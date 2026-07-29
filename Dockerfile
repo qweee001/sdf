@@ -19,7 +19,4 @@ COPY --chown=app:app app ./app
 
 USER app
 
-VOLUME ["/data"]
-
 CMD ["python", "-m", "app.main"]
-
