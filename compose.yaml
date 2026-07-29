@@ -1,0 +1,12 @@
+services:
+  userbot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - userbot-data:/data
+
+volumes:
+  userbot-data:
+
