@@ -7,7 +7,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN addgroup --system app && \
+RUN apt-get update && \
+    apt-get install --no-install-recommends --yes gosu && \
+    rm -rf /var/lib/apt/lists/* && \
+    addgroup --system app && \
     adduser --system --ingroup app app && \
     mkdir -p /data && \
     chown -R app:app /app /data
@@ -16,7 +19,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=app:app app ./app
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-USER app
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python", "-m", "app.main"]
