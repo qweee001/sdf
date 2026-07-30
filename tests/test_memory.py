@@ -36,7 +36,40 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
+    def test_runtime_control_and_statistics(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            self.assertTrue(await store.get_ai_enabled())
+
+            await store.set_ai_enabled(False)
+            self.assertFalse(await store.get_ai_enabled())
+
+            self.assertIsNone(await store.get_group_filter())
+            await store.set_group_filter(False, frozenset({-1001, -1002}))
+            self.assertEqual(
+                await store.get_group_filter(),
+                (False, frozenset({-1001, -1002})),
+            )
+
+            await store.add(100, 1, "甲", "user", "one")
+            await store.add(100, 2, "乙", "assistant", "two")
+            await store.add(200, 3, "丙", "user", "three")
+            self.assertEqual(
+                await store.statistics(),
+                {"message_count": 3, "group_count": 2},
+            )
+
+            self.assertEqual(await store.clear_all(), 3)
+            self.assertEqual(
+                await store.statistics(),
+                {"message_count": 0, "group_count": 0},
+            )
+            await store.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
 
 if __name__ == "__main__":
     unittest.main()
-
