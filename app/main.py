@@ -15,6 +15,7 @@ from telethon.tl.custom.message import Message
 from telethon.utils import get_display_name
 
 from .config import Settings, load_settings
+from .dashboard import DashboardServer
 from .memory import MemoryStore
 from .prompts import proactive_prompt, response_prompt, system_prompt
 
@@ -37,8 +38,16 @@ class UserbotApp:
             max_retries=2,
         )
         self.memory = MemoryStore(settings.memory_db_path, settings.memory_ttl_hours)
+        self.dashboard: DashboardServer | None = None
+        self.enabled = True
+        self.all_groups = not bool(settings.group_chat_ids)
+        self.runtime_group_ids = set(settings.group_chat_ids)
+        self.joined_groups: list[dict[str, object]] = []
         self.me_id = 0
         self.me_name = "這個帳號"
+        self.started_at = int(time.time())
+        self.replies_sent = 0
+        self.errors = 0
         self.last_activity: dict[int, float] = {}
         self.last_proactive: dict[int, float] = {}
         self.next_proactive_interval: dict[int, float] = {}
@@ -47,8 +56,7 @@ class UserbotApp:
         self.background_tasks: list[asyncio.Task[None]] = []
 
     def group_allowed(self, group_id: int) -> bool:
-        allowed = self.settings.group_chat_ids
-        return not allowed or group_id in allowed
+        return self.all_groups or group_id in self.runtime_group_ids
 
     async def generate(self, user_prompt: str) -> str:
         result = await self.ai.chat.completions.create(
@@ -79,6 +87,8 @@ class UserbotApp:
 
     async def on_message(self, event: events.NewMessage.Event) -> None:
         if not event.is_group or event.chat_id is None:
+            return
+        if not self.enabled:
             return
 
         group_id = int(event.chat_id)
@@ -123,8 +133,10 @@ class UserbotApp:
                     reply,
                     created_at=int(sent.date.timestamp()) if sent.date else None,
                 )
+                self.replies_sent += 1
                 self.last_activity[group_id] = time.time()
             except Exception:
+                self.errors += 1
                 LOGGER.exception("Failed to generate or send a reply in group %s", group_id)
 
     async def cleanup_loop(self) -> None:
@@ -147,6 +159,8 @@ class UserbotApp:
     async def proactive_loop(self) -> None:
         while True:
             await asyncio.sleep(60)
+            if not self.enabled:
+                continue
             now = time.time()
             today = date.today()
             for group_id, last_activity in list(self.last_activity.items()):
@@ -180,30 +194,126 @@ class UserbotApp:
                         self.last_activity[group_id] = time.time()
                         self.next_proactive_interval.pop(group_id, None)
                         self.proactive_counts[count_key] += 1
+                        self.replies_sent += 1
                     except Exception:
+                        self.errors += 1
                         LOGGER.exception(
                             "Failed to send a proactive message in group %s",
                             group_id,
                         )
 
+    async def set_enabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+        await self.memory.set_ai_enabled(enabled)
+        LOGGER.info("Group interaction %s from dashboard", "enabled" if enabled else "paused")
+
+    async def set_group_filter(self, all_groups: bool, group_ids: frozenset[int]) -> None:
+        joined_ids = {
+            int(group["id"])
+            for group in self.joined_groups
+            if isinstance(group.get("id"), int)
+        }
+        selected = frozenset(group_id for group_id in group_ids if group_id in joined_ids)
+        self.all_groups = all_groups
+        self.runtime_group_ids = set(selected)
+        await self.memory.set_group_filter(all_groups, selected)
+        LOGGER.info(
+            "Dashboard changed group scope to %s",
+            "all joined groups" if all_groups else ",".join(str(item) for item in sorted(selected)),
+        )
+
+    async def refresh_joined_groups(self) -> None:
+        groups: list[dict[str, object]] = []
+        async for dialog in self.client.iter_dialogs():
+            if not dialog.is_group:
+                continue
+            groups.append(
+                {
+                    "id": int(dialog.id),
+                    "title": str(
+                        dialog.name
+                        or getattr(dialog.entity, "title", None)
+                        or dialog.id
+                    )[:160],
+                }
+            )
+        groups.sort(key=lambda item: str(item["title"]).casefold())
+        self.joined_groups = groups
+
+    async def clear_memory(self) -> int:
+        removed = await self.memory.clear_all()
+        self.last_activity.clear()
+        self.last_proactive.clear()
+        self.next_proactive_interval.clear()
+        self.proactive_counts.clear()
+        LOGGER.info("Dashboard cleared %s memory rows", removed)
+        return removed
+
+    async def dashboard_status(self) -> dict[str, object]:
+        stats = await self.memory.statistics()
+        groups = (
+            [str(group_id) for group_id in sorted(self.runtime_group_ids)]
+            if not self.all_groups
+            else []
+        )
+        return {
+            "connected": self.client.is_connected(),
+            "enabled": self.enabled,
+            "account_name": self.me_name,
+            "role": self.settings.role_key,
+            "model": self.settings.ai_model,
+            "configured_groups": groups,
+            "all_groups": self.all_groups,
+            "joined_groups": [
+                {
+                    **group,
+                    "enabled": self.all_groups or int(group["id"]) in self.runtime_group_ids,
+                }
+                for group in self.joined_groups
+            ],
+            "memory_ttl_hours": self.settings.memory_ttl_hours,
+            "message_count": stats["message_count"],
+            "group_count": stats["group_count"],
+            "replies_sent": self.replies_sent,
+            "errors": self.errors,
+            "uptime_seconds": max(int(time.time()) - self.started_at, 0),
+        }
+
     async def run(self) -> None:
         await self.memory.open()
+        self.enabled = await self.memory.get_ai_enabled()
+        group_filter = await self.memory.get_group_filter()
+        if group_filter is not None:
+            self.all_groups, stored_ids = group_filter
+            self.runtime_group_ids = set(stored_ids)
         await self.client.start()
         me = await self.client.get_me()
         if me is None:
             raise RuntimeError("Telegram session did not return an authenticated account")
         self.me_id = int(me.id)
         self.me_name = get_display_name(me) or "這個帳號"
+        await self.refresh_joined_groups()
 
         self.client.add_event_handler(self.on_message, events.NewMessage(incoming=True))
         self.background_tasks.append(asyncio.create_task(self.cleanup_loop()))
         if self.settings.proactive_enabled and self.settings.max_proactive_per_day > 0:
             self.background_tasks.append(asyncio.create_task(self.proactive_loop()))
+        if self.settings.dashboard_enabled:
+            self.dashboard = DashboardServer(
+                username=self.settings.dashboard_username,
+                password=self.settings.dashboard_password,
+                port=self.settings.dashboard_port,
+                status_provider=self.dashboard_status,
+                enabled_setter=self.set_enabled,
+                group_filter_setter=self.set_group_filter,
+                memory_clearer=self.clear_memory,
+            )
+            await self.dashboard.start()
 
         role = self.settings.role_key
         groups = (
-            ",".join(str(group_id) for group_id in self.settings.group_chat_ids)
-            if self.settings.group_chat_ids
+            ",".join(str(group_id) for group_id in sorted(self.runtime_group_ids))
+            if not self.all_groups
             else "all joined groups"
         )
         LOGGER.info(
@@ -213,9 +323,13 @@ class UserbotApp:
             groups,
             self.settings.memory_ttl_hours,
         )
+        if self.dashboard is not None:
+            LOGGER.info("Dashboard listening on port %s", self.settings.dashboard_port)
         await self.client.run_until_disconnected()
 
     async def close(self) -> None:
+        if self.dashboard is not None:
+            await self.dashboard.close()
         for task in self.background_tasks:
             task.cancel()
         if self.background_tasks:

@@ -78,6 +78,10 @@ class Settings:
     memory_ttl_hours: int
     memory_history_limit: int
     memory_db_path: str
+    dashboard_enabled: bool
+    dashboard_username: str
+    dashboard_password: str
+    dashboard_port: int
     log_level: str
 
     @property
@@ -102,6 +106,11 @@ def load_settings() -> Settings:
     proactive_max = _integer("PROACTIVE_MAX_INTERVAL_MINUTES", 60, 1)
     if proactive_max < proactive_min:
         raise ValueError("PROACTIVE_MAX_INTERVAL_MINUTES cannot be lower than the minimum")
+
+    dashboard_enabled = _boolean("DASHBOARD_ENABLED", False)
+    dashboard_password = os.getenv("DASHBOARD_PASSWORD", "")
+    if dashboard_enabled and len(dashboard_password) < 12:
+        raise ValueError("DASHBOARD_PASSWORD must contain at least 12 characters")
 
     return Settings(
         tg_api_id=int(_required("TG_API_ID")),
@@ -128,5 +137,9 @@ def load_settings() -> Settings:
         memory_ttl_hours=_integer("MEMORY_TTL_HOURS", 24, 1),
         memory_history_limit=_integer("MEMORY_HISTORY_LIMIT", 30, 1),
         memory_db_path=os.getenv("MEMORY_DB_PATH", "/data/memory.db"),
+        dashboard_enabled=dashboard_enabled,
+        dashboard_username=os.getenv("DASHBOARD_USERNAME", "admin").strip() or "admin",
+        dashboard_password=dashboard_password,
+        dashboard_port=_integer("PORT", 8000, 1),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
     )
