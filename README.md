@@ -13,6 +13,7 @@ Railway 可部署的 Telegram Userbot。每個 Railway Service 綁定一個 Tele
 - SQLite 群聊記憶以 `group_id` 分隔，超過 24 小時自動清除。
 - 使用 `TG_SESSION_STRING`，不需要在 Railway 互動輸入 Telegram 驗證碼。
 - 被直接問到時會如實說明是自動互動角色，不冒充真人會員。
+- 可啟用密碼保護的網頁控制台，查看狀態、暫停互動及清空記憶。
 
 ## 角色設定
 
@@ -58,11 +59,16 @@ GROUP_CHAT_IDS=-1001234567890
 IGNORE_SENDER_IDS=
 MEMORY_TTL_HOURS=24
 MEMORY_DB_PATH=/data/memory.db
+DASHBOARD_ENABLED=true
+DASHBOARD_USERNAME=admin
+DASHBOARD_PASSWORD=請設定至少12字元的強密碼
 ```
 
 4. 為了讓記憶在重新部署後仍保留，在 Service 掛載 Railway Volume，Mount Path 設成 `/data`。
 5. 部署後查看 Logs，成功時會看到 `Userbot connected`，但不會顯示 API Key、API Hash 或 Session String。
 6. 用其他帳號在允許的測試群發訊息，確認只在群聊回覆、私聊不回覆。
+7. 在 Railway 的 Networking 產生公開網域，使用 `DASHBOARD_USERNAME` 和
+   `DASHBOARD_PASSWORD` 登入控制台。控制台不會顯示任何密鑰。
 
 若要部署多個帳號，為每個帳號建立獨立 Railway Service，分別設定自己的 `TG_SESSION_STRING`、角色與 `/data` Volume。不要讓多個 Service 共用同一個 Telegram Session String。建議把其他自動化帳號的 Telegram 數字 ID 填入 `IGNORE_SENDER_IDS`，避免帳號彼此接話形成循環。
 
