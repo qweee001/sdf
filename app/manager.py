@@ -792,6 +792,36 @@ class AccountManager:
             worker.proactive_counts.clear()
         return await self.store.clear_all(account_id)
 
+    async def conversation_log(
+        self,
+        account_id: str,
+        group_id: int,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        await self._require_account(account_id)
+        if isinstance(group_id, bool) or not isinstance(group_id, int):
+            raise ValueError("group_id must be an integer")
+        cleaned_limit = clean_int(
+            limit,
+            "limit",
+            minimum=1,
+            maximum=100,
+        )
+        entries = await self.store.conversation_log(
+            account_id,
+            group_id,
+            cleaned_limit,
+        )
+        return [
+            {
+                "created_at": entry.created_at,
+                "sender_name": entry.sender_name,
+                "role": entry.role,
+                "content": entry.content,
+            }
+            for entry in entries
+        ]
+
     async def account_status(self, account_id: str) -> dict[str, object]:
         account = await self._require_account(account_id)
         worker = self.workers.get(account_id)

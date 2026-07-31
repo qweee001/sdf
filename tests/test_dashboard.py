@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from app.dashboard import DashboardServer
+from app.dashboard import DASHBOARD_JS, DashboardServer
 
 
 class FakeAccountManager:
@@ -29,6 +29,9 @@ class FakeAccountManager:
             "session_configured": True,
             "all_groups": True,
             "group_ids": [],
+            "joined_groups": [
+                {"id": -1001, "title": "測試群組", "enabled": True},
+            ],
             "revision": 1,
             "state": "connected",
         }
@@ -166,6 +169,32 @@ class FakeAccountManager:
     async def clear_memory(self, account_id: str) -> int:
         self.calls.append(("clear_memory", account_id))
         return 7
+
+    async def conversation_log(
+        self,
+        account_id: str,
+        group_id: int,
+        limit: int,
+    ) -> dict[str, object]:
+        self.calls.append(("conversation_log", (account_id, group_id, limit)))
+        return {
+            "messages": [
+                {
+                    "sender_id": 987654321,
+                    "sender_name": "<img src=x onerror=alert(1)>",
+                    "role": "user",
+                    "content": "<script>alert('xss')</script>",
+                    "created_at": 1_700_000_000,
+                },
+                {
+                    "sender_id": 123456,
+                    "sender_name": "測試帳號",
+                    "role": "assistant",
+                    "content": "安全回覆",
+                    "created_at": 1_700_000_001,
+                },
+            ][-limit:]
+        }
 
 
 class DashboardTests(unittest.TestCase):
@@ -360,6 +389,95 @@ class DashboardTests(unittest.TestCase):
             )
             self.assertEqual(blocked.status_code, 429)
             self.assertIn("Retry-After", blocked.headers)
+
+    def test_conversation_log_auth_validation_and_public_shape(self) -> None:
+        path = (
+            "/api/accounts/acct_one/conversation-log"
+            "?group_id=-1001&limit=100"
+        )
+        with TestClient(self.server.app, base_url="https://testserver") as client:
+            self.assertEqual(client.get(path).status_code, 401)
+            self.login(client)
+
+            invalid_paths = [
+                "/api/accounts/acct_one/conversation-log",
+                "/api/accounts/acct_one/conversation-log?group_id=1001",
+                "/api/accounts/acct_one/conversation-log?group_id=-010",
+                "/api/accounts/acct_one/conversation-log?group_id=-1001&limit=0",
+                "/api/accounts/acct_one/conversation-log?group_id=-1001&limit=101",
+                "/api/accounts/acct_one/conversation-log?group_id=-1001&limit=1.5",
+                "/api/accounts/acct_one/conversation-log?group_id=-1001&limit=01",
+                (
+                    "/api/accounts/acct_one/conversation-log"
+                    "?group_id=-1001&group_id=-1002&limit=20"
+                ),
+            ]
+            for invalid_path in invalid_paths:
+                with self.subTest(path=invalid_path):
+                    self.assertEqual(client.get(invalid_path).status_code, 400)
+
+            response = client.get(path)
+            self.assertEqual(response.status_code, 200)
+            result = response.json()
+            self.assertEqual(result["account_id"], "acct_one")
+            self.assertEqual(result["group_id"], -1001)
+            self.assertEqual(result["count"], 2)
+            self.assertEqual(len(result["messages"]), 2)
+            self.assertNotIn("sender_id", response.text)
+            self.assertEqual(
+                result["messages"][0]["content"],
+                "<script>alert('xss')</script>",
+            )
+            self.assertIn(
+                ("conversation_log", ("acct_one", -1001, 100)),
+                self.manager.calls,
+            )
+
+        self.assertNotIn("innerHTML", DASHBOARD_JS)
+        self.assertIn("body.textContent", DASHBOARD_JS)
+        self.assertIn("sender.textContent", DASHBOARD_JS)
+
+    def test_conversation_log_discards_stale_responses(self) -> None:
+        self.assertIn(
+            "const requestSequence = ++conversationRequestSequence;",
+            DASHBOARD_JS,
+        )
+        self.assertIn(
+            "requestSequence === conversationRequestSequence",
+            DASHBOARD_JS,
+        )
+        self.assertIn(
+            "requestKey === conversationSelectionKey",
+            DASHBOARD_JS,
+        )
+        self.assertIn(
+            "if (!conversationRequestIsCurrent(requestSequence, requestKey)) return;\n"
+            "    conversationLoadedKey = requestKey;\n"
+            "    renderConversationLog(result);",
+            DASHBOARD_JS,
+        )
+        self.assertIn(
+            "} catch (error) {\n"
+            "    if (!conversationRequestIsCurrent(requestSequence, requestKey)) return;\n"
+            '    setNotice("conversationNotice", error.message, "error");',
+            DASHBOARD_JS,
+        )
+
+        handler_start = DASHBOARD_JS.index(
+            '$("refreshConversationButton").addEventListener'
+        )
+        handler_end = DASHBOARD_JS.index(
+            '$("clearMemoryButton").addEventListener',
+            handler_start,
+        )
+        handler = DASHBOARD_JS[handler_start:handler_end]
+        success_guard = handler.index(
+            "if (!conversationRequestIsCurrent(requestSequence, requestKey)) return;"
+        )
+        loaded_key_write = handler.index("conversationLoadedKey = requestKey;")
+        render = handler.index("renderConversationLog(result);")
+        self.assertLess(success_guard, loaded_key_write)
+        self.assertLess(success_guard, render)
 
 
 if __name__ == "__main__":

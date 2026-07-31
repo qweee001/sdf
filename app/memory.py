@@ -25,6 +25,14 @@ class MemoryMessage:
     created_at: int
 
 
+@dataclass(frozen=True)
+class ConversationLogEntry:
+    created_at: int
+    sender_name: str
+    role: str
+    content: str
+
+
 class MemoryStore:
     def __init__(self, path: str, ttl_hours: int) -> None:
         self.path = path
@@ -477,6 +485,25 @@ class MemoryStore:
             rows = await cursor.fetchall()
             await cursor.close()
         return [MemoryMessage(**dict(row)) for row in reversed(rows)]
+
+    async def conversation_log(
+        self,
+        account_id: str,
+        group_id: int,
+        limit: int,
+    ) -> list[ConversationLogEntry]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("limit must be an integer between 1 and 100")
+        messages = await self.recent_group(account_id, group_id, limit)
+        return [
+            ConversationLogEntry(
+                created_at=message.created_at,
+                sender_name=message.sender_name,
+                role=message.role,
+                content=message.content,
+            )
+            for message in messages
+        ]
 
     async def purge_expired(self, *, now: int | None = None) -> int:
         current = now if now is not None else int(time.time())

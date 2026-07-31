@@ -71,7 +71,10 @@ class WorkerGuardTests(unittest.TestCase):
 
     def test_semantic_classifier_errors_are_fail_closed(self) -> None:
         async def scenario() -> None:
-            worker = self.make_worker()
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
             worker._completion = AsyncMock(  # type: ignore[method-assign]
                 side_effect=[
                     "第一段待分類文字",
@@ -116,7 +119,7 @@ class WorkerGuardTests(unittest.TestCase):
                 side_effect=[
                     "秘密計畫",
                     "今天天氣不錯，晚點想出去走走。",
-                    "ALLOW",
+                    "MEMBER_ALLOW",
                 ]
             )
 
@@ -131,6 +134,85 @@ class WorkerGuardTests(unittest.TestCase):
             self.assertEqual(worker._completion.await_count, 3)
             retry_messages = worker._completion.await_args_list[1].args[0]
             self.assertIn("上一個草稿未通過", retry_messages[-1]["content"])
+            self.assertIn("一般群組成員口吻", retry_messages[-1]["content"])
+
+        asyncio.run(scenario())
+
+    def test_customer_service_draft_retries_as_an_ordinary_member_without_blocklist(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+            worker._completion = AsyncMock(  # type: ignore[method-assign]
+                side_effect=[
+                    "您好，我可以協助您辦理加入，請先提供個人資料。",
+                    "BLOCK",
+                    "這個我也不太確定耶，問群主比較準。",
+                    "MEMBER_ALLOW",
+                ]
+            )
+
+            reply = await worker.generate("群友詢問怎麼加入")
+
+            self.assertEqual(
+                reply.text,
+                "這個我也不太確定耶，問群主比較準。",
+            )
+            self.assertEqual(worker.policy_rejections, 1)
+            self.assertEqual(worker._completion.await_count, 4)
+            audit_messages = worker._completion.await_args_list[1].args[0]
+            self.assertIn("MEMBER_ALLOW", audit_messages[0]["content"])
+            self.assertIn('"blocked_terms":[]', audit_messages[1]["content"])
+
+        asyncio.run(scenario())
+
+    def test_consecutive_role_rejections_never_reach_sender(self) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+            worker._completion = AsyncMock(  # type: ignore[method-assign]
+                side_effect=[
+                    "歡迎加入，我可以為您介紹會員方案。",
+                    "BLOCK",
+                    "請把資料傳給我，我會協助您完成驗證。",
+                    "BLOCK",
+                ]
+            )
+            sender = AsyncMock()
+
+            with self.assertRaises(BlockedReplyError):
+                reply = await worker.generate("請回覆")
+                await worker._send_verified(reply, sender)
+
+            sender.assert_not_awaited()
+            self.assertEqual(worker.policy_rejections, 2)
+
+        asyncio.run(scenario())
+
+    def test_ambiguous_allow_tokens_do_not_pass_the_combined_audit(self) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+            worker._completion = AsyncMock(  # type: ignore[method-assign]
+                side_effect=[
+                    "第一段普通文字",
+                    "ALLOW",
+                    "第二段普通文字",
+                    "MEMBER",
+                ]
+            )
+
+            with self.assertRaises(BlockedReplyError):
+                await worker.generate("請回覆")
+
+            self.assertEqual(worker.policy_rejections, 2)
 
         asyncio.run(scenario())
 

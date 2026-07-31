@@ -295,6 +295,42 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .group-item span { min-width: 0; overflow-wrap: anywhere; }
     .group-item small { display: block; margin-top: 3px; color: var(--muted); }
+    .conversation-toolbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 130px auto;
+      gap: 9px;
+      align-items: end;
+      margin: 14px 0;
+    }
+    .conversation-list {
+      display: grid;
+      gap: 9px;
+      max-height: 620px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+    .conversation-message {
+      padding: 12px 13px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: #151711;
+    }
+    .conversation-message.assistant { border-color: #50633a; background: #192014; }
+    .conversation-message-head {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .conversation-message-body {
+      margin: 0;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     .empty {
       padding: 30px 18px;
       color: var(--muted);
@@ -319,6 +355,7 @@ DASHBOARD_HTML = """<!doctype html>
       .account-head, .row-between { flex-direction: column; align-items: stretch; }
       .field, .field.third, .field.quarter { grid-column: 1 / -1; }
       .group-list { grid-template-columns: 1fr; }
+      .conversation-toolbar { grid-template-columns: 1fr; }
       .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .status-line { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
@@ -564,6 +601,28 @@ DASHBOARD_HTML = """<!doctype html>
             <div id="groupsNotice" class="notice"></div>
           </article>
 
+          <article class="panel">
+            <div>
+              <h3>聊天記錄</h3>
+              <div class="hint">顯示此帳號 24 小時記憶中的群聊內容；不顯示 Telegram sender ID。</div>
+            </div>
+            <div class="conversation-toolbar">
+              <label class="field full">群組
+                <select id="conversationGroup"></select>
+              </label>
+              <label class="field full">顯示則數
+                <select id="conversationLimit">
+                  <option value="20">最近 20 則</option>
+                  <option value="50">最近 50 則</option>
+                  <option value="100" selected>最近 100 則</option>
+                </select>
+              </label>
+              <button id="refreshConversationButton" class="btn" type="button">重新整理記錄</button>
+            </div>
+            <div id="conversationNotice" class="notice"></div>
+            <div id="conversationList" class="conversation-list"></div>
+          </article>
+
           <article class="panel danger-zone">
             <h3>記憶管理</h3>
             <div class="hint">清除聊天記憶不會刪除帳號、Telegram Session 或模型設定。此操作無法復原。</div>
@@ -590,6 +649,12 @@ let formDirty = false;
 let groupsDirty = false;
 let telegramAuthId = "";
 let telegramAuthState = "idle";
+const conversationGroupByAccount = new Map();
+let conversationLoadedKey = "";
+let conversationSelectionKey = "";
+let conversationRequestSequence = 0;
+let conversationPendingKey = "";
+let conversationPendingSequence = 0;
 
 function showLogin() {
   $("app").classList.add("hidden");
@@ -821,6 +886,112 @@ function renderGroups(account) {
   }
 }
 
+function clearConversationList(message = "") {
+  const list = $("conversationList");
+  list.replaceChildren();
+  if (message) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = message;
+    list.appendChild(empty);
+  }
+}
+
+function setConversationSelection(key) {
+  if (conversationSelectionKey === key) return;
+  conversationSelectionKey = key;
+  conversationRequestSequence += 1;
+}
+
+function conversationRequestIsCurrent(requestSequence, requestKey) {
+  const account = selectedAccount();
+  const groupId = $("conversationGroup").value;
+  const currentKey = account && groupId ? `${account.id}:${groupId}` : "";
+  return requestSequence === conversationRequestSequence &&
+    requestKey === conversationSelectionKey &&
+    requestKey === currentKey;
+}
+
+function renderConversationGroups(account) {
+  const select = $("conversationGroup");
+  const groups = Array.isArray(account.joined_groups) ? account.joined_groups : [];
+  const availableIds = new Set(groups.map((group) => String(group.id)));
+  let selected = String(conversationGroupByAccount.get(account.id) || "");
+  if (!availableIds.has(selected)) selected = groups.length ? String(groups[0].id) : "";
+  conversationGroupByAccount.set(account.id, selected);
+  select.replaceChildren();
+  if (!groups.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = account.connected ? "目前沒有已加入群組" : "帳號連線後才可選擇群組";
+    select.appendChild(option);
+  } else {
+    for (const group of groups) {
+      const option = document.createElement("option");
+      option.value = String(group.id);
+      option.textContent = String(group.title || group.id);
+      option.selected = option.value === selected;
+      select.appendChild(option);
+    }
+  }
+  select.disabled = !groups.length;
+  const expectedKey = selected ? `${account.id}:${selected}` : "";
+  setConversationSelection(expectedKey);
+  $("refreshConversationButton").disabled = !groups.length ||
+    (conversationPendingKey === expectedKey &&
+      conversationPendingSequence === conversationRequestSequence);
+  if (conversationLoadedKey && conversationLoadedKey !== expectedKey) {
+    conversationLoadedKey = "";
+    setNotice("conversationNotice", "");
+    clearConversationList(groups.length ? "選擇群組後按「重新整理記錄」。" : "目前沒有可讀取的群組。");
+  } else if (!conversationLoadedKey && !$("conversationList").childElementCount) {
+    clearConversationList(groups.length ? "選擇群組後按「重新整理記錄」。" : "目前沒有可讀取的群組。");
+  }
+}
+
+function formatConversationTime(value) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "時間未知";
+  return new Intl.DateTimeFormat("zh-TW", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(timestamp * 1000));
+}
+
+function renderConversationLog(data) {
+  const list = $("conversationList");
+  list.replaceChildren();
+  const messages = Array.isArray(data.messages) ? data.messages.slice(-100) : [];
+  if (!messages.length) {
+    clearConversationList("這個群組目前沒有保留中的聊天記錄。");
+    return;
+  }
+  for (const message of messages) {
+    const item = document.createElement("article");
+    const role = message.role === "assistant" ? "assistant" : "user";
+    item.className = `conversation-message ${role}`;
+    const head = document.createElement("div");
+    head.className = "conversation-message-head";
+    const sender = document.createElement("strong");
+    sender.textContent = String(
+      message.sender_name || (role === "assistant" ? "AI 帳號" : "群組成員")
+    );
+    const created = document.createElement("time");
+    created.textContent = formatConversationTime(message.created_at);
+    const body = document.createElement("p");
+    body.className = "conversation-message-body";
+    body.textContent = String(message.content || "");
+    head.append(sender, created);
+    item.append(head, body);
+    list.appendChild(item);
+  }
+  list.scrollTop = list.scrollHeight;
+}
+
 function renderSelected(account) {
   $("emptyPanel").classList.add("hidden");
   $("accountPanels").classList.remove("hidden");
@@ -838,6 +1009,7 @@ function renderSelected(account) {
   setNotice("accountNotice", account.last_error || "", account.last_error ? "error" : "");
   fillEditor(account);
   renderGroups(account);
+  renderConversationGroups(account);
 }
 
 function renderDashboard() {
@@ -1260,6 +1432,69 @@ $("saveGroupsButton").addEventListener("click", async () => {
   });
 });
 
+$("conversationGroup").addEventListener("change", () => {
+  const account = selectedAccount();
+  if (!account) return;
+  conversationGroupByAccount.set(account.id, $("conversationGroup").value);
+  const selectedGroup = $("conversationGroup").value;
+  setConversationSelection(selectedGroup ? `${account.id}:${selectedGroup}` : "");
+  conversationLoadedKey = "";
+  setNotice("conversationNotice", "");
+  clearConversationList("按「重新整理記錄」讀取這個群組的聊天內容。");
+});
+
+$("refreshConversationButton").addEventListener("click", async () => {
+  const account = selectedAccount();
+  if (!account) return;
+  const rawGroupId = $("conversationGroup").value;
+  const groupId = Number(rawGroupId);
+  const limit = Number.parseInt($("conversationLimit").value, 10);
+  if (!/^-[1-9][0-9]*$/u.test(rawGroupId) || !Number.isSafeInteger(groupId)) {
+    setNotice("conversationNotice", "請先選擇有效群組", "error");
+    return;
+  }
+  if (![20, 50, 100].includes(limit)) {
+    setNotice("conversationNotice", "顯示則數不正確", "error");
+    return;
+  }
+  const requestKey = `${account.id}:${rawGroupId}`;
+  setConversationSelection(requestKey);
+  const requestSequence = ++conversationRequestSequence;
+  conversationPendingKey = requestKey;
+  conversationPendingSequence = requestSequence;
+  setNotice("conversationNotice", "正在讀取聊天記錄…", "warning");
+  const refreshButton = $("refreshConversationButton");
+  refreshButton.disabled = true;
+  try {
+    const query = new URLSearchParams({
+      group_id: String(groupId),
+      limit: String(limit),
+    });
+    const result = await api(
+      `/api/accounts/${encodeURIComponent(account.id)}/conversation-log?${query.toString()}`
+    );
+    if (!conversationRequestIsCurrent(requestSequence, requestKey)) return;
+    conversationLoadedKey = requestKey;
+    renderConversationLog(result);
+    setNotice(
+      "conversationNotice",
+      `已顯示 ${Array.isArray(result.messages) ? result.messages.length : 0} 則記錄`,
+      "success",
+    );
+  } catch (error) {
+    if (!conversationRequestIsCurrent(requestSequence, requestKey)) return;
+    setNotice("conversationNotice", error.message, "error");
+  } finally {
+    if (conversationPendingSequence === requestSequence) {
+      conversationPendingKey = "";
+      conversationPendingSequence = 0;
+    }
+    if (conversationRequestIsCurrent(requestSequence, requestKey)) {
+      refreshButton.disabled = false;
+    }
+  }
+});
+
 $("clearMemoryButton").addEventListener("click", async () => {
   const account = selectedAccount();
   if (!account || !window.confirm("確定清除這個帳號的全部聊天記憶？此操作無法復原。")) return;
@@ -1269,6 +1504,12 @@ $("clearMemoryButton").addEventListener("click", async () => {
         method: "POST",
         body: "{}",
       });
+      conversationRequestSequence += 1;
+      conversationPendingKey = "";
+      conversationPendingSequence = 0;
+      conversationLoadedKey = "";
+      clearConversationList("聊天記憶已清除。");
+      setNotice("conversationNotice", "");
       await refresh();
       setNotice("accountNotice", `已清除 ${result.removed} 筆記憶`, "success");
     } catch (error) {
@@ -1411,6 +1652,76 @@ class DashboardServer:
         if isinstance(revision, bool) or not isinstance(revision, int):
             raise ValueError("revision must be an integer")
         return revision
+
+    @staticmethod
+    def _conversation_group_id(raw_value: str) -> int:
+        if (
+            not raw_value.startswith("-")
+            or not raw_value[1:].isascii()
+            or not raw_value[1:].isdigit()
+            or raw_value[1:].startswith("0")
+        ):
+            raise ValueError("group_id must be a negative integer")
+        group_id = int(raw_value)
+        if group_id < -(2**63):
+            raise ValueError("group_id is outside the supported range")
+        return group_id
+
+    @staticmethod
+    def _conversation_limit(raw_value: str) -> int:
+        if (
+            not raw_value
+            or not raw_value.isascii()
+            or not raw_value.isdigit()
+            or (len(raw_value) > 1 and raw_value.startswith("0"))
+        ):
+            raise ValueError("limit must be an integer between 1 and 100")
+        limit = int(raw_value)
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        return limit
+
+    @staticmethod
+    def _public_conversation_log(
+        result: object,
+        *,
+        account_id: str,
+        group_id: int,
+        limit: int,
+    ) -> dict[str, object]:
+        if isinstance(result, dict):
+            raw_messages = result.get("messages", [])
+        elif isinstance(result, list):
+            raw_messages = result
+        else:
+            raise RuntimeError("invalid conversation log response")
+        if not isinstance(raw_messages, list):
+            raise RuntimeError("invalid conversation messages response")
+
+        messages: list[dict[str, object]] = []
+        for raw_message in raw_messages[-limit:]:
+            if not isinstance(raw_message, dict):
+                continue
+            role = str(raw_message.get("role", ""))
+            if role not in {"user", "assistant"}:
+                continue
+            created_at = raw_message.get("created_at", 0)
+            if isinstance(created_at, bool) or not isinstance(created_at, int):
+                created_at = 0
+            messages.append(
+                {
+                    "role": role,
+                    "sender_name": str(raw_message.get("sender_name", ""))[:120],
+                    "content": str(raw_message.get("content", ""))[:4000],
+                    "created_at": created_at,
+                }
+            )
+        return {
+            "account_id": account_id,
+            "group_id": group_id,
+            "count": len(messages),
+            "messages": messages,
+        }
 
     def _build_app(self) -> FastAPI:
         web = FastAPI(
@@ -1558,6 +1869,33 @@ class DashboardServer:
             return JSONResponse(
                 await self.manager.status(),
                 headers={"X-CSRF-Token": session.csrf_token},
+            )
+
+        @web.get("/api/accounts/{account_id}/conversation-log")
+        async def conversation_log(account_id: str, request: Request) -> JSONResponse:
+            session, blocked = self._require_auth(request)
+            if blocked is not None or session is None:
+                return blocked  # type: ignore[return-value]
+            group_values = request.query_params.getlist("group_id")
+            limit_values = request.query_params.getlist("limit")
+            if len(group_values) != 1 or len(limit_values) > 1:
+                raise ValueError("group_id and limit must not be repeated")
+            group_id = self._conversation_group_id(group_values[0])
+            limit = self._conversation_limit(
+                limit_values[0] if limit_values else "100"
+            )
+            result = await self.manager.conversation_log(
+                account_id,
+                group_id,
+                limit,
+            )
+            return JSONResponse(
+                self._public_conversation_log(
+                    result,
+                    account_id=account_id,
+                    group_id=group_id,
+                    limit=limit,
+                )
             )
 
         @web.post("/api/accounts")

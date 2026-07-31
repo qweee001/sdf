@@ -136,6 +136,88 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
+    def test_conversation_log_is_recent_bounded_ordered_and_redacted(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            now = int(time.time())
+            for index in range(105):
+                await store.add(
+                    "alpha",
+                    -1001,
+                    10000 + index,
+                    f"成員 {index:03d}",
+                    "user" if index % 2 == 0 else "assistant",
+                    f"message-{index:03d}",
+                    created_at=now - 104 + index,
+                )
+            await store.add(
+                "alpha",
+                -1001,
+                999,
+                "過期成員",
+                "user",
+                "expired",
+                created_at=now - 24 * 60 * 60 - 1,
+            )
+            await store.add(
+                "beta",
+                -1001,
+                888,
+                "其他帳號",
+                "user",
+                "other-account-secret",
+                created_at=now,
+            )
+            await store.add(
+                "alpha",
+                -2002,
+                777,
+                "其他群組",
+                "user",
+                "other-group-secret",
+                created_at=now,
+            )
+
+            entries = await store.conversation_log("alpha", -1001, 100)
+            self.assertEqual(len(entries), 100)
+            self.assertEqual(entries[0].content, "message-005")
+            self.assertEqual(entries[-1].content, "message-104")
+            self.assertEqual(
+                [entry.created_at for entry in entries],
+                sorted(entry.created_at for entry in entries),
+            )
+            self.assertTrue(
+                all(
+                    set(entry.__dict__)
+                    == {"created_at", "sender_name", "role", "content"}
+                    for entry in entries
+                )
+            )
+            self.assertTrue(all(not hasattr(entry, "sender_id") for entry in entries))
+            self.assertNotIn(
+                "other-account-secret",
+                [entry.content for entry in entries],
+            )
+            self.assertNotIn(
+                "other-group-secret",
+                [entry.content for entry in entries],
+            )
+            self.assertNotIn("expired", [entry.content for entry in entries])
+
+            latest = await store.conversation_log("alpha", -1001, 3)
+            self.assertEqual(
+                [entry.content for entry in latest],
+                ["message-102", "message-103", "message-104"],
+            )
+            for invalid_limit in (0, 101, True):
+                with self.assertRaises(ValueError):
+                    await store.conversation_log("alpha", -1001, invalid_limit)
+            await store.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
     def test_old_message_schema_migrates_transactionally(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "legacy.db")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -408,6 +409,111 @@ class ManagerTests(unittest.TestCase):
                         )
 
             self.assertEqual(await store.count_accounts(), 0)
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_conversation_log_is_account_scoped_ordered_and_has_no_sender_id(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            secrets = SecretBox(key)
+            manager = AccountManager(config, store, secrets)
+            await store.open()
+
+            identities = {
+                "alpha-session": (10001, "帳號 Alpha"),
+                "beta-session": (10002, "帳號 Beta"),
+            }
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                return identities[session]
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+
+            async def create(session: str) -> dict[str, object]:
+                return await manager.create_account(
+                    {
+                        "session_string": session,
+                        "enabled": False,
+                        "gender": "male",
+                        "stage": "observer",
+                        "task_name": "聊天記錄測試",
+                    }
+                )
+
+            alpha = await create("alpha-session")
+            beta = await create("beta-session")
+            alpha_id = str(alpha["id"])
+            beta_id = str(beta["id"])
+            now = int(time.time())
+            await store.add(
+                alpha_id,
+                -1001,
+                501,
+                "甲成員",
+                "user",
+                "較早訊息",
+                created_at=now - 2,
+            )
+            await store.add(
+                alpha_id,
+                -1001,
+                10001,
+                "帳號 Alpha",
+                "assistant",
+                "較新回覆",
+                created_at=now - 1,
+            )
+            await store.add(
+                beta_id,
+                -1001,
+                502,
+                "乙成員",
+                "user",
+                "另一帳號私密訊息",
+                created_at=now,
+            )
+            await store.add(
+                alpha_id,
+                -2002,
+                503,
+                "其他群成員",
+                "user",
+                "另一群組訊息",
+                created_at=now,
+            )
+
+            entries = await manager.conversation_log(alpha_id, -1001, 10)
+            self.assertEqual(
+                entries,
+                [
+                    {
+                        "created_at": now - 2,
+                        "sender_name": "甲成員",
+                        "role": "user",
+                        "content": "較早訊息",
+                    },
+                    {
+                        "created_at": now - 1,
+                        "sender_name": "帳號 Alpha",
+                        "role": "assistant",
+                        "content": "較新回覆",
+                    },
+                ],
+            )
+            self.assertTrue(all("sender_id" not in entry for entry in entries))
+            self.assertNotIn(
+                "另一帳號私密訊息",
+                [entry["content"] for entry in entries],
+            )
+
+            with self.assertRaisesRegex(ValueError, "between 1 and 100"):
+                await manager.conversation_log(alpha_id, -1001, 101)
+            with self.assertRaisesRegex(ValueError, "group_id must be an integer"):
+                await manager.conversation_log(alpha_id, True, 10)
             await manager.close()
 
         with tempfile.TemporaryDirectory() as directory:
