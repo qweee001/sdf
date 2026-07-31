@@ -278,6 +278,141 @@ class ManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
+    def test_blocked_policy_is_normalized_deduplicated_and_public(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            secrets = SecretBox(key)
+            manager = AccountManager(config, store, secrets)
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                self.assertEqual(session, "policy-session")
+                return 445566, "政策測試帳號"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "session_string": "policy-session",
+                    "enabled": False,
+                    "gender": "female",
+                    "stage": "observer",
+                    "task_name": "一般群聊",
+                    "blocked_terms": [
+                        "  ＴＥＳＴ  ",
+                        "test",
+                        "  咖   啡  ",
+                        "咖 啡",
+                        "",
+                    ],
+                    "blocked_topics": [
+                        "  私密   話題  ",
+                        "私密 話題",
+                        "安全",
+                    ],
+                }
+            )
+            self.assertEqual(created["blocked_terms"], ["TEST", "咖 啡"])
+            self.assertEqual(created["blocked_topics"], ["私密 話題", "安全"])
+            self.assertNotIn("session_string", created)
+            self.assertNotIn("session_ciphertext", created)
+
+            account_id = str(created["id"])
+            stored = await store.get_account(account_id)
+            self.assertEqual(stored.blocked_terms, ("TEST", "咖 啡"))
+            self.assertEqual(stored.blocked_topics, ("私密 話題", "安全"))
+            self.assertEqual(
+                stored.public_dict()["blocked_terms"],
+                ["TEST", "咖 啡"],
+            )
+
+            updated = await manager.update_account(
+                account_id,
+                {
+                    "revision": created["revision"],
+                    "blocked_terms": ["  ＡＢＣ  ", "abc"],
+                    "blocked_topics": ["  借貸   推廣 ", "借貸 推廣"],
+                },
+            )
+            self.assertEqual(updated["blocked_terms"], ["ABC"])
+            self.assertEqual(updated["blocked_topics"], ["借貸 推廣"])
+            reloaded = await store.get_account(account_id)
+            self.assertEqual(reloaded.blocked_terms, ("ABC",))
+            self.assertEqual(reloaded.blocked_topics, ("借貸 推廣",))
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_blocked_policy_manager_limits_are_enforced(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            secrets = SecretBox(key)
+            manager = AccountManager(config, store, secrets)
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                return 778899, "限制測試帳號"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            base_payload: dict[str, object] = {
+                "session_string": "limit-session",
+                "enabled": False,
+                "gender": "male",
+                "stage": "observer",
+                "task_name": "限制測試",
+            }
+            cases = (
+                (
+                    "blocked_terms",
+                    [f"term-{index}" for index in range(101)],
+                    "at most 100 items",
+                ),
+                (
+                    "blocked_topics",
+                    [f"topic-{index}" for index in range(51)],
+                    "at most 50 items",
+                ),
+                (
+                    "blocked_terms",
+                    ["x" * 81],
+                    "at most 80 characters",
+                ),
+                (
+                    "blocked_topics",
+                    ["x" * 301],
+                    "at most 300 characters",
+                ),
+                (
+                    "blocked_terms",
+                    [f"{index:02d}" + "x" * 78 for index in range(51)],
+                    "total length must be at most 4000",
+                ),
+                (
+                    "blocked_topics",
+                    [f"{index:02d}" + "x" * 298 for index in range(27)],
+                    "total length must be at most 8000",
+                ),
+            )
+            for field, value, message in cases:
+                with self.subTest(field=field, message=message):
+                    with self.assertRaisesRegex(ValueError, message):
+                        await manager.create_account(
+                            {
+                                **base_payload,
+                                field: value,
+                            }
+                        )
+
+            self.assertEqual(await store.count_accounts(), 0)
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
     def test_provider_url_rejects_private_targets(self) -> None:
         from app.account import validate_provider_url
 

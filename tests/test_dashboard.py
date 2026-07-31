@@ -21,6 +21,8 @@ class FakeAccountManager:
             "stage": "observer",
             "task_name": "自然參與群聊",
             "task_info": "回覆群內的一般交友話題",
+            "blocked_terms": ["測試屏蔽詞"],
+            "blocked_topics": ["測試屏蔽主題"],
             "ai_base_url": "https://api.openai.com/v1",
             "ai_model": "gpt-5-mini",
             "has_custom_api_key": True,
@@ -50,6 +52,8 @@ class FakeAccountManager:
                 "label": payload["label"],
                 "task_name": payload["task_name"],
                 "ai_model": payload["ai_model"],
+                "blocked_terms": list(payload.get("blocked_terms", [])),
+                "blocked_topics": list(payload.get("blocked_topics", [])),
                 "revision": 1,
             }
         )
@@ -118,6 +122,8 @@ class FakeAccountManager:
                 "task_name": payload["task_name"],
                 "task_info": payload["task_info"],
                 "ai_model": payload["ai_model"],
+                "blocked_terms": list(payload.get("blocked_terms", [])),
+                "blocked_topics": list(payload.get("blocked_topics", [])),
                 "revision": int(payload["revision"]) + 1,
             }
         )
@@ -262,11 +268,15 @@ class DashboardTests(unittest.TestCase):
                     "ai_base_url": "https://api.openai.com/v1",
                     "ai_api_key": api_key,
                     "ai_model": "gpt-5-mini",
+                    "blocked_terms": ["測試屏蔽詞"],
+                    "blocked_topics": ["測試屏蔽主題"],
                 },
             )
             self.assertEqual(created.status_code, 201)
             self.assertNotIn(session_secret, created.text)
             self.assertNotIn(api_key, created.text)
+            self.assertEqual(created.json()["blocked_terms"], ["測試屏蔽詞"])
+            self.assertEqual(created.json()["blocked_topics"], ["測試屏蔽主題"])
 
             updated = client.put(
                 "/api/accounts/acct_one",
@@ -280,11 +290,15 @@ class DashboardTests(unittest.TestCase):
                     "ai_model": "openai/gpt-5-mini",
                     "ai_api_key": "",
                     "clear_ai_api_key": False,
+                    "blocked_terms": ["更新後屏蔽詞"],
+                    "blocked_topics": ["更新後屏蔽主題"],
                 },
             )
             self.assertEqual(updated.status_code, 200)
             self.assertNotIn("session_string", updated.text)
             self.assertNotIn("ai_api_key", updated.text)
+            self.assertEqual(updated.json()["blocked_terms"], ["更新後屏蔽詞"])
+            self.assertEqual(updated.json()["blocked_topics"], ["更新後屏蔽主題"])
 
             controlled = client.post(
                 "/api/accounts/acct_one/control",

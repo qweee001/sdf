@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass, replace
 from ipaddress import ip_address
 from urllib.parse import urlparse
@@ -41,6 +43,8 @@ class AccountRecord:
     revision: int
     created_at: int
     updated_at: int
+    blocked_terms: tuple[str, ...] = ()
+    blocked_topics: tuple[str, ...] = ()
 
     @property
     def role_key(self) -> str:
@@ -79,6 +83,8 @@ class AccountRecord:
             "max_proactive_per_day": self.max_proactive_per_day,
             "all_groups": self.all_groups,
             "group_ids": sorted(self.group_ids),
+            "blocked_terms": list(self.blocked_terms),
+            "blocked_topics": list(self.blocked_topics),
             "revision": self.revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -148,6 +154,52 @@ def clean_group_ids(value: object) -> frozenset[int]:
     if any(isinstance(item, bool) or not isinstance(item, int) for item in value):
         raise ValueError("group_ids must contain integers")
     return frozenset(value)
+
+
+def clean_string_list(
+    value: object,
+    name: str,
+    *,
+    maximum_items: int,
+    maximum_item_length: int,
+    maximum_total_length: int,
+) -> tuple[str, ...]:
+    if not isinstance(value, list) or len(value) > maximum_items:
+        raise ValueError(
+            f"{name} must be a list with at most {maximum_items} items"
+        )
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    total_length = 0
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"{name} must contain only strings")
+        normalized = unicodedata.normalize("NFKC", item).strip()
+        if any(
+            unicodedata.category(char).startswith("C")
+            for char in normalized
+        ):
+            raise ValueError(f"{name} cannot contain control characters")
+        normalized = re.sub(r"\s+", " ", normalized)
+        if not normalized:
+            continue
+        if len(normalized) > maximum_item_length:
+            raise ValueError(
+                f"Each {name} item must be at most "
+                f"{maximum_item_length} characters"
+            )
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        total_length += len(normalized)
+        if total_length > maximum_total_length:
+            raise ValueError(
+                f"{name} total length must be at most "
+                f"{maximum_total_length} characters"
+            )
+        cleaned.append(normalized)
+    return tuple(cleaned)
 
 
 def validate_provider_url(value: object) -> str:

@@ -11,7 +11,7 @@ import aiosqlite
 from .account import AccountRecord
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,7 @@ class MemoryStore:
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._migrate_messages()
         await self._create_management_tables()
+        await self._migrate_account_policy_columns()
         await self._db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         await self._db.commit()
         await self.purge_expired()
@@ -151,7 +152,9 @@ class MemoryStore:
                 group_ids TEXT NOT NULL,
                 revision INTEGER NOT NULL DEFAULT 1,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                blocked_terms TEXT NOT NULL DEFAULT '[]',
+                blocked_topics TEXT NOT NULL DEFAULT '[]'
             )
             """
         )
@@ -166,6 +169,22 @@ class MemoryStore:
             )
             """
         )
+
+    async def _migrate_account_policy_columns(self) -> None:
+        db = self._connection()
+        cursor = await db.execute("PRAGMA table_info(accounts)")
+        columns = {str(row["name"]) for row in await cursor.fetchall()}
+        await cursor.close()
+        if "blocked_terms" not in columns:
+            await db.execute(
+                "ALTER TABLE accounts ADD COLUMN "
+                "blocked_terms TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "blocked_topics" not in columns:
+            await db.execute(
+                "ALTER TABLE accounts ADD COLUMN "
+                "blocked_topics TEXT NOT NULL DEFAULT '[]'"
+            )
 
     async def close(self) -> None:
         if self._db is not None:
@@ -183,6 +202,8 @@ class MemoryStore:
             group_ids = frozenset(int(item) for item in json.loads(row["group_ids"]))
         except (TypeError, ValueError, json.JSONDecodeError):
             group_ids = frozenset()
+        blocked_terms = MemoryStore._policy_values(row, "blocked_terms")
+        blocked_topics = MemoryStore._policy_values(row, "blocked_topics")
         return AccountRecord(
             id=str(row["id"]),
             label=str(row["label"]),
@@ -214,7 +235,24 @@ class MemoryStore:
             revision=int(row["revision"]),
             created_at=int(row["created_at"]),
             updated_at=int(row["updated_at"]),
+            blocked_terms=blocked_terms,
+            blocked_topics=blocked_topics,
         )
+
+    @staticmethod
+    def _policy_values(
+        row: aiosqlite.Row,
+        column: str,
+    ) -> tuple[str, ...]:
+        try:
+            decoded = json.loads(row[column])
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Stored blocked content policy is invalid") from exc
+        if not isinstance(decoded, list) or any(
+            not isinstance(item, str) for item in decoded
+        ):
+            raise RuntimeError("Stored blocked content policy is invalid")
+        return tuple(decoded)
 
     async def count_accounts(self) -> int:
         async with self._lock:
@@ -246,7 +284,7 @@ class MemoryStore:
         async with self._lock:
             db = self._connection()
             await db.execute(
-                """
+                f"""
                 INSERT INTO accounts (
                     id, label, session_ciphertext, session_fingerprint,
                     telegram_user_id, telegram_name, enabled, gender, stage,
@@ -256,10 +294,10 @@ class MemoryStore:
                     typing_delay_max_seconds, proactive_enabled,
                     proactive_idle_minutes, proactive_min_interval_minutes,
                     proactive_max_interval_minutes, max_proactive_per_day,
-                    all_groups, group_ids, revision, created_at, updated_at
+                    all_groups, group_ids, revision, created_at, updated_at,
+                    blocked_terms, blocked_topics
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    {", ".join("?" for _ in self._account_values(record))}
                 )
                 """,
                 self._account_values(record),
@@ -320,6 +358,8 @@ class MemoryStore:
             record.revision,
             record.created_at,
             record.updated_at,
+            json.dumps(list(record.blocked_terms), ensure_ascii=False),
+            json.dumps(list(record.blocked_topics), ensure_ascii=False),
         )
 
     async def update_account(
@@ -347,7 +387,7 @@ class MemoryStore:
                     proactive_idle_minutes=?, proactive_min_interval_minutes=?,
                     proactive_max_interval_minutes=?, max_proactive_per_day=?,
                     all_groups=?, group_ids=?, revision=?, created_at=?,
-                    updated_at=?
+                    updated_at=?, blocked_terms=?, blocked_topics=?
                 WHERE id=? AND revision=?
                 """,
                 (

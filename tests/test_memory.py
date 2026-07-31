@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import tempfile
 import time
@@ -9,6 +10,40 @@ from pathlib import Path
 
 from app.account import AccountRecord
 from app.memory import MemoryStore
+
+
+V2_ACCOUNT_COLUMNS = (
+    "id",
+    "label",
+    "session_ciphertext",
+    "session_fingerprint",
+    "telegram_user_id",
+    "telegram_name",
+    "enabled",
+    "gender",
+    "stage",
+    "style",
+    "task_name",
+    "task_info",
+    "ai_base_url",
+    "ai_model",
+    "ai_api_key_ciphertext",
+    "group_reply_probability",
+    "reply_on_mention",
+    "reply_on_reply",
+    "typing_delay_min_seconds",
+    "typing_delay_max_seconds",
+    "proactive_enabled",
+    "proactive_idle_minutes",
+    "proactive_min_interval_minutes",
+    "proactive_max_interval_minutes",
+    "max_proactive_per_day",
+    "all_groups",
+    "group_ids",
+    "revision",
+    "created_at",
+    "updated_at",
+)
 
 
 def account_record(account_id: str = "alpha", revision: int = 1) -> AccountRecord:
@@ -45,6 +80,25 @@ def account_record(account_id: str = "alpha", revision: int = 1) -> AccountRecor
         created_at=now,
         updated_at=now,
     )
+
+
+def rebuild_as_v2_account_schema(
+    path: str,
+    *,
+    keep_blocked_terms: bool = False,
+) -> None:
+    columns = list(V2_ACCOUNT_COLUMNS)
+    if keep_blocked_terms:
+        columns.append("blocked_terms")
+    selected = ", ".join(f'"{column}"' for column in columns)
+
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE accounts RENAME TO accounts_v3_source")
+    db.execute(f"CREATE TABLE accounts AS SELECT {selected} FROM accounts_v3_source")
+    db.execute("DROP TABLE accounts_v3_source")
+    db.execute("PRAGMA user_version=2")
+    db.commit()
+    db.close()
 
 
 class MemoryStoreTests(unittest.TestCase):
@@ -164,6 +218,140 @@ class MemoryStoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_account_policy_round_trips_through_create_update_and_public_data(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            record = account_record().with_updates(
+                blocked_terms=("邀約", "信用卡"),
+                blocked_topics=("政治宣傳", "未成年相關內容"),
+            )
+            await store.create_account(record)
+
+            loaded = await store.get_account("alpha")
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.blocked_terms, ("邀約", "信用卡"))
+            self.assertEqual(
+                loaded.blocked_topics,
+                ("政治宣傳", "未成年相關內容"),
+            )
+            self.assertEqual(
+                loaded.public_dict()["blocked_terms"],
+                ["邀約", "信用卡"],
+            )
+            self.assertEqual(
+                loaded.public_dict()["blocked_topics"],
+                ["政治宣傳", "未成年相關內容"],
+            )
+
+            saved = await store.update_account(
+                loaded.with_updates(
+                    blocked_terms=("投資群",),
+                    blocked_topics=("借貸", "個資交換"),
+                ),
+                expected_revision=loaded.revision,
+                changed_fields=["blocked_terms", "blocked_topics"],
+            )
+            self.assertEqual(saved.revision, 2)
+            reloaded = await store.get_account("alpha")
+            self.assertEqual(reloaded.blocked_terms, ("投資群",))
+            self.assertEqual(reloaded.blocked_topics, ("借貸", "個資交換"))
+            await store.close()
+
+            db = sqlite3.connect(path)
+            raw = db.execute(
+                "SELECT blocked_terms, blocked_topics FROM accounts WHERE id = 'alpha'"
+            ).fetchone()
+            db.close()
+            self.assertEqual(json.loads(raw[0]), ["投資群"])
+            self.assertEqual(json.loads(raw[1]), ["借貸", "個資交換"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_v2_policy_migration_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "v2.db")
+
+            async def seed() -> None:
+                store = MemoryStore(path, ttl_hours=24)
+                await store.open()
+                await store.create_account(account_record())
+                await store.close()
+
+            asyncio.run(seed())
+            rebuild_as_v2_account_schema(path)
+
+            async def migrate_twice() -> None:
+                for _ in range(2):
+                    store = MemoryStore(path, ttl_hours=24)
+                    await store.open()
+                    loaded = await store.get_account("alpha")
+                    self.assertEqual(loaded.blocked_terms, ())
+                    self.assertEqual(loaded.blocked_topics, ())
+                    await store.close()
+
+            asyncio.run(migrate_twice())
+
+            db = sqlite3.connect(path)
+            columns = {
+                row[1] for row in db.execute("PRAGMA table_info(accounts)").fetchall()
+            }
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            row = db.execute(
+                "SELECT blocked_terms, blocked_topics FROM accounts WHERE id = 'alpha'"
+            ).fetchone()
+            db.close()
+            self.assertIn("blocked_terms", columns)
+            self.assertIn("blocked_topics", columns)
+            self.assertEqual(version, 3)
+            self.assertEqual(row, ("[]", "[]"))
+
+    def test_policy_migration_repairs_an_interrupted_single_column_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "interrupted.db")
+
+            async def seed() -> None:
+                store = MemoryStore(path, ttl_hours=24)
+                await store.open()
+                await store.create_account(
+                    account_record().with_updates(blocked_terms=("保留規則",))
+                )
+                await store.close()
+
+            asyncio.run(seed())
+            rebuild_as_v2_account_schema(path, keep_blocked_terms=True)
+
+            async def repair() -> None:
+                store = MemoryStore(path, ttl_hours=24)
+                await store.open()
+                loaded = await store.get_account("alpha")
+                self.assertEqual(loaded.blocked_terms, ("保留規則",))
+                self.assertEqual(loaded.blocked_topics, ())
+                await store.close()
+
+                reopened = MemoryStore(path, ttl_hours=24)
+                await reopened.open()
+                self.assertEqual(
+                    (await reopened.get_account("alpha")).blocked_terms,
+                    ("保留規則",),
+                )
+                await reopened.close()
+
+            asyncio.run(repair())
+
+            db = sqlite3.connect(path)
+            columns = {
+                row[1] for row in db.execute("PRAGMA table_info(accounts)").fetchall()
+            }
+            row = db.execute(
+                "SELECT blocked_terms, blocked_topics FROM accounts WHERE id = 'alpha'"
+            ).fetchone()
+            db.close()
+            self.assertIn("blocked_topics", columns)
+            self.assertEqual(json.loads(row[0]), ["保留規則"])
+            self.assertEqual(json.loads(row[1]), [])
 
     def test_first_account_adopts_orphaned_legacy_messages(self) -> None:
         async def scenario(path: str) -> None:

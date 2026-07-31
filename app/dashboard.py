@@ -424,6 +424,14 @@ DASHBOARD_HTML = """<!doctype html>
             <label class="field full">任務資訊
               <textarea id="addTaskInfo" maxlength="3000" placeholder="說明這個帳號應關注的話題與互動目標"></textarea>
             </label>
+            <label class="field full">輸出屏蔽詞／詞組
+              <textarea id="addBlockedTerms" maxlength="4000" spellcheck="false" placeholder="每行一個，也可用半形或全形逗號分隔&#10;例如：代購、博彩&#10;私下匯款"></textarea>
+              <span class="hint">AI 草稿出現任一詞組、插入符號的變形或近似寫法時，不會發送。最多 100 項，每項最多 80 字。</span>
+            </label>
+            <label class="field full">輸出屏蔽主題
+              <textarea id="addBlockedTopics" maxlength="8000" placeholder="每行一個完整主題&#10;例如：政治宣傳&#10;借貸與投資招攬"></textarea>
+              <span class="hint">禁止輸出相關解釋、改寫或暗示。每行一項，最多 50 項、每項最多 300 字；語意審核會增加模型呼叫，審核失敗時不發送。</span>
+            </label>
             <label class="field">AI Base URL（可留白使用系統預設）
               <input id="addBaseUrl" inputmode="url" maxlength="500" placeholder="https://api.openai.com/v1">
             </label>
@@ -462,6 +470,7 @@ DASHBOARD_HTML = """<!doctype html>
               <div class="metric"><span>24 小時訊息</span><strong id="metricMessages">0</strong></div>
               <div class="metric"><span>已回覆</span><strong id="metricReplies">0</strong></div>
               <div class="metric"><span>群組</span><strong id="metricGroups">0</strong></div>
+              <div class="metric"><span>政策攔截</span><strong id="metricBlocked">0</strong></div>
               <div class="metric"><span>錯誤</span><strong id="metricErrors">0</strong></div>
             </div>
             <div id="accountNotice" class="notice"></div>
@@ -487,6 +496,14 @@ DASHBOARD_HTML = """<!doctype html>
               </label>
               <label class="field full">任務資訊
                 <textarea id="editTaskInfo" maxlength="3000"></textarea>
+              </label>
+              <label class="field full">輸出屏蔽詞／詞組
+                <textarea id="editBlockedTerms" maxlength="4000" spellcheck="false" placeholder="每行一個，也可用半形或全形逗號分隔"></textarea>
+                <span class="hint">AI 草稿出現任一詞組、插入符號的變形或近似寫法時，不會發送。最多 100 項，每項最多 80 字。</span>
+              </label>
+              <label class="field full">輸出屏蔽主題
+                <textarea id="editBlockedTopics" maxlength="8000" placeholder="每行一個完整主題"></textarea>
+                <span class="hint">禁止輸出相關解釋、改寫或暗示。每行一項，最多 50 項、每項最多 300 字；語意審核會增加模型呼叫，審核失敗時不發送。</span>
               </label>
               <label class="field">AI Base URL
                 <input id="editBaseUrl" required maxlength="500" inputmode="url">
@@ -654,6 +671,58 @@ function integerValue(id) {
   return Number.parseInt($(id).value, 10);
 }
 
+function normalizeBlockedItems(rawValue, options) {
+  const normalized = String(rawValue || "").normalize("NFKC");
+  const parts = normalized.split(options.separator);
+  const items = [];
+  const seen = new Set();
+  let totalLength = 0;
+  for (const part of parts) {
+    let item = part.trim();
+    if (!item) continue;
+    if (/\p{C}/u.test(item)) {
+      throw new Error(`${options.label}不可包含控制字元`);
+    }
+    item = item.replace(/\s+/gu, " ");
+    const itemLength = [...item].length;
+    if (itemLength > options.maxItemLength) {
+      throw new Error(`${options.label}「${item.slice(0, 20)}」超過 ${options.maxItemLength} 字`);
+    }
+    const key = item.toLocaleLowerCase("zh-Hant");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push(item);
+    totalLength += itemLength;
+  }
+  if (items.length > options.maxItems) {
+    throw new Error(`${options.label}最多只能設定 ${options.maxItems} 項`);
+  }
+  if (totalLength > options.maxTotalLength) {
+    throw new Error(`${options.label}總長度不可超過 ${options.maxTotalLength} 字`);
+  }
+  return items;
+}
+
+function parseBlockedTerms(value) {
+  return normalizeBlockedItems(value, {
+    label: "不回覆關鍵詞",
+    separator: /[\n,，]+/u,
+    maxItems: 100,
+    maxItemLength: 80,
+    maxTotalLength: 4000,
+  });
+}
+
+function parseBlockedTopics(value) {
+  return normalizeBlockedItems(value, {
+    label: "不回覆主題",
+    separator: /\r?\n/u,
+    maxItems: 50,
+    maxItemLength: 300,
+    maxTotalLength: 8000,
+  });
+}
+
 function createAccountItem(account) {
   const button = document.createElement("button");
   button.type = "button";
@@ -697,6 +766,12 @@ function fillEditor(account) {
   $("editStyle").value = account.style || "";
   $("editTaskName").value = account.task_name || "";
   $("editTaskInfo").value = account.task_info || "";
+  $("editBlockedTerms").value = Array.isArray(account.blocked_terms)
+    ? account.blocked_terms.join("\n")
+    : "";
+  $("editBlockedTopics").value = Array.isArray(account.blocked_topics)
+    ? account.blocked_topics.join("\n")
+    : "";
   $("editBaseUrl").value = account.ai_base_url || "";
   $("editModel").value = account.ai_model || "";
   $("editApiKey").value = "";
@@ -757,6 +832,8 @@ function renderSelected(account) {
   $("metricMessages").textContent = Number(account.message_count || 0).toLocaleString();
   $("metricReplies").textContent = Number(account.replies_sent || 0).toLocaleString();
   $("metricGroups").textContent = String(account.joined_groups?.length || 0);
+  $("metricBlocked").textContent = String(account.blocked_messages || 0);
+  $("metricBlocked").title = `被拒絕的草稿：${account.policy_rejections || 0}`;
   $("metricErrors").textContent = String(account.errors || 0);
   setNotice("accountNotice", account.last_error || "", account.last_error ? "error" : "");
   fillEditor(account);
@@ -834,6 +911,8 @@ function collectNewAccountPayload() {
     style: $("addStyle").value,
     task_name: $("addTaskName").value,
     task_info: $("addTaskInfo").value,
+    blocked_terms: parseBlockedTerms($("addBlockedTerms").value),
+    blocked_topics: parseBlockedTopics($("addBlockedTopics").value),
     enabled: $("addEnabled").checked,
   };
   if ($("addBaseUrl").value.trim()) payload.ai_base_url = $("addBaseUrl").value;
@@ -967,8 +1046,8 @@ $("restartPhoneLoginButton").addEventListener("click", async () => {
 $("addForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   await runButton($("addSubmitButton"), async () => {
-    const payload = collectNewAccountPayload();
     try {
+      const payload = collectNewAccountPayload();
       if ($("addLoginMode").value === "session") {
         setNotice("addNotice", "正在驗證 Telegram Session…", "warning");
         payload.session_string = $("addSession").value;
@@ -1046,30 +1125,32 @@ $("settingsForm").addEventListener("submit", async (event) => {
   if (!account) return;
   setNotice("settingsNotice", "正在儲存…", "warning");
   await runButton($("saveSettingsButton"), async () => {
-    const payload = {
-      revision: account.revision,
-      label: $("editLabel").value,
-      gender: $("editGender").value,
-      stage: $("editStage").value,
-      style: $("editStyle").value,
-      task_name: $("editTaskName").value,
-      task_info: $("editTaskInfo").value,
-      ai_base_url: $("editBaseUrl").value,
-      ai_model: $("editModel").value,
-      ai_api_key: $("editApiKey").value,
-      clear_ai_api_key: $("clearApiKey").checked,
-      group_reply_probability: numberValue("editProbability"),
-      reply_on_mention: $("editReplyMention").checked,
-      reply_on_reply: $("editReplyReply").checked,
-      typing_delay_min_seconds: numberValue("editDelayMin"),
-      typing_delay_max_seconds: numberValue("editDelayMax"),
-      proactive_enabled: $("editProactive").checked,
-      proactive_idle_minutes: integerValue("editIdle"),
-      proactive_min_interval_minutes: integerValue("editIntervalMin"),
-      proactive_max_interval_minutes: integerValue("editIntervalMax"),
-      max_proactive_per_day: integerValue("editProactiveMax"),
-    };
     try {
+      const payload = {
+        revision: account.revision,
+        label: $("editLabel").value,
+        gender: $("editGender").value,
+        stage: $("editStage").value,
+        style: $("editStyle").value,
+        task_name: $("editTaskName").value,
+        task_info: $("editTaskInfo").value,
+        blocked_terms: parseBlockedTerms($("editBlockedTerms").value),
+        blocked_topics: parseBlockedTopics($("editBlockedTopics").value),
+        ai_base_url: $("editBaseUrl").value,
+        ai_model: $("editModel").value,
+        ai_api_key: $("editApiKey").value,
+        clear_ai_api_key: $("clearApiKey").checked,
+        group_reply_probability: numberValue("editProbability"),
+        reply_on_mention: $("editReplyMention").checked,
+        reply_on_reply: $("editReplyReply").checked,
+        typing_delay_min_seconds: numberValue("editDelayMin"),
+        typing_delay_max_seconds: numberValue("editDelayMax"),
+        proactive_enabled: $("editProactive").checked,
+        proactive_idle_minutes: integerValue("editIdle"),
+        proactive_min_interval_minutes: integerValue("editIntervalMin"),
+        proactive_max_interval_minutes: integerValue("editIntervalMax"),
+        max_proactive_per_day: integerValue("editProactiveMax"),
+      };
       await api(`/api/accounts/${encodeURIComponent(account.id)}`, {
         method: "PUT",
         body: JSON.stringify(payload),

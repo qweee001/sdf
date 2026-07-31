@@ -20,6 +20,7 @@ from .account import (
     clean_group_ids,
     clean_int,
     clean_role,
+    clean_string_list,
     clean_text,
     validate_provider_url,
 )
@@ -423,6 +424,20 @@ class AccountManager:
             revision=1,
             created_at=now,
             updated_at=now,
+            blocked_terms=clean_string_list(
+                payload.get("blocked_terms", []),
+                "blocked_terms",
+                maximum_items=100,
+                maximum_item_length=80,
+                maximum_total_length=4000,
+            ),
+            blocked_topics=clean_string_list(
+                payload.get("blocked_topics", []),
+                "blocked_topics",
+                maximum_items=50,
+                maximum_item_length=300,
+                maximum_total_length=8000,
+            ),
         )
         self._validate_intervals(record)
         if not record.has_custom_api_key and not self.settings.ai_api_key:
@@ -598,6 +613,26 @@ class AccountManager:
                 minimum=0,
                 maximum=200,
             ),
+            blocked_terms=clean_string_list(
+                payload.get(
+                    "blocked_terms",
+                    list(current.blocked_terms),
+                ),
+                "blocked_terms",
+                maximum_items=100,
+                maximum_item_length=80,
+                maximum_total_length=4000,
+            ),
+            blocked_topics=clean_string_list(
+                payload.get(
+                    "blocked_topics",
+                    list(current.blocked_topics),
+                ),
+                "blocked_topics",
+                maximum_items=50,
+                maximum_item_length=300,
+                maximum_total_length=8000,
+            ),
         )
         self._validate_intervals(updated)
         if not updated.has_custom_api_key and not self.settings.ai_api_key:
@@ -625,6 +660,8 @@ class AccountManager:
                 "proactive_min_interval_minutes",
                 "proactive_max_interval_minutes",
                 "max_proactive_per_day",
+                "blocked_terms",
+                "blocked_topics",
             )
             if name in payload
         ]
@@ -779,6 +816,8 @@ class AccountManager:
             "group_count": stats["group_count"],
             "replies_sent": 0,
             "errors": 1 if account_id in self.start_errors else 0,
+            "policy_rejections": 0,
+            "blocked_messages": 0,
             "last_error": self.start_errors.get(account_id, ""),
             "uptime_seconds": 0,
         }
