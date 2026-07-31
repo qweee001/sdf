@@ -29,6 +29,7 @@ from .security import safe_error
 
 
 LOGGER = logging.getLogger("telegram-ai-userbot.worker")
+COMPLETION_MAX_ATTEMPTS = 2
 
 
 class AccountWorker:
@@ -97,14 +98,40 @@ class AccountWorker:
         self,
         messages: list[dict[str, str]],
     ) -> str:
-        result = await self.ai.chat.completions.create(
-            model=self.account.ai_model,
-            messages=messages,
-        )
-        content = result.choices[0].message.content
-        if not content or not content.strip():
-            raise RuntimeError("AI provider returned an empty reply")
-        return content.strip()[:4000]
+        for _ in range(COMPLETION_MAX_ATTEMPTS):
+            result = await self.ai.chat.completions.create(
+                model=self.account.ai_model,
+                messages=messages,
+            )
+            content = self._completion_content(result)
+            if content is not None:
+                return content[:4000]
+        raise RuntimeError("AI provider returned an invalid completion")
+
+    @staticmethod
+    def _completion_content(result: object) -> str | None:
+        def field(value: object, name: str) -> object | None:
+            if isinstance(value, dict):
+                return value.get(name)
+            return getattr(value, name, None)
+
+        try:
+            choices = field(result, "choices")
+            if choices is None:
+                return None
+            first_choice = choices[0]  # type: ignore[index]
+            if first_choice is None:
+                return None
+            message = field(first_choice, "message")
+            if message is None:
+                return None
+            content = field(message, "content")
+        except (AttributeError, IndexError, KeyError, TypeError):
+            return None
+        if not isinstance(content, str):
+            return None
+        cleaned = content.strip()
+        return cleaned or None
 
     async def _output_policy_allows(self, candidate: str) -> bool:
         policy_payload = json.dumps(
@@ -203,16 +230,14 @@ class AccountWorker:
 
     async def test_model(self) -> dict[str, object]:
         started = time.monotonic()
-        result = await self.ai.chat.completions.create(
-            model=self.account.ai_model,
-            messages=[
+        content = await self._completion(
+            [
                 {
                     "role": "user",
                     "content": "請只回覆「連線正常」四個繁體中文字。",
                 }
-            ],
+            ]
         )
-        content = (result.choices[0].message.content or "").strip()
         return {
             "ok": bool(content),
             "latency_ms": int((time.monotonic() - started) * 1000),

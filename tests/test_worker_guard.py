@@ -9,6 +9,26 @@ from app.content_guard import BlockedReplyError, ContentGuard, SafeReply
 from app.worker import AccountWorker
 
 
+class FakeCompletionEndpoint:
+    def __init__(self, *results: object) -> None:
+        self.results = list(results)
+        self.call_count = 0
+
+    async def create(self, **kwargs: object) -> object:
+        self.call_count += 1
+        return self.results.pop(0)
+
+
+def completion_result(content: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+            )
+        ]
+    )
+
+
 class WorkerGuardTests(unittest.TestCase):
     @staticmethod
     def make_worker(
@@ -30,6 +50,118 @@ class WorkerGuardTests(unittest.TestCase):
         worker.content_guard = ContentGuard(blocked_terms, blocked_topics)
         worker.policy_rejections = 0
         return worker
+
+    @staticmethod
+    def attach_completion_endpoint(
+        worker: AccountWorker,
+        *results: object,
+    ) -> FakeCompletionEndpoint:
+        endpoint = FakeCompletionEndpoint(*results)
+        worker.ai = SimpleNamespace(
+            chat=SimpleNamespace(completions=endpoint)
+        )
+        return endpoint
+
+    def test_invalid_completion_shape_retries_then_returns_valid_content(
+        self,
+    ) -> None:
+        invalid_results = (
+            SimpleNamespace(choices=None),
+            SimpleNamespace(choices=[]),
+            SimpleNamespace(choices=[None]),
+            SimpleNamespace(choices=[SimpleNamespace()]),
+            SimpleNamespace(choices=[SimpleNamespace(message=None)]),
+            completion_result(None),
+            completion_result("   "),
+        )
+
+        for invalid in invalid_results:
+            with self.subTest(invalid=repr(invalid)):
+                async def scenario() -> None:
+                    worker = self.make_worker()
+                    endpoint = self.attach_completion_endpoint(
+                        worker,
+                        invalid,
+                        completion_result("  有效回覆  "),
+                    )
+
+                    content = await worker._completion(
+                        [{"role": "user", "content": "測試"}]
+                    )
+
+                    self.assertEqual(content, "有效回覆")
+                    self.assertEqual(endpoint.call_count, 2)
+
+                asyncio.run(scenario())
+
+    def test_invalid_completion_exhaustion_is_bounded_and_generic(self) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker()
+            endpoint = self.attach_completion_endpoint(
+                worker,
+                SimpleNamespace(
+                    choices=None,
+                    raw_payload="provider-secret-value",
+                ),
+                completion_result(None),
+            )
+
+            with self.assertRaises(RuntimeError) as caught:
+                await worker._completion(
+                    [{"role": "user", "content": "測試"}]
+                )
+
+            self.assertEqual(
+                str(caught.exception),
+                "AI provider returned an invalid completion",
+            )
+            self.assertNotIn("provider-secret-value", str(caught.exception))
+            self.assertEqual(endpoint.call_count, 2)
+
+        asyncio.run(scenario())
+
+    def test_invalid_semantic_audit_completion_is_fail_closed(self) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+            endpoint = self.attach_completion_endpoint(
+                worker,
+                SimpleNamespace(choices=[]),
+                completion_result("   "),
+            )
+
+            allowed = await worker._output_policy_allows("一般成員回覆")
+
+            self.assertFalse(allowed)
+            self.assertEqual(endpoint.call_count, 2)
+
+        asyncio.run(scenario())
+
+    def test_model_uses_invalid_completion_retry(self) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker()
+            endpoint = self.attach_completion_endpoint(
+                worker,
+                SimpleNamespace(choices=None),
+                completion_result("  連線正常  "),
+            )
+
+            result = await worker.test_model()
+
+            self.assertEqual(
+                result,
+                {
+                    "ok": True,
+                    "latency_ms": result["latency_ms"],
+                    "response": "連線正常",
+                },
+            )
+            self.assertGreaterEqual(result["latency_ms"], 0)
+            self.assertEqual(endpoint.call_count, 2)
+
+        asyncio.run(scenario())
 
     def test_generate_never_returns_an_exact_blocked_term(self) -> None:
         async def scenario() -> None:
