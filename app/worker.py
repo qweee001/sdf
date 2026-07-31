@@ -427,6 +427,115 @@ class AccountWorker:
         )
         return reply_text, sent
 
+    def _require_manual_send_target(self, group_id: int) -> None:
+        if isinstance(group_id, bool) or not isinstance(group_id, int):
+            raise ValueError("group_id must be an integer")
+        if self.state != "online" or not self.client.is_connected():
+            raise RuntimeError("Telegram account is not connected")
+        if not self.group_allowed(group_id):
+            raise ValueError("Group is outside this account's enabled scope")
+
+        joined_group_ids: set[int] = set()
+        for group in self.joined_groups:
+            value = group.get("id")
+            if isinstance(value, int) and not isinstance(value, bool):
+                joined_group_ids.add(value)
+        if group_id not in joined_group_ids:
+            raise ValueError("Account has not joined this group")
+
+    async def manual_send_text(
+        self,
+        group_id: int,
+        text: str,
+    ) -> dict[str, object]:
+        self._require_manual_send_target(group_id)
+        if not isinstance(text, str):
+            raise ValueError("text must be a string")
+        if not text.strip():
+            raise ValueError("text must not be empty")
+
+        chunks: list[str] = []
+        current: list[str] = []
+        current_utf16_units = 0
+        # Stay below Telegram's 4096 UTF-16-unit text limit and the memory
+        # store's 4000-character column boundary without rewriting content.
+        for character in text:
+            try:
+                character_units = len(character.encode("utf-16-le")) // 2
+            except UnicodeEncodeError as exc:
+                raise ValueError("text contains invalid Unicode") from exc
+            if current and current_utf16_units + character_units > 4000:
+                chunks.append("".join(current))
+                current = []
+                current_utf16_units = 0
+            current.append(character)
+            current_utf16_units += character_units
+        if current:
+            chunks.append("".join(current))
+
+        sent_messages: list[tuple[str, Message]] = []
+        sent_utf16_units = 0
+        async with self.group_locks[group_id]:
+            try:
+                for chunk in chunks:
+                    # Recheck mutable connection and group state immediately
+                    # before each Telegram send.
+                    self._require_manual_send_target(group_id)
+                    sent = await self.client.send_message(
+                        group_id,
+                        chunk,
+                        parse_mode=None,
+                        link_preview=False,
+                    )
+                    if not isinstance(sent, Message) or sent.date is None:
+                        raise RuntimeError(
+                            "Telegram returned an invalid text message"
+                        )
+                    sent_messages.append((chunk, sent))
+                    sent_utf16_units += len(chunk.encode("utf-16-le")) // 2
+                    self.replies_sent += 1
+                    self.last_activity[group_id] = time.time()
+                    await self.store.add(
+                        self.account.id,
+                        group_id,
+                        self.me_id,
+                        self.me_name,
+                        "assistant",
+                        chunk,
+                        created_at=int(sent.date.timestamp()),
+                    )
+            except Exception as exc:
+                if not sent_messages:
+                    raise
+                LOGGER.warning(
+                    "Account %s sent %s manual message chunk(s) before a "
+                    "later chunk failed: %s",
+                    self.account.id,
+                    len(sent_messages),
+                    self._safe_error(exc),
+                )
+                return {
+                    "ok": False,
+                    "partial": True,
+                    "account_id": self.account.id,
+                    "group_id": group_id,
+                    "message_ids": [
+                        int(sent.id) for _, sent in sent_messages
+                    ],
+                    "message_count": len(sent_messages),
+                    "sent_utf16_units": sent_utf16_units,
+                }
+
+        return {
+            "ok": True,
+            "partial": False,
+            "account_id": self.account.id,
+            "group_id": group_id,
+            "message_ids": [int(sent.id) for _, sent in sent_messages],
+            "message_count": len(sent_messages),
+            "sent_utf16_units": sent_utf16_units,
+        }
+
     async def _verify_media_text(self, text: str) -> str:
         candidate = text.strip()
         if not candidate:

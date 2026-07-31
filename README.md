@@ -53,7 +53,8 @@ AZURE_SPEECH_KEY=
 AZURE_SPEECH_REGION=
 
 ACCOUNT_ENCRYPTION_KEY=
-MAX_ACCOUNTS=10
+# 可由 Railway Variables 依環境覆寫；預設可管理 20 個帳號
+MAX_ACCOUNTS=20
 
 MEMORY_TTL_HOURS=24
 MEMORY_HISTORY_LIMIT=30
@@ -95,6 +96,19 @@ Telegram Session 將無法解密。
 
 Session String 與 API Key 都不會由任何 GET API、HTML、狀態或日誌回傳。
 升級時若資料庫仍含舊版帳號專用 API Key，啟動程序會直接清除該欄位。
+
+## 控制台操作
+
+控制台會以帳號卡片顯示設定。可收合不常調整的區塊，集中查看帳號狀態、角色、
+群組範圍、任務與媒體設定；展開後再編輯並儲存。手動發送功能會由你選定帳號與
+允許群組後原文送出內容；它不經 AI 改寫、角色審核或屏蔽詞檢查，但仍要求控制台
+登入、有效 CSRF、已連線帳號，以及該帳號已加入且允許的群組。自動 AI 回覆仍會
+套用既有內容政策。超過 Telegram 單則訊息容量的手動文字會自動分段發送。
+若多段發送途中斷線，控制台會顯示已送出的則數，並只保留尚未送出的文字，
+避免直接重試時重複前段內容。
+帳號數量上限固定為 20；Railway 的 `MAX_ACCOUNTS` Variable 可設為 1–20 以降低環境
+上限，但不能超過 20。不要將任何 API Key 或 Telegram Session 寫入程式碼、README
+或 Git。
 
 ## 模型設定
 

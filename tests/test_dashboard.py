@@ -199,6 +199,22 @@ class FakeAccountManager:
         self.calls.append(("model_test", account_id))
         return {"ok": True, "model": self.account["ai_model"]}
 
+    async def manual_send_text(
+        self,
+        account_id: str,
+        group_id: int,
+        text: str,
+    ) -> dict[str, object]:
+        self.calls.append(("manual_send_text", (account_id, group_id, text)))
+        return {
+            "ok": True,
+            "partial": False,
+            "message_ids": [901],
+            "message_count": 1,
+            "sent_utf16_units": len(text.encode("utf-16-le")) // 2,
+            "image_api_key": "must-never-leave-the-server",
+        }
+
     async def clear_memory(self, account_id: str) -> int:
         self.calls.append(("clear_memory", account_id))
         return 7
@@ -636,6 +652,83 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("selectedAccountId !== accountId", DASHBOARD_JS)
         self.assertIn("title.textContent", DASHBOARD_JS)
         self.assertIn("meta.textContent", DASHBOARD_JS)
+        self.assertNotIn("innerHTML", DASHBOARD_JS)
+
+    def test_manual_message_auth_csrf_validation_and_send(self) -> None:
+        path = "/api/accounts/acct_one/manual-message"
+        valid_payload = {"group_id": -1001, "text": "  大家晚安  "}
+        with TestClient(self.server.app, base_url="https://testserver") as client:
+            self.assertEqual(client.post(path, json=valid_payload).status_code, 401)
+            csrf = self.login(client)
+            self.assertEqual(client.post(path, json=valid_payload).status_code, 403)
+            headers = {"X-CSRF-Token": csrf}
+
+            invalid_payloads = [
+                {},
+                {"group_id": -1001},
+                {"text": "訊息"},
+                {"group_id": True, "text": "訊息"},
+                {"group_id": "-1001", "text": "訊息"},
+                {"group_id": 1001, "text": "訊息"},
+                {"group_id": -(2**63) - 1, "text": "訊息"},
+                {"group_id": -1001, "text": None},
+                {"group_id": -1001, "text": "   "},
+                {"group_id": -1001, "text": "訊息", "extra": True},
+                {"group_id": -1001, "text": "訊息", "image_api_key": "secret"},
+            ]
+            for payload in invalid_payloads:
+                with self.subTest(payload=payload):
+                    response = client.post(path, headers=headers, json=payload)
+                    self.assertEqual(response.status_code, 400)
+                    self.assertNotIn("secret", response.text)
+
+            oversized = client.post(
+                path,
+                headers=headers,
+                json={"group_id": -1001, "text": "x" * (128 * 1024)},
+            )
+            self.assertEqual(oversized.status_code, 400)
+
+            sent = client.post(path, headers=headers, json=valid_payload)
+            self.assertEqual(sent.status_code, 200)
+            self.assertEqual(sent.json()["message_ids"], [901])
+            self.assertEqual(sent.json()["message_count"], 1)
+            self.assertNotIn("image_api_key", sent.text)
+            self.assertIn(
+                (
+                    "manual_send_text",
+                    ("acct_one", -1001, "  大家晚安  "),
+                ),
+                self.manager.calls,
+            )
+
+    def test_compact_manual_send_and_collapsible_ui_contract(self) -> None:
+        self.assertIn("manual-send-row", DASHBOARD_HTML)
+        self.assertIn("manual-send-button", DASHBOARD_HTML)
+        self.assertIn('data-panel-title="帳號概覽"', DASHBOARD_HTML)
+        self.assertIn('data-expanded="true"', DASHBOARD_HTML)
+        self.assertGreaterEqual(DASHBOARD_HTML.count("data-collapsible"), 6)
+        self.assertGreaterEqual(DASHBOARD_HTML.count('data-expanded="false"'), 5)
+        self.assertIn('toggle.setAttribute("aria-expanded"', DASHBOARD_JS)
+        self.assertIn('toggle.setAttribute("aria-controls"', DASHBOARD_JS)
+        self.assertIn("content.hidden = !nextExpanded", DASHBOARD_JS)
+        self.assertIn("function createManualSendRow(account)", DASHBOARD_JS)
+        self.assertIn("manualGroupByAccount", DASHBOARD_JS)
+        self.assertIn("manualMessageDraftByAccount", DASHBOARD_JS)
+        self.assertIn("manualMessagePendingAccounts", DASHBOARD_JS)
+        self.assertNotIn("message.maxLength", DASHBOARD_JS)
+        self.assertIn("group?.enabled !== false", DASHBOARD_JS)
+        self.assertIn(
+            "sendButton.disabled = !account.connected || !groups.length || pending",
+            DASHBOARD_JS,
+        )
+        self.assertIn("manualMessagePendingAccounts.size === 0", DASHBOARD_JS)
+        self.assertIn("/manual-message", DASHBOARD_JS)
+        self.assertIn("body: JSON.stringify({group_id: groupId, text})", DASHBOARD_JS)
+        self.assertIn("if (result.partial === true)", DASHBOARD_JS)
+        self.assertIn("text.slice(safeUnits)", DASHBOARD_JS)
+        self.assertIn("剩餘內容已保留", DASHBOARD_JS)
+        self.assertIn("notice.textContent = error.message", DASHBOARD_JS)
         self.assertNotIn("innerHTML", DASHBOARD_JS)
 
     def test_conversation_log_discards_stale_responses(self) -> None:

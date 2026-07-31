@@ -172,7 +172,14 @@ DASHBOARD_HTML = """<!doctype html>
       gap: 10px;
       margin-bottom: 12px;
     }
-    .account-list { display: grid; gap: 7px; }
+    .account-list { display: grid; gap: 9px; }
+    .account-card {
+      min-width: 0;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: #151711;
+    }
     .account-item {
       width: 100%;
       display: grid;
@@ -190,6 +197,50 @@ DASHBOARD_HTML = """<!doctype html>
       border-color: var(--line);
       background: var(--panel-2);
     }
+    .manual-send-row {
+      display: grid;
+      grid-template-columns: minmax(0, .85fr) minmax(0, 1.4fr) 38px;
+      gap: 6px;
+      align-items: center;
+      padding: 4px;
+    }
+    .manual-send-row select, .manual-send-row textarea {
+      width: 100%;
+      min-width: 0;
+      height: 38px;
+      padding: 8px 9px;
+      color: #fff;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      outline: none;
+      background: #0f110d;
+    }
+    .manual-send-row textarea {
+      min-height: 38px;
+      max-height: 38px;
+      resize: none;
+      line-height: 1.35;
+    }
+    .manual-send-row select:focus, .manual-send-row textarea:focus {
+      border-color: var(--accent);
+    }
+    .manual-send-button {
+      width: 38px;
+      min-height: 38px;
+      padding: 0;
+      border-radius: 50%;
+      font-size: 18px;
+      line-height: 1;
+    }
+    .manual-send-notice {
+      min-height: 17px;
+      padding: 0 5px 3px;
+      color: var(--muted);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+    .manual-send-notice.error { color: var(--danger); }
+    .manual-send-notice.success { color: var(--accent); }
     .account-item strong, .account-item small {
       display: block;
       overflow: hidden;
@@ -207,6 +258,30 @@ DASHBOARD_HTML = """<!doctype html>
     .dot.error { background: var(--danger); }
     .content { min-width: 0; }
     .panel { padding: 20px; margin-bottom: 14px; }
+    .collapsible-panel { padding-top: 12px; }
+    .collapse-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 7px 2px 12px;
+      color: inherit;
+      border: 0;
+      background: transparent;
+      text-align: left;
+      font-size: 16px;
+      font-weight: 800;
+    }
+    .collapse-toggle-icon {
+      color: var(--muted);
+      font-size: 18px;
+      transition: transform .16s ease;
+    }
+    .collapse-toggle[aria-expanded="true"] .collapse-toggle-icon {
+      transform: rotate(180deg);
+    }
+    .collapsible-content[hidden] { display: none; }
     .account-head {
       display: flex;
       justify-content: space-between;
@@ -381,6 +456,8 @@ DASHBOARD_HTML = """<!doctype html>
       .workspace { grid-template-columns: 1fr; }
       .sidebar { position: static; }
       .account-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .manual-send-row { grid-template-columns: minmax(0, 1fr) 38px; }
+      .manual-send-row select { grid-column: 1 / -1; }
       .account-head, .row-between { flex-direction: column; align-items: stretch; }
       .field, .field.third, .field.quarter { grid-column: 1 / -1; }
       .group-list { grid-template-columns: 1fr; }
@@ -391,6 +468,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
     @media (max-width: 440px) {
       .account-list { grid-template-columns: 1fr; }
+      .manual-send-row { grid-template-columns: minmax(0, .9fr) minmax(0, 1.3fr) 38px; }
+      .manual-send-row select { grid-column: auto; }
       .status-line { grid-template-columns: 1fr; }
     }
   </style>
@@ -517,7 +596,7 @@ DASHBOARD_HTML = """<!doctype html>
         <article id="emptyPanel" class="panel empty">請從左側選擇帳號，或新增第一個帳號。</article>
 
         <div id="accountPanels" class="hidden">
-          <article class="panel">
+          <article class="panel collapsible-panel" data-collapsible data-panel-title="帳號概覽" data-expanded="true">
             <div class="account-head">
               <div>
                 <div class="eyebrow" id="selectedState">—</div>
@@ -541,7 +620,7 @@ DASHBOARD_HTML = """<!doctype html>
             <div id="accountNotice" class="notice"></div>
           </article>
 
-          <article class="panel">
+          <article class="panel collapsible-panel" data-collapsible data-panel-title="角色、任務與模型" data-expanded="false">
             <h3>角色、任務與模型</h3>
             <form id="settingsForm" class="form-grid">
               <label class="field">帳號名稱
@@ -672,7 +751,7 @@ DASHBOARD_HTML = """<!doctype html>
             <div id="settingsNotice" class="notice"></div>
           </article>
 
-          <article class="panel">
+          <article class="panel collapsible-panel" data-collapsible data-panel-title="媒體任務狀態" data-expanded="false">
             <div class="row-between">
               <div>
                 <h3>媒體任務狀態</h3>
@@ -693,7 +772,7 @@ DASHBOARD_HTML = """<!doctype html>
             <div id="mediaJobList" class="media-job-list"></div>
           </article>
 
-          <article class="panel">
+          <article class="panel collapsible-panel" data-collapsible data-panel-title="回覆群組" data-expanded="false">
             <div class="row-between">
               <div>
                 <h3>回覆群組</h3>
@@ -708,7 +787,7 @@ DASHBOARD_HTML = """<!doctype html>
             <div id="groupsNotice" class="notice"></div>
           </article>
 
-          <article class="panel">
+          <article class="panel collapsible-panel" data-collapsible data-panel-title="聊天記錄" data-expanded="false">
             <div>
               <h3>聊天記錄</h3>
               <div class="hint">顯示此帳號 24 小時記憶中的群聊內容；不顯示 Telegram sender ID。</div>
@@ -730,7 +809,7 @@ DASHBOARD_HTML = """<!doctype html>
             <div id="conversationList" class="conversation-list"></div>
           </article>
 
-          <article class="panel danger-zone">
+          <article class="panel danger-zone collapsible-panel" data-collapsible data-panel-title="記憶管理" data-expanded="false">
             <h3>記憶管理</h3>
             <div class="hint">清除聊天記憶不會刪除帳號、Telegram Session 或模型設定。此操作無法復原。</div>
             <div class="actions">
@@ -757,6 +836,9 @@ let groupsDirty = false;
 let telegramAuthId = "";
 let telegramAuthState = "idle";
 const conversationGroupByAccount = new Map();
+const manualGroupByAccount = new Map();
+const manualMessageDraftByAccount = new Map();
+const manualMessagePendingAccounts = new Set();
 let conversationLoadedKey = "";
 let conversationSelectionKey = "";
 let conversationRequestSequence = 0;
@@ -835,6 +917,44 @@ function stateName(account) {
 
 function selectedAccount() {
   return dashboardState?.accounts.find((account) => account.id === selectedAccountId) || null;
+}
+
+function setupCollapsiblePanels() {
+  let index = 0;
+  for (const panel of document.querySelectorAll("[data-collapsible]")) {
+    if (panel.querySelector(":scope > .collapse-toggle")) continue;
+    index += 1;
+    const content = document.createElement("div");
+    content.className = "collapsible-content";
+    content.id = `collapsiblePanel${index}`;
+    while (panel.firstChild) content.appendChild(panel.firstChild);
+    const duplicateHeading = content.querySelector("h3");
+    if (duplicateHeading?.textContent?.trim() === panel.dataset.panelTitle) {
+      duplicateHeading.classList.add("hidden");
+    }
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "collapse-toggle";
+    toggle.setAttribute("aria-controls", content.id);
+    const expanded = panel.dataset.expanded === "true";
+    toggle.setAttribute("aria-expanded", String(expanded));
+    content.hidden = !expanded;
+
+    const label = document.createElement("span");
+    label.textContent = panel.dataset.panelTitle || "內容";
+    const icon = document.createElement("span");
+    icon.className = "collapse-toggle-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "⌃";
+    toggle.append(label, icon);
+    toggle.addEventListener("click", () => {
+      const nextExpanded = toggle.getAttribute("aria-expanded") !== "true";
+      toggle.setAttribute("aria-expanded", String(nextExpanded));
+      content.hidden = !nextExpanded;
+    });
+    panel.append(toggle, content);
+  }
 }
 
 function numberValue(id) {
@@ -926,10 +1046,141 @@ function parseBlockedTopics(value) {
   });
 }
 
+function createManualSendRow(account) {
+  const container = document.createElement("div");
+  const row = document.createElement("div");
+  row.className = "manual-send-row";
+  const pending = manualMessagePendingAccounts.has(account.id);
+  const groupSelect = document.createElement("select");
+  groupSelect.setAttribute("aria-label", `選擇 ${String(account.label || "帳號")} 的發送群組`);
+  const groups = (Array.isArray(account.joined_groups) ? account.joined_groups : [])
+    .filter((group) => {
+      const groupId = Number(group?.id);
+      return Number.isSafeInteger(groupId) && groupId < 0 && group?.enabled !== false;
+    });
+  const savedGroup = Number(manualGroupByAccount.get(account.id));
+  let selectedGroup = groups.some((group) => Number(group.id) === savedGroup)
+    ? savedGroup
+    : Number(groups[0]?.id || 0);
+  if (!groups.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = account.connected ? "沒有可用群組" : "尚未載入群組";
+    groupSelect.appendChild(option);
+    groupSelect.disabled = true;
+  } else {
+    for (const group of groups) {
+      const option = document.createElement("option");
+      option.value = String(group.id);
+      option.textContent = String(group.title || group.id);
+      option.selected = Number(group.id) === selectedGroup;
+      groupSelect.appendChild(option);
+    }
+    manualGroupByAccount.set(account.id, selectedGroup);
+    groupSelect.disabled = pending;
+  }
+  groupSelect.addEventListener("change", () => {
+    const groupId = Number(groupSelect.value);
+    if (Number.isSafeInteger(groupId) && groupId < 0) {
+      manualGroupByAccount.set(account.id, groupId);
+    }
+  });
+
+  const message = document.createElement("textarea");
+  message.rows = 1;
+  message.placeholder = "手動發送訊息";
+  message.setAttribute("aria-label", `輸入 ${String(account.label || "帳號")} 的手動訊息`);
+  message.value = String(manualMessageDraftByAccount.get(account.id) || "");
+  message.disabled = pending;
+  message.addEventListener("input", () => {
+    manualMessageDraftByAccount.set(account.id, message.value);
+  });
+
+  const sendButton = document.createElement("button");
+  sendButton.type = "button";
+  sendButton.className = "btn primary manual-send-button";
+  sendButton.textContent = "➤";
+  sendButton.title = "發送訊息";
+  sendButton.setAttribute("aria-label", `以 ${String(account.label || "帳號")} 發送訊息`);
+  sendButton.disabled = !account.connected || !groups.length || pending;
+
+  const notice = document.createElement("div");
+  notice.className = "manual-send-notice";
+  notice.setAttribute("role", "status");
+  sendButton.addEventListener("click", async () => {
+    const groupId = Number(groupSelect.value);
+    const text = message.value;
+    notice.className = "manual-send-notice";
+    if (!Number.isSafeInteger(groupId) || groupId >= 0) {
+      notice.textContent = "請先選擇群組";
+      notice.classList.add("error");
+      return;
+    }
+    if (!text.trim()) {
+      notice.textContent = "請輸入訊息";
+      notice.classList.add("error");
+      message.focus();
+      return;
+    }
+    manualMessagePendingAccounts.add(account.id);
+    groupSelect.disabled = true;
+    message.disabled = true;
+    try {
+      await runButton(sendButton, async () => {
+        const result = await api(`/api/accounts/${encodeURIComponent(account.id)}/manual-message`, {
+          method: "POST",
+          body: JSON.stringify({group_id: groupId, text}),
+        });
+        if (result.partial === true) {
+          const sentUnits = Number(result.sent_utf16_units);
+          const safeUnits = Number.isSafeInteger(sentUnits) && sentUnits > 0
+            ? Math.min(sentUnits, text.length)
+            : 0;
+          const remaining = text.slice(safeUnits);
+          message.value = remaining;
+          if (remaining) manualMessageDraftByAccount.set(account.id, remaining);
+          else manualMessageDraftByAccount.delete(account.id);
+          notice.textContent = `部分送出 ${Number(result.message_count) || 0} 則；剩餘內容已保留`;
+          notice.classList.add("error");
+          return;
+        }
+        if (result.ok !== true) {
+          throw new Error("Telegram 未確認訊息已送出");
+        }
+        message.value = "";
+        manualMessageDraftByAccount.delete(account.id);
+        notice.textContent = "已發送";
+        notice.classList.add("success");
+      });
+    } catch (error) {
+      notice.textContent = error.message;
+      notice.classList.add("error");
+    } finally {
+      manualMessagePendingAccounts.delete(account.id);
+      groupSelect.disabled = !groups.length;
+      message.disabled = false;
+      sendButton.disabled = !account.connected || !groups.length;
+    }
+  });
+  message.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      sendButton.click();
+    }
+  });
+
+  row.append(groupSelect, message, sendButton);
+  container.append(row, notice);
+  return container;
+}
+
 function createAccountItem(account) {
+  const card = document.createElement("article");
+  card.className = "account-card";
   const button = document.createElement("button");
   button.type = "button";
   button.className = `account-item${account.id === selectedAccountId ? " active" : ""}`;
+  button.setAttribute("aria-pressed", String(account.id === selectedAccountId));
   const dot = document.createElement("span");
   dot.className = `dot${account.connected ? " online" : account.state === "error" ? " error" : ""}`;
   const copy = document.createElement("span");
@@ -945,7 +1196,8 @@ function createAccountItem(account) {
     groupsDirty = false;
     renderDashboard();
   });
-  return button;
+  card.append(button, createManualSendRow(account));
+  return card;
 }
 
 function renderAccountList() {
@@ -1833,6 +2085,8 @@ $("logoutButton").addEventListener("click", async () => {
   }
 });
 
+setupCollapsiblePanels();
+
 refresh().catch((error) => {
   if (error.message !== "unauthorized") {
     showLogin();
@@ -1842,6 +2096,7 @@ refresh().catch((error) => {
 
 setInterval(() => {
   if (!document.hidden && !formDirty && !groupsDirty &&
+      manualMessagePendingAccounts.size === 0 &&
       $("addPanel").classList.contains("hidden")) {
     refresh().catch(() => {});
   }
@@ -1946,6 +2201,26 @@ class DashboardServer:
         if isinstance(revision, bool) or not isinstance(revision, int):
             raise ValueError("revision must be an integer")
         return revision
+
+    @staticmethod
+    def _manual_message_payload(
+        payload: dict[str, object],
+    ) -> tuple[int, str]:
+        if set(payload) != {"group_id", "text"}:
+            raise ValueError("manual message requires only group_id and text")
+        group_id = payload.get("group_id")
+        if (
+            isinstance(group_id, bool)
+            or not isinstance(group_id, int)
+            or not -(2**63) <= group_id < 0
+        ):
+            raise ValueError("group_id must be a negative integer")
+        raw_text = payload.get("text")
+        if not isinstance(raw_text, str):
+            raise ValueError("text must be a string")
+        if not raw_text.strip():
+            raise ValueError("text cannot be empty")
+        return group_id, raw_text
 
     @staticmethod
     def _conversation_group_id(raw_value: str) -> int:
@@ -2439,6 +2714,23 @@ class DashboardServer:
                     await self.manager.test_model(account_id)
                 )
             )
+
+        @web.post("/api/accounts/{account_id}/manual-message")
+        async def manual_message(account_id: str, request: Request) -> JSONResponse:
+            _, blocked = self._require_action(request)
+            if blocked is not None:
+                return blocked
+            payload = await self._read_payload(request)
+            self._reject_api_key_fields(payload)
+            group_id, text = self._manual_message_payload(payload)
+            result = await self.manager.manual_send_text(  # type: ignore[attr-defined]
+                account_id,
+                group_id,
+                text,
+            )
+            if isinstance(result, dict):
+                return JSONResponse(self._without_api_key_fields(result))
+            return JSONResponse({"ok": True})
 
         @web.post("/api/accounts/{account_id}/memory/clear")
         async def clear_memory(account_id: str, request: Request) -> JSONResponse:

@@ -31,10 +31,17 @@ def _boolean(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be true or false")
 
 
-def _integer(name: str, default: int, minimum: int | None = None) -> int:
+def _integer(
+    name: str,
+    default: int,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
     value = int(os.getenv(name, str(default)))
     if minimum is not None and value < minimum:
         raise ValueError(f"{name} must be at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
     return value
 
 
@@ -193,7 +200,9 @@ def load_settings() -> Settings:
         dashboard_username=os.getenv("DASHBOARD_USERNAME", "admin").strip() or "admin",
         dashboard_password=dashboard_password,
         dashboard_port=_integer("PORT", 8000, 1),
-        max_accounts=_integer("MAX_ACCOUNTS", 10, 1),
+        # Railway may lower this per environment, while the console itself
+        # remains capped at the requested 20 managed accounts.
+        max_accounts=_integer("MAX_ACCOUNTS", 20, 1, 20),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         legacy_gender=gender,
         legacy_stage=stage,

@@ -6,6 +6,7 @@ import logging
 import sqlite3
 import time
 import uuid
+from collections import defaultdict
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -67,6 +68,9 @@ class AccountManager:
         self._managed_ids: frozenset[int] = frozenset()
         self._lock = asyncio.Lock()
         self._create_lock = asyncio.Lock()
+        self._account_operation_locks: dict[str, asyncio.Lock] = defaultdict(
+            asyncio.Lock
+        )
         self._cleanup_task: asyncio.Task[None] | None = None
         self._supervisor_task: asyncio.Task[None] | None = None
         self._retry_attempts: dict[str, int] = {}
@@ -224,18 +228,21 @@ class AccountManager:
             self.worker_tasks[account_id] = asyncio.create_task(worker.run())
 
     async def stop_account(self, account_id: str) -> None:
-        async with self._lock:
-            worker = self.workers.get(account_id)
-            task = self.worker_tasks.get(account_id)
-            if worker is not None:
-                await worker.close()
-            if task is not None and not task.done():
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-            self.workers.pop(account_id, None)
-            self.worker_tasks.pop(account_id, None)
-            if worker is not None or not (await self._require_account(account_id)).enabled:
-                self.start_errors.pop(account_id, None)
+        async with self._account_operation_locks[account_id]:
+            async with self._lock:
+                worker = self.workers.get(account_id)
+                task = self.worker_tasks.get(account_id)
+                if worker is not None:
+                    await worker.close()
+                if task is not None and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                self.workers.pop(account_id, None)
+                self.worker_tasks.pop(account_id, None)
+                if worker is not None or not (
+                    await self._require_account(account_id)
+                ).enabled:
+                    self.start_errors.pop(account_id, None)
 
     async def restart_account(self, account_id: str) -> dict[str, object]:
         account = await self._require_account(account_id)
@@ -685,16 +692,17 @@ class AccountManager:
             )
             if name in payload
         ]
-        try:
-            saved = await self.store.update_account(
-                updated,
-                expected_revision=current.revision,
-                changed_fields=changed_fields,
-            )
-        except RuntimeError as exc:
-            raise AccountConflictError(str(exc)) from exc
-        except sqlite3.IntegrityError as exc:
-            raise AccountConflictError("這個 Telegram 帳號已經存在") from exc
+        async with self._account_operation_locks[account_id]:
+            try:
+                saved = await self.store.update_account(
+                    updated,
+                    expected_revision=current.revision,
+                    changed_fields=changed_fields,
+                )
+            except RuntimeError as exc:
+                raise AccountConflictError(str(exc)) from exc
+            except sqlite3.IntegrityError as exc:
+                raise AccountConflictError("這個 Telegram 帳號已經存在") from exc
         await self._refresh_managed_ids()
         await self.stop_account(account_id)
         if saved.enabled:
@@ -712,14 +720,15 @@ class AccountManager:
         current = await self._require_account(account_id)
         if revision != current.revision:
             raise AccountConflictError("設定已被其他操作更新，請重新整理")
-        try:
-            saved = await self.store.update_account(
-                current.with_updates(enabled=enabled),
-                expected_revision=current.revision,
-                changed_fields=["enabled"],
-            )
-        except RuntimeError as exc:
-            raise AccountConflictError(str(exc)) from exc
+        async with self._account_operation_locks[account_id]:
+            try:
+                saved = await self.store.update_account(
+                    current.with_updates(enabled=enabled),
+                    expected_revision=current.revision,
+                    changed_fields=["enabled"],
+                )
+            except RuntimeError as exc:
+                raise AccountConflictError(str(exc)) from exc
         if enabled:
             self._retry_attempts.pop(saved.id, None)
             self._next_retry_at.pop(saved.id, None)
@@ -747,14 +756,18 @@ class AccountManager:
         if worker is not None and worker.joined_groups:
             joined = frozenset(int(group["id"]) for group in worker.joined_groups)
             cleaned_ids = frozenset(item for item in cleaned_ids if item in joined)
-        try:
-            saved = await self.store.update_account(
-                current.with_updates(all_groups=all_groups, group_ids=cleaned_ids),
-                expected_revision=current.revision,
-                changed_fields=["all_groups", "group_ids"],
-            )
-        except RuntimeError as exc:
-            raise AccountConflictError(str(exc)) from exc
+        async with self._account_operation_locks[account_id]:
+            try:
+                saved = await self.store.update_account(
+                    current.with_updates(
+                        all_groups=all_groups,
+                        group_ids=cleaned_ids,
+                    ),
+                    expected_revision=current.revision,
+                    changed_fields=["all_groups", "group_ids"],
+                )
+            except RuntimeError as exc:
+                raise AccountConflictError(str(exc)) from exc
         await self.stop_account(account_id)
         if saved.enabled:
             await self.start_account(account_id)
@@ -794,6 +807,33 @@ class AccountManager:
             return {"ok": False, "error": self._safe_error(exc)}
         finally:
             await client.close()
+
+    async def manual_send_text(
+        self,
+        account_id: str,
+        group_id: int,
+        text: str,
+    ) -> dict[str, object]:
+        async with self._account_operation_locks[account_id]:
+            account = await self._require_account(account_id)
+            worker = self.workers.get(account.id)
+            if (
+                not account.enabled
+                or worker is None
+                or worker.state != "online"
+                or not worker.client.is_connected()
+            ):
+                raise AccountConflictError("Telegram account is not connected")
+            if worker.account.revision != account.revision:
+                raise AccountConflictError(
+                    "Account settings are restarting; please try again"
+                )
+            try:
+                return await worker.manual_send_text(group_id, text)
+            except RuntimeError as exc:
+                if str(exc) == "Telegram account is not connected":
+                    raise AccountConflictError(str(exc)) from exc
+                raise
 
     async def clear_memory(self, account_id: str) -> int:
         await self._require_account(account_id)
@@ -929,26 +969,33 @@ class AccountManager:
         telegram_name: str,
     ) -> None:
         for _ in range(2):
-            current = await self._require_account(account_id)
-            if current.telegram_user_id > 0:
-                if current.telegram_user_id != telegram_user_id:
-                    raise AccountConflictError(
-                        "Telegram Session 與已儲存的帳號身分不一致"
+            async with self._account_operation_locks[account_id]:
+                current = await self._require_account(account_id)
+                if current.telegram_user_id > 0:
+                    if current.telegram_user_id != telegram_user_id:
+                        raise AccountConflictError(
+                            "Telegram Session 與已儲存的帳號身分不一致"
+                        )
+                    return
+                try:
+                    saved = await self.store.update_account(
+                        current.with_updates(
+                            telegram_user_id=telegram_user_id,
+                            telegram_name=telegram_name,
+                        ),
+                        expected_revision=current.revision,
+                        changed_fields=["telegram_identity"],
                     )
-                return
-            try:
-                await self.store.update_account(
-                    current.with_updates(
-                        telegram_user_id=telegram_user_id,
-                        telegram_name=telegram_name,
-                    ),
-                    expected_revision=current.revision,
-                    changed_fields=["telegram_identity"],
-                )
-                await self._refresh_managed_ids()
-                return
-            except RuntimeError:
-                continue
+                    worker = self.workers.get(account_id)
+                    if (
+                        worker is not None
+                        and worker.account.revision == current.revision
+                    ):
+                        worker.account = saved
+                    await self._refresh_managed_ids()
+                    return
+                except RuntimeError:
+                    continue
         raise AccountConflictError("帳號身分更新衝突，請重新啟動帳號")
 
     @staticmethod
