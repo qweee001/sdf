@@ -889,19 +889,26 @@ function updateAddLoginMode() {
 
 async function cancelTelegramAuth() {
   const authId = telegramAuthId;
-  telegramAuthId = "";
-  telegramAuthState = "idle";
-  $("addCode").value = "";
-  $("addTwoFactorPassword").value = "";
   if (authId) {
     try {
       await api("/api/telegram-auth/cancel", {
         method: "POST",
         body: JSON.stringify({auth_id: authId}),
       });
-    } catch (_) {}
+    } catch (error) {
+      if (error.status !== 410) {
+        setNotice("addNotice", "暫時無法取消登入流程，請稍後再試。", "error");
+        return false;
+      }
+    }
   }
+  telegramAuthId = "";
+  telegramAuthState = "idle";
+  $("addPhone").value = "";
+  $("addCode").value = "";
+  $("addTwoFactorPassword").value = "";
   updateAddLoginMode();
+  return true;
 }
 
 function resetAddForm() {
@@ -935,18 +942,20 @@ $("showAddButton").addEventListener("click", () => {
 });
 
 $("cancelAddButton").addEventListener("click", async () => {
-  await cancelTelegramAuth();
+  if (!(await cancelTelegramAuth())) return;
   $("addPanel").classList.add("hidden");
   setNotice("addNotice", "");
 });
 
 $("addLoginMode").addEventListener("change", async () => {
-  await cancelTelegramAuth();
+  if (!(await cancelTelegramAuth())) {
+    $("addLoginMode").value = "phone";
+  }
   updateAddLoginMode();
 });
 
 $("restartPhoneLoginButton").addEventListener("click", async () => {
-  await cancelTelegramAuth();
+  if (!(await cancelTelegramAuth())) return;
   setNotice(
     "addNotice",
     "登入流程已取消；Telegram 可能要求等待 60 秒後才能重新傳送驗證碼。",

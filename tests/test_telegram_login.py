@@ -13,8 +13,10 @@ from telethon.errors import (
 
 from app.crypto import SecretBox
 from app.telegram_login import (
+    TelegramLoginConflict,
     TelegramLoginExpired,
     TelegramLoginService,
+    TelegramLoginUnavailable,
 )
 
 
@@ -213,6 +215,120 @@ class TelegramLoginTests(unittest.TestCase):
                     "12345",
                 )
             self.assertFalse(second.is_connected())
+            await service.close()
+
+        asyncio.run(scenario())
+
+    def test_expired_flow_is_pruned_without_another_login(self) -> None:
+        async def scenario() -> None:
+            now = [1000.0]
+            client = FakeTelegramClient()
+            service, _ = self.make_service(client, now)
+            started = await service.start("owner", "+886945678901")
+            now[0] += 601
+
+            self.assertEqual(await service.prune_expired(), 1)
+            self.assertNotIn(started["auth_id"], service.pending)
+            self.assertFalse(client.is_connected())
+            self.assertEqual(service.last_start, {})
+            self.assertEqual(service.last_phone_start, {})
+            await service.close()
+
+        asyncio.run(scenario())
+
+    def test_claimed_session_cannot_be_cancelled_mid_create(self) -> None:
+        async def scenario() -> None:
+            client = FakeTelegramClient()
+            service, _ = self.make_service(client)
+            started = await service.start("owner", "+886956789012")
+            await service.submit_code("owner", started["auth_id"], "12345")
+            await service.claim_authorized("owner", started["auth_id"])
+
+            with self.assertRaises(TelegramLoginConflict):
+                await service.cancel("owner", started["auth_id"])
+            self.assertEqual(await service.cancel_owner("owner"), 0)
+            self.assertIn(started["auth_id"], service.pending)
+
+            await service.release_claim("owner", started["auth_id"])
+            await service.cancel("owner", started["auth_id"])
+            self.assertNotIn(started["auth_id"], service.pending)
+            await service.close()
+
+        asyncio.run(scenario())
+
+    def test_expiry_is_rechecked_after_waiting_for_flow_lock(self) -> None:
+        async def scenario() -> None:
+            now = [1000.0]
+            client = FakeTelegramClient()
+            service, _ = self.make_service(client, now)
+            started = await service.start("owner", "+886967890123")
+            pending = service.pending[str(started["auth_id"])]
+            await pending.lock.acquire()
+            submit = asyncio.create_task(
+                service.submit_code("owner", started["auth_id"], "12345")
+            )
+            await asyncio.sleep(0)
+            now[0] += 601
+            pending.lock.release()
+
+            with self.assertRaises(TelegramLoginExpired):
+                await submit
+            self.assertFalse(client.is_connected())
+            await service.close()
+
+        asyncio.run(scenario())
+
+    def test_cancel_during_send_code_does_not_leave_orphaned_flow(self) -> None:
+        async def scenario() -> None:
+            entered = asyncio.Event()
+            release = asyncio.Event()
+
+            class SlowClient(FakeTelegramClient):
+                async def send_code_request(self, phone: str) -> object:
+                    self.sent_phone = phone
+                    entered.set()
+                    await release.wait()
+                    return SimpleNamespace(phone_code_hash="temporary-hash")
+
+            client = SlowClient()
+            service, _ = self.make_service(client)
+            starting = asyncio.create_task(
+                service.start("owner", "+886978901234")
+            )
+            await entered.wait()
+            await service.cancel_owner("owner")
+            release.set()
+
+            with self.assertRaises(TelegramLoginExpired):
+                await starting
+            self.assertEqual(service.pending, {})
+            self.assertFalse(client.is_connected())
+            await service.close()
+
+        asyncio.run(scenario())
+
+    def test_authorization_finish_error_is_redacted_and_flow_is_closed(self) -> None:
+        async def scenario() -> None:
+            class BrokenClient(FakeTelegramClient):
+                async def get_me(self) -> object:
+                    raise RuntimeError(
+                        "secret-session +886900000000 server-only-phone-code-hash"
+                    )
+
+            client = BrokenClient()
+            service, _ = self.make_service(client)
+            started = await service.start("owner", "+886989012345")
+            with self.assertRaises(TelegramLoginUnavailable) as caught:
+                await service.submit_code(
+                    "owner",
+                    started["auth_id"],
+                    "12345",
+                )
+            rendered = str(caught.exception)
+            self.assertNotIn("+886989012345", rendered)
+            self.assertNotIn("server-only-phone-code-hash", rendered)
+            self.assertNotIn(started["auth_id"], service.pending)
+            self.assertFalse(client.is_connected())
             await service.close()
 
         asyncio.run(scenario())

@@ -838,17 +838,27 @@ class AccountManager:
             raise ValueError("主動發言最大間隔不可小於最小間隔")
 
     async def _cleanup_loop(self) -> None:
+        next_memory_cleanup = time.monotonic()
         while True:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(30)
             try:
-                removed = await self.store.purge_expired()
-                if removed:
-                    LOGGER.info("Removed %s expired memory rows", removed)
+                expired_logins = await self.telegram_login.prune_expired()
+                if expired_logins:
+                    LOGGER.info(
+                        "Removed %s expired Telegram login flows",
+                        expired_logins,
+                    )
+                now = time.monotonic()
+                if now >= next_memory_cleanup:
+                    removed = await self.store.purge_expired()
+                    if removed:
+                        LOGGER.info("Removed %s expired memory rows", removed)
+                    next_memory_cleanup = now + 3600
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 LOGGER.error(
-                    "Memory cleanup failed and will be retried: %s",
+                    "Background cleanup failed and will be retried: %s",
                     self._safe_error(exc),
                 )
 
