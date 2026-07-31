@@ -120,6 +120,56 @@ class PromptPolicyTests(unittest.TestCase):
                 )
                 self.assertIn("一般群組成員", prompt)
 
+    def test_generation_history_excludes_old_assistant_but_keeps_users(self) -> None:
+        account = self.account(
+            style="自然聊天",
+            task_name="一般聊天",
+            task_info="聊日常生活",
+            blocked_terms=(),
+            blocked_topics=(),
+        )
+        messages = [
+            MemoryMessage(
+                account_id="alpha",
+                group_id=-1001,
+                sender_id=100,
+                sender_name="這個帳號",
+                role="assistant",
+                content="【舊回覆甲】您好，我是群組客服，可以協助您辦理加入。",
+                created_at=1,
+            ),
+            MemoryMessage(
+                account_id="alpha",
+                group_id=-1001,
+                sender_id=22,
+                sender_name="群友",
+                role="user",
+                content="今天下班後有人想去吃火鍋嗎？",
+                created_at=2,
+            ),
+            MemoryMessage(
+                account_id="alpha",
+                group_id=-1001,
+                sender_id=100,
+                sender_name="這個帳號",
+                role="assistant",
+                content="【舊回覆乙】請提供資料，我會替您聯絡管理員。",
+                created_at=3,
+            ),
+        ]
+
+        rendered = transcript(account, messages)
+        response = response_prompt(account, messages)
+        proactive = proactive_prompt(account, messages)
+
+        for prompt in (rendered, response, proactive):
+            with self.subTest(prompt=prompt[:20]):
+                self.assertNotIn("【舊回覆甲】", prompt)
+                self.assertNotIn("【舊回覆乙】", prompt)
+                self.assertNotIn('"role":"assistant"', prompt)
+                self.assertIn("今天下班後有人想去吃火鍋嗎？", prompt)
+                self.assertIn('"role":"user"', prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

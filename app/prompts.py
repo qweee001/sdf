@@ -117,7 +117,9 @@ def transcript(
     guard = ContentGuard(account.blocked_terms, account.blocked_topics)
     entries: list[dict[str, str]] = []
     for item in messages:
-        speaker = "這個帳號" if item.role == "assistant" else item.sender_name
+        if item.role == "assistant":
+            continue
+        speaker = item.sender_name
         safe_speaker = guard.safe_context(speaker)
         safe_content = guard.safe_context(item.content)
         entries.append(
