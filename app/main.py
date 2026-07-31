@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import sys
 
 from .config import load_settings
 from .crypto import SecretBox
@@ -14,11 +15,35 @@ from .memory import MemoryStore
 LOGGER = logging.getLogger("telegram-ai-userbot")
 
 
+class _BelowWarningFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < logging.WARNING
+
+
+def configure_logging(level: int) -> None:
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    standard_output = logging.StreamHandler(sys.stdout)
+    standard_output.setLevel(level)
+    standard_output.addFilter(_BelowWarningFilter())
+    standard_output.setFormatter(formatter)
+
+    error_output = logging.StreamHandler(sys.stderr)
+    error_output.setLevel(max(level, logging.WARNING))
+    error_output.setFormatter(formatter)
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level)
+    root.addHandler(standard_output)
+    root.addHandler(error_output)
+
+
 async def async_main() -> None:
     settings = load_settings()
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level, logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    configure_logging(
+        getattr(logging, settings.log_level, logging.INFO)
     )
 
     secrets = SecretBox(settings.account_encryption_key)
@@ -66,7 +91,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     except Exception:
-        logging.basicConfig(level=logging.INFO)
+        configure_logging(logging.INFO)
         LOGGER.exception("Fatal startup error")
         raise
 
