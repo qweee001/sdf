@@ -1,6 +1,7 @@
 aiosqlite==0.21.0
 cryptography>=44.0.0,<47
 fastapi>=0.128.0,<1
+httpx>=0.28.0,<1
 openai>=1.68.0,<3
 python-dotenv>=1.0.1,<2
 telethon==1.44.0

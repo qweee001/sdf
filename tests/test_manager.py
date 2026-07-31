@@ -224,7 +224,7 @@ class ManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
-    def test_create_and_update_account_keeps_credentials_secret(self) -> None:
+    def test_create_and_update_rejects_dashboard_api_keys(self) -> None:
         async def scenario(path: str) -> None:
             key = Fernet.generate_key().decode()
             config = settings(path, key)
@@ -268,12 +268,24 @@ class ManagerTests(unittest.TestCase):
                     "task_info": "更新後任務",
                     "ai_base_url": "https://api.example.com/v2",
                     "ai_model": "model-b",
-                    "ai_api_key": "custom-secret",
                 },
             )
             self.assertEqual(updated["ai_model"], "model-b")
-            self.assertTrue(updated["has_custom_api_key"])
+            self.assertFalse(updated["has_custom_api_key"])
             self.assertNotIn("ai_api_key", updated)
+            with self.assertRaisesRegex(
+                ValueError,
+                "Railway Variables",
+            ):
+                await manager.update_account(
+                    account_id,
+                    {
+                        "revision": updated["revision"],
+                        "ai_api_key": "custom-secret",
+                    },
+                )
+            reloaded = await store.get_account(account_id)
+            self.assertEqual(reloaded.ai_api_key_ciphertext, "")
             await manager.close()
 
         with tempfile.TemporaryDirectory() as directory:
@@ -536,6 +548,80 @@ class ManagerTests(unittest.TestCase):
             validate_provider_url("https://api.example.com/v1/"),
             "https://api.example.com/v1",
         )
+
+    def test_media_settings_require_railway_providers_and_jobs_are_redacted(
+        self,
+    ) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = replace(
+                settings(path, key),
+                openai_media_api_key="railway-openai-media-key",
+                azure_speech_key="railway-azure-key",
+                azure_speech_region="eastasia",
+            )
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+            try:
+                async def fake_verify(session: str) -> tuple[int, str]:
+                    return 778811, "媒體測試帳號"
+
+                manager.verify_session = fake_verify  # type: ignore[method-assign]
+                created = await manager.create_account(
+                    {
+                        "session_string": "media-session",
+                        "enabled": False,
+                        "gender": "female",
+                        "stage": "observer",
+                        "task_name": "媒體測試",
+                        "media": {
+                            "image": {
+                                "enabled": True,
+                                "model": "gpt-image-1.5",
+                                "voice": "",
+                                "daily_limit": 5,
+                                "cooldown_seconds": 60,
+                                "allowed_group_ids": [-100123],
+                            },
+                            "voice": {
+                                "enabled": True,
+                                "model": "azure-speech",
+                                "voice": "zh-TW-HsiaoChenNeural",
+                                "daily_limit": 10,
+                                "cooldown_seconds": 30,
+                                "allowed_group_ids": [-100123],
+                            },
+                        },
+                    }
+                )
+                self.assertTrue(created["media"]["image"]["enabled"])
+                self.assertEqual(
+                    created["media_providers"],
+                    {"openai_media": True, "azure_speech": True},
+                )
+                reservation = await store.enqueue_media_job(
+                    str(created["id"]),
+                    -100123,
+                    "image",
+                    {
+                        "text": "",
+                        "prompt": "安全的自然風景",
+                        "source_message_id": 42,
+                        "voice": "",
+                    },
+                    daily_limit=5,
+                    cooldown_seconds=60,
+                )
+                self.assertIsNotNone(reservation.job)
+                public_jobs = await manager.media_jobs(str(created["id"]), 20)
+                self.assertEqual(public_jobs["jobs"][0]["kind"], "image")
+                self.assertNotIn("payload", public_jobs["jobs"][0])
+            finally:
+                await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
     def test_provider_errors_are_redacted(self) -> None:
         message = safe_error(

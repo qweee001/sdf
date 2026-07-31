@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from app.dashboard import DASHBOARD_JS, DashboardServer
+from app.dashboard import DASHBOARD_HTML, DASHBOARD_JS, DashboardServer
 
 
 class FakeAccountManager:
@@ -26,6 +26,37 @@ class FakeAccountManager:
             "ai_base_url": "https://api.openai.com/v1",
             "ai_model": "gpt-5-mini",
             "has_custom_api_key": True,
+            "image_api_key": "must-never-leave-the-server",
+            "media_providers": {
+                "openai_media": True,
+                "azure_speech": True,
+            },
+            "media": {
+                "image": {
+                    "enabled": True,
+                    "model": "image-model-v1",
+                    "voice": "",
+                    "daily_limit": 12,
+                    "cooldown_seconds": 90,
+                    "allowed_group_ids": [-1001],
+                },
+                "voice": {
+                    "enabled": True,
+                    "model": "speech-model-v1",
+                    "voice": "zh-TW-HsiaoChenNeural",
+                    "daily_limit": 20,
+                    "cooldown_seconds": 30,
+                    "allowed_group_ids": [-1001],
+                },
+                "video": {
+                    "enabled": False,
+                    "model": "video-model-v1",
+                    "voice": "",
+                    "daily_limit": 3,
+                    "cooldown_seconds": 600,
+                    "allowed_group_ids": [],
+                },
+            },
             "session_configured": True,
             "all_groups": True,
             "group_ids": [],
@@ -130,6 +161,8 @@ class FakeAccountManager:
                 "revision": int(payload["revision"]) + 1,
             }
         )
+        if "media" in payload:
+            self.account["media"] = payload["media"]
         return dict(self.account)
 
     async def set_enabled(
@@ -196,6 +229,36 @@ class FakeAccountManager:
             ][-limit:]
         }
 
+    async def media_jobs(
+        self,
+        account_id: str,
+        limit: int,
+    ) -> dict[str, object]:
+        self.calls.append(("media_jobs", (account_id, limit)))
+        return {
+            "jobs": [
+                {
+                    "job_id": "job-001",
+                    "media_type": "image",
+                    "status": "completed",
+                    "group_id": -1001,
+                    "created_at": 1_700_000_000,
+                    "updated_at": 1_700_000_010,
+                    "prompt": "<script>alert('job')</script>",
+                    "image_api_key": "job-provider-secret",
+                    "result_url": "https://private.example/result.png",
+                },
+                {
+                    "id": "job-002",
+                    "media_type": "voice",
+                    "status": "queued",
+                    "group_id": -1001,
+                    "created_at": 1_700_000_020,
+                    "updated_at": 0,
+                },
+            ][-limit:]
+        }
+
 
 class DashboardTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -230,6 +293,11 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(status.status_code, 200)
             self.assertEqual(status.headers["x-csrf-token"], csrf)
             self.assertEqual(status.json()["memory_ttl_hours"], 24)
+            self.assertNotIn("has_custom_api_key", status.text)
+            self.assertNotIn("image_api_key", status.text)
+            self.assertTrue(
+                status.json()["accounts"][0]["media_providers"]["openai_media"]
+            )
 
             self.assertEqual(
                 client.post(
@@ -295,7 +363,6 @@ class DashboardTests(unittest.TestCase):
                     "task_name": "帶動自然話題",
                     "task_info": "關心群友近況",
                     "ai_base_url": "https://api.openai.com/v1",
-                    "ai_api_key": api_key,
                     "ai_model": "gpt-5-mini",
                     "blocked_terms": ["測試屏蔽詞"],
                     "blocked_topics": ["測試屏蔽主題"],
@@ -304,8 +371,18 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(created.status_code, 201)
             self.assertNotIn(session_secret, created.text)
             self.assertNotIn(api_key, created.text)
+            self.assertNotIn("has_custom_api_key", created.text)
+            self.assertNotIn("image_api_key", created.text)
             self.assertEqual(created.json()["blocked_terms"], ["測試屏蔽詞"])
             self.assertEqual(created.json()["blocked_topics"], ["測試屏蔽主題"])
+
+            rejected_key = client.put(
+                "/api/accounts/acct_one",
+                headers=headers,
+                json={"revision": 1, "image_api_key": api_key},
+            )
+            self.assertEqual(rejected_key.status_code, 400)
+            self.assertNotIn(api_key, rejected_key.text)
 
             updated = client.put(
                 "/api/accounts/acct_one",
@@ -317,17 +394,50 @@ class DashboardTests(unittest.TestCase):
                     "task_info": "依照目前群聊內容自然接話",
                     "ai_base_url": "https://openrouter.ai/api/v1",
                     "ai_model": "openai/gpt-5-mini",
-                    "ai_api_key": "",
-                    "clear_ai_api_key": False,
                     "blocked_terms": ["更新後屏蔽詞"],
                     "blocked_topics": ["更新後屏蔽主題"],
+                    "media": {
+                        "image": {
+                            "enabled": True,
+                            "model": "image-v2",
+                            "voice": "",
+                            "daily_limit": 10,
+                            "cooldown_seconds": 120,
+                            "allowed_group_ids": [-1001, -1002],
+                        },
+                        "voice": {
+                            "enabled": True,
+                            "model": "speech-v2",
+                            "voice": "zh-TW-HsiaoChenNeural",
+                            "daily_limit": 25,
+                            "cooldown_seconds": 45,
+                            "allowed_group_ids": [-1001],
+                        },
+                        "video": {
+                            "enabled": False,
+                            "model": "video-v2",
+                            "voice": "",
+                            "daily_limit": 2,
+                            "cooldown_seconds": 900,
+                            "allowed_group_ids": [-1002],
+                        },
+                    },
                 },
             )
             self.assertEqual(updated.status_code, 200)
             self.assertNotIn("session_string", updated.text)
             self.assertNotIn("ai_api_key", updated.text)
+            self.assertNotIn("image_api_key", updated.text)
             self.assertEqual(updated.json()["blocked_terms"], ["更新後屏蔽詞"])
             self.assertEqual(updated.json()["blocked_topics"], ["更新後屏蔽主題"])
+            self.assertEqual(
+                updated.json()["media"]["image"]["allowed_group_ids"],
+                [-1001, -1002],
+            )
+            self.assertEqual(
+                updated.json()["media"]["voice"]["voice"],
+                "zh-TW-HsiaoChenNeural",
+            )
 
             controlled = client.post(
                 "/api/accounts/acct_one/control",
@@ -436,6 +546,97 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("innerHTML", DASHBOARD_JS)
         self.assertIn("body.textContent", DASHBOARD_JS)
         self.assertIn("sender.textContent", DASHBOARD_JS)
+
+    def test_media_jobs_auth_validation_and_public_shape(self) -> None:
+        path = "/api/accounts/acct_one/media-jobs?limit=20"
+        with TestClient(self.server.app, base_url="https://testserver") as client:
+            self.assertEqual(client.get(path).status_code, 401)
+            self.login(client)
+
+            invalid_paths = [
+                "/api/accounts/acct_one/media-jobs?limit=0",
+                "/api/accounts/acct_one/media-jobs?limit=101",
+                "/api/accounts/acct_one/media-jobs?limit=01",
+                "/api/accounts/acct_one/media-jobs?limit=20&limit=50",
+            ]
+            for invalid_path in invalid_paths:
+                with self.subTest(path=invalid_path):
+                    self.assertEqual(client.get(invalid_path).status_code, 400)
+
+            response = client.get(path)
+            self.assertEqual(response.status_code, 200)
+            result = response.json()
+            self.assertEqual(result["account_id"], "acct_one")
+            self.assertEqual(result["count"], 2)
+            self.assertEqual(result["jobs"][0]["job_id"], "job-001")
+            self.assertEqual(result["jobs"][0]["kind"], "image")
+            self.assertEqual(result["jobs"][1]["job_id"], "job-002")
+            self.assertNotIn("prompt", response.text)
+            self.assertNotIn("result_url", response.text)
+            self.assertNotIn("api_key", response.text)
+            self.assertNotIn("job-provider-secret", response.text)
+            self.assertIn(
+                ("media_jobs", ("acct_one", 20)),
+                self.manager.calls,
+            )
+
+    def test_media_ui_contract_uses_railway_keys_and_safe_dom(self) -> None:
+        for field_id in (
+            "editImageEnabled",
+            "editImageModel",
+            "editImageDailyLimit",
+            "editImageCooldown",
+            "editImageGroupIds",
+            "editImageKnownGroups",
+            "editVoiceEnabled",
+            "editVoiceModel",
+            "editVoiceName",
+            "editVoiceDailyLimit",
+            "editVoiceCooldown",
+            "editVoiceGroupIds",
+            "editVoiceKnownGroups",
+            "editVideoEnabled",
+            "editVideoModel",
+            "editVideoDailyLimit",
+            "editVideoCooldown",
+            "editVideoGroupIds",
+            "editVideoKnownGroups",
+            "imageProviderState",
+            "videoProviderState",
+            "azureProviderState",
+            "refreshMediaJobsButton",
+            "mediaJobList",
+        ):
+            with self.subTest(field_id=field_id):
+                self.assertIn(f'id="{field_id}"', DASHBOARD_HTML)
+
+        self.assertIn("Railway Variables", DASHBOARD_HTML)
+        self.assertNotIn('id="addApiKey"', DASHBOARD_HTML)
+        self.assertNotIn('id="editApiKey"', DASHBOARD_HTML)
+        self.assertNotIn('id="clearApiKey"', DASHBOARD_HTML)
+        self.assertNotIn("ai_api_key", DASHBOARD_JS)
+        self.assertNotIn("clear_ai_api_key", DASHBOARD_JS)
+        self.assertIn("media: {\n          image: {", DASHBOARD_JS)
+        self.assertIn(
+            'allowed_group_ids: mediaGroupIds("Image"',
+            DASHBOARD_JS,
+        )
+        self.assertIn(
+            'allowed_group_ids: mediaGroupIds("Voice"',
+            DASHBOARD_JS,
+        )
+        self.assertIn(
+            'allowed_group_ids: mediaGroupIds("Video"',
+            DASHBOARD_JS,
+        )
+        self.assertEqual(DASHBOARD_JS.count("providers.openai_media"), 2)
+        self.assertIn('providers.azure_speech', DASHBOARD_JS)
+        self.assertIn("/media-jobs?", DASHBOARD_JS)
+        self.assertIn("const requestSequence = ++mediaJobsRequestSequence;", DASHBOARD_JS)
+        self.assertIn("selectedAccountId !== accountId", DASHBOARD_JS)
+        self.assertIn("title.textContent", DASHBOARD_JS)
+        self.assertIn("meta.textContent", DASHBOARD_JS)
+        self.assertNotIn("innerHTML", DASHBOARD_JS)
 
     def test_conversation_log_discards_stale_responses(self) -> None:
         self.assertIn(

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
+from ipaddress import ip_address
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -52,6 +55,55 @@ def _id_set(name: str) -> frozenset[int]:
         raise ValueError(f"{name} must contain comma-separated numeric IDs") from exc
 
 
+def _media_base_url() -> str:
+    value = os.getenv(
+        "OPENAI_MEDIA_BASE_URL",
+        "https://api.openai.com/v1",
+    ).strip().rstrip("/")
+    parsed = urlparse(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "OPENAI_MEDIA_BASE_URL must be an HTTPS URL without credentials, "
+            "query, or fragment"
+        )
+    host = parsed.hostname.lower().rstrip(".")
+    if host == "localhost" or host.endswith(
+        (".local", ".localhost", ".internal", ".lan", ".home")
+    ):
+        raise ValueError("OPENAI_MEDIA_BASE_URL cannot target a local host")
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return value
+    if (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    ):
+        raise ValueError("OPENAI_MEDIA_BASE_URL cannot target a private address")
+    return value
+
+
+def _azure_speech_region() -> str:
+    value = os.getenv("AZURE_SPEECH_REGION", "").strip()
+    if value and re.fullmatch(r"[a-z0-9-]{2,40}", value) is None:
+        raise ValueError(
+            "AZURE_SPEECH_REGION must contain 2-40 lowercase letters, "
+            "numbers, or hyphens"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     tg_api_id: int
@@ -85,6 +137,19 @@ class Settings:
     legacy_proactive_min_interval_minutes: int
     legacy_proactive_max_interval_minutes: int
     legacy_max_proactive_per_day: int
+    openai_media_api_key: str = ""
+    openai_media_base_url: str = "https://api.openai.com/v1"
+    azure_speech_key: str = ""
+    azure_speech_region: str = ""
+
+    @property
+    def media_provider_readiness(self) -> dict[str, bool]:
+        return {
+            "openai_media": bool(self.openai_media_api_key),
+            "azure_speech": bool(
+                self.azure_speech_key and self.azure_speech_region
+            ),
+        }
 
 
 def load_settings() -> Settings:
@@ -105,7 +170,10 @@ def load_settings() -> Settings:
     if proactive_max < proactive_min:
         raise ValueError("PROACTIVE_MAX_INTERVAL_MINUTES cannot be lower than the minimum")
 
-    dashboard_enabled = _boolean("DASHBOARD_ENABLED", False)
+    # Railway's config-as-code healthcheck targets the dashboard's /health
+    # route, so the deployable default keeps the password-protected dashboard
+    # enabled. Operators can still opt out when not using railway.json.
+    dashboard_enabled = _boolean("DASHBOARD_ENABLED", True)
     dashboard_password = os.getenv("DASHBOARD_PASSWORD", "")
     if dashboard_enabled and len(dashboard_password) < 12:
         raise ValueError("DASHBOARD_PASSWORD must contain at least 12 characters")
@@ -142,4 +210,8 @@ def load_settings() -> Settings:
         legacy_proactive_min_interval_minutes=proactive_min,
         legacy_proactive_max_interval_minutes=proactive_max,
         legacy_max_proactive_per_day=_integer("MAX_PROACTIVE_PER_DAY", 24, 0),
+        openai_media_api_key=os.getenv("OPENAI_MEDIA_API_KEY", "").strip(),
+        openai_media_base_url=_media_base_url(),
+        azure_speech_key=os.getenv("AZURE_SPEECH_KEY", "").strip(),
+        azure_speech_region=_azure_speech_region(),
     )

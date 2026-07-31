@@ -331,6 +331,35 @@ DASHBOARD_HTML = """<!doctype html>
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
+    .provider-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 9px;
+    }
+    .provider-state {
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #151711;
+    }
+    .provider-state span { display: block; color: var(--muted); font-size: 12px; }
+    .provider-state strong { display: block; margin-top: 4px; }
+    .provider-state.ready strong { color: var(--accent); }
+    .media-job-list {
+      display: grid;
+      gap: 9px;
+      margin-top: 12px;
+    }
+    .media-job {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 7px 12px;
+      padding: 12px 13px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #151711;
+    }
+    .media-job small { color: var(--muted); overflow-wrap: anywhere; }
     .empty {
       padding: 30px 18px;
       color: var(--muted);
@@ -356,6 +385,7 @@ DASHBOARD_HTML = """<!doctype html>
       .field, .field.third, .field.quarter { grid-column: 1 / -1; }
       .group-list { grid-template-columns: 1fr; }
       .conversation-toolbar { grid-template-columns: 1fr; }
+      .provider-grid { grid-template-columns: 1fr; }
       .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .status-line { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
@@ -475,9 +505,7 @@ DASHBOARD_HTML = """<!doctype html>
             <label class="field">模型（可留白使用系統預設）
               <input id="addModel" maxlength="200" placeholder="模型名稱">
             </label>
-            <label class="field full">帳號專用 AI API Key（系統未設定共用 Key 時必填）
-              <input id="addApiKey" type="password" maxlength="12000" autocomplete="new-password">
-            </label>
+            <div class="hint field full">AI 與媒體 Provider API Key 僅由 Railway Variables 提供；控制台不接受、保存或顯示任何 Key。</div>
             <label class="check field full"><input id="addEnabled" type="checkbox" checked> 建立後立即啟用</label>
             <div class="actions field full">
               <button id="addSubmitButton" class="btn primary" type="submit">傳送 Telegram 驗證碼</button>
@@ -548,11 +576,69 @@ DASHBOARD_HTML = """<!doctype html>
               <label class="field">模型名稱
                 <input id="editModel" required maxlength="200">
               </label>
-              <label class="field full">新的帳號專用 AI API Key
-                <input id="editApiKey" type="password" maxlength="12000" autocomplete="new-password" placeholder="留白表示保留目前設定">
+              <div class="hint field full">AI 與媒體 Provider API Key 僅由 Railway Variables 提供；控制台不接受、保存或顯示任何 Key。</div>
+
+              <div class="field full"><div class="divider"></div><h3>媒體生成</h3></div>
+              <div class="provider-grid field full" aria-label="媒體 Provider 狀態">
+                <div id="imageProviderState" class="provider-state"><span>圖片 Provider</span><strong>未就緒</strong></div>
+                <div id="videoProviderState" class="provider-state"><span>影片 Provider</span><strong>未就緒</strong></div>
+                <div id="azureProviderState" class="provider-state"><span>Azure 語音</span><strong>未就緒</strong></div>
+              </div>
+
+              <label class="check field full"><input id="editImageEnabled" type="checkbox"> 啟用圖片生成</label>
+              <label class="field">圖片模型
+                <input id="editImageModel" maxlength="200" autocomplete="off">
               </label>
-              <label class="check field"><input id="clearApiKey" type="checkbox"> 清除帳號專用 API Key，改用 Railway 共用 Key</label>
-              <div id="apiKeyState" class="hint field">—</div>
+              <label class="field quarter">圖片每日上限
+                <input id="editImageDailyLimit" type="number" min="0" max="1000" step="1" required>
+              </label>
+              <label class="field quarter">圖片冷卻時間（秒）
+                <input id="editImageCooldown" type="number" min="0" max="604800" step="1" required>
+              </label>
+              <label class="field full">圖片允許群組 ID
+                <textarea id="editImageGroupIds" maxlength="12000" spellcheck="false" placeholder="-1001234567890, -1009876543210"></textarea>
+                <span class="hint">可用逗號、空白或換行輸入；也可在下方從此帳號已知群組複選。</span>
+              </label>
+              <label class="field full">從已知群組複用到圖片
+                <select id="editImageKnownGroups" multiple size="4"></select>
+              </label>
+
+              <label class="check field full"><input id="editVoiceEnabled" type="checkbox"> 啟用語音生成</label>
+              <label class="field">語音模型
+                <input id="editVoiceModel" maxlength="200" autocomplete="off">
+              </label>
+              <label class="field">語音聲線
+                <input id="editVoiceName" maxlength="120" autocomplete="off">
+              </label>
+              <label class="field quarter">語音每日上限
+                <input id="editVoiceDailyLimit" type="number" min="0" max="1000" step="1" required>
+              </label>
+              <label class="field quarter">語音冷卻時間（秒）
+                <input id="editVoiceCooldown" type="number" min="0" max="604800" step="1" required>
+              </label>
+              <label class="field full">語音允許群組 ID
+                <textarea id="editVoiceGroupIds" maxlength="12000" spellcheck="false" placeholder="-1001234567890"></textarea>
+              </label>
+              <label class="field full">從已知群組複用到語音
+                <select id="editVoiceKnownGroups" multiple size="4"></select>
+              </label>
+
+              <label class="check field full"><input id="editVideoEnabled" type="checkbox"> 啟用影片生成</label>
+              <label class="field">影片模型
+                <input id="editVideoModel" maxlength="200" autocomplete="off">
+              </label>
+              <label class="field quarter">影片每日上限
+                <input id="editVideoDailyLimit" type="number" min="0" max="1000" step="1" required>
+              </label>
+              <label class="field quarter">影片冷卻時間（秒）
+                <input id="editVideoCooldown" type="number" min="0" max="604800" step="1" required>
+              </label>
+              <label class="field full">影片允許群組 ID
+                <textarea id="editVideoGroupIds" maxlength="12000" spellcheck="false" placeholder="-1001234567890"></textarea>
+              </label>
+              <label class="field full">從已知群組複用到影片
+                <select id="editVideoKnownGroups" multiple size="4"></select>
+              </label>
 
               <div class="field full"><div class="divider"></div><h3>回覆與主動發言</h3></div>
               <label class="field third">一般訊息回覆機率（0–1）
@@ -584,6 +670,27 @@ DASHBOARD_HTML = """<!doctype html>
               </div>
             </form>
             <div id="settingsNotice" class="notice"></div>
+          </article>
+
+          <article class="panel">
+            <div class="row-between">
+              <div>
+                <h3>媒體任務狀態</h3>
+                <div class="hint">只顯示任務類型、狀態、群組與時間；不回傳 Prompt、結果內容或 Provider Key。</div>
+              </div>
+              <div class="actions">
+                <label class="field">顯示筆數
+                  <select id="mediaJobsLimit">
+                    <option value="20" selected>最近 20 筆</option>
+                    <option value="50">最近 50 筆</option>
+                    <option value="100">最近 100 筆</option>
+                  </select>
+                </label>
+                <button id="refreshMediaJobsButton" class="btn" type="button">重新整理任務</button>
+              </div>
+            </div>
+            <div id="mediaJobsNotice" class="notice"></div>
+            <div id="mediaJobList" class="media-job-list"></div>
           </article>
 
           <article class="panel">
@@ -655,6 +762,8 @@ let conversationSelectionKey = "";
 let conversationRequestSequence = 0;
 let conversationPendingKey = "";
 let conversationPendingSequence = 0;
+let mediaJobsRequestSequence = 0;
+let mediaJobsLoadedAccountId = "";
 
 function showLogin() {
   $("app").classList.add("hidden");
@@ -734,6 +843,35 @@ function numberValue(id) {
 
 function integerValue(id) {
   return Number.parseInt($(id).value, 10);
+}
+
+function parseGroupIdList(value, label) {
+  const tokens = String(value || "").trim().split(/[\s,，]+/u).filter(Boolean);
+  if (tokens.length > 500) throw new Error(`${label}最多 500 個群組 ID`);
+  const result = [];
+  const seen = new Set();
+  for (const token of tokens) {
+    if (!/^-[1-9][0-9]*$/u.test(token)) {
+      throw new Error(`${label}包含無效群組 ID：${token.slice(0, 30)}`);
+    }
+    const groupId = Number(token);
+    if (!Number.isSafeInteger(groupId)) {
+      throw new Error(`${label}包含超出安全範圍的群組 ID`);
+    }
+    if (!seen.has(groupId)) {
+      seen.add(groupId);
+      result.push(groupId);
+    }
+  }
+  return result;
+}
+
+function mediaGroupIds(prefix, label) {
+  const typed = parseGroupIdList($(`edit${prefix}GroupIds`).value, label);
+  const known = [...$(`edit${prefix}KnownGroups`).selectedOptions]
+    .map((option) => Number(option.value))
+    .filter((groupId) => Number.isSafeInteger(groupId));
+  return [...new Set([...typed, ...known])];
 }
 
 function normalizeBlockedItems(rawValue, options) {
@@ -825,6 +963,13 @@ function renderAccountList() {
 }
 
 function fillEditor(account) {
+  const media = account.media && typeof account.media === "object" ? account.media : {};
+  const image = media.image && typeof media.image === "object" ? media.image : {};
+  const voice = media.voice && typeof media.voice === "object" ? media.voice : {};
+  const video = media.video && typeof media.video === "object" ? media.video : {};
+  const providers = account.media_providers && typeof account.media_providers === "object"
+    ? account.media_providers
+    : {};
   $("editLabel").value = account.label || "";
   $("editGender").value = account.gender;
   $("editStage").value = account.stage;
@@ -839,8 +984,33 @@ function fillEditor(account) {
     : "";
   $("editBaseUrl").value = account.ai_base_url || "";
   $("editModel").value = account.ai_model || "";
-  $("editApiKey").value = "";
-  $("clearApiKey").checked = false;
+  $("editImageEnabled").checked = Boolean(image.enabled);
+  $("editImageModel").value = image.model || "gpt-image-1.5";
+  $("editImageDailyLimit").value = String(image.daily_limit || 5);
+  $("editImageCooldown").value = String(image.cooldown_seconds || 300);
+  $("editImageGroupIds").value = Array.isArray(image.allowed_group_ids)
+    ? image.allowed_group_ids.join("\n")
+    : "";
+  $("editVoiceEnabled").checked = Boolean(voice.enabled);
+  $("editVoiceModel").value = voice.model || "azure-speech";
+  $("editVoiceName").value = voice.voice || (
+    account.gender === "male"
+      ? "zh-TW-YunJheNeural"
+      : "zh-TW-HsiaoChenNeural"
+  );
+  $("editVoiceDailyLimit").value = String(voice.daily_limit || 10);
+  $("editVoiceCooldown").value = String(voice.cooldown_seconds || 120);
+  $("editVoiceGroupIds").value = Array.isArray(voice.allowed_group_ids)
+    ? voice.allowed_group_ids.join("\n")
+    : "";
+  $("editVideoEnabled").checked = Boolean(video.enabled);
+  $("editVideoModel").value = video.model || "sora-2";
+  $("editVideoDailyLimit").value = String(video.daily_limit || 1);
+  $("editVideoCooldown").value = String(video.cooldown_seconds || 1800);
+  $("editVideoGroupIds").value = Array.isArray(video.allowed_group_ids)
+    ? video.allowed_group_ids.join("\n")
+    : "";
+  fillMediaKnownGroups(account, media);
   $("editProbability").value = String(account.group_reply_probability);
   $("editDelayMin").value = String(account.typing_delay_min_seconds);
   $("editDelayMax").value = String(account.typing_delay_max_seconds);
@@ -851,9 +1021,37 @@ function fillEditor(account) {
   $("editIntervalMin").value = String(account.proactive_min_interval_minutes);
   $("editIntervalMax").value = String(account.proactive_max_interval_minutes);
   $("editProactiveMax").value = String(account.max_proactive_per_day);
-  $("apiKeyState").textContent = account.has_custom_api_key
-    ? "目前使用帳號專用 API Key（內容不會顯示）"
-    : "目前使用 Railway 共用 API Key";
+  setProviderState("imageProviderState", providers.openai_media);
+  setProviderState("videoProviderState", providers.openai_media);
+  setProviderState("azureProviderState", providers.azure_speech);
+}
+
+function fillMediaKnownGroups(account, media) {
+  const groups = Array.isArray(account.joined_groups) ? account.joined_groups : [];
+  const selectedByPrefix = {
+    Image: new Set((media.image?.allowed_group_ids || []).map(String)),
+    Voice: new Set((media.voice?.allowed_group_ids || []).map(String)),
+    Video: new Set((media.video?.allowed_group_ids || []).map(String)),
+  };
+  for (const prefix of ["Image", "Voice", "Video"]) {
+    const select = $(`edit${prefix}KnownGroups`);
+    select.replaceChildren();
+    for (const group of groups) {
+      const option = document.createElement("option");
+      option.value = String(group.id);
+      option.textContent = `${String(group.title || group.id)} · ${String(group.id)}`;
+      option.selected = selectedByPrefix[prefix].has(option.value);
+      select.appendChild(option);
+    }
+    select.disabled = !groups.length;
+  }
+}
+
+function setProviderState(id, readyValue) {
+  const node = $(id);
+  const ready = readyValue === true;
+  node.classList.toggle("ready", ready);
+  node.querySelector("strong").textContent = ready ? "已就緒" : "未就緒";
 }
 
 function renderGroups(account) {
@@ -992,6 +1190,47 @@ function renderConversationLog(data) {
   list.scrollTop = list.scrollHeight;
 }
 
+function clearMediaJobs(message = "") {
+  const list = $("mediaJobList");
+  list.replaceChildren();
+  if (message) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = message;
+    list.appendChild(empty);
+  }
+}
+
+function formatMediaJobTime(value) {
+  return formatConversationTime(value);
+}
+
+function renderMediaJobs(data) {
+  const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+  const list = $("mediaJobList");
+  list.replaceChildren();
+  if (!jobs.length) {
+    clearMediaJobs("這個帳號目前沒有媒體任務。");
+    return;
+  }
+  for (const job of jobs) {
+    const item = document.createElement("article");
+    item.className = "media-job";
+    const title = document.createElement("strong");
+    title.textContent = `${String(job.kind || "media")} · ${String(job.status || "unknown")}`;
+    const created = document.createElement("time");
+    created.textContent = formatMediaJobTime(job.updated_at || job.created_at);
+    const meta = document.createElement("small");
+    const groupId = Number(job.group_id);
+    const groupText = Number.isSafeInteger(groupId) && groupId < 0
+      ? `群組 ${String(groupId)}`
+      : "群組未知";
+    meta.textContent = `${groupText} · 任務 ${String(job.job_id || "—")}`;
+    item.append(title, created, meta);
+    list.appendChild(item);
+  }
+}
+
 function renderSelected(account) {
   $("emptyPanel").classList.add("hidden");
   $("accountPanels").classList.remove("hidden");
@@ -1010,6 +1249,12 @@ function renderSelected(account) {
   fillEditor(account);
   renderGroups(account);
   renderConversationGroups(account);
+  if (mediaJobsLoadedAccountId !== account.id) {
+    mediaJobsRequestSequence += 1;
+    mediaJobsLoadedAccountId = "";
+    setNotice("mediaJobsNotice", "");
+    clearMediaJobs("按「重新整理任務」讀取這個帳號的媒體任務。");
+  }
 }
 
 function renderDashboard() {
@@ -1089,7 +1334,6 @@ function collectNewAccountPayload() {
   };
   if ($("addBaseUrl").value.trim()) payload.ai_base_url = $("addBaseUrl").value;
   if ($("addModel").value.trim()) payload.ai_model = $("addModel").value;
-  if ($("addApiKey").value) payload.ai_api_key = $("addApiKey").value;
   return payload;
 }
 
@@ -1283,14 +1527,6 @@ $("settingsForm").addEventListener("input", () => {
   formDirty = true;
 });
 
-$("editApiKey").addEventListener("input", () => {
-  if ($("editApiKey").value) $("clearApiKey").checked = false;
-});
-
-$("clearApiKey").addEventListener("change", () => {
-  if ($("clearApiKey").checked) $("editApiKey").value = "";
-});
-
 $("settingsForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const account = selectedAccount();
@@ -1310,8 +1546,32 @@ $("settingsForm").addEventListener("submit", async (event) => {
         blocked_topics: parseBlockedTopics($("editBlockedTopics").value),
         ai_base_url: $("editBaseUrl").value,
         ai_model: $("editModel").value,
-        ai_api_key: $("editApiKey").value,
-        clear_ai_api_key: $("clearApiKey").checked,
+        media: {
+          image: {
+            enabled: $("editImageEnabled").checked,
+            model: $("editImageModel").value,
+            voice: "",
+            daily_limit: integerValue("editImageDailyLimit"),
+            cooldown_seconds: integerValue("editImageCooldown"),
+            allowed_group_ids: mediaGroupIds("Image", "圖片允許群組"),
+          },
+          voice: {
+            enabled: $("editVoiceEnabled").checked,
+            model: $("editVoiceModel").value,
+            voice: $("editVoiceName").value,
+            daily_limit: integerValue("editVoiceDailyLimit"),
+            cooldown_seconds: integerValue("editVoiceCooldown"),
+            allowed_group_ids: mediaGroupIds("Voice", "語音允許群組"),
+          },
+          video: {
+            enabled: $("editVideoEnabled").checked,
+            model: $("editVideoModel").value,
+            voice: "",
+            daily_limit: integerValue("editVideoDailyLimit"),
+            cooldown_seconds: integerValue("editVideoCooldown"),
+            allowed_group_ids: mediaGroupIds("Video", "影片允許群組"),
+          },
+        },
         group_reply_probability: numberValue("editProbability"),
         reply_on_mention: $("editReplyMention").checked,
         reply_on_reply: $("editReplyReply").checked,
@@ -1428,6 +1688,40 @@ $("saveGroupsButton").addEventListener("click", async () => {
       setNotice("groupsNotice", "群組範圍已儲存", "success");
     } catch (error) {
       setNotice("groupsNotice", error.message, "error");
+    }
+  });
+});
+
+$("refreshMediaJobsButton").addEventListener("click", async () => {
+  const account = selectedAccount();
+  if (!account) return;
+  const accountId = account.id;
+  const limit = Number.parseInt($("mediaJobsLimit").value, 10);
+  if (![20, 50, 100].includes(limit)) {
+    setNotice("mediaJobsNotice", "顯示筆數不正確", "error");
+    return;
+  }
+  const requestSequence = ++mediaJobsRequestSequence;
+  setNotice("mediaJobsNotice", "正在讀取媒體任務…", "warning");
+  await runButton($("refreshMediaJobsButton"), async () => {
+    try {
+      const query = new URLSearchParams({limit: String(limit)});
+      const result = await api(
+        `/api/accounts/${encodeURIComponent(accountId)}/media-jobs?${query.toString()}`
+      );
+      if (requestSequence !== mediaJobsRequestSequence ||
+          selectedAccountId !== accountId) return;
+      mediaJobsLoadedAccountId = accountId;
+      renderMediaJobs(result);
+      setNotice(
+        "mediaJobsNotice",
+        `已顯示 ${Array.isArray(result.jobs) ? result.jobs.length : 0} 筆任務`,
+        "success",
+      );
+    } catch (error) {
+      if (requestSequence !== mediaJobsRequestSequence ||
+          selectedAccountId !== accountId) return;
+      setNotice("mediaJobsNotice", error.message, "error");
     }
   });
 });
@@ -1681,6 +1975,93 @@ class DashboardServer:
             raise ValueError("limit must be between 1 and 100")
         return limit
 
+    @classmethod
+    def _reject_api_key_fields(cls, payload: dict[str, object]) -> None:
+        def contains_api_key(value: object) -> bool:
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    normalized = "".join(
+                        char for char in str(key).casefold() if char.isalnum()
+                    )
+                    if "apikey" in normalized or contains_api_key(nested):
+                        return True
+            elif isinstance(value, list):
+                return any(contains_api_key(item) for item in value)
+            return False
+
+        if contains_api_key(payload):
+            raise ValueError(
+                "API keys are configured only through Railway Variables"
+            )
+
+    @classmethod
+    def _without_api_key_fields(cls, value: object) -> object:
+        if isinstance(value, dict):
+            result: dict[str, object] = {}
+            for raw_key, nested in value.items():
+                key = str(raw_key)
+                normalized = "".join(
+                    char for char in key.casefold() if char.isalnum()
+                )
+                if "apikey" in normalized:
+                    continue
+                result[key] = cls._without_api_key_fields(nested)
+            return result
+        if isinstance(value, list):
+            return [cls._without_api_key_fields(item) for item in value]
+        if isinstance(value, tuple):
+            return [cls._without_api_key_fields(item) for item in value]
+        return value
+
+    @staticmethod
+    def _public_media_jobs(
+        result: object,
+        *,
+        account_id: str,
+        limit: int,
+    ) -> dict[str, object]:
+        if isinstance(result, dict):
+            raw_jobs = result.get("jobs", [])
+        elif isinstance(result, list):
+            raw_jobs = result
+        else:
+            raise RuntimeError("invalid media jobs response")
+        if not isinstance(raw_jobs, list):
+            raise RuntimeError("invalid media jobs list")
+
+        jobs: list[dict[str, object]] = []
+        for raw_job in raw_jobs[:limit]:
+            if not isinstance(raw_job, dict):
+                continue
+            group_id = raw_job.get("group_id", 0)
+            if isinstance(group_id, bool) or not isinstance(group_id, int):
+                group_id = 0
+            created_at = raw_job.get("created_at", 0)
+            if isinstance(created_at, bool) or not isinstance(created_at, int):
+                created_at = 0
+            updated_at = raw_job.get("updated_at", 0)
+            if isinstance(updated_at, bool) or not isinstance(updated_at, int):
+                updated_at = 0
+            jobs.append(
+                {
+                    "job_id": str(
+                        raw_job.get("job_id", raw_job.get("id", ""))
+                    )[:160],
+                    "kind": str(
+                        raw_job.get("kind", raw_job.get("media_type", "media"))
+                    )[:40],
+                    "status": str(raw_job.get("status", "unknown"))[:80],
+                    "group_id": group_id,
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                }
+            )
+        return {
+            "account_id": account_id,
+            "count": len(jobs),
+            "jobs": jobs,
+        }
+
     @staticmethod
     def _public_conversation_log(
         result: object,
@@ -1867,8 +2248,28 @@ class DashboardServer:
             if blocked is not None or session is None:
                 return blocked  # type: ignore[return-value]
             return JSONResponse(
-                await self.manager.status(),
+                self._without_api_key_fields(await self.manager.status()),
                 headers={"X-CSRF-Token": session.csrf_token},
+            )
+
+        @web.get("/api/accounts/{account_id}/media-jobs")
+        async def media_jobs(account_id: str, request: Request) -> JSONResponse:
+            session, blocked = self._require_auth(request)
+            if blocked is not None or session is None:
+                return blocked  # type: ignore[return-value]
+            limit_values = request.query_params.getlist("limit")
+            if len(limit_values) > 1:
+                raise ValueError("limit must not be repeated")
+            limit = self._conversation_limit(
+                limit_values[0] if limit_values else "20"
+            )
+            result = await self.manager.media_jobs(account_id, limit)  # type: ignore[attr-defined]
+            return JSONResponse(
+                self._public_media_jobs(
+                    result,
+                    account_id=account_id,
+                    limit=limit,
+                )
             )
 
         @web.get("/api/accounts/{account_id}/conversation-log")
@@ -1904,8 +2305,11 @@ class DashboardServer:
             if blocked is not None or session is None:
                 return blocked
             payload = await self._read_payload(request)
+            self._reject_api_key_fields(payload)
             return JSONResponse(
-                await self.manager.create_account(payload, session.session_id),
+                self._without_api_key_fields(
+                    await self.manager.create_account(payload, session.session_id)
+                ),
                 status_code=201,
             )
 
@@ -1969,7 +2373,12 @@ class DashboardServer:
             if blocked is not None:
                 return blocked
             payload = await self._read_payload(request)
-            return JSONResponse(await self.manager.update_account(account_id, payload))
+            self._reject_api_key_fields(payload)
+            return JSONResponse(
+                self._without_api_key_fields(
+                    await self.manager.update_account(account_id, payload)
+                )
+            )
 
         @web.post("/api/accounts/{account_id}/control")
         async def control(account_id: str, request: Request) -> JSONResponse:
@@ -1982,7 +2391,9 @@ class DashboardServer:
                 raise ValueError("enabled must be boolean")
             revision = self._revision(payload)
             return JSONResponse(
-                await self.manager.set_enabled(account_id, enabled, revision)
+                self._without_api_key_fields(
+                    await self.manager.set_enabled(account_id, enabled, revision)
+                )
             )
 
         @web.post("/api/accounts/{account_id}/groups")
@@ -1997,11 +2408,13 @@ class DashboardServer:
                 raise ValueError("invalid group selection")
             revision = self._revision(payload)
             return JSONResponse(
-                await self.manager.set_groups(
-                    account_id,
-                    all_groups,
-                    group_ids,
-                    revision,
+                self._without_api_key_fields(
+                    await self.manager.set_groups(
+                        account_id,
+                        all_groups,
+                        group_ids,
+                        revision,
+                    )
                 )
             )
 
@@ -2010,14 +2423,22 @@ class DashboardServer:
             _, blocked = self._require_action(request)
             if blocked is not None:
                 return blocked
-            return JSONResponse(await self.manager.restart_account(account_id))
+            return JSONResponse(
+                self._without_api_key_fields(
+                    await self.manager.restart_account(account_id)
+                )
+            )
 
         @web.post("/api/accounts/{account_id}/model/test")
         async def model_test(account_id: str, request: Request) -> JSONResponse:
             _, blocked = self._require_action(request)
             if blocked is not None:
                 return blocked
-            return JSONResponse(await self.manager.test_model(account_id))
+            return JSONResponse(
+                self._without_api_key_fields(
+                    await self.manager.test_model(account_id)
+                )
+            )
 
         @web.post("/api/accounts/{account_id}/memory/clear")
         async def clear_memory(account_id: str, request: Request) -> JSONResponse:

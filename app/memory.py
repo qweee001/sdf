@@ -1,17 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import json
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 import aiosqlite
 
 from .account import AccountRecord
+from .media_types import (
+    MediaJob,
+    MediaJobReservation,
+    MediaQuotaDecision,
+    clean_media_kind,
+    media_settings_from_json,
+    safe_media_job_payload,
+    utc_day_key,
+)
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,8 @@ class MemoryStore:
         await self._migrate_messages()
         await self._create_management_tables()
         await self._migrate_account_policy_columns()
+        await self._db.commit()
+        await self._repair_media_foreign_keys()
         await self._db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         await self._db.commit()
         await self.purge_expired()
@@ -162,7 +175,8 @@ class MemoryStore:
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 blocked_terms TEXT NOT NULL DEFAULT '[]',
-                blocked_topics TEXT NOT NULL DEFAULT '[]'
+                blocked_topics TEXT NOT NULL DEFAULT '[]',
+                media_settings TEXT NOT NULL DEFAULT '{}'
             )
             """
         )
@@ -175,6 +189,51 @@ class MemoryStore:
                 fields TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS media_usage (
+                account_id TEXT NOT NULL,
+                media_type TEXT NOT NULL
+                    CHECK (media_type IN ('image', 'voice', 'video')),
+                day_key TEXT NOT NULL,
+                used_count INTEGER NOT NULL,
+                last_reserved_at INTEGER NOT NULL,
+                PRIMARY KEY (account_id, media_type),
+                FOREIGN KEY (account_id) REFERENCES accounts(id)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS media_jobs (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                group_id INTEGER NOT NULL,
+                media_type TEXT NOT NULL
+                    CHECK (media_type IN ('image', 'voice', 'video')),
+                status TEXT NOT NULL
+                    CHECK (
+                        status IN (
+                            'queued', 'running', 'completed', 'failed', 'cancelled'
+                        )
+                    ),
+                payload TEXT NOT NULL,
+                result_ref TEXT NOT NULL,
+                error TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                available_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (account_id) REFERENCES accounts(id)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_media_jobs_queue
+            ON media_jobs (status, available_at, created_at, id)
             """
         )
 
@@ -193,6 +252,115 @@ class MemoryStore:
                 "ALTER TABLE accounts ADD COLUMN "
                 "blocked_topics TEXT NOT NULL DEFAULT '[]'"
             )
+        if "media_settings" not in columns:
+            await db.execute(
+                "ALTER TABLE accounts ADD COLUMN "
+                "media_settings TEXT NOT NULL DEFAULT '{}'"
+            )
+
+    async def _repair_media_foreign_keys(self) -> None:
+        """Repair SQLite foreign keys rewritten by legacy account-table migrations."""
+        db = self._connection()
+        broken_tables: list[str] = []
+        for table in ("media_usage", "media_jobs"):
+            cursor = await db.execute(f"PRAGMA foreign_key_list({table})")
+            targets = {str(row["table"]) for row in await cursor.fetchall()}
+            await cursor.close()
+            if targets and targets != {"accounts"}:
+                broken_tables.append(table)
+        if not broken_tables:
+            return
+
+        await db.execute("PRAGMA foreign_keys=OFF")
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            if "media_usage" in broken_tables:
+                await db.execute(
+                    "ALTER TABLE media_usage RENAME TO media_usage_legacy_fk"
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE media_usage (
+                        account_id TEXT NOT NULL,
+                        media_type TEXT NOT NULL
+                            CHECK (media_type IN ('image', 'voice', 'video')),
+                        day_key TEXT NOT NULL,
+                        used_count INTEGER NOT NULL,
+                        last_reserved_at INTEGER NOT NULL,
+                        PRIMARY KEY (account_id, media_type),
+                        FOREIGN KEY (account_id) REFERENCES accounts(id)
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    INSERT INTO media_usage
+                        (account_id, media_type, day_key, used_count,
+                         last_reserved_at)
+                    SELECT account_id, media_type, day_key, used_count,
+                           last_reserved_at
+                    FROM media_usage_legacy_fk
+                    WHERE account_id IN (SELECT id FROM accounts)
+                    """
+                )
+                await db.execute("DROP TABLE media_usage_legacy_fk")
+
+            if "media_jobs" in broken_tables:
+                await db.execute(
+                    "ALTER TABLE media_jobs RENAME TO media_jobs_legacy_fk"
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE media_jobs (
+                        id TEXT PRIMARY KEY,
+                        account_id TEXT NOT NULL,
+                        group_id INTEGER NOT NULL,
+                        media_type TEXT NOT NULL
+                            CHECK (media_type IN ('image', 'voice', 'video')),
+                        status TEXT NOT NULL
+                            CHECK (
+                                status IN (
+                                    'queued', 'running', 'completed',
+                                    'failed', 'cancelled'
+                                )
+                            ),
+                        payload TEXT NOT NULL,
+                        result_ref TEXT NOT NULL,
+                        error TEXT NOT NULL,
+                        attempts INTEGER NOT NULL,
+                        available_at INTEGER NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY (account_id) REFERENCES accounts(id)
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    INSERT INTO media_jobs
+                        (id, account_id, group_id, media_type, status, payload,
+                         result_ref, error, attempts, available_at, created_at,
+                         updated_at)
+                    SELECT id, account_id, group_id, media_type, status, payload,
+                           result_ref, error, attempts, available_at, created_at,
+                           updated_at
+                    FROM media_jobs_legacy_fk
+                    WHERE account_id IN (SELECT id FROM accounts)
+                    """
+                )
+                await db.execute("DROP TABLE media_jobs_legacy_fk")
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_media_jobs_queue
+                    ON media_jobs (status, available_at, created_at, id)
+                    """
+                )
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+        finally:
+            await db.execute("PRAGMA foreign_keys=ON")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -212,6 +380,10 @@ class MemoryStore:
             group_ids = frozenset()
         blocked_terms = MemoryStore._policy_values(row, "blocked_terms")
         blocked_topics = MemoryStore._policy_values(row, "blocked_topics")
+        try:
+            media_settings = media_settings_from_json(row["media_settings"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("Stored media settings are invalid") from exc
         return AccountRecord(
             id=str(row["id"]),
             label=str(row["label"]),
@@ -245,6 +417,7 @@ class MemoryStore:
             updated_at=int(row["updated_at"]),
             blocked_terms=blocked_terms,
             blocked_topics=blocked_topics,
+            media_settings=media_settings,
         )
 
     @staticmethod
@@ -303,7 +476,7 @@ class MemoryStore:
                     proactive_idle_minutes, proactive_min_interval_minutes,
                     proactive_max_interval_minutes, max_proactive_per_day,
                     all_groups, group_ids, revision, created_at, updated_at,
-                    blocked_terms, blocked_topics
+                    blocked_terms, blocked_topics, media_settings
                 ) VALUES (
                     {", ".join("?" for _ in self._account_values(record))}
                 )
@@ -368,6 +541,11 @@ class MemoryStore:
             record.updated_at,
             json.dumps(list(record.blocked_terms), ensure_ascii=False),
             json.dumps(list(record.blocked_topics), ensure_ascii=False),
+            json.dumps(
+                record.media_settings.public_dict(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
         )
 
     async def update_account(
@@ -395,7 +573,8 @@ class MemoryStore:
                     proactive_idle_minutes=?, proactive_min_interval_minutes=?,
                     proactive_max_interval_minutes=?, max_proactive_per_day=?,
                     all_groups=?, group_ids=?, revision=?, created_at=?,
-                    updated_at=?, blocked_terms=?, blocked_topics=?
+                    updated_at=?, blocked_terms=?, blocked_topics=?,
+                    media_settings=?
                 WHERE id=? AND revision=?
                 """,
                 (
@@ -410,6 +589,20 @@ class MemoryStore:
             await self._audit_locked(updated.id, "account_updated", changed_fields)
             await db.commit()
         return updated
+
+    async def clear_account_api_keys(self) -> int:
+        """Remove legacy per-account provider keys without ever decrypting them."""
+        async with self._lock:
+            db = self._connection()
+            cursor = await db.execute(
+                """
+                UPDATE accounts
+                SET ai_api_key_ciphertext=''
+                WHERE ai_api_key_ciphertext <> ''
+                """
+            )
+            await db.commit()
+            return max(0, int(cursor.rowcount))
 
     async def _audit_locked(
         self,
@@ -429,6 +622,430 @@ class MemoryStore:
             """,
             (account_id, action[:80], json.dumps(safe_fields), int(time.time())),
         )
+
+    @staticmethod
+    def _clean_quota_parameters(
+        daily_limit: object,
+        cooldown_seconds: object,
+    ) -> tuple[int, int]:
+        if (
+            isinstance(daily_limit, bool)
+            or not isinstance(daily_limit, int)
+            or not 0 <= daily_limit <= 1000
+        ):
+            raise ValueError("daily_limit must be an integer between 0 and 1000")
+        if (
+            isinstance(cooldown_seconds, bool)
+            or not isinstance(cooldown_seconds, int)
+            or not 0 <= cooldown_seconds <= 7 * 24 * 60 * 60
+        ):
+            raise ValueError(
+                "cooldown_seconds must be an integer between 0 and 604800"
+            )
+        return daily_limit, cooldown_seconds
+
+    @staticmethod
+    def _seconds_until_utc_midnight(now: int) -> int:
+        current = time.gmtime(now)
+        midnight = calendar.timegm(
+            (
+                current.tm_year,
+                current.tm_mon,
+                current.tm_mday,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+        )
+        return max(midnight + 24 * 60 * 60 - now, 1)
+
+    async def _require_account_locked(self, account_id: str) -> None:
+        cursor = await self._connection().execute(
+            "SELECT 1 FROM accounts WHERE id = ?",
+            (account_id,),
+        )
+        exists = await cursor.fetchone()
+        await cursor.close()
+        if exists is None:
+            raise ValueError("account does not exist")
+
+    async def _reserve_media_quota_locked(
+        self,
+        account_id: str,
+        media_type: str,
+        daily_limit: int,
+        cooldown_seconds: int,
+        now: int,
+    ) -> MediaQuotaDecision:
+        db = self._connection()
+        cursor = await db.execute(
+            """
+            SELECT day_key, used_count, last_reserved_at
+            FROM media_usage
+            WHERE account_id = ? AND media_type = ?
+            """,
+            (account_id, media_type),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+
+        day_key = utc_day_key(now)
+        stored_day = str(row["day_key"]) if row is not None else ""
+        used = int(row["used_count"]) if row is not None and stored_day == day_key else 0
+        last_reserved_at = int(row["last_reserved_at"]) if row is not None else 0
+        remaining = max(daily_limit - used, 0)
+        if daily_limit == 0 or used >= daily_limit:
+            return MediaQuotaDecision(
+                allowed=False,
+                reason="daily_limit",
+                used=used,
+                remaining=remaining,
+                retry_after_seconds=self._seconds_until_utc_midnight(now),
+            )
+
+        elapsed = now - last_reserved_at
+        if last_reserved_at and elapsed < cooldown_seconds:
+            return MediaQuotaDecision(
+                allowed=False,
+                reason="cooldown",
+                used=used,
+                remaining=remaining,
+                retry_after_seconds=max(cooldown_seconds - elapsed, 1),
+            )
+
+        next_used = used + 1
+        await db.execute(
+            """
+            INSERT INTO media_usage (
+                account_id, media_type, day_key, used_count, last_reserved_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, media_type) DO UPDATE SET
+                day_key=excluded.day_key,
+                used_count=excluded.used_count,
+                last_reserved_at=excluded.last_reserved_at
+            """,
+            (account_id, media_type, day_key, next_used, now),
+        )
+        return MediaQuotaDecision(
+            allowed=True,
+            reason="allowed",
+            used=next_used,
+            remaining=max(daily_limit - next_used, 0),
+            retry_after_seconds=0,
+        )
+
+    async def reserve_media_quota(
+        self,
+        account_id: str,
+        media_type: str,
+        *,
+        daily_limit: int,
+        cooldown_seconds: int,
+        now: int | None = None,
+    ) -> MediaQuotaDecision:
+        kind = clean_media_kind(media_type)
+        cleaned_limit, cleaned_cooldown = self._clean_quota_parameters(
+            daily_limit,
+            cooldown_seconds,
+        )
+        timestamp = int(time.time()) if now is None else now
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < 0:
+            raise ValueError("now must be a non-negative integer timestamp")
+        async with self._lock:
+            db = self._connection()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._require_account_locked(account_id)
+                decision = await self._reserve_media_quota_locked(
+                    account_id,
+                    kind,
+                    cleaned_limit,
+                    cleaned_cooldown,
+                    timestamp,
+                )
+                await db.commit()
+                return decision
+            except BaseException:
+                await db.rollback()
+                raise
+
+    @staticmethod
+    def _media_job_from_row(row: aiosqlite.Row) -> MediaJob:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Stored media job payload is invalid") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Stored media job payload is invalid")
+        return MediaJob(
+            id=str(row["id"]),
+            account_id=str(row["account_id"]),
+            group_id=int(row["group_id"]),
+            media_type=str(row["media_type"]),
+            status=str(row["status"]),
+            payload=payload,
+            result_ref=str(row["result_ref"]),
+            error=str(row["error"]),
+            attempts=int(row["attempts"]),
+            available_at=int(row["available_at"]),
+            created_at=int(row["created_at"]),
+            updated_at=int(row["updated_at"]),
+        )
+
+    async def enqueue_media_job(
+        self,
+        account_id: str,
+        group_id: int,
+        media_type: str,
+        payload: dict[str, object],
+        *,
+        daily_limit: int,
+        cooldown_seconds: int,
+        now: int | None = None,
+        available_at: int | None = None,
+    ) -> MediaJobReservation:
+        if isinstance(group_id, bool) or not isinstance(group_id, int):
+            raise ValueError("group_id must be an integer")
+        kind = clean_media_kind(media_type)
+        cleaned_limit, cleaned_cooldown = self._clean_quota_parameters(
+            daily_limit,
+            cooldown_seconds,
+        )
+        payload_json = safe_media_job_payload(payload)
+        source_message_id = payload.get("source_message_id")
+        if (
+            isinstance(source_message_id, bool)
+            or not isinstance(source_message_id, int)
+            or source_message_id <= 0
+        ):
+            raise ValueError(
+                "media job payload must contain a positive source_message_id"
+            )
+        timestamp = int(time.time()) if now is None else now
+        scheduled_at = timestamp if available_at is None else available_at
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, int)
+            or timestamp < 0
+            or isinstance(scheduled_at, bool)
+            or not isinstance(scheduled_at, int)
+            or scheduled_at < timestamp
+        ):
+            raise ValueError(
+                "now and available_at must be valid non-negative timestamps"
+            )
+        job_id = f"media_{uuid.uuid4().hex}"
+        async with self._lock:
+            db = self._connection()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._require_account_locked(account_id)
+                quota = await self._reserve_media_quota_locked(
+                    account_id,
+                    kind,
+                    cleaned_limit,
+                    cleaned_cooldown,
+                    timestamp,
+                )
+                if not quota.allowed:
+                    await db.commit()
+                    return MediaJobReservation(quota=quota, job=None)
+                await db.execute(
+                    """
+                    INSERT INTO media_jobs (
+                        id, account_id, group_id, media_type, status, payload,
+                        result_ref, error, attempts, available_at, created_at,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, 'queued', ?, '', '', 0, ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        account_id,
+                        group_id,
+                        kind,
+                        payload_json,
+                        scheduled_at,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                await db.commit()
+                job = MediaJob(
+                    id=job_id,
+                    account_id=account_id,
+                    group_id=group_id,
+                    media_type=kind,
+                    status="queued",
+                    payload=json.loads(payload_json),
+                    result_ref="",
+                    error="",
+                    attempts=0,
+                    available_at=scheduled_at,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+                return MediaJobReservation(quota=quota, job=job)
+            except BaseException:
+                await db.rollback()
+                raise
+
+    async def claim_next_media_job(
+        self,
+        account_id: str,
+        *,
+        media_type: str | None = None,
+        now: int | None = None,
+    ) -> MediaJob | None:
+        kind = clean_media_kind(media_type) if media_type is not None else None
+        timestamp = int(time.time()) if now is None else now
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < 0:
+            raise ValueError("now must be a non-negative integer timestamp")
+        async with self._lock:
+            db = self._connection()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._require_account_locked(account_id)
+                if kind is None:
+                    cursor = await db.execute(
+                        """
+                        SELECT * FROM media_jobs
+                        WHERE account_id = ?
+                          AND status = 'queued' AND available_at <= ?
+                        ORDER BY available_at, created_at, id
+                        LIMIT 1
+                        """,
+                        (account_id, timestamp),
+                    )
+                else:
+                    cursor = await db.execute(
+                        """
+                        SELECT * FROM media_jobs
+                        WHERE account_id = ?
+                          AND status = 'queued' AND available_at <= ?
+                          AND media_type = ?
+                        ORDER BY available_at, created_at, id
+                        LIMIT 1
+                        """,
+                        (account_id, timestamp, kind),
+                    )
+                row = await cursor.fetchone()
+                await cursor.close()
+                if row is None:
+                    await db.commit()
+                    return None
+                await db.execute(
+                    """
+                    UPDATE media_jobs
+                    SET status='running', attempts=attempts + 1, updated_at=?
+                    WHERE id=? AND status='queued'
+                    """,
+                    (timestamp, row["id"]),
+                )
+                cursor = await db.execute(
+                    "SELECT * FROM media_jobs WHERE id = ?",
+                    (row["id"],),
+                )
+                claimed = await cursor.fetchone()
+                await cursor.close()
+                await db.commit()
+                return self._media_job_from_row(claimed)
+            except BaseException:
+                await db.rollback()
+                raise
+
+    async def list_media_jobs(
+        self,
+        account_id: str,
+        limit: int = 100,
+    ) -> list[MediaJob]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("limit must be an integer between 1 and 100")
+        async with self._lock:
+            await self._require_account_locked(account_id)
+            cursor = await self._connection().execute(
+                """
+                SELECT * FROM media_jobs
+                WHERE account_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (account_id, limit),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [self._media_job_from_row(row) for row in rows]
+
+    async def recover_stale_media_jobs(
+        self,
+        account_id: str,
+        *,
+        now: int | None = None,
+    ) -> int:
+        timestamp = int(time.time()) if now is None else now
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < 0:
+            raise ValueError("now must be a non-negative integer timestamp")
+        async with self._lock:
+            db = self._connection()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._require_account_locked(account_id)
+                cursor = await db.execute(
+                    """
+                    UPDATE media_jobs
+                    SET status='queued', updated_at=?
+                    WHERE account_id=? AND status='running'
+                    """,
+                    (timestamp, account_id),
+                )
+                recovered = max(int(cursor.rowcount), 0)
+                await cursor.close()
+                await db.commit()
+                return recovered
+            except BaseException:
+                await db.rollback()
+                raise
+
+    async def finish_media_job(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        result_ref: str = "",
+        error: str = "",
+        now: int | None = None,
+    ) -> MediaJob:
+        cleaned_status = str(status or "").strip().lower()
+        if cleaned_status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("status must be completed, failed, or cancelled")
+        if len(result_ref) > 2000 or len(error) > 1000:
+            raise ValueError("media job result or error is too long")
+        timestamp = int(time.time()) if now is None else now
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < 0:
+            raise ValueError("now must be a non-negative integer timestamp")
+        async with self._lock:
+            db = self._connection()
+            cursor = await db.execute(
+                """
+                UPDATE media_jobs
+                SET status=?, payload='{}', result_ref=?, error=?, updated_at=?
+                WHERE id=? AND status IN ('queued', 'running')
+                """,
+                (cleaned_status, result_ref, error, timestamp, job_id),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                raise ValueError("media job does not exist or is already finished")
+            cursor = await db.execute(
+                "SELECT * FROM media_jobs WHERE id = ?",
+                (job_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            await db.commit()
+        return self._media_job_from_row(row)
 
     async def add(
         self,
@@ -514,8 +1131,26 @@ class MemoryStore:
                 "DELETE FROM messages WHERE created_at < ?",
                 (cutoff,),
             )
+            removed_messages = max(cursor.rowcount, 0)
+            await db.execute(
+                """
+                UPDATE media_jobs
+                SET status='cancelled', payload='{}', result_ref='',
+                    error='expired', updated_at=?
+                WHERE created_at < ? AND status IN ('queued', 'running')
+                """,
+                (current, cutoff),
+            )
+            await db.execute(
+                """
+                DELETE FROM media_jobs
+                WHERE updated_at < ?
+                  AND status IN ('completed', 'failed', 'cancelled')
+                """,
+                (cutoff,),
+            )
             await db.commit()
-            return max(cursor.rowcount, 0)
+            return removed_messages
 
     async def legacy_runtime_settings(self) -> dict[str, str]:
         async with self._lock:

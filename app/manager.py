@@ -27,6 +27,7 @@ from .account import (
 from .config import Settings
 from .crypto import SecretBox
 from .memory import MemoryStore
+from .media_types import AccountMediaSettings, clean_account_media_settings
 from .security import safe_error
 from .telegram_login import TelegramLoginService, VerifiedTelegramSession
 from .worker import AccountWorker
@@ -77,6 +78,13 @@ class AccountManager:
     async def start(self) -> None:
         await self.store.open()
         await self._import_legacy_account()
+        removed_legacy_keys = await self.store.clear_account_api_keys()
+        if removed_legacy_keys:
+            LOGGER.info(
+                "Removed %s legacy per-account API key(s); provider keys are "
+                "read only from Railway Variables",
+                removed_legacy_keys,
+            )
         await self._refresh_managed_ids()
         accounts = await self.store.list_accounts()
         for account in accounts:
@@ -331,7 +339,12 @@ class AccountManager:
             payload.get("stage", "observer"),
         )
         now = int(time.time())
-        ai_key = clean_text(payload.get("ai_api_key"), "ai_api_key", maximum=12000)
+        if clean_text(
+            payload.get("ai_api_key"),
+            "ai_api_key",
+            maximum=12000,
+        ):
+            raise ValueError("AI API Key 只能設定在 Railway Variables")
         record = AccountRecord(
             id=f"acct_{uuid.uuid4().hex[:12]}",
             label=clean_text(
@@ -364,7 +377,7 @@ class AccountManager:
                 maximum=200,
                 required=True,
             ),
-            ai_api_key_ciphertext=self.secrets.encrypt(ai_key) if ai_key else "",
+            ai_api_key_ciphertext="",
             group_reply_probability=clean_float(
                 payload.get("group_reply_probability", 0.35),
                 "group_reply_probability",
@@ -438,10 +451,14 @@ class AccountManager:
                 maximum_item_length=300,
                 maximum_total_length=8000,
             ),
+            media_settings=clean_account_media_settings(
+                payload.get("media", {})
+            ),
         )
         self._validate_intervals(record)
-        if not record.has_custom_api_key and not self.settings.ai_api_key:
-            raise ValueError("請填入帳號專用 AI API Key")
+        self._validate_media_settings(record.media_settings)
+        if not self.settings.ai_api_key:
+            raise ValueError("請在 Railway Variables 設定 AI_API_KEY")
         async with self._create_lock:
             if await self.store.count_accounts() >= self.settings.max_accounts:
                 raise ValueError(
@@ -492,12 +509,9 @@ class AccountManager:
             session_ciphertext = self.secrets.encrypt(new_session)
             session_fingerprint = self.secrets.fingerprint(new_session)
 
-        ai_key_ciphertext = current.ai_api_key_ciphertext
         new_ai_key = clean_text(payload.get("ai_api_key"), "ai_api_key", maximum=12000)
         if new_ai_key:
-            ai_key_ciphertext = self.secrets.encrypt(new_ai_key)
-        elif payload.get("clear_ai_api_key") is True:
-            ai_key_ciphertext = ""
+            raise ValueError("AI API Key 只能設定在 Railway Variables")
 
         updated = current.with_updates(
             label=clean_text(
@@ -537,7 +551,7 @@ class AccountManager:
                 maximum=200,
                 required=True,
             ),
-            ai_api_key_ciphertext=ai_key_ciphertext,
+            ai_api_key_ciphertext="",
             group_reply_probability=clean_float(
                 payload.get(
                     "group_reply_probability",
@@ -633,10 +647,15 @@ class AccountManager:
                 maximum_item_length=300,
                 maximum_total_length=8000,
             ),
+            media_settings=clean_account_media_settings(
+                payload.get("media", {}),
+                current=current.media_settings,
+            ),
         )
         self._validate_intervals(updated)
-        if not updated.has_custom_api_key and not self.settings.ai_api_key:
-            raise ValueError("請填入帳號專用 AI API Key")
+        self._validate_media_settings(updated.media_settings)
+        if not self.settings.ai_api_key:
+            raise ValueError("請在 Railway Variables 設定 AI_API_KEY")
 
         changed_fields = [
             name
@@ -662,11 +681,10 @@ class AccountManager:
                 "max_proactive_per_day",
                 "blocked_terms",
                 "blocked_topics",
+                "media",
             )
             if name in payload
         ]
-        if new_ai_key or payload.get("clear_ai_api_key") is True:
-            changed_fields.append("ai_api_key")
         try:
             saved = await self.store.update_account(
                 updated,
@@ -751,12 +769,7 @@ class AccountManager:
                 return {"ok": False, "error": self._safe_error(exc)}
 
         account = await self._require_account(account_id)
-        custom_key = (
-            self.secrets.decrypt(account.ai_api_key_ciphertext)
-            if account.ai_api_key_ciphertext
-            else ""
-        )
-        key = custom_key or self.settings.ai_api_key
+        key = self.settings.ai_api_key
         if not key:
             return {"ok": False, "error": "尚未設定 AI API Key"}
         client = AsyncOpenAI(
@@ -822,6 +835,35 @@ class AccountManager:
             for entry in entries
         ]
 
+    async def media_jobs(
+        self,
+        account_id: str,
+        limit: int = 20,
+    ) -> dict[str, object]:
+        await self._require_account(account_id)
+        cleaned_limit = clean_int(
+            limit,
+            "limit",
+            minimum=1,
+            maximum=100,
+        )
+        jobs = await self.store.list_media_jobs(account_id, cleaned_limit)
+        return {
+            "account_id": account_id,
+            "jobs": [
+                {
+                    "job_id": job.id,
+                    "kind": job.media_type,
+                    "status": job.status,
+                    "group_id": job.group_id,
+                    "attempts": job.attempts,
+                    "created_at": job.created_at,
+                    "updated_at": job.updated_at,
+                }
+                for job in jobs
+            ],
+        }
+
     async def account_status(self, account_id: str) -> dict[str, object]:
         account = await self._require_account(account_id)
         worker = self.workers.get(account_id)
@@ -829,6 +871,7 @@ class AccountManager:
             status = await worker.status()
             status["enabled"] = account.enabled
             status["revision"] = account.revision
+            status["media_providers"] = self.settings.media_provider_readiness
             return status
         stats = await self.store.statistics(account_id)
         return {
@@ -848,8 +891,12 @@ class AccountManager:
             "errors": 1 if account_id in self.start_errors else 0,
             "policy_rejections": 0,
             "blocked_messages": 0,
+            "media_jobs_queued": 0,
+            "media_sent": 0,
+            "media_failed": 0,
             "last_error": self.start_errors.get(account_id, ""),
             "uptime_seconds": 0,
+            "media_providers": self.settings.media_provider_readiness,
         }
 
     async def status(self) -> dict[str, object]:
@@ -865,6 +912,7 @@ class AccountManager:
                 "connected": connected,
                 "max_accounts": self.settings.max_accounts,
                 "memory_ttl_hours": self.settings.memory_ttl_hours,
+                "media_providers": self.settings.media_provider_readiness,
             },
         }
 
@@ -912,6 +960,40 @@ class AccountManager:
             < account.proactive_min_interval_minutes
         ):
             raise ValueError("主動發言最大間隔不可小於最小間隔")
+
+    def _validate_media_settings(self, media: AccountMediaSettings) -> None:
+        for media_type in ("image", "voice", "video"):
+            feature = media.for_kind(media_type)
+            if not feature.enabled:
+                continue
+            if not feature.model:
+                raise ValueError(f"{media_type} media model is required when enabled")
+            if feature.daily_limit < 1:
+                raise ValueError(
+                    f"{media_type} daily limit must be at least 1 when enabled"
+                )
+            if not feature.allowed_group_ids:
+                raise ValueError(
+                    f"{media_type} must allow at least one group when enabled"
+                )
+            if any(group_id >= 0 for group_id in feature.allowed_group_ids):
+                raise ValueError(
+                    f"{media_type} allowed groups must be negative Telegram group IDs"
+                )
+        if (
+            media.image.enabled or media.video.enabled
+        ) and not self.settings.openai_media_api_key:
+            raise ValueError(
+                "請先在 Railway Variables 設定 OPENAI_MEDIA_API_KEY"
+            )
+        if media.voice.enabled and not (
+            self.settings.azure_speech_key
+            and self.settings.azure_speech_region
+        ):
+            raise ValueError(
+                "請先在 Railway Variables 設定 AZURE_SPEECH_KEY "
+                "與 AZURE_SPEECH_REGION"
+            )
 
     async def _cleanup_loop(self) -> None:
         next_memory_cleanup = time.monotonic()

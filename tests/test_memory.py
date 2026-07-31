@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app.account import AccountRecord
 from app.memory import MemoryStore
+from app.media_types import AccountMediaSettings, MediaFeatureSettings
 
 
 V2_ACCOUNT_COLUMNS = (
@@ -91,10 +92,57 @@ def rebuild_as_v2_account_schema(
     if keep_blocked_terms:
         columns.append("blocked_terms")
     selected = ", ".join(f'"{column}"' for column in columns)
+    optional_policy_column = (
+        ", blocked_terms TEXT NOT NULL DEFAULT '[]'"
+        if keep_blocked_terms
+        else ""
+    )
 
     db = sqlite3.connect(path)
     db.execute("ALTER TABLE accounts RENAME TO accounts_v3_source")
-    db.execute(f"CREATE TABLE accounts AS SELECT {selected} FROM accounts_v3_source")
+    db.execute(
+        f"""
+        CREATE TABLE accounts (
+            id TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            session_ciphertext TEXT NOT NULL,
+            session_fingerprint TEXT NOT NULL UNIQUE,
+            telegram_user_id INTEGER NOT NULL UNIQUE,
+            telegram_name TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            gender TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            style TEXT NOT NULL,
+            task_name TEXT NOT NULL,
+            task_info TEXT NOT NULL,
+            ai_base_url TEXT NOT NULL,
+            ai_model TEXT NOT NULL,
+            ai_api_key_ciphertext TEXT NOT NULL,
+            group_reply_probability REAL NOT NULL,
+            reply_on_mention INTEGER NOT NULL,
+            reply_on_reply INTEGER NOT NULL,
+            typing_delay_min_seconds REAL NOT NULL,
+            typing_delay_max_seconds REAL NOT NULL,
+            proactive_enabled INTEGER NOT NULL,
+            proactive_idle_minutes INTEGER NOT NULL,
+            proactive_min_interval_minutes INTEGER NOT NULL,
+            proactive_max_interval_minutes INTEGER NOT NULL,
+            max_proactive_per_day INTEGER NOT NULL,
+            all_groups INTEGER NOT NULL,
+            group_ids TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+            {optional_policy_column}
+        )
+        """
+    )
+    db.execute(
+        f"""
+        INSERT INTO accounts ({selected})
+        SELECT {selected} FROM accounts_v3_source
+        """
+    )
     db.execute("DROP TABLE accounts_v3_source")
     db.execute("PRAGMA user_version=2")
     db.commit()
@@ -301,6 +349,26 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
+    def test_legacy_account_api_keys_are_purged_without_decryption(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            await store.create_account(
+                account_record().with_updates(
+                    ai_api_key_ciphertext="opaque-legacy-ciphertext"
+                )
+            )
+
+            self.assertEqual(await store.clear_account_api_keys(), 1)
+            loaded = await store.get_account("alpha")
+            self.assertEqual(loaded.ai_api_key_ciphertext, "")
+            self.assertFalse(loaded.has_custom_api_key)
+            self.assertEqual(await store.clear_account_api_keys(), 0)
+            await store.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
     def test_account_policy_round_trips_through_create_update_and_public_data(self) -> None:
         async def scenario(path: str) -> None:
             store = MemoryStore(path, ttl_hours=24)
@@ -352,6 +420,346 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
+    def test_account_media_settings_round_trip_and_default_disabled(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            default_record = account_record()
+            await store.create_account(default_record)
+            loaded = await store.get_account("alpha")
+            self.assertIsNotNone(loaded)
+            for feature in loaded.media_settings.public_dict().values():
+                self.assertFalse(feature["enabled"])
+
+            configured = AccountMediaSettings(
+                image=MediaFeatureSettings(
+                    enabled=True,
+                    model="gpt-image-1",
+                    daily_limit=12,
+                    cooldown_seconds=90,
+                    allowed_group_ids=frozenset({-1002, -1001}),
+                ),
+                voice=MediaFeatureSettings(
+                    enabled=True,
+                    model="azure-speech",
+                    voice="zh-TW-HsiaoChenNeural",
+                    daily_limit=20,
+                    cooldown_seconds=30,
+                    allowed_group_ids=frozenset({-1001}),
+                ),
+            )
+            saved = await store.update_account(
+                loaded.with_updates(media_settings=configured),
+                expected_revision=loaded.revision,
+                changed_fields=["media"],
+            )
+            self.assertEqual(saved.media_settings, configured)
+            reloaded = await store.get_account("alpha")
+            self.assertEqual(reloaded.media_settings, configured)
+            public = reloaded.public_dict()
+            self.assertEqual(
+                public["media"]["image"]["allowed_group_ids"],
+                [-1002, -1001],
+            )
+            self.assertNotIn("api_key", json.dumps(public["media"]))
+            await store.close()
+
+            db = sqlite3.connect(path)
+            raw = db.execute(
+                "SELECT media_settings FROM accounts WHERE id = 'alpha'"
+            ).fetchone()[0]
+            db.close()
+            self.assertEqual(json.loads(raw)["voice"]["voice"], "zh-TW-HsiaoChenNeural")
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_media_quota_and_queue_are_atomic_and_persistent(self) -> None:
+        async def scenario(path: str) -> None:
+            first = MemoryStore(path, ttl_hours=24)
+            second = MemoryStore(path, ttl_hours=24)
+            await first.open()
+            await first.create_account(account_record())
+            await second.open()
+            now = int(time.time())
+
+            initial = await first.reserve_media_quota(
+                "alpha",
+                "image",
+                daily_limit=2,
+                cooldown_seconds=0,
+                now=now,
+            )
+            self.assertTrue(initial.allowed)
+            concurrent = await asyncio.gather(
+                first.reserve_media_quota(
+                    "alpha",
+                    "image",
+                    daily_limit=2,
+                    cooldown_seconds=0,
+                    now=now + 1,
+                ),
+                second.reserve_media_quota(
+                    "alpha",
+                    "image",
+                    daily_limit=2,
+                    cooldown_seconds=0,
+                    now=now + 1,
+                ),
+            )
+            self.assertEqual(sum(item.allowed for item in concurrent), 1)
+            denied = next(item for item in concurrent if not item.allowed)
+            self.assertEqual(denied.reason, "daily_limit")
+            self.assertEqual(denied.remaining, 0)
+
+            voice_first = await first.reserve_media_quota(
+                "alpha",
+                "voice",
+                daily_limit=10,
+                cooldown_seconds=60,
+                now=now,
+            )
+            voice_denied = await second.reserve_media_quota(
+                "alpha",
+                "voice",
+                daily_limit=10,
+                cooldown_seconds=60,
+                now=now + 20,
+            )
+            voice_next = await first.reserve_media_quota(
+                "alpha",
+                "voice",
+                daily_limit=10,
+                cooldown_seconds=60,
+                now=now + 60,
+            )
+            self.assertTrue(voice_first.allowed)
+            self.assertFalse(voice_denied.allowed)
+            self.assertEqual(voice_denied.reason, "cooldown")
+            self.assertEqual(voice_denied.retry_after_seconds, 40)
+            self.assertTrue(voice_next.allowed)
+
+            reservation = await first.enqueue_media_job(
+                "alpha",
+                -1001,
+                "video",
+                dict(
+                    {"prompt": "夜晚城市", "model": "video-model"},
+                    source_message_id=101,
+                ),
+                daily_limit=3,
+                cooldown_seconds=30,
+                now=now,
+            )
+            self.assertTrue(reservation.quota.allowed)
+            self.assertIsNotNone(reservation.job)
+            blocked = await second.enqueue_media_job(
+                "alpha",
+                -1001,
+                "video",
+                dict(
+                    {"prompt": "第二段影片"},
+                    source_message_id=102,
+                ),
+                daily_limit=3,
+                cooldown_seconds=30,
+                now=now + 10,
+            )
+            self.assertFalse(blocked.quota.allowed)
+            self.assertIsNone(blocked.job)
+
+            claimed = await second.claim_next_media_job("alpha", now=now)
+            self.assertIsNotNone(claimed)
+            self.assertEqual(claimed.status, "running")
+            self.assertEqual(claimed.attempts, 1)
+            finished = await first.finish_media_job(
+                claimed.id,
+                "completed",
+                result_ref="telegram:file-reference",
+                now=now + 5,
+            )
+            self.assertEqual(finished.status, "completed")
+            self.assertEqual(finished.payload, {})
+            self.assertIsNone(
+                await second.claim_next_media_job("alpha", now=now + 100)
+            )
+            await second.close()
+            await first.close()
+
+            reopened = MemoryStore(path, ttl_hours=24)
+            await reopened.open()
+            self.assertIsNone(
+                await reopened.claim_next_media_job("alpha", now=now + 100)
+            )
+            await reopened.close()
+
+            db = sqlite3.connect(path)
+            job = db.execute(
+                "SELECT status, payload FROM media_jobs"
+            ).fetchone()
+            db.close()
+            self.assertEqual(job[0], "completed")
+            self.assertEqual(json.loads(job[1]), {})
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_media_jobs_are_account_scoped_and_recoverable(self) -> None:
+        async def scenario(path: str) -> None:
+            first = MemoryStore(path, ttl_hours=24)
+            second = MemoryStore(path, ttl_hours=24)
+            await first.open()
+            await first.create_account(account_record("alpha"))
+            await first.create_account(account_record("beta"))
+            await second.open()
+            now = int(time.time())
+
+            alpha_reservation = await first.enqueue_media_job(
+                "alpha",
+                -1001,
+                "image",
+                {
+                    "prompt": "alpha image",
+                    "model": "image-model",
+                    "source_message_id": 201,
+                },
+                daily_limit=5,
+                cooldown_seconds=0,
+                now=now,
+            )
+            beta_reservation = await second.enqueue_media_job(
+                "beta",
+                -2001,
+                "voice",
+                {
+                    "prompt": "beta voice",
+                    "model": "voice-model",
+                    "source_message_id": 202,
+                },
+                daily_limit=5,
+                cooldown_seconds=0,
+                now=now,
+            )
+            self.assertIsNotNone(alpha_reservation.job)
+            self.assertIsNotNone(beta_reservation.job)
+
+            claimed_alpha = await second.claim_next_media_job(
+                "alpha",
+                now=now,
+            )
+            claimed_beta = await first.claim_next_media_job(
+                "beta",
+                now=now,
+            )
+            self.assertEqual(claimed_alpha.account_id, "alpha")
+            self.assertEqual(claimed_beta.account_id, "beta")
+            self.assertEqual(claimed_alpha.payload["source_message_id"], 201)
+            self.assertEqual(claimed_beta.payload["source_message_id"], 202)
+
+            alpha_jobs = await first.list_media_jobs("alpha")
+            beta_jobs = await second.list_media_jobs("beta")
+            self.assertEqual([job.account_id for job in alpha_jobs], ["alpha"])
+            self.assertEqual([job.account_id for job in beta_jobs], ["beta"])
+            self.assertEqual(alpha_jobs[0].status, "running")
+            self.assertEqual(beta_jobs[0].status, "running")
+
+            self.assertEqual(
+                await first.recover_stale_media_jobs("alpha", now=now + 1),
+                1,
+            )
+            self.assertEqual(
+                (await second.list_media_jobs("beta"))[0].status,
+                "running",
+            )
+            recovered_alpha = await second.claim_next_media_job(
+                "alpha",
+                now=now + 1,
+            )
+            self.assertEqual(recovered_alpha.attempts, 2)
+            await first.finish_media_job(
+                recovered_alpha.id,
+                "completed",
+                result_ref="telegram:alpha",
+                now=now + 2,
+            )
+
+            self.assertEqual(
+                await second.recover_stale_media_jobs("beta", now=now + 2),
+                1,
+            )
+            recovered_beta = await first.claim_next_media_job(
+                "beta",
+                now=now + 2,
+            )
+            self.assertEqual(recovered_beta.attempts, 2)
+            await second.finish_media_job(
+                recovered_beta.id,
+                "completed",
+                result_ref="telegram:beta",
+                now=now + 3,
+            )
+            await second.close()
+            await first.close()
+
+            reopened = MemoryStore(path, ttl_hours=24)
+            await reopened.open()
+            self.assertEqual(
+                [job.status for job in await reopened.list_media_jobs("alpha")],
+                ["completed"],
+            )
+            self.assertEqual(
+                [job.status for job in await reopened.list_media_jobs("beta")],
+                ["completed"],
+            )
+            await reopened.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_expired_media_jobs_drop_sensitive_payloads_and_history(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            await store.create_account(account_record())
+            now = 1_800_000_000
+            old = now - 24 * 60 * 60 - 2
+
+            queued = await store.enqueue_media_job(
+                "alpha",
+                -1001,
+                "image",
+                {"prompt": "old prompt", "source_message_id": 1},
+                daily_limit=10,
+                cooldown_seconds=0,
+                now=old,
+            )
+            finished = await store.enqueue_media_job(
+                "alpha",
+                -1001,
+                "voice",
+                {"prompt": "old script", "source_message_id": 2},
+                daily_limit=10,
+                cooldown_seconds=0,
+                now=old,
+            )
+            await store.finish_media_job(
+                finished.job.id,
+                "completed",
+                result_ref="telegram:old",
+                now=old + 1,
+            )
+
+            self.assertEqual(await store.purge_expired(now=now), 0)
+            jobs = await store.list_media_jobs("alpha")
+            self.assertEqual([job.id for job in jobs], [queued.job.id])
+            self.assertEqual(jobs[0].status, "cancelled")
+            self.assertEqual(jobs[0].payload, {})
+            self.assertEqual(jobs[0].error, "expired")
+            await store.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
     def test_v2_policy_migration_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = str(Path(directory) / "v2.db")
@@ -372,6 +780,10 @@ class MemoryStoreTests(unittest.TestCase):
                     loaded = await store.get_account("alpha")
                     self.assertEqual(loaded.blocked_terms, ())
                     self.assertEqual(loaded.blocked_topics, ())
+                    self.assertEqual(
+                        loaded.media_settings,
+                        AccountMediaSettings(),
+                    )
                     await store.close()
 
             asyncio.run(migrate_twice())
@@ -387,7 +799,8 @@ class MemoryStoreTests(unittest.TestCase):
             db.close()
             self.assertIn("blocked_terms", columns)
             self.assertIn("blocked_topics", columns)
-            self.assertEqual(version, 3)
+            self.assertIn("media_settings", columns)
+            self.assertEqual(version, 4)
             self.assertEqual(row, ("[]", "[]"))
 
     def test_policy_migration_repairs_an_interrupted_single_column_upgrade(self) -> None:

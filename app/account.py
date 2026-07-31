@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from ipaddress import ip_address
 from urllib.parse import urlparse
+
+from .media_types import AccountMediaSettings
 
 
 ROLE_GENDERS = {"male", "female"}
@@ -45,6 +47,9 @@ class AccountRecord:
     updated_at: int
     blocked_terms: tuple[str, ...] = ()
     blocked_topics: tuple[str, ...] = ()
+    media_settings: AccountMediaSettings = field(
+        default_factory=AccountMediaSettings
+    )
 
     @property
     def role_key(self) -> str:
@@ -85,6 +90,7 @@ class AccountRecord:
             "group_ids": sorted(self.group_ids),
             "blocked_terms": list(self.blocked_terms),
             "blocked_topics": list(self.blocked_topics),
+            "media": self.media_settings.public_dict(),
             "revision": self.revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,

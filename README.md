@@ -12,13 +12,16 @@ Telegram 連線、固定角色、群組範圍、任務說明、AI 模型與 24 �
 - 四種固定角色：男性／女性老成員、男性／女性觀望成員。
 - 每個帳號可編輯語氣、任務名稱、任務說明及回覆行為。
 - 每個帳號可選擇所有群組或指定群組。
-- 每個帳號可設定 OpenAI-compatible Base URL、模型與專用 API Key。
+- 每個帳號可設定 OpenAI-compatible Base URL 與模型；API Key 只從 Railway Variables 讀取。
 - 每個帳號可設定輸出屏蔽詞與屏蔽主題；草稿會經字面、變形、近似詞與語意審核，未通過時不會發送。
+- 每個帳號可獨立開啟圖片、台灣口語語音與影片，並設定模型／聲線、每日上限、冷卻時間及允許群組。
+- 媒體請求由聊天模型輸出結構化意圖，通過屏蔽及安全審核後才排入背景任務；影片不會阻塞文字群聊。
+- 圖片與完成的影片會再次執行視覺安全審核；所有媒體都由目前登入的 Telegram 帳號透過 `send_file` 發送。
 - 模型可從控制台測試及切換，儲存後只重啟該帳號。
 - 每個帳號的群聊記憶與統計完全隔離，超過 24 小時自動清除。
 - 所有受管帳號自動互相忽略，避免機器帳號互相回覆形成循環。
 - 一個帳號連線或模型失敗，不會使其他帳號與控制台停止。
-- Telegram Session 與帳號專用 API Key 使用 Fernet 加密後保存在 Railway Volume。
+- Telegram Session 使用 Fernet 加密後保存在 Railway Volume；API Key 不寫入資料庫。
 - 控制台與 API 使用登入速率限制、伺服器端 Session、CSRF 驗證及安全標頭。
 
 ## 首次升級
@@ -44,6 +47,11 @@ AI_API_KEY=
 AI_BASE_URL=https://api.openai.com/v1
 AI_MODEL=gpt-5-mini
 
+OPENAI_MEDIA_API_KEY=
+OPENAI_MEDIA_BASE_URL=https://api.openai.com/v1
+AZURE_SPEECH_KEY=
+AZURE_SPEECH_REGION=
+
 ACCOUNT_ENCRYPTION_KEY=
 MAX_ACCOUNTS=10
 
@@ -63,7 +71,11 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 ```
 
 這個 Key 只能放在 Railway Variables。建立帳號後不可任意更換，否則已保存的
-Telegram Session 與 API Key 將無法解密。
+Telegram Session 將無法解密。
+
+媒體金鑰也只能放在 Railway Variables。控制台只顯示供應商是否就緒，不提供
+金鑰輸入欄，也不會把金鑰保存到 SQLite、API 回應或日誌。沒有媒體金鑰時，原有
+文字群聊仍可正常運作；各帳號的圖片、語音及影片預設皆為關閉。
 
 ## 新增多個帳號
 
@@ -82,6 +94,7 @@ Telegram Session 與 API Key 將無法解密。
 不得把同一個 Telegram 帳號重複加入；系統會檢查 Session 與 Telegram ID。
 
 Session String 與 API Key 都不會由任何 GET API、HTML、狀態或日誌回傳。
+升級時若資料庫仍含舊版帳號專用 API Key，啟動程序會直接清除該欄位。
 
 ## 模型設定
 
@@ -89,11 +102,9 @@ Session String 與 API Key 都不會由任何 GET API、HTML、狀態或日誌�
 
 - AI Base URL（必須是公開 HTTPS 位址）
 - Model ID
-- 帳號專用 API Key
 
-專用 API Key 留空時使用 Railway 的全域 `AI_API_KEY`。更新欄位留空代表保留原
-Key；勾選「清除自訂 Key」後才會改回全域 Key。控制台提供小型「測試模型」請求，
-測試失敗不會自動改寫其他帳號。
+所有帳號共用 Railway Variables 內的 `AI_API_KEY`；控制台不接受或保存 Key。
+控制台提供小型「測試模型」請求，測試失敗不會自動改寫其他帳號。
 
 ## 輸出屏蔽規則
 
@@ -112,11 +123,28 @@ Key；勾選「清除自訂 Key」後才會改回全域 Key。控制台提供小
 歡迎新成員或回答某類話題。任務不能覆蓋成年、自願、尊重、隱私、不冒充真人及
 不捏造經歷等共同規則。
 
+## 媒體任務
+
+控制台可針對每個帳號分別設定：
+
+- 圖片：開關、OpenAI 圖片模型、每日上限、冷卻秒數、允許群組。
+- 語音：開關、Azure 台灣中文聲線、每日上限、冷卻秒數、允許群組。
+- 影片：開關、OpenAI 影片模型、每日上限、冷卻秒數、允許群組。
+
+只有成員明確要求圖片、語音或影片時，聊天模型才會建立結構化媒體需求。需求會先
+經現有屏蔽詞／屏蔽主題與媒體安全審核；圖片生成後再審核圖片，影片完成後則審核
+預覽圖，再由該帳號的 Telethon 連線發送。語音文案採台灣繁體口語，Azure 直接
+輸出 OGG/Opus，並以 Telegram 語音訊息送出。
+
+媒體任務及配額保存在同一個 Railway Volume 的 SQLite。部署重新啟動時，未完成
+任務可由帳號背景工作重新接手；每日上限及冷卻在排隊時原子檢查，避免同時訊息
+繞過限制。
+
 ## 部署
 
 - Railway 必須保留 `/data` Volume，資料庫預設在 `/data/memory.db`。
 - 服務保持 **1 Replica**。SQLite Volume 與 Telegram Session 不支援多副本同時登入。
-- Railway 會讀取根目錄的 `Dockerfile` 與 `railway.json`。
+- Railway 會讀取根目錄的 `Dockerfile` 與 `railway.json`，並以 `/health` 驗證新版本啟動完成。
 - 公開網域只提供有密碼保護的控制台；敏感憑證仍由 Railway Variables 管理。
 
 ## 本機執行與檢查
