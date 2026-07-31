@@ -732,7 +732,11 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("manualMessagePendingAccounts", DASHBOARD_JS)
         self.assertIn('message.className = "manual-message-input"', DASHBOARD_JS)
         self.assertIn("function activeManualMessageEditor()", DASHBOARD_JS)
-        self.assertIn("if (activeManualMessageEditor()) return;", DASHBOARD_JS)
+        self.assertIn(
+            "if (activeManualMessageEditor() || "
+            "manualMessagePendingAccounts.size > 0) return;",
+            DASHBOARD_JS,
+        )
         self.assertIn("function dashboardEditorHasFocus()", DASHBOARD_JS)
         self.assertIn("!dashboardEditorHasFocus()", DASHBOARD_JS)
         self.assertIn("if (!formDirty) fillEditor(account);", DASHBOARD_JS)

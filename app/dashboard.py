@@ -1255,7 +1255,9 @@ function createAccountItem(account) {
 function renderAccountList() {
   // Preserve the live textarea node while it is being edited. Replacing it
   // would reset the caret, internal scroll position and mobile/Chinese IME.
-  if (activeManualMessageEditor()) return;
+  // Keep the same row during a send as well, so an already in-flight status
+  // response cannot replace it with a permanently disabled pending snapshot.
+  if (activeManualMessageEditor() || manualMessagePendingAccounts.size > 0) return;
   const list = $("accountList");
   list.replaceChildren();
   for (const account of dashboardState?.accounts || []) {
