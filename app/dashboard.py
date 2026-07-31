@@ -13,6 +13,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from .manager import AccountConflictError, AccountManager, AccountNotFoundError
+from .telegram_login import (
+    TelegramLoginConflict,
+    TelegramLoginExpired,
+    TelegramLoginRateLimit,
+    TelegramLoginUnavailable,
+)
 
 
 LOGGER = logging.getLogger("telegram-ai-userbot.dashboard")
@@ -45,6 +51,7 @@ SECURITY_HEADERS = {
 
 @dataclass(slots=True)
 class DashboardSession:
+    session_id: str
     csrf_token: str
     expires_at: float
 
@@ -364,14 +371,41 @@ DASHBOARD_HTML = """<!doctype html>
           <div class="row-between section-title">
             <div>
               <h2>新增 Telegram 帳號</h2>
-              <div class="hint">TG_SESSION_STRING 只會傳到伺服器並加密保存，不會再次顯示。</div>
+              <div class="hint">推薦直接用手機號碼與 Telegram 驗證碼登入；Session 會在伺服器自動加密保存。</div>
             </div>
             <button id="cancelAddButton" class="btn small">取消</button>
           </div>
           <form id="addForm" class="form-grid">
-            <label class="field full">TG_SESSION_STRING
-              <textarea id="addSession" required maxlength="12000" autocomplete="off"></textarea>
+            <label class="field">登入方式
+              <select id="addLoginMode">
+                <option value="phone" selected>手機號碼＋Telegram 驗證碼（推薦）</option>
+                <option value="session">TG_SESSION_STRING（進階）</option>
+              </select>
             </label>
+            <div id="addPhonePanel" class="field full">
+              <label class="field">Telegram 手機號碼
+                <input id="addPhone" type="tel" required maxlength="20" autocomplete="tel" placeholder="+886912345678">
+              </label>
+              <div id="addPhoneHint" class="hint">請包含國碼；驗證碼會由 Telegram 官方帳號或 App 傳送。</div>
+            </div>
+            <div id="addCodePanel" class="field full hidden">
+              <label class="field">Telegram 驗證碼
+                <input id="addCode" type="text" disabled maxlength="8" inputmode="numeric" autocomplete="one-time-code" placeholder="輸入 Telegram 傳送的數字">
+              </label>
+              <button id="restartPhoneLoginButton" class="btn small" type="button">取消並重新開始</button>
+            </div>
+            <div id="addPasswordPanel" class="field full hidden">
+              <label class="field">Telegram 兩步驗證密碼
+                <input id="addTwoFactorPassword" type="password" disabled maxlength="512" autocomplete="off">
+              </label>
+              <div class="hint">只有已啟用 Telegram 兩步驗證的帳號才需要。</div>
+            </div>
+            <div id="addSessionPanel" class="field full hidden">
+              <label class="field full">TG_SESSION_STRING
+                <textarea id="addSession" disabled maxlength="12000" autocomplete="off"></textarea>
+              </label>
+              <div class="hint">進階備援方式；內容只傳到伺服器並加密保存，不會再次顯示。</div>
+            </div>
             <label class="field">顯示名稱（可留白）
               <input id="addLabel" maxlength="60" autocomplete="off">
             </label>
@@ -401,7 +435,7 @@ DASHBOARD_HTML = """<!doctype html>
             </label>
             <label class="check field full"><input id="addEnabled" type="checkbox" checked> 建立後立即啟用</label>
             <div class="actions field full">
-              <button id="addSubmitButton" class="btn primary" type="submit">驗證並新增帳號</button>
+              <button id="addSubmitButton" class="btn primary" type="submit">傳送 Telegram 驗證碼</button>
             </div>
           </form>
           <div id="addNotice" class="notice"></div>
@@ -537,6 +571,8 @@ let selectedAccountId = "";
 let csrfToken = "";
 let formDirty = false;
 let groupsDirty = false;
+let telegramAuthId = "";
+let telegramAuthState = "idle";
 
 function showLogin() {
   $("app").classList.add("hidden");
@@ -578,7 +614,12 @@ async function api(path, options = {}) {
     showLogin();
     throw new Error("unauthorized");
   }
-  if (!response.ok) throw new Error(data.detail || `請求失敗（${response.status}）`);
+  if (!response.ok) {
+    const error = new Error(data.detail || `請求失敗（${response.status}）`);
+    error.status = response.status;
+    error.retryAfter = data.retry_after || 0;
+    throw error;
+  }
   if (data.csrf_token) csrfToken = data.csrf_token;
   return data;
 }
@@ -785,51 +826,198 @@ $("loginPassword").addEventListener("keydown", (event) => {
   if (event.key === "Enter") $("loginButton").click();
 });
 
+function collectNewAccountPayload() {
+  const payload = {
+    label: $("addLabel").value,
+    gender: $("addGender").value,
+    stage: $("addStage").value,
+    style: $("addStyle").value,
+    task_name: $("addTaskName").value,
+    task_info: $("addTaskInfo").value,
+    enabled: $("addEnabled").checked,
+  };
+  if ($("addBaseUrl").value.trim()) payload.ai_base_url = $("addBaseUrl").value;
+  if ($("addModel").value.trim()) payload.ai_model = $("addModel").value;
+  if ($("addApiKey").value) payload.ai_api_key = $("addApiKey").value;
+  return payload;
+}
+
+function setTelegramAuthState(state, phoneHint = "") {
+  telegramAuthState = state;
+  const phoneMode = $("addLoginMode").value === "phone";
+  const codeRequired = phoneMode && state === "code_required";
+  const passwordRequired = phoneMode && state === "password_required";
+  $("addPhone").disabled = !phoneMode || state !== "idle";
+  $("addPhone").required = phoneMode && state === "idle";
+  $("addCodePanel").classList.toggle("hidden", !codeRequired);
+  $("addCode").disabled = !codeRequired;
+  $("addCode").required = codeRequired;
+  $("addPasswordPanel").classList.toggle("hidden", !passwordRequired);
+  $("addTwoFactorPassword").disabled = !passwordRequired;
+  $("addTwoFactorPassword").required = passwordRequired;
+  if (phoneHint) $("addPhoneHint").textContent = `驗證碼已傳送至 ${phoneHint}`;
+  else if (state === "idle") {
+    $("addPhoneHint").textContent = "請包含國碼；驗證碼會由 Telegram 官方帳號或 App 傳送。";
+  }
+  $("addSubmitButton").textContent = {
+    idle: "傳送 Telegram 驗證碼",
+    code_required: "驗證並自動新增帳號",
+    password_required: "完成兩步驗證並新增帳號",
+    authorized: "儲存並啟動帳號",
+  }[state] || "繼續";
+}
+
+function updateAddLoginMode() {
+  const phoneMode = $("addLoginMode").value === "phone";
+  $("addPhonePanel").classList.toggle("hidden", !phoneMode);
+  $("addSessionPanel").classList.toggle("hidden", phoneMode);
+  $("addSession").disabled = phoneMode;
+  $("addSession").required = !phoneMode;
+  if (phoneMode) setTelegramAuthState(telegramAuthState);
+  else {
+    $("addPhone").disabled = true;
+    $("addPhone").required = false;
+    $("addCodePanel").classList.add("hidden");
+    $("addCode").disabled = true;
+    $("addCode").required = false;
+    $("addPasswordPanel").classList.add("hidden");
+    $("addTwoFactorPassword").disabled = true;
+    $("addTwoFactorPassword").required = false;
+    $("addSubmitButton").textContent = "驗證並新增帳號";
+  }
+}
+
+async function cancelTelegramAuth() {
+  const authId = telegramAuthId;
+  telegramAuthId = "";
+  telegramAuthState = "idle";
+  $("addCode").value = "";
+  $("addTwoFactorPassword").value = "";
+  if (authId) {
+    try {
+      await api("/api/telegram-auth/cancel", {
+        method: "POST",
+        body: JSON.stringify({auth_id: authId}),
+      });
+    } catch (_) {}
+  }
+  updateAddLoginMode();
+}
+
+function resetAddForm() {
+  telegramAuthId = "";
+  telegramAuthState = "idle";
+  $("addForm").reset();
+  $("addTaskName").value = "一般群聊互動";
+  $("addEnabled").checked = true;
+  $("addLoginMode").value = "phone";
+  updateAddLoginMode();
+}
+
+async function finishNewAccount(payload) {
+  const created = await api("/api/accounts", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  selectedAccountId = created.id;
+  resetAddForm();
+  $("addPanel").classList.add("hidden");
+  setNotice("addNotice", "");
+  await refresh();
+  setNotice("accountNotice", "帳號已登入、加密保存並啟動", "success");
+}
+
 $("showAddButton").addEventListener("click", () => {
   $("addPanel").classList.remove("hidden");
-  $("addSession").focus();
+  updateAddLoginMode();
+  if ($("addLoginMode").value === "phone") $("addPhone").focus();
+  else $("addSession").focus();
 });
 
-$("cancelAddButton").addEventListener("click", () => {
+$("cancelAddButton").addEventListener("click", async () => {
+  await cancelTelegramAuth();
   $("addPanel").classList.add("hidden");
   setNotice("addNotice", "");
 });
 
+$("addLoginMode").addEventListener("change", async () => {
+  await cancelTelegramAuth();
+  updateAddLoginMode();
+});
+
+$("restartPhoneLoginButton").addEventListener("click", async () => {
+  await cancelTelegramAuth();
+  setNotice(
+    "addNotice",
+    "登入流程已取消；Telegram 可能要求等待 60 秒後才能重新傳送驗證碼。",
+    "warning",
+  );
+  $("addPhone").focus();
+});
+
 $("addForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  setNotice("addNotice", "正在驗證 Telegram Session…", "warning");
   await runButton($("addSubmitButton"), async () => {
-    const payload = {
-      session_string: $("addSession").value,
-      label: $("addLabel").value,
-      gender: $("addGender").value,
-      stage: $("addStage").value,
-      style: $("addStyle").value,
-      task_name: $("addTaskName").value,
-      task_info: $("addTaskInfo").value,
-      enabled: $("addEnabled").checked,
-    };
-    if ($("addBaseUrl").value.trim()) payload.ai_base_url = $("addBaseUrl").value;
-    if ($("addModel").value.trim()) payload.ai_model = $("addModel").value;
-    if ($("addApiKey").value) payload.ai_api_key = $("addApiKey").value;
+    const payload = collectNewAccountPayload();
     try {
-      const created = await api("/api/accounts", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      selectedAccountId = created.id;
-      $("addForm").reset();
-      $("addTaskName").value = "一般群聊互動";
-      $("addEnabled").checked = true;
-      $("addPanel").classList.add("hidden");
-      setNotice("addNotice", "");
-      await refresh();
-      setNotice("accountNotice", "帳號已新增並完成安全儲存", "success");
+      if ($("addLoginMode").value === "session") {
+        setNotice("addNotice", "正在驗證 Telegram Session…", "warning");
+        payload.session_string = $("addSession").value;
+        await finishNewAccount(payload);
+        return;
+      }
+
+      if (telegramAuthState === "idle") {
+        setNotice("addNotice", "正在請 Telegram 傳送驗證碼…", "warning");
+        const result = await api("/api/telegram-auth/start", {
+          method: "POST",
+          body: JSON.stringify({phone: $("addPhone").value}),
+        });
+        telegramAuthId = result.auth_id;
+        setTelegramAuthState(result.status, result.phone_hint);
+        setNotice("addNotice", "驗證碼已傳送，請在 10 分鐘內完成登入。", "success");
+        $("addCode").focus();
+        return;
+      }
+
+      if (telegramAuthState === "code_required") {
+        setNotice("addNotice", "正在驗證 Telegram 驗證碼…", "warning");
+        const code = $("addCode").value;
+        $("addCode").value = "";
+        const result = await api("/api/telegram-auth/code", {
+          method: "POST",
+          body: JSON.stringify({auth_id: telegramAuthId, code}),
+        });
+        setTelegramAuthState(result.status, result.phone_hint);
+        if (result.status === "password_required") {
+          setNotice("addNotice", "此帳號已啟用兩步驗證，請輸入 Telegram 密碼。", "warning");
+          $("addTwoFactorPassword").focus();
+          return;
+        }
+      } else if (telegramAuthState === "password_required") {
+        setNotice("addNotice", "正在完成 Telegram 兩步驗證…", "warning");
+        const password = $("addTwoFactorPassword").value;
+        $("addTwoFactorPassword").value = "";
+        const result = await api("/api/telegram-auth/password", {
+          method: "POST",
+          body: JSON.stringify({auth_id: telegramAuthId, password}),
+        });
+        setTelegramAuthState(result.status, result.phone_hint);
+      }
+
+      if (telegramAuthState === "authorized") {
+        setNotice("addNotice", "登入成功，正在加密保存並啟動帳號…", "warning");
+        payload.telegram_auth_id = telegramAuthId;
+        await finishNewAccount(payload);
+      }
     } catch (error) {
+      if (error.status === 410) await cancelTelegramAuth();
       setNotice("addNotice", error.message, "error");
     }
   });
 });
+
+updateAddLoginMode();
 
 $("settingsForm").addEventListener("input", () => {
   formDirty = true;
@@ -1068,9 +1256,15 @@ class DashboardServer:
 
     def _prune_sessions(self) -> None:
         now = time.time()
+        expired_owner_ids: list[str] = []
         for token, session in list(self.sessions.items()):
             if session.expires_at <= now:
                 self.sessions.pop(token, None)
+                expired_owner_ids.append(session.session_id)
+        for owner_id in expired_owner_ids:
+            asyncio.create_task(
+                self.manager.cancel_phone_logins_for_owner(owner_id)
+            )
 
     def _get_session(self, request: Request) -> DashboardSession | None:
         self._prune_sessions()
@@ -1157,6 +1351,38 @@ class DashboardServer:
         ) -> JSONResponse:
             return JSONResponse({"detail": str(exc)}, status_code=409)
 
+        @web.exception_handler(TelegramLoginConflict)
+        async def telegram_login_conflict(
+            request: Request,
+            exc: TelegramLoginConflict,
+        ) -> JSONResponse:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
+
+        @web.exception_handler(TelegramLoginExpired)
+        async def telegram_login_expired(
+            request: Request,
+            exc: TelegramLoginExpired,
+        ) -> JSONResponse:
+            return JSONResponse({"detail": str(exc)}, status_code=410)
+
+        @web.exception_handler(TelegramLoginRateLimit)
+        async def telegram_login_rate_limit(
+            request: Request,
+            exc: TelegramLoginRateLimit,
+        ) -> JSONResponse:
+            return JSONResponse(
+                {"detail": str(exc), "retry_after": exc.retry_after},
+                status_code=429,
+                headers={"Retry-After": str(exc.retry_after)},
+            )
+
+        @web.exception_handler(TelegramLoginUnavailable)
+        async def telegram_login_unavailable(
+            request: Request,
+            exc: TelegramLoginUnavailable,
+        ) -> JSONResponse:
+            return JSONResponse({"detail": str(exc)}, status_code=503)
+
         @web.exception_handler(ValueError)
         async def invalid_value(
             request: Request,
@@ -1200,6 +1426,7 @@ class DashboardServer:
             session_token = secrets.token_urlsafe(32)
             csrf_token = secrets.token_urlsafe(32)
             self.sessions[session_token] = DashboardSession(
+                session_id=secrets.token_urlsafe(24),
                 csrf_token=csrf_token,
                 expires_at=time.time() + SESSION_TTL_SECONDS,
             )
@@ -1220,6 +1447,7 @@ class DashboardServer:
             session, blocked = self._require_action(request)
             if blocked is not None or session is None:
                 return blocked  # type: ignore[return-value]
+            await self.manager.cancel_phone_logins_for_owner(session.session_id)
             token = request.cookies.get(COOKIE_NAME, "")
             self.sessions.pop(token, None)
             response = JSONResponse({"ok": True})
@@ -1244,11 +1472,68 @@ class DashboardServer:
 
         @web.post("/api/accounts")
         async def create_account(request: Request) -> JSONResponse:
-            _, blocked = self._require_action(request)
-            if blocked is not None:
+            session, blocked = self._require_action(request)
+            if blocked is not None or session is None:
                 return blocked
             payload = await self._read_payload(request)
-            return JSONResponse(await self.manager.create_account(payload), status_code=201)
+            return JSONResponse(
+                await self.manager.create_account(payload, session.session_id),
+                status_code=201,
+            )
+
+        @web.post("/api/telegram-auth/start")
+        async def telegram_auth_start(request: Request) -> JSONResponse:
+            session, blocked = self._require_action(request)
+            if blocked is not None or session is None:
+                return blocked  # type: ignore[return-value]
+            payload = await self._read_payload(request)
+            return JSONResponse(
+                await self.manager.start_phone_login(
+                    session.session_id,
+                    payload.get("phone"),
+                ),
+                status_code=201,
+            )
+
+        @web.post("/api/telegram-auth/code")
+        async def telegram_auth_code(request: Request) -> JSONResponse:
+            session, blocked = self._require_action(request)
+            if blocked is not None or session is None:
+                return blocked  # type: ignore[return-value]
+            payload = await self._read_payload(request)
+            return JSONResponse(
+                await self.manager.submit_phone_code(
+                    session.session_id,
+                    payload.get("auth_id"),
+                    payload.get("code"),
+                )
+            )
+
+        @web.post("/api/telegram-auth/password")
+        async def telegram_auth_password(request: Request) -> JSONResponse:
+            session, blocked = self._require_action(request)
+            if blocked is not None or session is None:
+                return blocked  # type: ignore[return-value]
+            payload = await self._read_payload(request)
+            return JSONResponse(
+                await self.manager.submit_phone_password(
+                    session.session_id,
+                    payload.get("auth_id"),
+                    payload.get("password"),
+                )
+            )
+
+        @web.post("/api/telegram-auth/cancel")
+        async def telegram_auth_cancel(request: Request) -> JSONResponse:
+            session, blocked = self._require_action(request)
+            if blocked is not None or session is None:
+                return blocked  # type: ignore[return-value]
+            payload = await self._read_payload(request)
+            await self.manager.cancel_phone_login(
+                session.session_id,
+                payload.get("auth_id"),
+            )
+            return JSONResponse({"ok": True})
 
         @web.put("/api/accounts/{account_id}")
         async def update_account(account_id: str, request: Request) -> JSONResponse:

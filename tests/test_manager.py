@@ -13,6 +13,7 @@ from app.crypto import SecretBox
 from app.manager import AccountManager
 from app.memory import MemoryStore
 from app.security import safe_error
+from app.telegram_login import VerifiedTelegramSession
 
 
 def settings(path: str, key: str) -> Settings:
@@ -52,6 +53,76 @@ def settings(path: str, key: str) -> Settings:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_phone_authorized_session_is_saved_without_reverification(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            secrets = SecretBox(key)
+
+            class FakeLogin:
+                completed = False
+                released = False
+
+                async def claim_authorized(
+                    self,
+                    owner_id: str,
+                    auth_id: object,
+                ) -> VerifiedTelegramSession:
+                    self.assert_values = (owner_id, auth_id)
+                    return VerifiedTelegramSession(
+                        session_ciphertext=secrets.encrypt("phone-login-session"),
+                        session_fingerprint=secrets.fingerprint("phone-login-session"),
+                        telegram_user_id=776655,
+                        telegram_name="手機登入帳號",
+                    )
+
+                async def release_claim(self, owner_id: str, auth_id: object) -> None:
+                    self.released = True
+
+                async def complete(self, owner_id: str, auth_id: object) -> None:
+                    self.completed = True
+
+                async def close(self) -> None:
+                    return None
+
+            login = FakeLogin()
+            manager = AccountManager(
+                config,
+                store,
+                secrets,
+                telegram_login=login,  # type: ignore[arg-type]
+            )
+            await store.open()
+
+            async def must_not_verify(session: str) -> tuple[int, str]:
+                raise AssertionError("phone login must not reconnect for verification")
+
+            manager.verify_session = must_not_verify  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "telegram_auth_id": "opaque-flow",
+                    "label": "手機帳號",
+                    "enabled": False,
+                    "gender": "female",
+                    "stage": "observer",
+                    "task_name": "自然群聊",
+                },
+                owner_id="dashboard-owner",
+            )
+            stored = await store.get_account(str(created["id"]))
+            self.assertEqual(stored.telegram_user_id, 776655)
+            self.assertEqual(
+                secrets.decrypt(stored.session_ciphertext),
+                "phone-login-session",
+            )
+            self.assertTrue(login.completed)
+            self.assertFalse(login.released)
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
     def test_legacy_import_survives_temporary_telegram_failure(self) -> None:
         async def scenario(path: str) -> None:
             key = Fernet.generate_key().decode()

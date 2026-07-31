@@ -27,6 +27,7 @@ from .config import Settings
 from .crypto import SecretBox
 from .memory import MemoryStore
 from .security import safe_error
+from .telegram_login import TelegramLoginService, VerifiedTelegramSession
 from .worker import AccountWorker
 
 
@@ -47,10 +48,17 @@ class AccountManager:
         settings: Settings,
         store: MemoryStore,
         secrets: SecretBox,
+        telegram_login: TelegramLoginService | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
         self.secrets = secrets
+        self.telegram_login = telegram_login or TelegramLoginService(
+            settings.tg_api_id,
+            settings.tg_api_hash,
+            secrets,
+            max_flows=min(settings.max_accounts * 2, 20),
+        )
         self.workers: dict[str, AccountWorker] = {}
         self.worker_tasks: dict[str, asyncio.Task[None]] = {}
         self.start_errors: dict[str, str] = {}
@@ -229,16 +237,87 @@ class AccountManager:
             await self.start_account(account_id)
         return await self.account_status(account_id)
 
-    async def create_account(self, payload: dict[str, Any]) -> dict[str, object]:
+    async def start_phone_login(
+        self,
+        owner_id: str,
+        phone: object,
+    ) -> dict[str, object]:
+        return await self.telegram_login.start(owner_id, phone)
+
+    async def submit_phone_code(
+        self,
+        owner_id: str,
+        auth_id: object,
+        code: object,
+    ) -> dict[str, object]:
+        return await self.telegram_login.submit_code(owner_id, auth_id, code)
+
+    async def submit_phone_password(
+        self,
+        owner_id: str,
+        auth_id: object,
+        password: object,
+    ) -> dict[str, object]:
+        return await self.telegram_login.submit_password(
+            owner_id,
+            auth_id,
+            password,
+        )
+
+    async def cancel_phone_login(self, owner_id: str, auth_id: object) -> None:
+        await self.telegram_login.cancel(owner_id, auth_id)
+
+    async def cancel_phone_logins_for_owner(self, owner_id: str) -> int:
+        return await self.telegram_login.cancel_owner(owner_id)
+
+    async def create_account(
+        self,
+        payload: dict[str, Any],
+        owner_id: str | None = None,
+    ) -> dict[str, object]:
         if await self.store.count_accounts() >= self.settings.max_accounts:
             raise ValueError(f"最多可管理 {self.settings.max_accounts} 個帳號")
         session_string = clean_text(
             payload.get("session_string"),
             "session_string",
             maximum=12000,
-            required=True,
         )
+        auth_id = clean_text(
+            payload.get("telegram_auth_id"),
+            "telegram_auth_id",
+            maximum=200,
+        )
+        if bool(session_string) == bool(auth_id):
+            raise ValueError(
+                "請使用手機驗證登入，或提供一個 TG_SESSION_STRING"
+            )
+
+        if auth_id:
+            if not owner_id:
+                raise ValueError("手機驗證登入只能從控制台完成")
+            verified = await self.telegram_login.claim_authorized(owner_id, auth_id)
+            try:
+                result = await self._create_verified_account(payload, verified)
+            except Exception:
+                await self.telegram_login.release_claim(owner_id, auth_id)
+                raise
+            await self.telegram_login.complete(owner_id, auth_id)
+            return result
+
         telegram_user_id, telegram_name = await self.verify_session(session_string)
+        verified = VerifiedTelegramSession(
+            session_ciphertext=self.secrets.encrypt(session_string),
+            session_fingerprint=self.secrets.fingerprint(session_string),
+            telegram_user_id=telegram_user_id,
+            telegram_name=telegram_name,
+        )
+        return await self._create_verified_account(payload, verified)
+
+    async def _create_verified_account(
+        self,
+        payload: dict[str, Any],
+        verified: VerifiedTelegramSession,
+    ) -> dict[str, object]:
         gender, stage = clean_role(
             payload.get("gender", "male"),
             payload.get("stage", "observer"),
@@ -248,15 +327,15 @@ class AccountManager:
         record = AccountRecord(
             id=f"acct_{uuid.uuid4().hex[:12]}",
             label=clean_text(
-                payload.get("label") or telegram_name,
+                payload.get("label") or verified.telegram_name,
                 "label",
                 maximum=60,
                 required=True,
             ),
-            session_ciphertext=self.secrets.encrypt(session_string),
-            session_fingerprint=self.secrets.fingerprint(session_string),
-            telegram_user_id=telegram_user_id,
-            telegram_name=telegram_name,
+            session_ciphertext=verified.session_ciphertext,
+            session_fingerprint=verified.session_fingerprint,
+            telegram_user_id=verified.telegram_user_id,
+            telegram_name=verified.telegram_name,
             enabled=clean_bool(payload.get("enabled", True), "enabled"),
             gender=gender,
             stage=stage,
@@ -839,6 +918,7 @@ class AccountManager:
             await asyncio.gather(self._cleanup_task, return_exceptions=True)
         for account_id in list(self.workers):
             await self.stop_account(account_id)
+        await self.telegram_login.close()
         self._retry_attempts.clear()
         self._next_retry_at.clear()
         await self.store.close()

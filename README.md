@@ -6,6 +6,8 @@ Telegram 連線、固定角色、群組範圍、任務說明、AI 模型與 24 �
 ## 主要功能
 
 - 同一個 Railway Service 同時啟動多個 Telegram 帳號。
+- 控制台直接輸入手機號碼、Telegram 驗證碼及必要的兩步驗證密碼，
+  自動建立並加密保存 Session。
 - 控制台新增帳號、啟用、停用、重連及查看連線錯誤。
 - 四種固定角色：男性／女性老成員、男性／女性觀望成員。
 - 每個帳號可編輯語氣、任務名稱、任務說明及回覆行為。
@@ -64,12 +66,19 @@ Telegram Session 與 API Key 將無法解密。
 
 ## 新增多個帳號
 
-1. 使用 `scripts/generate_session.py` 為每個 Telegram 帳號各自產生
-   `TG_SESSION_STRING`。
-2. 登入網頁控制台，點選「新增帳號」。
-3. 貼入該帳號的 Session String，設定名稱、角色、任務與模型。
-4. 儲存後控制台會先驗證 Telegram Session，再加密保存並啟動帳號。
-5. 不得把同一個 Telegram 帳號重複加入；系統會檢查 Session 與 Telegram ID。
+1. 登入網頁控制台，點選「新增帳號」。
+2. 輸入包含國碼的 Telegram 手機號碼，例如 `+886912345678`。
+3. 輸入 Telegram 官方帳號或 App 傳送的驗證碼。
+4. 如果帳號已啟用兩步驗證，再輸入 Telegram 兩步驗證密碼。
+5. 設定名稱、角色、任務與模型；控制台會自動產生 Session、加密保存並啟動帳號。
+
+電話、驗證碼、兩步驗證密碼與 `phone_code_hash` 只會在伺服器記憶體短暫存在，
+不會寫入 SQLite、日誌或瀏覽器儲存空間。未完成流程 10 分鐘後自動失效。
+
+如果電話驗證暫時不可用，仍可在「登入方式」選擇 `TG_SESSION_STRING（進階）`，
+使用 `scripts/generate_session.py` 產生後貼入。
+
+不得把同一個 Telegram 帳號重複加入；系統會檢查 Session 與 Telegram ID。
 
 Session String 與 API Key 都不會由任何 GET API、HTML、狀態或日誌回傳。
 

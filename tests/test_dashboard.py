@@ -39,8 +39,12 @@ class FakeAccountManager:
             "accounts": [dict(self.account)],
         }
 
-    async def create_account(self, payload: dict[str, Any]) -> dict[str, object]:
-        self.calls.append(("create", dict(payload)))
+    async def create_account(
+        self,
+        payload: dict[str, Any],
+        owner_id: str | None = None,
+    ) -> dict[str, object]:
+        self.calls.append(("create", (dict(payload), owner_id)))
         self.account.update(
             {
                 "label": payload["label"],
@@ -50,6 +54,57 @@ class FakeAccountManager:
             }
         )
         return dict(self.account)
+
+    async def start_phone_login(
+        self,
+        owner_id: str,
+        phone: object,
+    ) -> dict[str, object]:
+        self.calls.append(("phone_start", (owner_id, phone)))
+        return {
+            "auth_id": "opaque-auth-id",
+            "status": "code_required",
+            "phone_hint": "+886•••••678",
+            "expires_in": 600,
+            "resend_after": 60,
+        }
+
+    async def submit_phone_code(
+        self,
+        owner_id: str,
+        auth_id: object,
+        code: object,
+    ) -> dict[str, object]:
+        self.calls.append(("phone_code", (owner_id, auth_id, code)))
+        return {
+            "auth_id": str(auth_id),
+            "status": "password_required",
+            "phone_hint": "+886•••••678",
+            "expires_in": 500,
+            "resend_after": 60,
+        }
+
+    async def submit_phone_password(
+        self,
+        owner_id: str,
+        auth_id: object,
+        password: object,
+    ) -> dict[str, object]:
+        self.calls.append(("phone_password", (owner_id, auth_id, password)))
+        return {
+            "auth_id": str(auth_id),
+            "status": "authorized",
+            "phone_hint": "+886•••••678",
+            "expires_in": 300,
+            "resend_after": 60,
+        }
+
+    async def cancel_phone_login(self, owner_id: str, auth_id: object) -> None:
+        self.calls.append(("phone_cancel", (owner_id, auth_id)))
+
+    async def cancel_phone_logins_for_owner(self, owner_id: str) -> int:
+        self.calls.append(("phone_cancel_owner", owner_id))
+        return 1
 
     async def update_account(
         self,
@@ -149,6 +204,50 @@ class DashboardTests(unittest.TestCase):
                 403,
             )
             headers = {"X-CSRF-Token": csrf}
+
+            self.assertEqual(
+                client.post(
+                    "/api/telegram-auth/start",
+                    json={"phone": "+886912345678"},
+                ).status_code,
+                403,
+            )
+            phone_started = client.post(
+                "/api/telegram-auth/start",
+                headers=headers,
+                json={"phone": "+886912345678"},
+            )
+            self.assertEqual(phone_started.status_code, 201)
+            self.assertEqual(phone_started.json()["status"], "code_required")
+            self.assertNotIn("+886912345678", phone_started.text)
+
+            code_result = client.post(
+                "/api/telegram-auth/code",
+                headers=headers,
+                json={"auth_id": "opaque-auth-id", "code": "12345"},
+            )
+            self.assertEqual(code_result.status_code, 200)
+            self.assertEqual(code_result.json()["status"], "password_required")
+            self.assertNotIn("12345", code_result.text)
+
+            password_result = client.post(
+                "/api/telegram-auth/password",
+                headers=headers,
+                json={
+                    "auth_id": "opaque-auth-id",
+                    "password": "telegram-2fa-secret",
+                },
+            )
+            self.assertEqual(password_result.status_code, 200)
+            self.assertEqual(password_result.json()["status"], "authorized")
+            self.assertNotIn("telegram-2fa-secret", password_result.text)
+
+            cancelled = client.post(
+                "/api/telegram-auth/cancel",
+                headers=headers,
+                json={"auth_id": "opaque-auth-id"},
+            )
+            self.assertEqual(cancelled.status_code, 200)
 
             created = client.post(
                 "/api/accounts",
