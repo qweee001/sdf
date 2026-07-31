@@ -298,10 +298,17 @@ class AccountManager:
             verified = await self.telegram_login.claim_authorized(owner_id, auth_id)
             try:
                 result = await self._create_verified_account(payload, verified)
+            except asyncio.CancelledError:
+                await asyncio.shield(
+                    self.telegram_login.release_claim(owner_id, auth_id)
+                )
+                raise
             except Exception:
                 await self.telegram_login.release_claim(owner_id, auth_id)
                 raise
-            await self.telegram_login.complete(owner_id, auth_id)
+            await asyncio.shield(
+                self.telegram_login.complete(owner_id, auth_id)
+            )
             return result
 
         telegram_user_id, telegram_name = await self.verify_session(session_string)

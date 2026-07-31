@@ -333,6 +333,66 @@ class TelegramLoginTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_cancelled_start_disconnects_unregistered_client(self) -> None:
+        async def scenario() -> None:
+            entered = asyncio.Event()
+            never_finishes = asyncio.Event()
+
+            class SlowClient(FakeTelegramClient):
+                async def send_code_request(self, phone: str) -> object:
+                    self.sent_phone = phone
+                    entered.set()
+                    await never_finishes.wait()
+                    return SimpleNamespace(phone_code_hash="temporary-hash")
+
+            client = SlowClient()
+            service, _ = self.make_service(client)
+            starting = asyncio.create_task(
+                service.start("owner", "+886990123456")
+            )
+            await entered.wait()
+            starting.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await starting
+
+            self.assertEqual(service.pending, {})
+            self.assertFalse(client.is_connected())
+            await service.close()
+
+        asyncio.run(scenario())
+
+    def test_cancelled_authorization_closes_pending_flow(self) -> None:
+        async def scenario() -> None:
+            entered = asyncio.Event()
+            never_finishes = asyncio.Event()
+
+            class SlowClient(FakeTelegramClient):
+                async def get_me(self) -> object:
+                    entered.set()
+                    await never_finishes.wait()
+                    return await super().get_me()
+
+            client = SlowClient()
+            service, _ = self.make_service(client)
+            started = await service.start("owner", "+886901234567")
+            authorizing = asyncio.create_task(
+                service.submit_code(
+                    "owner",
+                    started["auth_id"],
+                    "12345",
+                )
+            )
+            await entered.wait()
+            authorizing.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await authorizing
+
+            self.assertNotIn(started["auth_id"], service.pending)
+            self.assertFalse(client.is_connected())
+            await service.close()
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()

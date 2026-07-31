@@ -53,6 +53,76 @@ def settings(path: str, key: str) -> Settings:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_cancelled_phone_account_creation_releases_login_claim(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            secrets = SecretBox(key)
+            entered = asyncio.Event()
+            never_finishes = asyncio.Event()
+
+            class FakeLogin:
+                released = False
+
+                async def claim_authorized(
+                    self,
+                    owner_id: str,
+                    auth_id: object,
+                ) -> VerifiedTelegramSession:
+                    return VerifiedTelegramSession(
+                        session_ciphertext=secrets.encrypt("phone-login-session"),
+                        session_fingerprint=secrets.fingerprint("phone-login-session"),
+                        telegram_user_id=112233,
+                        telegram_name="取消測試帳號",
+                    )
+
+                async def release_claim(self, owner_id: str, auth_id: object) -> None:
+                    self.released = True
+
+                async def complete(self, owner_id: str, auth_id: object) -> None:
+                    raise AssertionError("cancelled create must not complete")
+
+                async def close(self) -> None:
+                    return None
+
+            login = FakeLogin()
+            manager = AccountManager(
+                config,
+                store,
+                secrets,
+                telegram_login=login,  # type: ignore[arg-type]
+            )
+            await store.open()
+
+            async def slow_create(
+                payload: dict[str, object],
+                verified: VerifiedTelegramSession,
+            ) -> dict[str, object]:
+                entered.set()
+                await never_finishes.wait()
+                return {}
+
+            manager._create_verified_account = slow_create  # type: ignore[method-assign]
+            creating = asyncio.create_task(
+                manager.create_account(
+                    {
+                        "telegram_auth_id": "opaque-flow",
+                        "task_name": "自然群聊",
+                    },
+                    owner_id="dashboard-owner",
+                )
+            )
+            await entered.wait()
+            creating.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await creating
+            self.assertTrue(login.released)
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
     def test_phone_authorized_session_is_saved_without_reverification(self) -> None:
         async def scenario(path: str) -> None:
             key = Fernet.generate_key().decode()

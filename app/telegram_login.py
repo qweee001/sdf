@@ -270,55 +270,67 @@ class TelegramLoginService:
                 self.api_hash,
             )
             try:
-                await client.connect()
-                sent = await client.send_code_request(phone)
-            except FloodWaitError as exc:
-                await self._disconnect(client)
-                raise TelegramLoginRateLimit(
-                    "Telegram 要求稍後再傳送驗證碼",
-                    int(exc.seconds),
-                ) from None
-            except PhoneNumberFloodError:
-                await self._disconnect(client)
-                raise TelegramLoginRateLimit(
-                    "這個號碼的驗證要求過多，請稍後再試",
-                    START_COOLDOWN_SECONDS,
-                ) from None
-            except PhoneNumberInvalidError:
-                await self._disconnect(client)
-                raise ValueError("手機號碼格式無效，請確認國碼與號碼") from None
-            except PhoneNumberBannedError:
-                await self._disconnect(client)
-                raise ValueError("這個 Telegram 手機號碼目前無法登入") from None
-            except Exception:
-                await self._disconnect(client)
-                raise TelegramLoginUnavailable(
-                    "Telegram 暫時無法傳送驗證碼，請稍後再試"
-                ) from None
+                try:
+                    await client.connect()
+                    sent = await client.send_code_request(phone)
+                except FloodWaitError as exc:
+                    await self._disconnect(client)
+                    raise TelegramLoginRateLimit(
+                        "Telegram 要求稍後再傳送驗證碼",
+                        int(exc.seconds),
+                    ) from None
+                except PhoneNumberFloodError:
+                    await self._disconnect(client)
+                    raise TelegramLoginRateLimit(
+                        "這個號碼的驗證要求過多，請稍後再試",
+                        START_COOLDOWN_SECONDS,
+                    ) from None
+                except PhoneNumberInvalidError:
+                    await self._disconnect(client)
+                    raise ValueError(
+                        "手機號碼格式無效，請確認國碼與號碼"
+                    ) from None
+                except PhoneNumberBannedError:
+                    await self._disconnect(client)
+                    raise ValueError(
+                        "這個 Telegram 手機號碼目前無法登入"
+                    ) from None
+                except Exception:
+                    await self._disconnect(client)
+                    raise TelegramLoginUnavailable(
+                        "Telegram 暫時無法傳送驗證碼，請稍後再試"
+                    ) from None
 
-            auth_id = secrets.token_urlsafe(32)
-            pending = PendingTelegramLogin(
-                auth_id=auth_id,
-                owner_id=owner,
-                phone=phone,
-                phone_hint=self._mask_phone(phone),
-                phone_code_hash=str(sent.phone_code_hash),
-                client=client,
-                created_at=now,
-                expires_at=now + FLOW_TTL_SECONDS,
-            )
-            async with self._dict_lock:
-                cancelled = self.owner_generation.get(owner, 0) != generation
-                at_capacity = len(self.pending) >= self.max_flows
-                if not cancelled and not at_capacity:
-                    self.pending[auth_id] = pending
-            if cancelled:
-                await self._disconnect(client)
-                raise TelegramLoginExpired("登入流程已取消，請重新取得驗證碼")
-            if at_capacity:
-                await self._disconnect(client)
-                raise TelegramLoginConflict("目前登入流程已滿，請稍後再試")
-            return self._public(pending)
+                auth_id = secrets.token_urlsafe(32)
+                pending = PendingTelegramLogin(
+                    auth_id=auth_id,
+                    owner_id=owner,
+                    phone=phone,
+                    phone_hint=self._mask_phone(phone),
+                    phone_code_hash=str(sent.phone_code_hash),
+                    client=client,
+                    created_at=now,
+                    expires_at=now + FLOW_TTL_SECONDS,
+                )
+                async with self._dict_lock:
+                    cancelled = self.owner_generation.get(owner, 0) != generation
+                    at_capacity = len(self.pending) >= self.max_flows
+                    if not cancelled and not at_capacity:
+                        self.pending[auth_id] = pending
+                if cancelled:
+                    await self._disconnect(client)
+                    raise TelegramLoginExpired(
+                        "登入流程已取消，請重新取得驗證碼"
+                    )
+                if at_capacity:
+                    await self._disconnect(client)
+                    raise TelegramLoginConflict(
+                        "目前登入流程已滿，請稍後再試"
+                    )
+                return self._public(pending)
+            except asyncio.CancelledError:
+                await asyncio.shield(self._disconnect(client))
+                raise
 
     async def _get(
         self,
@@ -374,6 +386,9 @@ class TelegramLoginService:
     ) -> None:
         try:
             await self._authorize(pending)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._remove(pending.auth_id, pending))
+            raise
         except Exception:
             await self._remove(pending.auth_id, pending)
             raise TelegramLoginUnavailable(
