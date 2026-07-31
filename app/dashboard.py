@@ -220,6 +220,8 @@ DASHBOARD_HTML = """<!doctype html>
       max-height: 38px;
       resize: none;
       line-height: 1.35;
+      overflow-y: auto;
+      overscroll-behavior: contain;
     }
     .manual-send-row select:focus, .manual-send-row textarea:focus {
       border-color: var(--accent);
@@ -257,21 +259,36 @@ DASHBOARD_HTML = """<!doctype html>
     .dot.online { background: var(--accent); box-shadow: 0 0 14px rgba(184, 244, 109, .65); }
     .dot.error { background: var(--danger); }
     .content { min-width: 0; }
-    .panel { padding: 20px; margin-bottom: 14px; }
-    .collapsible-panel { padding-top: 12px; }
+    .panel { padding: 14px; margin-bottom: 10px; }
+    .collapsible-panel { padding-top: 0; padding-bottom: 0; }
     .collapse-toggle {
       width: 100%;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      padding: 7px 2px 12px;
+      padding: 7px 2px;
       color: inherit;
       border: 0;
       background: transparent;
       text-align: left;
       font-size: 16px;
       font-weight: 800;
+    }
+    .collapse-toggle-copy {
+      min-width: 0;
+      display: grid;
+      gap: 3px;
+    }
+    .account-compact-summary {
+      max-width: min(72vw, 820px);
+      overflow: hidden;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .collapse-toggle-icon {
       color: var(--muted);
@@ -281,7 +298,19 @@ DASHBOARD_HTML = """<!doctype html>
     .collapse-toggle[aria-expanded="true"] .collapse-toggle-icon {
       transform: rotate(180deg);
     }
+    .collapse-toggle[aria-expanded="true"] .account-compact-summary { display: none; }
     .collapsible-content[hidden] { display: none; }
+    .account-section {
+      padding: 14px 2px;
+      border-top: 1px solid var(--line);
+    }
+    .account-section:first-child {
+      padding-top: 4px;
+      border-top: 0;
+    }
+    .account-section:last-child { padding-bottom: 10px; }
+    .account-section > h3 { margin-bottom: 7px; }
+    .account-section.danger-zone { border-top-color: #553b35; }
     .account-head {
       display: flex;
       justify-content: space-between;
@@ -306,18 +335,18 @@ DASHBOARD_HTML = """<!doctype html>
     .btn:disabled { opacity: .5; cursor: wait; }
     .status-line {
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-      gap: 9px;
-      margin-top: 18px;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 7px;
+      margin-top: 12px;
     }
-    .metric { padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: #151711; }
+    .metric { padding: 9px; border: 1px solid var(--line); border-radius: 12px; background: #151711; }
     .metric span { display: block; color: var(--muted); font-size: 12px; }
     .metric strong { display: block; margin-top: 4px; font-size: 17px; overflow-wrap: anywhere; }
-    .section-title { margin-bottom: 16px; }
+    .section-title { margin-bottom: 12px; }
     .form-grid {
       display: grid;
       grid-template-columns: repeat(12, minmax(0, 1fr));
-      gap: 12px;
+      gap: 9px 10px;
     }
     .field { grid-column: span 6; display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
     .field.third { grid-column: span 4; }
@@ -325,14 +354,14 @@ DASHBOARD_HTML = """<!doctype html>
     .field.full { grid-column: 1 / -1; }
     .field input, .field select, .field textarea {
       width: 100%;
-      padding: 11px 12px;
+      padding: 9px 10px;
       color: #fff;
       border: 1px solid var(--line);
       border-radius: 10px;
       outline: none;
       background: #11130f;
     }
-    .field textarea { min-height: 90px; resize: vertical; line-height: 1.5; }
+    .field textarea { min-height: 64px; resize: vertical; line-height: 1.4; }
     .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); }
     .check {
       display: flex;
@@ -352,12 +381,12 @@ DASHBOARD_HTML = """<!doctype html>
     .notice.error { color: var(--danger); }
     .notice.success { color: var(--accent); }
     .notice.warning { color: var(--warning); }
-    .divider { height: 1px; margin: 20px 0; background: var(--line); }
+    .divider { height: 1px; margin: 14px 0; background: var(--line); }
     .group-list {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
-      margin: 12px 0;
+      margin: 9px 0;
     }
     .group-item {
       display: flex;
@@ -375,7 +404,7 @@ DASHBOARD_HTML = """<!doctype html>
       grid-template-columns: minmax(0, 1fr) 130px auto;
       gap: 9px;
       align-items: end;
-      margin: 14px 0;
+      margin: 9px 0;
     }
     .conversation-list {
       display: grid;
@@ -564,7 +593,7 @@ DASHBOARD_HTML = """<!doctype html>
             <label class="field">角色風格
               <input id="addStyle" maxlength="500" placeholder="例如：自然、穩重、偶爾幽默">
             </label>
-            <label class="field">任務名稱
+            <label class="field full">任務名稱
               <input id="addTaskName" maxlength="120" value="一般群聊互動">
             </label>
             <label class="field full">任務資訊
@@ -596,7 +625,8 @@ DASHBOARD_HTML = """<!doctype html>
         <article id="emptyPanel" class="panel empty">請從左側選擇帳號，或新增第一個帳號。</article>
 
         <div id="accountPanels" class="hidden">
-          <article class="panel collapsible-panel" data-collapsible data-panel-title="帳號概覽" data-expanded="true">
+          <article class="panel collapsible-panel account-overview-accordion" data-collapsible data-panel-title="帳號概覽" data-expanded="false">
+            <section class="account-section account-section-primary">
             <div class="account-head">
               <div>
                 <div class="eyebrow" id="selectedState">—</div>
@@ -618,9 +648,9 @@ DASHBOARD_HTML = """<!doctype html>
               <div class="metric"><span>錯誤</span><strong id="metricErrors">0</strong></div>
             </div>
             <div id="accountNotice" class="notice"></div>
-          </article>
+            </section>
 
-          <article class="panel collapsible-panel" data-collapsible data-panel-title="角色、任務與模型" data-expanded="false">
+            <section class="account-section">
             <h3>角色、任務與模型</h3>
             <form id="settingsForm" class="form-grid">
               <label class="field">帳號名稱
@@ -635,7 +665,7 @@ DASHBOARD_HTML = """<!doctype html>
               <label class="field full">角色風格
                 <textarea id="editStyle" maxlength="500"></textarea>
               </label>
-              <label class="field">任務名稱
+              <label class="field full">任務名稱
                 <input id="editTaskName" required maxlength="120">
               </label>
               <label class="field full">任務資訊
@@ -689,10 +719,10 @@ DASHBOARD_HTML = """<!doctype html>
               <label class="field">語音聲線
                 <input id="editVoiceName" maxlength="120" autocomplete="off">
               </label>
-              <label class="field quarter">語音每日上限
+              <label class="field">語音每日上限
                 <input id="editVoiceDailyLimit" type="number" min="0" max="1000" step="1" required>
               </label>
-              <label class="field quarter">語音冷卻時間（秒）
+              <label class="field">語音冷卻時間（秒）
                 <input id="editVoiceCooldown" type="number" min="0" max="604800" step="1" required>
               </label>
               <label class="field full">語音允許群組 ID
@@ -738,10 +768,10 @@ DASHBOARD_HTML = """<!doctype html>
               <label class="field quarter">最短主動間隔（分鐘）
                 <input id="editIntervalMin" type="number" min="1" max="1440" step="1" required>
               </label>
-              <label class="field quarter">最長主動間隔（分鐘）
+              <label class="field">最長主動間隔（分鐘）
                 <input id="editIntervalMax" type="number" min="1" max="1440" step="1" required>
               </label>
-              <label class="field quarter">每日主動發言上限
+              <label class="field">每日主動發言上限
                 <input id="editProactiveMax" type="number" min="0" max="200" step="1" required>
               </label>
               <div class="actions field full">
@@ -749,9 +779,9 @@ DASHBOARD_HTML = """<!doctype html>
               </div>
             </form>
             <div id="settingsNotice" class="notice"></div>
-          </article>
+            </section>
 
-          <article class="panel collapsible-panel" data-collapsible data-panel-title="媒體任務狀態" data-expanded="false">
+            <section class="account-section">
             <div class="row-between">
               <div>
                 <h3>媒體任務狀態</h3>
@@ -770,9 +800,9 @@ DASHBOARD_HTML = """<!doctype html>
             </div>
             <div id="mediaJobsNotice" class="notice"></div>
             <div id="mediaJobList" class="media-job-list"></div>
-          </article>
+            </section>
 
-          <article class="panel collapsible-panel" data-collapsible data-panel-title="回覆群組" data-expanded="false">
+            <section class="account-section">
             <div class="row-between">
               <div>
                 <h3>回覆群組</h3>
@@ -785,9 +815,9 @@ DASHBOARD_HTML = """<!doctype html>
               <button id="saveGroupsButton" class="btn primary">儲存群組範圍</button>
             </div>
             <div id="groupsNotice" class="notice"></div>
-          </article>
+            </section>
 
-          <article class="panel collapsible-panel" data-collapsible data-panel-title="聊天記錄" data-expanded="false">
+            <section class="account-section">
             <div>
               <h3>聊天記錄</h3>
               <div class="hint">顯示此帳號 24 小時記憶中的群聊內容；不顯示 Telegram sender ID。</div>
@@ -807,14 +837,15 @@ DASHBOARD_HTML = """<!doctype html>
             </div>
             <div id="conversationNotice" class="notice"></div>
             <div id="conversationList" class="conversation-list"></div>
-          </article>
+            </section>
 
-          <article class="panel danger-zone collapsible-panel" data-collapsible data-panel-title="記憶管理" data-expanded="false">
+            <section class="account-section danger-zone">
             <h3>記憶管理</h3>
             <div class="hint">清除聊天記憶不會刪除帳號、Telegram Session 或模型設定。此操作無法復原。</div>
             <div class="actions">
               <button id="clearMemoryButton" class="btn danger">清除這個帳號的聊天記憶</button>
             </div>
+            </section>
           </article>
         </div>
       </section>
@@ -919,6 +950,19 @@ function selectedAccount() {
   return dashboardState?.accounts.find((account) => account.id === selectedAccountId) || null;
 }
 
+function activeManualMessageEditor() {
+  const active = document.activeElement;
+  return active?.classList?.contains("manual-message-input") ? active : null;
+}
+
+function dashboardEditorHasFocus() {
+  const active = document.activeElement;
+  return Boolean(
+    active?.matches?.("input, textarea, select") &&
+    active.closest("#app")
+  );
+}
+
 function setupCollapsiblePanels() {
   let index = 0;
   for (const panel of document.querySelectorAll("[data-collapsible]")) {
@@ -941,13 +985,20 @@ function setupCollapsiblePanels() {
     toggle.setAttribute("aria-expanded", String(expanded));
     content.hidden = !expanded;
 
+    const copy = document.createElement("span");
+    copy.className = "collapse-toggle-copy";
     const label = document.createElement("span");
     label.textContent = panel.dataset.panelTitle || "內容";
+    const summary = document.createElement("span");
+    summary.id = "selectedCompactSummary";
+    summary.className = "account-compact-summary";
+    summary.textContent = "請選擇帳號";
+    copy.append(label, summary);
     const icon = document.createElement("span");
     icon.className = "collapse-toggle-icon";
     icon.setAttribute("aria-hidden", "true");
     icon.textContent = "⌃";
-    toggle.append(label, icon);
+    toggle.append(copy, icon);
     toggle.addEventListener("click", () => {
       const nextExpanded = toggle.getAttribute("aria-expanded") !== "true";
       toggle.setAttribute("aria-expanded", String(nextExpanded));
@@ -1087,6 +1138,7 @@ function createManualSendRow(account) {
   });
 
   const message = document.createElement("textarea");
+  message.className = "manual-message-input";
   message.rows = 1;
   message.placeholder = "手動發送訊息";
   message.setAttribute("aria-label", `輸入 ${String(account.label || "帳號")} 的手動訊息`);
@@ -1201,6 +1253,9 @@ function createAccountItem(account) {
 }
 
 function renderAccountList() {
+  // Preserve the live textarea node while it is being edited. Replacing it
+  // would reset the caret, internal scroll position and mobile/Chinese IME.
+  if (activeManualMessageEditor()) return;
   const list = $("accountList");
   list.replaceChildren();
   for (const account of dashboardState?.accounts || []) {
@@ -1486,6 +1541,10 @@ function renderMediaJobs(data) {
 function renderSelected(account) {
   $("emptyPanel").classList.add("hidden");
   $("accountPanels").classList.remove("hidden");
+  const groupCount = Array.isArray(account.joined_groups) ? account.joined_groups.length : 0;
+  const connectionState = account.connected ? "已連線" : "未連線";
+  $("selectedCompactSummary").textContent =
+    `${account.label || "未命名帳號"} · ${stateName(account)}／${connectionState} · ${roleName(account)} · ${account.ai_model || "未設定模型"} · ${groupCount} 個群組`;
   $("selectedState").textContent = stateName(account);
   $("selectedLabel").textContent = account.label;
   $("selectedIdentity").textContent = `${account.telegram_name || "Telegram 帳號"} · ${roleName(account)} · ID ${account.telegram_user_id}`;
@@ -1498,8 +1557,10 @@ function renderSelected(account) {
   $("metricBlocked").title = `被拒絕的草稿：${account.policy_rejections || 0}`;
   $("metricErrors").textContent = String(account.errors || 0);
   setNotice("accountNotice", account.last_error || "", account.last_error ? "error" : "");
-  fillEditor(account);
-  renderGroups(account);
+  // A status request may have started just before the user edited a field.
+  // Re-check dirty state at the render boundary to avoid overwriting that edit.
+  if (!formDirty) fillEditor(account);
+  if (!groupsDirty) renderGroups(account);
   renderConversationGroups(account);
   if (mediaJobsLoadedAccountId !== account.id) {
     mediaJobsRequestSequence += 1;
@@ -2096,6 +2157,7 @@ refresh().catch((error) => {
 
 setInterval(() => {
   if (!document.hidden && !formDirty && !groupsDirty &&
+      !dashboardEditorHasFocus() &&
       manualMessagePendingAccounts.size === 0 &&
       $("addPanel").classList.contains("hidden")) {
     refresh().catch(() => {});

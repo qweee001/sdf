@@ -706,16 +706,37 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("manual-send-row", DASHBOARD_HTML)
         self.assertIn("manual-send-button", DASHBOARD_HTML)
         self.assertIn('data-panel-title="帳號概覽"', DASHBOARD_HTML)
-        self.assertIn('data-expanded="true"', DASHBOARD_HTML)
-        self.assertGreaterEqual(DASHBOARD_HTML.count("data-collapsible"), 6)
-        self.assertGreaterEqual(DASHBOARD_HTML.count('data-expanded="false"'), 5)
+        self.assertEqual(DASHBOARD_HTML.count("data-collapsible"), 1)
+        self.assertEqual(DASHBOARD_HTML.count('data-expanded="false"'), 1)
+        self.assertNotIn('data-expanded="true"', DASHBOARD_HTML)
+        self.assertGreaterEqual(DASHBOARD_HTML.count('class="account-section'), 6)
+        for element_id in (
+            "settingsForm",
+            "mediaJobList",
+            "groupList",
+            "conversationList",
+            "clearMemoryButton",
+        ):
+            self.assertIn(f'id="{element_id}"', DASHBOARD_HTML)
+        self.assertIn('class="field full">任務名稱', DASHBOARD_HTML)
         self.assertIn('toggle.setAttribute("aria-expanded"', DASHBOARD_JS)
         self.assertIn('toggle.setAttribute("aria-controls"', DASHBOARD_JS)
         self.assertIn("content.hidden = !nextExpanded", DASHBOARD_JS)
+        self.assertIn('summary.id = "selectedCompactSummary"', DASHBOARD_JS)
+        self.assertIn('$("selectedCompactSummary").textContent', DASHBOARD_JS)
+        self.assertIn('account.ai_model || "未設定模型"', DASHBOARD_JS)
+        self.assertIn("${groupCount} 個群組", DASHBOARD_JS)
         self.assertIn("function createManualSendRow(account)", DASHBOARD_JS)
         self.assertIn("manualGroupByAccount", DASHBOARD_JS)
         self.assertIn("manualMessageDraftByAccount", DASHBOARD_JS)
         self.assertIn("manualMessagePendingAccounts", DASHBOARD_JS)
+        self.assertIn('message.className = "manual-message-input"', DASHBOARD_JS)
+        self.assertIn("function activeManualMessageEditor()", DASHBOARD_JS)
+        self.assertIn("if (activeManualMessageEditor()) return;", DASHBOARD_JS)
+        self.assertIn("function dashboardEditorHasFocus()", DASHBOARD_JS)
+        self.assertIn("!dashboardEditorHasFocus()", DASHBOARD_JS)
+        self.assertIn("if (!formDirty) fillEditor(account);", DASHBOARD_JS)
+        self.assertIn("if (!groupsDirty) renderGroups(account);", DASHBOARD_JS)
         self.assertNotIn("message.maxLength", DASHBOARD_JS)
         self.assertIn("group?.enabled !== false", DASHBOARD_JS)
         self.assertIn(
