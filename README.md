@@ -1,103 +1,117 @@
-# Telegram AI Userbot — 固定角色群聊版
+# Telegram AI Userbot — 多帳號控制台版
 
-Railway 可部署的 Telegram Userbot。每個 Railway Service 綁定一個 Telegram 帳號及一個固定角色，只在群組內互動，使用 OpenAI-compatible API 生成回覆，並只保留最近 24 小時的群聊記憶。
+一個 Railway Service 可同時管理多個 Telegram Userbot 帳號。每個帳號都有獨立的
+Telegram 連線、固定角色、群組範圍、任務說明、AI 模型與 24 小時記憶。
 
-## 功能
+## 主要功能
 
-- 僅處理群聊，不回覆私聊。
-- 固定四種角色組合：男性老成員、女性老成員、男性觀望成員、女性觀望成員。
-- 同一帳號的性別與階段固定，不會每次發言重新隨機。
-- 可設定群組白名單、一般回覆機率、被提及／被回覆時必答。
-- 可忽略其他自動化帳號的 Telegram ID，避免多帳號互相回覆形成循環。
-- 可在群組安靜一段時間後自然開啟非露骨話題。
-- SQLite 群聊記憶以 `group_id` 分隔，超過 24 小時自動清除。
-- 使用 `TG_SESSION_STRING`，不需要在 Railway 互動輸入 Telegram 驗證碼。
-- 被直接問到時會如實說明是自動互動角色，不冒充真人會員。
-- 可啟用密碼保護的網頁控制台，查看狀態、暫停互動及清空記憶。
+- 同一個 Railway Service 同時啟動多個 Telegram 帳號。
+- 控制台新增帳號、啟用、停用、重連及查看連線錯誤。
+- 四種固定角色：男性／女性老成員、男性／女性觀望成員。
+- 每個帳號可編輯語氣、任務名稱、任務說明及回覆行為。
+- 每個帳號可選擇所有群組或指定群組。
+- 每個帳號可設定 OpenAI-compatible Base URL、模型與專用 API Key。
+- 模型可從控制台測試及切換，儲存後只重啟該帳號。
+- 每個帳號的群聊記憶與統計完全隔離，超過 24 小時自動清除。
+- 所有受管帳號自動互相忽略，避免機器帳號互相回覆形成循環。
+- 一個帳號連線或模型失敗，不會使其他帳號與控制台停止。
+- Telegram Session 與帳號專用 API Key 使用 Fernet 加密後保存在 Railway Volume。
+- 控制台與 API 使用登入速率限制、伺服器端 Session、CSRF 驗證及安全標頭。
 
-## 角色設定
+## 首次升級
 
-每個 Service 固定設定以下兩個值：
+如果 Railway 已有舊版單帳號設定，第一次啟動新版時會自動：
 
-| `ACCOUNT_GENDER` | `ACCOUNT_STAGE` | 角色 |
-|---|---|---|
-| `male` | `old_member` | 男性老成員 |
-| `female` | `old_member` | 女性老成員 |
-| `male` | `observer` | 男性觀望成員 |
-| `female` | `observer` | 女性觀望成員 |
+1. 驗證現有 `TG_SESSION_STRING`。
+2. 加密 Session 並建立 `primary` 帳號。
+3. 保留原本角色、群組範圍、模型及啟停狀態。
+4. 將舊訊息補上 `primary` 帳號 ID，不會清空現有 24 小時記憶。
 
-可用 `ACCOUNT_STYLE` 補充該帳號的固定語氣，但不要填寫真實個資。
+之後新增的帳號直接在控制台輸入新的 `TG_SESSION_STRING`，不需要再建立 Railway
+Service。
 
-## 產生 Telegram Session String
-
-先在可信任的本機環境安裝依賴：
-
-```bash
-python -m pip install -r requirements.txt
-python scripts/generate_session.py
-```
-
-完成 Telegram 驗證後，工具會顯示 `TG_SESSION_STRING`。它等同登入憑證，只能保存於 Railway Variables，不得貼到聊天、日誌或 GitHub。
-
-## Railway 部署
-
-1. 在 Railway 建立 Project，選擇 **Deploy from GitHub repo**，連結此倉庫。
-2. 建立一個 Service；Railway 會讀取根目錄的 `Dockerfile` 與 `railway.json`。
-3. 在 Service 的 **Variables** 新增：
+## 必要 Railway Variables
 
 ```env
 TG_API_ID=
 TG_API_HASH=
 TG_SESSION_STRING=
+
 AI_API_KEY=
 AI_BASE_URL=https://api.openai.com/v1
-AI_MODEL=
-ACCOUNT_GENDER=male
-ACCOUNT_STAGE=old_member
-ACCOUNT_STYLE=穩重、自然、偶爾幽默
-GROUP_CHAT_IDS=-1001234567890
-IGNORE_SENDER_IDS=
+AI_MODEL=gpt-5-mini
+
+ACCOUNT_ENCRYPTION_KEY=
+MAX_ACCOUNTS=10
+
 MEMORY_TTL_HOURS=24
+MEMORY_HISTORY_LIMIT=30
 MEMORY_DB_PATH=/data/memory.db
+
 DASHBOARD_ENABLED=true
 DASHBOARD_USERNAME=admin
-DASHBOARD_PASSWORD=請設定至少12字元的強密碼
+DASHBOARD_PASSWORD=<至少12字元的強密碼>
 ```
 
-4. 為了讓記憶在重新部署後仍保留，在 Service 掛載 Railway Volume，Mount Path 設成 `/data`。
-5. 部署後查看 Logs，成功時會看到 `Userbot connected`，但不會顯示 API Key、API Hash 或 Session String。
-6. 用其他帳號在允許的測試群發訊息，確認只在群聊回覆、私聊不回覆。
-7. 在 Railway 的 Networking 產生公開網域，使用 `DASHBOARD_USERNAME` 和
-   `DASHBOARD_PASSWORD` 登入控制台。控制台不會顯示任何密鑰。
+產生 `ACCOUNT_ENCRYPTION_KEY`：
 
-若要部署多個帳號，為每個帳號建立獨立 Railway Service，分別設定自己的 `TG_SESSION_STRING`、角色與 `/data` Volume。不要讓多個 Service 共用同一個 Telegram Session String。建議把其他自動化帳號的 Telegram 數字 ID 填入 `IGNORE_SENDER_IDS`，避免帳號彼此接話形成循環。
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
-## 本機執行
+這個 Key 只能放在 Railway Variables。建立帳號後不可任意更換，否則已保存的
+Telegram Session 與 API Key 將無法解密。
 
-複製範例設定並填入自己的值：
+## 新增多個帳號
+
+1. 使用 `scripts/generate_session.py` 為每個 Telegram 帳號各自產生
+   `TG_SESSION_STRING`。
+2. 登入網頁控制台，點選「新增帳號」。
+3. 貼入該帳號的 Session String，設定名稱、角色、任務與模型。
+4. 儲存後控制台會先驗證 Telegram Session，再加密保存並啟動帳號。
+5. 不得把同一個 Telegram 帳號重複加入；系統會檢查 Session 與 Telegram ID。
+
+Session String 與 API Key 都不會由任何 GET API、HTML、狀態或日誌回傳。
+
+## 模型設定
+
+每個帳號可使用不同的：
+
+- AI Base URL（必須是公開 HTTPS 位址）
+- Model ID
+- 帳號專用 API Key
+
+專用 API Key 留空時使用 Railway 的全域 `AI_API_KEY`。更新欄位留空代表保留原
+Key；勾選「清除自訂 Key」後才會改回全域 Key。控制台提供小型「測試模型」請求，
+測試失敗不會自動改寫其他帳號。
+
+## 任務資訊
+
+`任務名稱` 與 `任務說明` 會加入該帳號的 system prompt，例如指定聊天重點、
+歡迎新成員或回答某類話題。任務不能覆蓋成年、自願、尊重、隱私、不冒充真人及
+不捏造經歷等共同規則。
+
+## 部署
+
+- Railway 必須保留 `/data` Volume，資料庫預設在 `/data/memory.db`。
+- 服務保持 **1 Replica**。SQLite Volume 與 Telegram Session 不支援多副本同時登入。
+- Railway 會讀取根目錄的 `Dockerfile` 與 `railway.json`。
+- 公開網域只提供有密碼保護的控制台；敏感憑證仍由 Railway Variables 管理。
+
+## 本機執行與檢查
 
 ```bash
 cp .env.example .env
 docker compose up --build
-```
-
-`.env`、`*.session`、SQLite 記憶檔都已被 Git 與 Docker 忽略。
-
-## 發布前檢查
-
-```bash
 python scripts/audit_release.py .
 python -m unittest discover -s tests -v
 ```
 
-若要檢查壓縮包：
+`.env`、`*.session`、SQLite 資料庫與所有真實密鑰都已被 Git 與 Docker 忽略。
 
-```bash
-python scripts/audit_release.py telegram-ai-userbot-fixed-roles.zip
-```
+## 使用限制
 
-## 重要限制
-
-- Telegram Userbot 使用一般使用者帳號自動化，可能受 Telegram 條款與風控影響；請先在小型測試群驗證。
-- 角色可以參與成人交友話題，但程式提示要求所有人已成年、明確自願、尊重隱私與安全，且不捏造真人見證。
-- SQLite 僅適合單一 Service／單一副本。不要把同一資料庫 Volume 同時掛給多個副本。
+- Userbot 使用一般 Telegram 帳號自動化，可能受 Telegram 條款與風控影響。
+- 新帳號預設仍有回覆機率與主動發言上限；請先在測試群驗證。
+- 所有帳號被詢問時必須如實說明是自動互動角色，不是真人會員。
+- 角色可參與成人交友話題，但必須以成年、自願、尊重、隱私與安全為前提。

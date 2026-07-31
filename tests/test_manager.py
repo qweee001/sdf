@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+import asyncio
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+
+from cryptography.fernet import Fernet
+
+from app.config import Settings
+from app.crypto import SecretBox
+from app.manager import AccountManager
+from app.memory import MemoryStore
+from app.security import safe_error
+
+
+def settings(path: str, key: str) -> Settings:
+    return Settings(
+        tg_api_id=12345,
+        tg_api_hash="hash",
+        legacy_session_string="",
+        ai_api_key="global-key",
+        ai_base_url="https://api.example.com/v1",
+        ai_model="default-model",
+        account_encryption_key=key,
+        memory_ttl_hours=24,
+        memory_history_limit=30,
+        memory_db_path=path,
+        dashboard_enabled=True,
+        dashboard_username="admin",
+        dashboard_password="strong-dashboard-password",
+        dashboard_port=8000,
+        max_accounts=5,
+        log_level="INFO",
+        legacy_gender="male",
+        legacy_stage="old_member",
+        legacy_style="",
+        legacy_group_ids=frozenset(),
+        legacy_ignore_sender_ids=frozenset(),
+        legacy_group_reply_probability=0.35,
+        legacy_reply_on_mention=True,
+        legacy_reply_on_reply=True,
+        legacy_typing_delay_min_seconds=1.5,
+        legacy_typing_delay_max_seconds=5,
+        legacy_proactive_enabled=True,
+        legacy_proactive_idle_minutes=15,
+        legacy_proactive_min_interval_minutes=25,
+        legacy_proactive_max_interval_minutes=60,
+        legacy_max_proactive_per_day=24,
+    )
+
+
+class ManagerTests(unittest.TestCase):
+    def test_legacy_import_survives_temporary_telegram_failure(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = replace(
+                settings(path, key),
+                legacy_session_string="legacy-session-secret",
+            )
+            store = MemoryStore(path, ttl_hours=24)
+            secrets = SecretBox(key)
+            manager = AccountManager(config, store, secrets)
+            await store.open()
+
+            async def unavailable(session: str) -> tuple[int, str]:
+                self.assertEqual(session, "legacy-session-secret")
+                raise OSError("temporary Telegram connection failure")
+
+            manager.verify_session = unavailable  # type: ignore[method-assign]
+            await manager._import_legacy_account()
+            imported = await store.get_account("primary")
+            self.assertIsNotNone(imported)
+            self.assertLess(imported.telegram_user_id, 0)
+            self.assertEqual(
+                secrets.decrypt(imported.session_ciphertext),
+                "legacy-session-secret",
+            )
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_create_and_update_account_keeps_credentials_secret(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            secrets = SecretBox(key)
+            manager = AccountManager(config, store, secrets)
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                self.assertEqual(session, "session-secret")
+                return 9988, "測試 Telegram"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "label": "帳號 A",
+                    "session_string": "session-secret",
+                    "enabled": False,
+                    "gender": "female",
+                    "stage": "observer",
+                    "task_name": "歡迎新人",
+                    "task_info": "自然歡迎新加入的成員",
+                    "ai_base_url": "https://api.example.com/v1",
+                    "ai_model": "model-a",
+                }
+            )
+            account_id = str(created["id"])
+            self.assertNotIn("session_string", created)
+            self.assertNotIn("session_ciphertext", created)
+            stored = await store.get_account(account_id)
+            self.assertEqual(secrets.decrypt(stored.session_ciphertext), "session-secret")
+
+            updated = await manager.update_account(
+                account_id,
+                {
+                    "revision": created["revision"],
+                    "label": "帳號 A2",
+                    "gender": "female",
+                    "stage": "observer",
+                    "task_name": "新任務",
+                    "task_info": "更新後任務",
+                    "ai_base_url": "https://api.example.com/v2",
+                    "ai_model": "model-b",
+                    "ai_api_key": "custom-secret",
+                },
+            )
+            self.assertEqual(updated["ai_model"], "model-b")
+            self.assertTrue(updated["has_custom_api_key"])
+            self.assertNotIn("ai_api_key", updated)
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_provider_url_rejects_private_targets(self) -> None:
+        from app.account import validate_provider_url
+
+        for url in (
+            "http://api.example.com/v1",
+            "https://localhost/v1",
+            "https://metadata.google.internal/v1",
+            "https://127.0.0.1/v1",
+            "https://169.254.169.254/latest",
+            "https://api.example.com/v1?key=secret",
+        ):
+            with self.assertRaises(ValueError):
+                validate_provider_url(url)
+        self.assertEqual(
+            validate_provider_url("https://api.example.com/v1/"),
+            "https://api.example.com/v1",
+        )
+
+    def test_provider_errors_are_redacted(self) -> None:
+        message = safe_error(
+            RuntimeError(
+                "Authorization: Bearer sk-very-secret-token "
+                "api_key=another-secret"
+            )
+        )
+        self.assertNotIn("very-secret", message)
+        self.assertNotIn("another-secret", message)
+        self.assertIn("[redacted]", message)
+
+
+if __name__ == "__main__":
+    unittest.main()

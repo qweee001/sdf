@@ -15,8 +15,10 @@ db_dir="$(dirname -- "$db_path")"
 mkdir -p "$db_dir"
 chown app:app "$db_dir"
 
-if [ -e "$db_path" ]; then
-    chown app:app "$db_path"
-fi
+for db_file in "$db_path" "$db_path-wal" "$db_path-shm"; do
+    if [ -e "$db_file" ]; then
+        chown app:app "$db_file"
+    fi
+done
 
 exec gosu app "$@"

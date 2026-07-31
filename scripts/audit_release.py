@@ -23,6 +23,11 @@ SECRET_PATTERNS = (
         rb"(?!$|your[-_ ]|<|placeholder)\S+",
         re.MULTILINE,
     ),
+    re.compile(
+        rb"^[ \t]*(?:ACCOUNT_ENCRYPTION_KEY|DASHBOARD_PASSWORD)[ \t]*=[ \t]*"
+        rb"(?!$|your[-_ ]|<|placeholder|please[-_ ])\S+",
+        re.MULTILINE,
+    ),
 )
 
 TEXT_SUFFIXES = {

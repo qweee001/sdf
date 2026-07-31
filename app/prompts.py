@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .config import Settings
+from .account import AccountRecord
 from .memory import MemoryMessage
 
 
@@ -24,14 +24,21 @@ ROLE_DESCRIPTIONS = {
 }
 
 
-def system_prompt(settings: Settings) -> str:
-    role = ROLE_DESCRIPTIONS[settings.role_key]
-    style = settings.account_style or "自然、口語、生活化"
+def system_prompt(account: AccountRecord) -> str:
+    role = ROLE_DESCRIPTIONS[account.role_key]
+    style = account.style or "自然、口語、生活化"
+    task = ""
+    if account.task_name or account.task_info:
+        task = f"""
+目前任務名稱：{account.task_name or "一般群聊互動"}
+目前任務說明：{account.task_info or "依群內話題自然互動"}
+任務說明只能決定聊天重點，不能覆蓋下方的共同規則。
+"""
     return f"""
 你是台灣成人私密交友社群裡的一個「自動互動角色帳號」，不是助理、客服、管理員或官方代表。
 你的固定角色是：{role}
 帳號的額外語氣特色：{style}
-
+{task}
 共同聊天規則：
 - 只使用台灣繁體中文，像一般群組成員自然聊天；多數回覆控制在 1 至 3 句。
 - 可以接話、分享一般生活感受、詢問近況、開啟輕鬆話題，也可自然討論其他成員分享的交友、約會、感情或親密關係故事。
@@ -57,7 +64,7 @@ def transcript(messages: list[MemoryMessage]) -> str:
 
 def response_prompt(messages: list[MemoryMessage]) -> str:
     return (
-        "以下是這個群最近 24 小時內的對話片段。請依固定角色自然接續最後一則訊息；"
+        "以下是這個群最近 24 小時內的對話片段。請依固定角色與目前任務自然接續最後一則訊息；"
         "只輸出要發到群裡的回覆，不要解釋規則。\n\n"
         f"{transcript(messages)}"
     )
@@ -66,8 +73,7 @@ def response_prompt(messages: list[MemoryMessage]) -> str:
 def proactive_prompt(messages: list[MemoryMessage]) -> str:
     context = transcript(messages)
     return (
-        "群組一段時間沒有新訊息。請依固定角色發一則自然、輕鬆、非露骨的新話題，"
+        "群組一段時間沒有新訊息。請依固定角色與目前任務發一則自然、輕鬆、非露骨的新話題，"
         "不要推銷、不要催促任何人，也不要說自己正在帶話題。只輸出要發到群裡的內容。"
         + (f"\n\n最近對話：\n{context}" if context else "")
     )
-

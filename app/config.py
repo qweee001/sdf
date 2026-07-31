@@ -56,25 +56,11 @@ def _id_set(name: str) -> frozenset[int]:
 class Settings:
     tg_api_id: int
     tg_api_hash: str
-    tg_session_string: str
+    legacy_session_string: str
     ai_api_key: str
     ai_base_url: str
     ai_model: str
-    account_gender: str
-    account_stage: str
-    account_style: str
-    group_chat_ids: frozenset[int]
-    ignore_sender_ids: frozenset[int]
-    group_reply_probability: float
-    reply_on_mention: bool
-    reply_on_reply: bool
-    typing_delay_min_seconds: float
-    typing_delay_max_seconds: float
-    proactive_enabled: bool
-    proactive_idle_minutes: int
-    proactive_min_interval_minutes: int
-    proactive_max_interval_minutes: int
-    max_proactive_per_day: int
+    account_encryption_key: str
     memory_ttl_hours: int
     memory_history_limit: int
     memory_db_path: str
@@ -82,16 +68,28 @@ class Settings:
     dashboard_username: str
     dashboard_password: str
     dashboard_port: int
+    max_accounts: int
     log_level: str
-
-    @property
-    def role_key(self) -> str:
-        return f"{self.account_gender}_{self.account_stage}"
+    legacy_gender: str
+    legacy_stage: str
+    legacy_style: str
+    legacy_group_ids: frozenset[int]
+    legacy_ignore_sender_ids: frozenset[int]
+    legacy_group_reply_probability: float
+    legacy_reply_on_mention: bool
+    legacy_reply_on_reply: bool
+    legacy_typing_delay_min_seconds: float
+    legacy_typing_delay_max_seconds: float
+    legacy_proactive_enabled: bool
+    legacy_proactive_idle_minutes: int
+    legacy_proactive_min_interval_minutes: int
+    legacy_proactive_max_interval_minutes: int
+    legacy_max_proactive_per_day: int
 
 
 def load_settings() -> Settings:
-    gender = os.getenv("ACCOUNT_GENDER", "").strip().lower()
-    stage = os.getenv("ACCOUNT_STAGE", "").strip().lower()
+    gender = os.getenv("ACCOUNT_GENDER", "male").strip().lower()
+    stage = os.getenv("ACCOUNT_STAGE", "old_member").strip().lower()
     if gender not in {"male", "female"}:
         raise ValueError("ACCOUNT_GENDER must be male or female")
     if stage not in {"old_member", "observer"}:
@@ -115,25 +113,11 @@ def load_settings() -> Settings:
     return Settings(
         tg_api_id=int(_required("TG_API_ID")),
         tg_api_hash=_required("TG_API_HASH"),
-        tg_session_string=_required("TG_SESSION_STRING"),
-        ai_api_key=_required("AI_API_KEY"),
+        legacy_session_string=os.getenv("TG_SESSION_STRING", "").strip(),
+        ai_api_key=os.getenv("AI_API_KEY", "").strip(),
         ai_base_url=os.getenv("AI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
-        ai_model=_required("AI_MODEL"),
-        account_gender=gender,
-        account_stage=stage,
-        account_style=os.getenv("ACCOUNT_STYLE", "").strip(),
-        group_chat_ids=_id_set("GROUP_CHAT_IDS"),
-        ignore_sender_ids=_id_set("IGNORE_SENDER_IDS"),
-        group_reply_probability=_number("GROUP_REPLY_PROBABILITY", 0.35, 0, 1),
-        reply_on_mention=_boolean("REPLY_ON_MENTION", True),
-        reply_on_reply=_boolean("REPLY_ON_REPLY", True),
-        typing_delay_min_seconds=delay_min,
-        typing_delay_max_seconds=delay_max,
-        proactive_enabled=_boolean("PROACTIVE_ENABLED", True),
-        proactive_idle_minutes=_integer("PROACTIVE_IDLE_MINUTES", 15, 1),
-        proactive_min_interval_minutes=proactive_min,
-        proactive_max_interval_minutes=proactive_max,
-        max_proactive_per_day=_integer("MAX_PROACTIVE_PER_DAY", 24, 0),
+        ai_model=os.getenv("AI_MODEL", "gpt-5-mini").strip() or "gpt-5-mini",
+        account_encryption_key=_required("ACCOUNT_ENCRYPTION_KEY"),
         memory_ttl_hours=_integer("MEMORY_TTL_HOURS", 24, 1),
         memory_history_limit=_integer("MEMORY_HISTORY_LIMIT", 30, 1),
         memory_db_path=os.getenv("MEMORY_DB_PATH", "/data/memory.db"),
@@ -141,5 +125,21 @@ def load_settings() -> Settings:
         dashboard_username=os.getenv("DASHBOARD_USERNAME", "admin").strip() or "admin",
         dashboard_password=dashboard_password,
         dashboard_port=_integer("PORT", 8000, 1),
+        max_accounts=_integer("MAX_ACCOUNTS", 10, 1),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        legacy_gender=gender,
+        legacy_stage=stage,
+        legacy_style=os.getenv("ACCOUNT_STYLE", "").strip(),
+        legacy_group_ids=_id_set("GROUP_CHAT_IDS"),
+        legacy_ignore_sender_ids=_id_set("IGNORE_SENDER_IDS"),
+        legacy_group_reply_probability=_number("GROUP_REPLY_PROBABILITY", 0.35, 0, 1),
+        legacy_reply_on_mention=_boolean("REPLY_ON_MENTION", True),
+        legacy_reply_on_reply=_boolean("REPLY_ON_REPLY", True),
+        legacy_typing_delay_min_seconds=delay_min,
+        legacy_typing_delay_max_seconds=delay_max,
+        legacy_proactive_enabled=_boolean("PROACTIVE_ENABLED", True),
+        legacy_proactive_idle_minutes=_integer("PROACTIVE_IDLE_MINUTES", 15, 1),
+        legacy_proactive_min_interval_minutes=proactive_min,
+        legacy_proactive_max_interval_minutes=proactive_max,
+        legacy_max_proactive_per_day=_integer("MAX_PROACTIVE_PER_DAY", 24, 0),
     )
