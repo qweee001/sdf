@@ -146,9 +146,9 @@ DASHBOARD_HTML = """<!doctype html>
     .topbar h1 { margin-bottom: 0; }
     .summary {
       display: grid;
-      grid-template-columns: repeat(4, minmax(100px, 1fr));
+      grid-template-columns: repeat(5, minmax(100px, 1fr));
       gap: 10px;
-      width: min(620px, 100%);
+      width: min(760px, 100%);
     }
     .summary-item, .panel {
       border: 1px solid var(--line);
@@ -250,6 +250,25 @@ DASHBOARD_HTML = """<!doctype html>
       white-space: nowrap;
     }
     .account-item small { margin-top: 3px; color: var(--muted); }
+    .account-title-row {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .account-title-row strong { min-width: 0; flex: 1; }
+    .private-alert-badge {
+      flex: 0 0 auto;
+      min-width: 21px;
+      padding: 2px 6px;
+      color: #17200d;
+      border-radius: 999px;
+      background: var(--accent);
+      font-size: 11px;
+      font-weight: 850;
+      line-height: 1.45;
+      text-align: center;
+    }
     .dot {
       width: 9px;
       height: 9px;
@@ -335,7 +354,7 @@ DASHBOARD_HTML = """<!doctype html>
     .btn:disabled { opacity: .5; cursor: wait; }
     .status-line {
       display: grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
+      grid-template-columns: repeat(7, minmax(0, 1fr));
       gap: 7px;
       margin-top: 12px;
     }
@@ -435,6 +454,59 @@ DASHBOARD_HTML = """<!doctype html>
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
+    .private-alert-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      margin: 9px 0;
+    }
+    .private-alert-list {
+      display: grid;
+      gap: 8px;
+      max-height: 430px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+    .private-alert {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #151711;
+    }
+    .private-alert.unread {
+      border-color: #647d43;
+      background: #192014;
+    }
+    .private-alert-head {
+      min-width: 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 5px 8px;
+    }
+    .private-alert-head strong,
+    .private-alert-head small {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .private-alert-head small,
+    .private-alert time { color: var(--muted); font-size: 12px; }
+    .private-alert-preview {
+      grid-column: 1 / -1;
+      margin: 0;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .private-alert .btn {
+      grid-column: 2;
+      justify-self: end;
+    }
     .provider-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -523,6 +595,7 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="summary-item"><span>帳號總數</span><strong id="summaryTotal">0</strong></div>
         <div class="summary-item"><span>已啟用</span><strong id="summaryEnabled">0</strong></div>
         <div class="summary-item"><span>已連線</span><strong id="summaryConnected">0</strong></div>
+        <div class="summary-item"><span>私聊未讀</span><strong id="summaryPrivateUnread">0</strong></div>
         <div class="summary-item"><span>記憶時間</span><strong id="summaryMemory">24h</strong></div>
       </section>
     </header>
@@ -644,10 +717,26 @@ DASHBOARD_HTML = """<!doctype html>
               <div class="metric"><span>24 小時訊息</span><strong id="metricMessages">0</strong></div>
               <div class="metric"><span>已回覆</span><strong id="metricReplies">0</strong></div>
               <div class="metric"><span>群組</span><strong id="metricGroups">0</strong></div>
+              <div class="metric"><span>私聊未讀</span><strong id="metricPrivateUnread">0</strong></div>
               <div class="metric"><span>政策攔截</span><strong id="metricBlocked">0</strong></div>
               <div class="metric"><span>錯誤</span><strong id="metricErrors">0</strong></div>
             </div>
             <div id="accountNotice" class="notice"></div>
+            </section>
+
+            <section class="account-section">
+            <div class="row-between">
+              <div>
+                <h3>私聊提醒</h3>
+                <div class="hint">顯示最近 24 小時收到的私聊提示；AI 不會在私聊自動回覆，也不會把私聊帶入群聊記憶。標記已處理只會清除控制台未讀提示，不會向 Telegram 傳送已讀回條。</div>
+              </div>
+              <div class="private-alert-toolbar">
+                <button id="refreshPrivateAlertsButton" class="btn small" type="button">重新整理</button>
+                <button id="ackAllPrivateAlertsButton" class="btn small" type="button">全部標記已處理</button>
+              </div>
+            </div>
+            <div id="privateAlertsNotice" class="notice"></div>
+            <div id="privateAlertList" class="private-alert-list"></div>
             </section>
 
             <section class="account-section">
@@ -877,8 +966,14 @@ let conversationPendingKey = "";
 let conversationPendingSequence = 0;
 let mediaJobsRequestSequence = 0;
 let mediaJobsLoadedAccountId = "";
+let privateAlertsRequestSequence = 0;
+let privateAlertsLoadedAccountId = "";
+let privateAlertsLoadedUnreadCount = -1;
+let privateAlertsLoadedLatestAt = 0;
+let privateIndicatorRefreshPending = false;
 
 function showLogin() {
+  document.title = "Telegram AI 多帳號控制台";
   $("app").classList.add("hidden");
   $("login").classList.remove("hidden");
 }
@@ -886,6 +981,29 @@ function showLogin() {
 function showApp() {
   $("login").classList.add("hidden");
   $("app").classList.remove("hidden");
+}
+
+function resetDashboardClientState() {
+  dashboardState = null;
+  selectedAccountId = "";
+  formDirty = false;
+  groupsDirty = false;
+  manualGroupByAccount.clear();
+  manualMessageDraftByAccount.clear();
+  manualMessagePendingAccounts.clear();
+  conversationRequestSequence += 1;
+  conversationLoadedKey = "";
+  conversationSelectionKey = "";
+  mediaJobsRequestSequence += 1;
+  mediaJobsLoadedAccountId = "";
+  privateAlertsRequestSequence += 1;
+  privateAlertsLoadedAccountId = "";
+  privateAlertsLoadedUnreadCount = -1;
+  privateAlertsLoadedLatestAt = 0;
+  clearConversationList();
+  clearMediaJobs();
+  clearPrivateAlerts();
+  document.title = "Telegram AI 多帳號控制台";
 }
 
 function setNotice(id, message, kind = "") {
@@ -915,6 +1033,7 @@ async function api(path, options = {}) {
   }
   if (response.status === 401) {
     csrfToken = "";
+    resetDashboardClientState();
     showLogin();
     throw new Error("unauthorized");
   }
@@ -948,6 +1067,15 @@ function stateName(account) {
 
 function selectedAccount() {
   return dashboardState?.accounts.find((account) => account.id === selectedAccountId) || null;
+}
+
+function compactAccountSummary(account) {
+  const groupCount = Array.isArray(account.joined_groups) ? account.joined_groups.length : 0;
+  const connectionState = account.connected ? "已連線" : "未連線";
+  const privateUnread = Math.max(0, Number(account.private_unread_count || 0));
+  return `${account.label || "未命名帳號"} · ${stateName(account)}／${connectionState} · ` +
+    `${roleName(account)} · ${account.ai_model || "未設定模型"} · ${groupCount} 個群組 · ` +
+    `私聊未讀 ${privateUnread}`;
 }
 
 function activeManualMessageEditor() {
@@ -1236,11 +1364,22 @@ function createAccountItem(account) {
   const dot = document.createElement("span");
   dot.className = `dot${account.connected ? " online" : account.state === "error" ? " error" : ""}`;
   const copy = document.createElement("span");
+  const titleRow = document.createElement("span");
+  titleRow.className = "account-title-row";
   const title = document.createElement("strong");
   title.textContent = account.label;
+  const unreadCount = Math.max(0, Number(account.private_unread_count || 0));
+  titleRow.appendChild(title);
+  if (unreadCount > 0) {
+    const badge = document.createElement("span");
+    badge.className = "private-alert-badge";
+    badge.textContent = unreadCount > 99 ? "99+" : String(unreadCount);
+    badge.setAttribute("aria-label", `${unreadCount} 則私聊未讀`);
+    titleRow.appendChild(badge);
+  }
   const meta = document.createElement("small");
   meta.textContent = `${stateName(account)} · ${roleName(account)}`;
-  copy.append(title, meta);
+  copy.append(titleRow, meta);
   button.append(dot, copy);
   button.addEventListener("click", () => {
     selectedAccountId = account.id;
@@ -1540,13 +1679,153 @@ function renderMediaJobs(data) {
   }
 }
 
+function clearPrivateAlerts(message = "") {
+  const list = $("privateAlertList");
+  list.replaceChildren();
+  if (message) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = message;
+    list.appendChild(empty);
+  }
+}
+
+function updatePrivateUnreadCount(accountId, value, latestAt = 0) {
+  const unreadCount = Math.max(0, Number(value || 0));
+  const latest = Math.max(0, Number(latestAt || 0));
+  const account = dashboardState?.accounts.find((item) => item.id === accountId);
+  if (account) {
+    account.private_unread_count = unreadCount;
+    account.private_alert_latest_at = latest;
+  }
+  if (dashboardState?.summary) {
+    dashboardState.summary.private_unread_count = (dashboardState.accounts || [])
+      .reduce((total, item) => total + Math.max(0, Number(item.private_unread_count || 0)), 0);
+  }
+  const totalPrivateUnread = Math.max(
+    0,
+    Number(dashboardState?.summary?.private_unread_count || 0),
+  );
+  $("summaryPrivateUnread").textContent = String(totalPrivateUnread);
+  document.title = totalPrivateUnread > 0
+    ? `(${totalPrivateUnread}) Telegram AI 多帳號控制台`
+    : "Telegram AI 多帳號控制台";
+  if (selectedAccountId === accountId) {
+    $("metricPrivateUnread").textContent = String(unreadCount);
+    $("ackAllPrivateAlertsButton").disabled = unreadCount <= 0;
+    if (account) $("selectedCompactSummary").textContent = compactAccountSummary(account);
+  }
+  renderAccountList();
+}
+
+function renderPrivateAlerts(data) {
+  const alerts = Array.isArray(data.alerts) ? data.alerts : [];
+  const accountId = String(data.account_id || "");
+  const list = $("privateAlertList");
+  list.replaceChildren();
+  if (!alerts.length) {
+    clearPrivateAlerts("最近 24 小時沒有私聊提醒。");
+    return;
+  }
+  for (const alert of alerts) {
+    const alertId = String(alert.alert_id || "");
+    const unread = !alert.acknowledged;
+    const item = document.createElement("article");
+    item.className = `private-alert${unread ? " unread" : ""}`;
+    const head = document.createElement("div");
+    head.className = "private-alert-head";
+    const sender = document.createElement("strong");
+    sender.textContent = String(alert.sender_name || "Telegram 使用者");
+    head.appendChild(sender);
+    const username = String(alert.sender_username || "");
+    if (username) {
+      const handle = document.createElement("small");
+      handle.textContent = `@${username.replace(/^@/u, "")}`;
+      head.appendChild(handle);
+    }
+    const created = document.createElement("time");
+    created.textContent = formatConversationTime(alert.created_at);
+    const preview = document.createElement("p");
+    preview.className = "private-alert-preview";
+    preview.textContent = String(alert.preview || "（非文字訊息）");
+    item.append(head, created, preview);
+    if (unread && alertId) {
+      const acknowledge = document.createElement("button");
+      acknowledge.type = "button";
+      acknowledge.className = "btn small";
+      acknowledge.textContent = "標記已處理";
+      acknowledge.addEventListener("click", async () => {
+        await acknowledgePrivateAlerts(accountId, [alertId], acknowledge);
+      });
+      item.appendChild(acknowledge);
+    }
+    list.appendChild(item);
+  }
+}
+
+async function loadPrivateAlerts(accountId) {
+  if (!accountId) return;
+  const requestSequence = ++privateAlertsRequestSequence;
+  setNotice("privateAlertsNotice", "正在讀取私聊提醒…", "warning");
+  try {
+    const query = new URLSearchParams({limit: "20", unread_only: "false"});
+    const result = await api(
+      `/api/accounts/${encodeURIComponent(accountId)}/private-alerts?${query.toString()}`
+    );
+    if (requestSequence !== privateAlertsRequestSequence ||
+        selectedAccountId !== accountId) return;
+    privateAlertsLoadedAccountId = accountId;
+    privateAlertsLoadedUnreadCount = Math.max(0, Number(result.unread_count || 0));
+    privateAlertsLoadedLatestAt = Math.max(0, Number(result.private_alert_latest_at || 0));
+    updatePrivateUnreadCount(
+      accountId,
+      privateAlertsLoadedUnreadCount,
+      privateAlertsLoadedLatestAt,
+    );
+    renderPrivateAlerts(result);
+    setNotice(
+      "privateAlertsNotice",
+      `最近 24 小時 ${Array.isArray(result.alerts) ? result.alerts.length : 0} 則提醒`,
+      "success",
+    );
+  } catch (error) {
+    if (requestSequence !== privateAlertsRequestSequence ||
+        selectedAccountId !== accountId) return;
+    setNotice("privateAlertsNotice", error.message, "error");
+  }
+}
+
+async function acknowledgePrivateAlerts(accountId, alertIds, button) {
+  if (!accountId) return;
+  await runButton(button, async () => {
+    try {
+      const body = alertIds === null ? {all: true} : {alert_ids: alertIds};
+      const result = await api(
+        `/api/accounts/${encodeURIComponent(accountId)}/private-alerts/ack`,
+        {method: "POST", body: JSON.stringify(body)},
+      );
+      if (selectedAccountId !== accountId) return;
+      const nextUnreadCount = Math.max(0, Number(result.unread_count || 0));
+      const nextLatestAt = Math.max(0, Number(result.private_alert_latest_at || 0));
+      privateAlertsLoadedUnreadCount = nextUnreadCount;
+      privateAlertsLoadedLatestAt = nextLatestAt;
+      updatePrivateUnreadCount(accountId, nextUnreadCount, nextLatestAt);
+      await loadPrivateAlerts(accountId);
+    } catch (error) {
+      if (selectedAccountId !== accountId) return;
+      setNotice("privateAlertsNotice", error.message, "error");
+    }
+  });
+  if (button === $("ackAllPrivateAlertsButton")) {
+    button.disabled = Number(selectedAccount()?.private_unread_count || 0) <= 0;
+  }
+}
+
 function renderSelected(account) {
   $("emptyPanel").classList.add("hidden");
   $("accountPanels").classList.remove("hidden");
-  const groupCount = Array.isArray(account.joined_groups) ? account.joined_groups.length : 0;
-  const connectionState = account.connected ? "已連線" : "未連線";
-  $("selectedCompactSummary").textContent =
-    `${account.label || "未命名帳號"} · ${stateName(account)}／${connectionState} · ${roleName(account)} · ${account.ai_model || "未設定模型"} · ${groupCount} 個群組`;
+  const privateUnread = Math.max(0, Number(account.private_unread_count || 0));
+  $("selectedCompactSummary").textContent = compactAccountSummary(account);
   $("selectedState").textContent = stateName(account);
   $("selectedLabel").textContent = account.label;
   $("selectedIdentity").textContent = `${account.telegram_name || "Telegram 帳號"} · ${roleName(account)} · ID ${account.telegram_user_id}`;
@@ -1555,6 +1834,8 @@ function renderSelected(account) {
   $("metricMessages").textContent = Number(account.message_count || 0).toLocaleString();
   $("metricReplies").textContent = Number(account.replies_sent || 0).toLocaleString();
   $("metricGroups").textContent = String(account.joined_groups?.length || 0);
+  $("metricPrivateUnread").textContent = String(privateUnread);
+  $("ackAllPrivateAlertsButton").disabled = privateUnread <= 0;
   $("metricBlocked").textContent = String(account.blocked_messages || 0);
   $("metricBlocked").title = `被拒絕的草稿：${account.policy_rejections || 0}`;
   $("metricErrors").textContent = String(account.errors || 0);
@@ -1564,6 +1845,15 @@ function renderSelected(account) {
   if (!formDirty) fillEditor(account);
   if (!groupsDirty) renderGroups(account);
   renderConversationGroups(account);
+  if (privateAlertsLoadedAccountId !== account.id ||
+      privateAlertsLoadedUnreadCount !== privateUnread ||
+      privateAlertsLoadedLatestAt !== Math.max(0, Number(account.private_alert_latest_at || 0))) {
+    privateAlertsLoadedAccountId = "";
+    privateAlertsLoadedUnreadCount = -1;
+    privateAlertsLoadedLatestAt = 0;
+    clearPrivateAlerts("正在讀取私聊提醒…");
+    loadPrivateAlerts(account.id);
+  }
   if (mediaJobsLoadedAccountId !== account.id) {
     mediaJobsRequestSequence += 1;
     mediaJobsLoadedAccountId = "";
@@ -1574,10 +1864,18 @@ function renderSelected(account) {
 
 function renderDashboard() {
   const summary = dashboardState?.summary || {};
+  const totalPrivateUnread = Math.max(
+    0,
+    Number(summary.private_unread_count || 0),
+  );
   $("summaryTotal").textContent = String(summary.total || 0);
   $("summaryEnabled").textContent = String(summary.enabled || 0);
   $("summaryConnected").textContent = String(summary.connected || 0);
+  $("summaryPrivateUnread").textContent = String(totalPrivateUnread);
   $("summaryMemory").textContent = `${summary.memory_ttl_hours || 24}h`;
+  document.title = totalPrivateUnread > 0
+    ? `(${totalPrivateUnread}) Telegram AI 多帳號控制台`
+    : "Telegram AI 多帳號控制台";
   if (!selectedAccountId && dashboardState?.accounts.length) {
     selectedAccountId = dashboardState.accounts[0].id;
   }
@@ -1598,6 +1896,62 @@ async function refresh() {
   const data = await api("/api/status");
   dashboardState = data;
   renderDashboard();
+}
+
+async function refreshPrivateIndicators() {
+  if (privateIndicatorRefreshPending || !dashboardState) return;
+  privateIndicatorRefreshPending = true;
+  try {
+    const data = await api("/api/status");
+    const nextAccounts = Array.isArray(data.accounts) ? data.accounts : [];
+    const nextById = new Map(
+      nextAccounts.map((account) => [
+        String(account.id || ""),
+        {
+          unread: Math.max(0, Number(account.private_unread_count || 0)),
+          latest: Math.max(0, Number(account.private_alert_latest_at || 0)),
+        },
+      ]),
+    );
+    for (const account of dashboardState.accounts || []) {
+      if (nextById.has(String(account.id))) {
+        const next = nextById.get(String(account.id));
+        account.private_unread_count = next?.unread || 0;
+        account.private_alert_latest_at = next?.latest || 0;
+      }
+    }
+    const totalPrivateUnread = (dashboardState.accounts || []).reduce(
+      (total, account) =>
+        total + Math.max(0, Number(account.private_unread_count || 0)),
+      0,
+    );
+    if (dashboardState.summary) {
+      dashboardState.summary.private_unread_count = totalPrivateUnread;
+    }
+    $("summaryPrivateUnread").textContent = String(totalPrivateUnread);
+    document.title = totalPrivateUnread > 0
+      ? `(${totalPrivateUnread}) Telegram AI 多帳號控制台`
+      : "Telegram AI 多帳號控制台";
+    renderAccountList();
+    const account = selectedAccount();
+    if (!account) return;
+    const privateUnread = Math.max(
+      0,
+      Number(account.private_unread_count || 0),
+    );
+    const privateLatest = Math.max(0, Number(account.private_alert_latest_at || 0));
+    $("metricPrivateUnread").textContent = String(privateUnread);
+    $("ackAllPrivateAlertsButton").disabled = privateUnread <= 0;
+    $("selectedCompactSummary").textContent = compactAccountSummary(account);
+    if (
+      privateAlertsLoadedUnreadCount !== privateUnread ||
+      privateAlertsLoadedLatestAt !== privateLatest
+    ) {
+      await loadPrivateAlerts(account.id);
+    }
+  } finally {
+    privateIndicatorRefreshPending = false;
+  }
 }
 
 async function runButton(button, operation) {
@@ -2041,6 +2395,20 @@ $("refreshMediaJobsButton").addEventListener("click", async () => {
   });
 });
 
+$("refreshPrivateAlertsButton").addEventListener("click", async () => {
+  const account = selectedAccount();
+  if (!account) return;
+  await runButton($("refreshPrivateAlertsButton"), async () => {
+    await loadPrivateAlerts(account.id);
+  });
+});
+
+$("ackAllPrivateAlertsButton").addEventListener("click", async () => {
+  const account = selectedAccount();
+  if (!account || Number(account.private_unread_count || 0) <= 0) return;
+  await acknowledgePrivateAlerts(account.id, null, $("ackAllPrivateAlertsButton"));
+});
+
 $("conversationGroup").addEventListener("change", () => {
   const account = selectedAccount();
   if (!account) return;
@@ -2142,8 +2510,7 @@ $("logoutButton").addEventListener("click", async () => {
     await api("/api/logout", {method: "POST", body: "{}"});
   } finally {
     csrfToken = "";
-    dashboardState = null;
-    selectedAccountId = "";
+    resetDashboardClientState();
     showLogin();
   }
 });
@@ -2158,11 +2525,15 @@ refresh().catch((error) => {
 });
 
 setInterval(() => {
-  if (!document.hidden && !formDirty && !groupsDirty &&
-      !dashboardEditorHasFocus() &&
-      manualMessagePendingAccounts.size === 0 &&
-      $("addPanel").classList.contains("hidden")) {
+  const canRefreshEverything = !document.hidden &&
+    !formDirty && !groupsDirty &&
+    !dashboardEditorHasFocus() &&
+    manualMessagePendingAccounts.size === 0 &&
+    $("addPanel").classList.contains("hidden");
+  if (canRefreshEverything) {
     refresh().catch(() => {});
+  } else {
+    refreshPrivateIndicators().catch(() => {});
   }
 }, 20000);
 """
@@ -2314,6 +2685,41 @@ class DashboardServer:
             raise ValueError("limit must be between 1 and 100")
         return limit
 
+    @staticmethod
+    def _private_unread_only(raw_value: str) -> bool:
+        if raw_value == "true":
+            return True
+        if raw_value == "false":
+            return False
+        raise ValueError("unread_only must be true or false")
+
+    @staticmethod
+    def _private_ack_payload(
+        payload: dict[str, object],
+    ) -> tuple[list[str] | None, bool]:
+        if set(payload) == {"all"}:
+            if payload["all"] is not True:
+                raise ValueError("all must be true")
+            return None, True
+        if set(payload) != {"alert_ids"}:
+            raise ValueError("provide either alert_ids or all")
+        raw_ids = payload["alert_ids"]
+        if not isinstance(raw_ids, list) or not 1 <= len(raw_ids) <= 100:
+            raise ValueError("alert_ids must contain between 1 and 100 items")
+        alert_ids: list[str] = []
+        seen: set[str] = set()
+        for raw_id in raw_ids:
+            if not isinstance(raw_id, str):
+                raise ValueError("alert_ids must contain strings")
+            alert_id = raw_id.strip()
+            if not alert_id or len(alert_id) > 160:
+                raise ValueError("alert_id must contain between 1 and 160 characters")
+            if alert_id in seen:
+                raise ValueError("alert_ids must not contain duplicates")
+            seen.add(alert_id)
+            alert_ids.append(alert_id)
+        return alert_ids, False
+
     @classmethod
     def _reject_api_key_fields(cls, payload: dict[str, object]) -> None:
         def contains_api_key(value: object) -> bool:
@@ -2441,6 +2847,57 @@ class DashboardServer:
             "group_id": group_id,
             "count": len(messages),
             "messages": messages,
+        }
+
+    @staticmethod
+    def _public_private_alerts(
+        result: object,
+        *,
+        account_id: str,
+        limit: int,
+    ) -> dict[str, object]:
+        if not isinstance(result, dict):
+            raise RuntimeError("invalid private alerts response")
+        raw_alerts = result.get("alerts", [])
+        if not isinstance(raw_alerts, list):
+            raise RuntimeError("invalid private alerts list")
+        raw_unread = result.get("unread_count", 0)
+        unread_count = (
+            raw_unread
+            if isinstance(raw_unread, int) and not isinstance(raw_unread, bool)
+            else 0
+        )
+        raw_latest_at = result.get("latest_at", 0)
+        latest_at = (
+            raw_latest_at
+            if isinstance(raw_latest_at, int) and not isinstance(raw_latest_at, bool)
+            else 0
+        )
+        alerts: list[dict[str, object]] = []
+        for raw_alert in raw_alerts[:limit]:
+            if not isinstance(raw_alert, dict):
+                continue
+            alert_id = str(raw_alert.get("alert_id", ""))[:160]
+            if not alert_id:
+                continue
+            created_at = raw_alert.get("created_at", 0)
+            if isinstance(created_at, bool) or not isinstance(created_at, int):
+                created_at = 0
+            alerts.append(
+                {
+                    "alert_id": alert_id,
+                    "sender_name": str(raw_alert.get("sender_name", ""))[:120],
+                    "preview": str(raw_alert.get("preview", ""))[:280],
+                    "created_at": created_at,
+                    "acknowledged": bool(raw_alert.get("acknowledged", False)),
+                }
+            )
+        return {
+            "account_id": account_id,
+            "unread_count": max(0, unread_count),
+            "latest_at": max(0, latest_at),
+            "count": len(alerts),
+            "alerts": alerts,
         }
 
     def _build_app(self) -> FastAPI:
@@ -2589,6 +3046,86 @@ class DashboardServer:
             return JSONResponse(
                 self._without_api_key_fields(await self.manager.status()),
                 headers={"X-CSRF-Token": session.csrf_token},
+            )
+
+        @web.get("/api/accounts/{account_id}/private-alerts")
+        async def private_alerts(account_id: str, request: Request) -> JSONResponse:
+            session, blocked = self._require_auth(request)
+            if blocked is not None or session is None:
+                return blocked  # type: ignore[return-value]
+            if set(request.query_params.keys()) - {"limit", "unread_only"}:
+                raise ValueError("unsupported private alerts query parameter")
+            limit_values = request.query_params.getlist("limit")
+            unread_values = request.query_params.getlist("unread_only")
+            if len(limit_values) > 1 or len(unread_values) > 1:
+                raise ValueError("private alerts query parameters must not be repeated")
+            limit = self._conversation_limit(
+                limit_values[0] if limit_values else "20"
+            )
+            unread_only = self._private_unread_only(
+                unread_values[0] if unread_values else "false"
+            )
+            result = await self.manager.private_alerts(  # type: ignore[attr-defined]
+                account_id,
+                limit=limit,
+                unread_only=unread_only,
+            )
+            return JSONResponse(
+                self._public_private_alerts(
+                    result,
+                    account_id=account_id,
+                    limit=limit,
+                )
+            )
+
+        @web.post("/api/accounts/{account_id}/private-alerts/ack")
+        async def acknowledge_private_alerts(
+            account_id: str,
+            request: Request,
+        ) -> JSONResponse:
+            _, blocked = self._require_action(request)
+            if blocked is not None:
+                return blocked  # type: ignore[return-value]
+            alert_ids, acknowledge_all = self._private_ack_payload(
+                await self._read_payload(request)
+            )
+            result = await self.manager.acknowledge_private_alerts(  # type: ignore[attr-defined]
+                account_id,
+                alert_ids=alert_ids,
+                acknowledge_all=acknowledge_all,
+            )
+            if not isinstance(result, dict):
+                raise RuntimeError(
+                    "invalid private alerts acknowledgement response"
+                )
+            raw_acknowledged = result.get("acknowledged", 0)
+            raw_unread_count = result.get("unread_count", 0)
+            raw_latest_at = result.get("latest_at", 0)
+            acknowledged = (
+                max(0, raw_acknowledged)
+                if isinstance(raw_acknowledged, int)
+                and not isinstance(raw_acknowledged, bool)
+                else 0
+            )
+            unread_count = (
+                max(0, raw_unread_count)
+                if isinstance(raw_unread_count, int)
+                and not isinstance(raw_unread_count, bool)
+                else 0
+            )
+            latest_at = (
+                max(0, raw_latest_at)
+                if isinstance(raw_latest_at, int)
+                and not isinstance(raw_latest_at, bool)
+                else 0
+            )
+            return JSONResponse(
+                {
+                    "account_id": account_id,
+                    "acknowledged": acknowledged,
+                    "unread_count": unread_count,
+                    "latest_at": latest_at,
+                }
             )
 
         @web.get("/api/accounts/{account_id}/media-jobs")

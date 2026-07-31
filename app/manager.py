@@ -875,6 +875,93 @@ class AccountManager:
             for entry in entries
         ]
 
+    async def private_alerts(
+        self,
+        account_id: str,
+        limit: int = 50,
+        *,
+        unread_only: bool = False,
+    ) -> dict[str, object]:
+        await self._require_account(account_id)
+        cleaned_limit = clean_int(
+            limit,
+            "limit",
+            minimum=1,
+            maximum=100,
+        )
+        if not isinstance(unread_only, bool):
+            raise ValueError("unread_only must be a boolean")
+        entries = await self.store.list_private_alerts(
+            account_id,
+            cleaned_limit,
+            unread_only=unread_only,
+        )
+        alert_summary = await self.store.private_alert_summary(account_id)
+        return {
+            "account_id": account_id,
+            "unread_count": alert_summary["unread_count"],
+            "latest_at": alert_summary["latest_at"],
+            "alerts": [
+                {
+                    "alert_id": entry.alert_id,
+                    "sender_name": entry.sender_name,
+                    "preview": entry.preview,
+                    "created_at": entry.created_at,
+                    "acknowledged": entry.acknowledged,
+                }
+                for entry in entries
+            ],
+        }
+
+    async def acknowledge_private_alerts(
+        self,
+        account_id: str,
+        *,
+        alert_ids: list[str] | None = None,
+        acknowledge_all: bool = False,
+    ) -> dict[str, object]:
+        await self._require_account(account_id)
+        if not isinstance(acknowledge_all, bool):
+            raise ValueError("acknowledge_all must be a boolean")
+        if acknowledge_all:
+            if alert_ids:
+                raise ValueError("alert_ids cannot be combined with acknowledge_all")
+            acknowledged = await self.store.acknowledge_all_private_alerts(
+                account_id
+            )
+        else:
+            if (
+                not isinstance(alert_ids, list)
+                or not 1 <= len(alert_ids) <= 100
+                or any(not isinstance(item, str) for item in alert_ids)
+            ):
+                raise ValueError("alert_ids must contain 1 to 100 UUID strings")
+            cleaned_alert_ids: list[str] = []
+            seen: set[str] = set()
+            for alert_id in alert_ids:
+                try:
+                    cleaned_alert_id = str(uuid.UUID(alert_id))
+                except (ValueError, AttributeError) as exc:
+                    raise ValueError("alert_ids must contain valid UUIDs") from exc
+                if cleaned_alert_id not in seen:
+                    seen.add(cleaned_alert_id)
+                    cleaned_alert_ids.append(cleaned_alert_id)
+            acknowledged = 0
+            for cleaned_alert_id in cleaned_alert_ids:
+                acknowledged += int(
+                    await self.store.acknowledge_private_alert(
+                        account_id,
+                        cleaned_alert_id,
+                    )
+                )
+        alert_summary = await self.store.private_alert_summary(account_id)
+        return {
+            "account_id": account_id,
+            "acknowledged": acknowledged,
+            "unread_count": alert_summary["unread_count"],
+            "latest_at": alert_summary["latest_at"],
+        }
+
     async def media_jobs(
         self,
         account_id: str,
@@ -906,11 +993,14 @@ class AccountManager:
 
     async def account_status(self, account_id: str) -> dict[str, object]:
         account = await self._require_account(account_id)
+        alert_summary = await self.store.private_alert_summary(account_id)
         worker = self.workers.get(account_id)
         if worker is not None:
             status = await worker.status()
             status["enabled"] = account.enabled
             status["revision"] = account.revision
+            status["private_unread_count"] = alert_summary["unread_count"]
+            status["private_alert_latest_at"] = alert_summary["latest_at"]
             status["media_providers"] = self.settings.media_provider_readiness
             return status
         stats = await self.store.statistics(account_id)
@@ -927,6 +1017,8 @@ class AccountManager:
             "joined_groups": [],
             "message_count": stats["message_count"],
             "group_count": stats["group_count"],
+            "private_unread_count": alert_summary["unread_count"],
+            "private_alert_latest_at": alert_summary["latest_at"],
             "replies_sent": 0,
             "errors": 1 if account_id in self.start_errors else 0,
             "policy_rejections": 0,
@@ -944,6 +1036,9 @@ class AccountManager:
         statuses = [await self.account_status(account.id) for account in accounts]
         connected = sum(1 for item in statuses if item["connected"])
         enabled = sum(1 for item in statuses if item["enabled"])
+        private_unread_count = sum(
+            int(item.get("private_unread_count", 0)) for item in statuses
+        )
         return {
             "accounts": statuses,
             "summary": {
@@ -952,6 +1047,7 @@ class AccountManager:
                 "connected": connected,
                 "max_accounts": self.settings.max_accounts,
                 "memory_ttl_hours": self.settings.memory_ttl_hours,
+                "private_unread_count": private_unread_count,
                 "media_providers": self.settings.media_provider_readiness,
             },
         }

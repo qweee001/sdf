@@ -4,6 +4,7 @@ import asyncio
 import calendar
 import json
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +23,7 @@ from .media_types import (
 )
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,15 @@ class ConversationLogEntry:
     content: str
 
 
+@dataclass(frozen=True)
+class PrivateAlertEntry:
+    alert_id: str
+    sender_name: str
+    preview: str
+    created_at: int
+    acknowledged: bool
+
+
 class MemoryStore:
     def __init__(self, path: str, ttl_hours: int) -> None:
         self.path = path
@@ -62,7 +72,7 @@ class MemoryStore:
         await self._create_management_tables()
         await self._migrate_account_policy_columns()
         await self._db.commit()
-        await self._repair_media_foreign_keys()
+        await self._repair_management_foreign_keys()
         await self._db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         await self._db.commit()
         await self.purge_expired()
@@ -232,6 +242,33 @@ class MemoryStore:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS private_alerts (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                sender_fingerprint TEXT NOT NULL,
+                telegram_message_id INTEGER NOT NULL,
+                sender_name TEXT NOT NULL,
+                preview TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                acknowledged_at INTEGER,
+                UNIQUE (
+                    account_id, sender_fingerprint, telegram_message_id
+                ),
+                FOREIGN KEY (account_id) REFERENCES accounts(id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_private_alerts_account_status_time
+            ON private_alerts (
+                account_id, acknowledged_at, created_at DESC, id DESC
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_media_jobs_queue
             ON media_jobs (status, available_at, created_at, id)
             """
@@ -258,11 +295,11 @@ class MemoryStore:
                 "media_settings TEXT NOT NULL DEFAULT '{}'"
             )
 
-    async def _repair_media_foreign_keys(self) -> None:
-        """Repair SQLite foreign keys rewritten by legacy account-table migrations."""
+    async def _repair_management_foreign_keys(self) -> None:
+        """Repair foreign keys rewritten by legacy account-table migrations."""
         db = self._connection()
         broken_tables: list[str] = []
-        for table in ("media_usage", "media_jobs"):
+        for table in ("media_usage", "media_jobs", "private_alerts"):
             cursor = await db.execute(f"PRAGMA foreign_key_list({table})")
             targets = {str(row["table"]) for row in await cursor.fetchall()}
             await cursor.close()
@@ -355,6 +392,56 @@ class MemoryStore:
                     ON media_jobs (status, available_at, created_at, id)
                     """
                 )
+            if "private_alerts" in broken_tables:
+                await db.execute(
+                    "ALTER TABLE private_alerts RENAME TO private_alerts_legacy_fk"
+                )
+                await db.execute(
+                    "DROP INDEX IF EXISTS idx_private_alerts_account_status_time"
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE private_alerts (
+                        id TEXT PRIMARY KEY,
+                        account_id TEXT NOT NULL,
+                        sender_fingerprint TEXT NOT NULL,
+                        telegram_message_id INTEGER NOT NULL,
+                        sender_name TEXT NOT NULL,
+                        preview TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        acknowledged_at INTEGER,
+                        UNIQUE (
+                            account_id, sender_fingerprint,
+                            telegram_message_id
+                        ),
+                        FOREIGN KEY (account_id) REFERENCES accounts(id)
+                            ON DELETE CASCADE
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    INSERT INTO private_alerts (
+                        id, account_id, sender_fingerprint,
+                        telegram_message_id, sender_name, preview,
+                        created_at, acknowledged_at
+                    )
+                    SELECT id, account_id, sender_fingerprint,
+                           telegram_message_id, sender_name, preview,
+                           created_at, acknowledged_at
+                    FROM private_alerts_legacy_fk
+                    WHERE account_id IN (SELECT id FROM accounts)
+                    """
+                )
+                await db.execute("DROP TABLE private_alerts_legacy_fk")
+                await db.execute(
+                    """
+                    CREATE INDEX idx_private_alerts_account_status_time
+                    ON private_alerts (
+                        account_id, acknowledged_at, created_at DESC, id DESC
+                    )
+                    """
+                )
             await db.commit()
         except BaseException:
             await db.rollback()
@@ -371,6 +458,21 @@ class MemoryStore:
         if self._db is None:
             raise RuntimeError("MemoryStore is not open")
         return self._db
+
+    @staticmethod
+    def _clean_private_alert_text(
+        value: object,
+        *,
+        limit: int,
+        fallback: str,
+    ) -> str:
+        text = str(value or "")
+        text = "".join(
+            " " if unicodedata.category(character).startswith("C") else character
+            for character in text
+        )
+        cleaned = " ".join(text.split())[:limit].strip()
+        return cleaned or fallback
 
     @staticmethod
     def _account_from_row(row: aiosqlite.Row) -> AccountRecord:
@@ -1079,6 +1181,204 @@ class MemoryStore:
             )
             await db.commit()
 
+    async def add_private_alert(
+        self,
+        account_id: str,
+        sender_fingerprint: str,
+        telegram_message_id: int,
+        sender_name: object,
+        preview: object,
+        *,
+        created_at: int | None = None,
+    ) -> bool:
+        """Store a private-message notification without exposing Telegram IDs.
+
+        The sender fingerprint and Telegram message ID are internal deduplication
+        fields only. Callers must not include them in dashboard responses or logs.
+        """
+        if not sender_fingerprint or len(sender_fingerprint) > 128:
+            raise ValueError("sender_fingerprint is invalid")
+        if (
+            isinstance(telegram_message_id, bool)
+            or not isinstance(telegram_message_id, int)
+            or telegram_message_id < 0
+        ):
+            raise ValueError("telegram_message_id must be a non-negative integer")
+        timestamp = int(time.time()) if created_at is None else created_at
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp < 0:
+            raise ValueError("created_at must be a non-negative integer timestamp")
+        safe_name = self._clean_private_alert_text(
+            sender_name,
+            limit=120,
+            fallback="Telegram 使用者",
+        )
+        safe_preview = self._clean_private_alert_text(
+            preview,
+            limit=280,
+            fallback="（非文字訊息）",
+        )
+        alert_id = str(uuid.uuid4())
+        cutoff = timestamp - self.ttl_seconds
+        async with self._lock:
+            db = self._connection()
+            await db.execute(
+                "DELETE FROM private_alerts WHERE account_id = ? AND created_at < ?",
+                (account_id, cutoff),
+            )
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO private_alerts (
+                    id, account_id, sender_fingerprint, telegram_message_id,
+                    sender_name, preview, created_at, acknowledged_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    alert_id,
+                    account_id,
+                    sender_fingerprint,
+                    telegram_message_id,
+                    safe_name,
+                    safe_preview,
+                    timestamp,
+                ),
+            )
+            inserted = cursor.rowcount == 1
+            await cursor.close()
+            await db.execute(
+                """
+                DELETE FROM private_alerts
+                WHERE account_id = ? AND id IN (
+                    SELECT id FROM private_alerts
+                    WHERE account_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT -1 OFFSET 200
+                )
+                """,
+                (account_id, account_id),
+            )
+            await db.commit()
+        return inserted
+
+    async def list_private_alerts(
+        self,
+        account_id: str,
+        limit: int = 50,
+        *,
+        unread_only: bool = False,
+    ) -> list[PrivateAlertEntry]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("limit must be an integer between 1 and 100")
+        if not isinstance(unread_only, bool):
+            raise ValueError("unread_only must be a boolean")
+        cutoff = int(time.time()) - self.ttl_seconds
+        unread_clause = "AND acknowledged_at IS NULL" if unread_only else ""
+        async with self._lock:
+            cursor = await self._connection().execute(
+                f"""
+                SELECT id, sender_name, preview, created_at, acknowledged_at
+                FROM private_alerts
+                WHERE account_id = ? AND created_at >= ? {unread_clause}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (account_id, cutoff, limit),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [
+            PrivateAlertEntry(
+                alert_id=str(row["id"]),
+                sender_name=str(row["sender_name"]),
+                preview=str(row["preview"]),
+                created_at=int(row["created_at"]),
+                acknowledged=row["acknowledged_at"] is not None,
+            )
+            for row in rows
+        ]
+
+    async def private_unread_count(self, account_id: str) -> int:
+        cutoff = int(time.time()) - self.ttl_seconds
+        async with self._lock:
+            cursor = await self._connection().execute(
+                """
+                SELECT COUNT(*) AS total FROM private_alerts
+                WHERE account_id = ? AND created_at >= ?
+                  AND acknowledged_at IS NULL
+                """,
+                (account_id, cutoff),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        return int(row["total"]) if row else 0
+
+    async def private_alert_summary(self, account_id: str) -> dict[str, int]:
+        cutoff = int(time.time()) - self.ttl_seconds
+        async with self._lock:
+            cursor = await self._connection().execute(
+                """
+                SELECT
+                    COUNT(
+                        CASE WHEN acknowledged_at IS NULL THEN 1 END
+                    ) AS unread_count,
+                    MAX(created_at) AS latest_at
+                FROM private_alerts
+                WHERE account_id = ? AND created_at >= ?
+                """,
+                (account_id, cutoff),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        unread = int(row["unread_count"]) if row else 0
+        latest_at = int(row["latest_at"]) if row and row["latest_at"] is not None else 0
+        return {"unread_count": unread, "latest_at": latest_at}
+
+    async def acknowledge_private_alert(
+        self,
+        account_id: str,
+        alert_id: str,
+        *,
+        now: int | None = None,
+    ) -> bool:
+        timestamp = int(time.time()) if now is None else now
+        cutoff = timestamp - self.ttl_seconds
+        async with self._lock:
+            db = self._connection()
+            cursor = await db.execute(
+                """
+                UPDATE private_alerts SET acknowledged_at = ?
+                WHERE account_id = ? AND id = ? AND created_at >= ?
+                  AND acknowledged_at IS NULL
+                """,
+                (timestamp, account_id, alert_id, cutoff),
+            )
+            changed = cursor.rowcount == 1
+            await cursor.close()
+            await db.commit()
+        return changed
+
+    async def acknowledge_all_private_alerts(
+        self,
+        account_id: str,
+        *,
+        now: int | None = None,
+    ) -> int:
+        timestamp = int(time.time()) if now is None else now
+        cutoff = timestamp - self.ttl_seconds
+        async with self._lock:
+            db = self._connection()
+            cursor = await db.execute(
+                """
+                UPDATE private_alerts SET acknowledged_at = ?
+                WHERE account_id = ? AND created_at >= ?
+                  AND acknowledged_at IS NULL
+                """,
+                (timestamp, account_id, cutoff),
+            )
+            changed = max(cursor.rowcount, 0)
+            await cursor.close()
+            await db.commit()
+        return changed
+
     async def recent_group(
         self,
         account_id: str,
@@ -1132,6 +1432,11 @@ class MemoryStore:
                 (cutoff,),
             )
             removed_messages = max(cursor.rowcount, 0)
+            cursor = await db.execute(
+                "DELETE FROM private_alerts WHERE created_at < ?",
+                (cutoff,),
+            )
+            removed_alerts = max(cursor.rowcount, 0)
             await db.execute(
                 """
                 UPDATE media_jobs
@@ -1150,7 +1455,7 @@ class MemoryStore:
                 (cutoff,),
             )
             await db.commit()
-            return removed_messages
+            return removed_messages + removed_alerts
 
     async def legacy_runtime_settings(self) -> dict[str, str]:
         async with self._lock:

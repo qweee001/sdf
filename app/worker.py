@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -62,6 +64,9 @@ class AccountWorker:
         self.managed_ids_provider = managed_ids_provider
         self.identity_callback = identity_callback
         session = secrets.decrypt(account.session_ciphertext)
+        self._private_sender_hmac_key = settings.account_encryption_key.encode(
+            "utf-8"
+        )
         api_key = settings.ai_api_key
         if not api_key:
             raise ValueError(
@@ -745,7 +750,96 @@ class AccountWorker:
             return True
         return random.random() <= self.account.group_reply_probability
 
+    @staticmethod
+    def _private_media_label(message: Message) -> str:
+        labels = (
+            ("photo", "（圖片）"),
+            ("voice", "（語音訊息）"),
+            ("video_note", "（影片留言）"),
+            ("video", "（影片）"),
+            ("audio", "（音訊）"),
+            ("sticker", "（貼圖）"),
+            ("gif", "（GIF）"),
+            ("document", "（檔案）"),
+            ("contact", "（聯絡人）"),
+            ("poll", "（投票）"),
+            ("geo", "（位置）"),
+            ("venue", "（地點）"),
+        )
+        for attribute, label in labels:
+            if getattr(message, attribute, None):
+                return label
+        return "（非文字訊息）"
+
+    def _private_sender_fingerprint(self, sender_id: int) -> str:
+        return hmac.new(
+            self._private_sender_hmac_key,
+            f"{self.account.id}:{sender_id}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    @staticmethod
+    def _telegram_message_created_at(message: Message) -> int | None:
+        message_date = getattr(message, "date", None)
+        if message_date is None:
+            return None
+        try:
+            timestamp = int(message_date.timestamp())
+        except (AttributeError, OSError, OverflowError, ValueError):
+            return None
+        return timestamp if timestamp >= 0 else None
+
+    async def _store_private_alert(
+        self,
+        sender_id: int,
+        sender_name: str,
+        message: Message,
+        raw_text: str,
+    ) -> None:
+        preview = (raw_text or "").strip()
+        if not preview:
+            preview = self._private_media_label(message)
+        created_at = self._telegram_message_created_at(message)
+        arguments: dict[str, int] = {}
+        if created_at is not None and created_at >= 0:
+            arguments["created_at"] = created_at
+        await self.store.add_private_alert(
+            self.account.id,
+            self._private_sender_fingerprint(sender_id),
+            int(message.id or 0),
+            sender_name,
+            preview,
+            **arguments,
+        )
+
+    async def _record_private_alert(self, event: events.NewMessage.Event) -> None:
+        sender_id = int(event.sender_id or 0)
+        sender_name = "Telegram 使用者"
+        try:
+            sender = await event.get_sender()
+            if sender is not None:
+                sender_name = get_display_name(sender) or sender_name
+        except Exception:
+            # A Telegram entity lookup failure must not hide the notification.
+            pass
+        await self._store_private_alert(
+            sender_id,
+            sender_name,
+            event.message,
+            event.raw_text or "",
+        )
+
     async def on_message(self, event: events.NewMessage.Event) -> None:
+        if getattr(event, "is_private", False):
+            try:
+                await self._record_private_alert(event)
+            except Exception as exc:
+                LOGGER.error(
+                    "Account %s could not store a private-message alert: %s",
+                    self.account.id,
+                    self._safe_error(exc),
+                )
+            return
         if not event.is_group or event.chat_id is None:
             return
         group_id = int(event.chat_id)
@@ -911,6 +1005,48 @@ class AccountWorker:
     async def refresh_joined_groups(self) -> None:
         groups: list[dict[str, object]] = []
         async for dialog in self.client.iter_dialogs():
+            if bool(getattr(dialog, "is_user", False)):
+                message = getattr(dialog, "message", None)
+                created_at = (
+                    self._telegram_message_created_at(message)
+                    if message is not None
+                    else None
+                )
+                read_inbox_max_id = int(
+                    getattr(
+                        getattr(dialog, "dialog", None),
+                        "read_inbox_max_id",
+                        0,
+                    )
+                    or 0
+                )
+                if (
+                    int(dialog.id) != self.me_id
+                    and int(getattr(dialog, "unread_count", 0) or 0) > 0
+                    and message is not None
+                    and not bool(getattr(message, "out", False))
+                    and int(message.id or 0) > read_inbox_max_id
+                    and (
+                        created_at is None
+                        or created_at >= int(time.time()) - self.store.ttl_seconds
+                    )
+                ):
+                    try:
+                        await self._store_private_alert(
+                            int(dialog.id),
+                            get_display_name(dialog.entity)
+                            or str(dialog.name or "Telegram 使用者"),
+                            message,
+                            getattr(message, "raw_text", "") or "",
+                        )
+                    except Exception as exc:
+                        LOGGER.error(
+                            "Account %s could not restore a private-message "
+                            "alert: %s",
+                            self.account.id,
+                            self._safe_error(exc),
+                        )
+                continue
             if not dialog.is_group:
                 continue
             groups.append(
@@ -937,8 +1073,8 @@ class AccountWorker:
             self.me_id = int(me.id)
             self.me_name = get_display_name(me) or self.account.label
             await self.identity_callback(self.account.id, self.me_id, self.me_name)
-            await self.refresh_joined_groups()
             self.client.add_event_handler(self.on_message, events.NewMessage(incoming=True))
+            await self.refresh_joined_groups()
             if self.account.proactive_enabled and self.account.max_proactive_per_day > 0:
                 self.background_tasks.append(asyncio.create_task(self.proactive_loop()))
             if self.media_service is not None:
@@ -970,6 +1106,9 @@ class AccountWorker:
 
     async def status(self) -> dict[str, object]:
         stats = await self.store.statistics(self.account.id)
+        private_unread_count = await self.store.private_unread_count(
+            self.account.id
+        )
         return {
             **self.account.public_dict(),
             "state": self.state,
@@ -986,6 +1125,7 @@ class AccountWorker:
             ],
             "message_count": stats["message_count"],
             "group_count": stats["group_count"],
+            "private_unread_count": private_unread_count,
             "replies_sent": self.replies_sent,
             "errors": self.errors,
             "policy_rejections": self.policy_rejections,

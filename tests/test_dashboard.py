@@ -65,6 +65,8 @@ class FakeAccountManager:
             ],
             "revision": 1,
             "state": "connected",
+            "private_unread_count": 2,
+            "private_alert_latest_at": 1_700_000_001,
         }
 
     async def status(self) -> dict[str, object]:
@@ -72,6 +74,14 @@ class FakeAccountManager:
             "ok": True,
             "account_count": 1,
             "memory_ttl_hours": 24,
+            "summary": {
+                "total": 1,
+                "enabled": 1,
+                "connected": 1,
+                "memory_ttl_hours": 24,
+                "private_unread_count": 2,
+                "private_alert_latest_at": 1_700_000_001,
+            },
             "accounts": [dict(self.account)],
         }
 
@@ -273,6 +283,64 @@ class FakeAccountManager:
                     "updated_at": 0,
                 },
             ][-limit:]
+        }
+
+    async def private_alerts(
+        self,
+        account_id: str,
+        *,
+        limit: int = 50,
+        unread_only: bool = False,
+    ) -> dict[str, object]:
+        self.calls.append(
+            ("private_alerts", (account_id, limit, unread_only))
+        )
+        alerts = [
+            {
+                "alert_id": "11111111-1111-4111-8111-111111111111",
+                "sender_id": 987654321,
+                "sender_name": "<img src=x onerror=alert(1)>",
+                "preview": "<script>alert('private')</script>",
+                "created_at": 1_700_000_000,
+                "acknowledged": False,
+                "raw_text": "must-never-leave-the-server",
+            },
+            {
+                "alert_id": "22222222-2222-4222-8222-222222222222",
+                "sender_id": 123456789,
+                "sender_name": "測試私聊",
+                "preview": "已讀訊息",
+                "created_at": 1_700_000_001,
+                "acknowledged": True,
+            },
+        ]
+        if unread_only:
+            alerts = [alert for alert in alerts if not alert["acknowledged"]]
+        return {
+            "account_id": account_id,
+            "unread_count": 1,
+            "latest_at": 1_700_000_001,
+            "alerts": alerts[:limit],
+        }
+
+    async def acknowledge_private_alerts(
+        self,
+        account_id: str,
+        *,
+        alert_ids: list[str] | None = None,
+        acknowledge_all: bool = False,
+    ) -> dict[str, object]:
+        self.calls.append(
+            (
+                "acknowledge_private_alerts",
+                (account_id, alert_ids, acknowledge_all),
+            )
+        )
+        return {
+            "account_id": account_id,
+            "acknowledged": 2 if acknowledge_all else len(alert_ids or []),
+            "unread_count": 0,
+            "latest_at": 1_700_000_001,
         }
 
 
@@ -562,6 +630,170 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("innerHTML", DASHBOARD_JS)
         self.assertIn("body.textContent", DASHBOARD_JS)
         self.assertIn("sender.textContent", DASHBOARD_JS)
+
+    def test_private_alerts_auth_validation_csrf_and_public_shape(self) -> None:
+        get_path = (
+            "/api/accounts/acct_one/private-alerts"
+            "?limit=20&unread_only=false"
+        )
+        ack_path = "/api/accounts/acct_one/private-alerts/ack"
+        with TestClient(self.server.app, base_url="https://testserver") as client:
+            self.assertEqual(client.get(get_path).status_code, 401)
+            self.assertEqual(
+                client.post(ack_path, json={"all": True}).status_code,
+                401,
+            )
+            csrf = self.login(client)
+            self.assertEqual(
+                client.post(ack_path, json={"all": True}).status_code,
+                403,
+            )
+
+            invalid_get_paths = [
+                "/api/accounts/acct_one/private-alerts?limit=0",
+                "/api/accounts/acct_one/private-alerts?limit=101",
+                "/api/accounts/acct_one/private-alerts?limit=01",
+                "/api/accounts/acct_one/private-alerts?unread_only=1",
+                "/api/accounts/acct_one/private-alerts?unread_only=True",
+                (
+                    "/api/accounts/acct_one/private-alerts"
+                    "?limit=20&limit=50"
+                ),
+                (
+                    "/api/accounts/acct_one/private-alerts"
+                    "?unread_only=true&unread_only=false"
+                ),
+                "/api/accounts/acct_one/private-alerts?extra=true",
+            ]
+            for path in invalid_get_paths:
+                with self.subTest(path=path):
+                    self.assertEqual(client.get(path).status_code, 400)
+
+            response = client.get(get_path)
+            self.assertEqual(response.status_code, 200)
+            result = response.json()
+            self.assertEqual(result["account_id"], "acct_one")
+            self.assertEqual(result["unread_count"], 1)
+            self.assertEqual(result["count"], 2)
+            self.assertEqual(
+                result["alerts"][0]["alert_id"],
+                "11111111-1111-4111-8111-111111111111",
+            )
+            self.assertNotIn("sender_id", response.text)
+            self.assertNotIn("raw_text", response.text)
+            self.assertNotIn("must-never-leave-the-server", response.text)
+            self.assertIn(
+                ("private_alerts", ("acct_one", 20, False)),
+                self.manager.calls,
+            )
+
+            headers = {"X-CSRF-Token": csrf}
+            invalid_payloads = [
+                {},
+                {"all": False},
+                {
+                    "all": True,
+                    "alert_ids": ["11111111-1111-4111-8111-111111111111"],
+                },
+                {"alert_ids": []},
+                {"alert_ids": "11111111-1111-4111-8111-111111111111"},
+                {"alert_ids": [1]},
+                {"alert_ids": [""]},
+                {
+                    "alert_ids": [
+                        "11111111-1111-4111-8111-111111111111",
+                        "11111111-1111-4111-8111-111111111111",
+                    ]
+                },
+                {"alert_ids": ["x" * 161]},
+            ]
+            for payload in invalid_payloads:
+                with self.subTest(payload=payload):
+                    self.assertEqual(
+                        client.post(
+                            ack_path,
+                            headers=headers,
+                            json=payload,
+                        ).status_code,
+                        400,
+                    )
+
+            one = client.post(
+                ack_path,
+                headers=headers,
+                json={
+                    "alert_ids": [
+                        "11111111-1111-4111-8111-111111111111"
+                    ]
+                },
+            )
+            self.assertEqual(one.status_code, 200)
+            self.assertEqual(one.json()["acknowledged"], 1)
+            self.assertIn(
+                (
+                    "acknowledge_private_alerts",
+                    (
+                        "acct_one",
+                        ["11111111-1111-4111-8111-111111111111"],
+                        False,
+                    ),
+                ),
+                self.manager.calls,
+            )
+
+            all_alerts = client.post(
+                ack_path,
+                headers=headers,
+                json={"all": True},
+            )
+            self.assertEqual(all_alerts.status_code, 200)
+            self.assertEqual(all_alerts.json()["acknowledged"], 2)
+            self.assertIn(
+                (
+                    "acknowledge_private_alerts",
+                    ("acct_one", None, True),
+                ),
+                self.manager.calls,
+            )
+
+    def test_private_alert_ui_is_compact_safe_and_stale_guarded(self) -> None:
+        for field_id in (
+            "summaryPrivateUnread",
+            "metricPrivateUnread",
+            "refreshPrivateAlertsButton",
+            "ackAllPrivateAlertsButton",
+            "privateAlertsNotice",
+            "privateAlertList",
+        ):
+            with self.subTest(field_id=field_id):
+                self.assertIn(f'id="{field_id}"', DASHBOARD_HTML)
+        self.assertIn("最近 24 小時收到的私聊提示", DASHBOARD_HTML)
+        self.assertIn("AI 不會在私聊自動回覆", DASHBOARD_HTML)
+        self.assertIn("不會向 Telegram 傳送已讀回條", DASHBOARD_HTML)
+        self.assertIn("全部標記已處理", DASHBOARD_HTML)
+        self.assertIn("private-alert-badge", DASHBOARD_HTML)
+        self.assertIn("/private-alerts?", DASHBOARD_JS)
+        self.assertIn("/private-alerts/ack", DASHBOARD_JS)
+        self.assertIn(
+            "const requestSequence = ++privateAlertsRequestSequence;",
+            DASHBOARD_JS,
+        )
+        self.assertIn(
+            "requestSequence !== privateAlertsRequestSequence",
+            DASHBOARD_JS,
+        )
+        self.assertIn("selectedAccountId !== accountId", DASHBOARD_JS)
+        self.assertIn("sender.textContent", DASHBOARD_JS)
+        self.assertIn("preview.textContent", DASHBOARD_JS)
+        self.assertIn("Telegram AI 多帳號控制台", DASHBOARD_JS)
+        self.assertIn('acknowledge.textContent = "標記已處理"', DASHBOARD_JS)
+        self.assertIn("async function refreshPrivateIndicators()", DASHBOARD_JS)
+        self.assertIn("privateIndicatorRefreshPending", DASHBOARD_JS)
+        self.assertIn("refreshPrivateIndicators().catch", DASHBOARD_JS)
+        self.assertIn("function resetDashboardClientState()", DASHBOARD_JS)
+        self.assertIn("privateAlertsRequestSequence += 1", DASHBOARD_JS)
+        self.assertIn("clearPrivateAlerts();", DASHBOARD_JS)
+        self.assertNotIn("innerHTML", DASHBOARD_JS)
 
     def test_media_jobs_auth_validation_and_public_shape(self) -> None:
         path = "/api/accounts/acct_one/media-jobs?limit=20"

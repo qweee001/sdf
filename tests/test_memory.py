@@ -793,6 +793,12 @@ class MemoryStoreTests(unittest.TestCase):
                 row[1] for row in db.execute("PRAGMA table_info(accounts)").fetchall()
             }
             version = db.execute("PRAGMA user_version").fetchone()[0]
+            private_alert_targets = {
+                foreign_key[2]
+                for foreign_key in db.execute(
+                    "PRAGMA foreign_key_list(private_alerts)"
+                ).fetchall()
+            }
             row = db.execute(
                 "SELECT blocked_terms, blocked_topics FROM accounts WHERE id = 'alpha'"
             ).fetchone()
@@ -800,7 +806,8 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertIn("blocked_terms", columns)
             self.assertIn("blocked_topics", columns)
             self.assertIn("media_settings", columns)
-            self.assertEqual(version, 4)
+            self.assertEqual(version, 5)
+            self.assertEqual(private_alert_targets, {"accounts"})
             self.assertEqual(row, ("[]", "[]"))
 
     def test_policy_migration_repairs_an_interrupted_single_column_upgrade(self) -> None:
