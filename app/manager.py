@@ -1166,6 +1166,11 @@ class AccountManager:
             )
 
     def _validate_media_settings(self, media: AccountMediaSettings) -> None:
+        media_labels = {
+            "image": "圖片生成",
+            "voice": "語音生成",
+            "video": "影片生成",
+        }
         for media_type in ("image", "voice", "video"):
             feature = media.for_kind(media_type)
             if not feature.enabled:
@@ -1178,7 +1183,7 @@ class AccountManager:
                 )
             if not feature.allowed_group_ids:
                 raise ValueError(
-                    f"{media_type} must allow at least one group when enabled"
+                    f"啟用{media_labels[media_type]}時，請至少選擇一個允許群組"
                 )
             if any(group_id >= 0 for group_id in feature.allowed_group_ids):
                 raise ValueError(

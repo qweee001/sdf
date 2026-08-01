@@ -671,6 +671,36 @@ class ManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
+    def test_enabled_media_requires_a_localized_explicit_group(self) -> None:
+        from app.media_types import AccountMediaSettings, MediaFeatureSettings
+
+        with tempfile.TemporaryDirectory() as directory:
+            key = Fernet.generate_key().decode()
+            config = replace(
+                settings(str(Path(directory) / "memory.db"), key),
+                openai_media_api_key="railway-openrouter-media-key",
+            )
+            manager = AccountManager(
+                config,
+                MemoryStore(config.memory_db_path, ttl_hours=24),
+                SecretBox(key),
+            )
+            media = AccountMediaSettings(
+                image=MediaFeatureSettings(
+                    enabled=True,
+                    model="x-ai/grok-imagine-image-quality",
+                    daily_limit=5,
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "啟用圖片生成時，請至少選擇一個允許群組",
+            ):
+                manager._validate_media_settings(media)
+
+            manager._validate_media_settings(AccountMediaSettings())
+
     def test_provider_errors_are_redacted(self) -> None:
         message = safe_error(
             RuntimeError(

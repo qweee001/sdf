@@ -786,6 +786,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <div id="voiceProviderState" class="provider-state"><span>OpenRouter 語音</span><strong>未就緒</strong></div>
                 <div id="videoProviderState" class="provider-state"><span>OpenRouter 影片</span><strong>未就緒</strong></div>
               </div>
+              <div class="hint field full">媒體允許群組與帳號的回覆群組分開管理。啟用每種媒體時都要明確選擇至少一個群組；若帳號目前只有一個可回覆群組，控制台會自動預選。</div>
 
               <label class="check field full"><input id="editImageEnabled" type="checkbox"> 啟用圖片生成</label>
               <label class="field">圖片模型
@@ -1175,7 +1176,11 @@ function mediaGroupIds(prefix, label) {
   const known = [...$(`edit${prefix}KnownGroups`).selectedOptions]
     .map((option) => Number(option.value))
     .filter((groupId) => Number.isSafeInteger(groupId));
-  return [...new Set([...typed, ...known])];
+  const result = [...new Set([...typed, ...known])];
+  if ($(`edit${prefix}Enabled`).checked && !result.length) {
+    throw new Error(`啟用${label}時，請至少選擇一個允許群組`);
+  }
+  return result;
 }
 
 function normalizeBlockedItems(rawValue, options) {
@@ -1415,6 +1420,17 @@ function renderAccountList() {
   }
 }
 
+function unlistedMediaGroupIds(account, feature) {
+  const knownGroupIds = new Set(
+    (Array.isArray(account.joined_groups) ? account.joined_groups : [])
+      .map((group) => String(group.id)),
+  );
+  const allowedGroupIds = Array.isArray(feature.allowed_group_ids)
+    ? feature.allowed_group_ids
+    : [];
+  return allowedGroupIds.filter((groupId) => !knownGroupIds.has(String(groupId)));
+}
+
 function fillEditor(account) {
   const media = account.media && typeof account.media === "object" ? account.media : {};
   const image = media.image && typeof media.image === "object" ? media.image : {};
@@ -1442,9 +1458,7 @@ function fillEditor(account) {
   $("editImageModel").value = image.model || "x-ai/grok-imagine-image-quality";
   $("editImageDailyLimit").value = String(image.daily_limit || 5);
   $("editImageCooldown").value = String(image.cooldown_seconds || 300);
-  $("editImageGroupIds").value = Array.isArray(image.allowed_group_ids)
-    ? image.allowed_group_ids.join("\n")
-    : "";
+  $("editImageGroupIds").value = unlistedMediaGroupIds(account, image).join("\n");
   $("editVoiceEnabled").checked = Boolean(voice.enabled);
   $("editVoiceModel").value = voice.model || "x-ai/grok-voice-tts-1.0";
   $("editVoiceName").value = voice.voice || (
@@ -1454,16 +1468,12 @@ function fillEditor(account) {
   );
   $("editVoiceDailyLimit").value = String(voice.daily_limit || 10);
   $("editVoiceCooldown").value = String(voice.cooldown_seconds || 120);
-  $("editVoiceGroupIds").value = Array.isArray(voice.allowed_group_ids)
-    ? voice.allowed_group_ids.join("\n")
-    : "";
+  $("editVoiceGroupIds").value = unlistedMediaGroupIds(account, voice).join("\n");
   $("editVideoEnabled").checked = Boolean(video.enabled);
   $("editVideoModel").value = video.model || "x-ai/grok-imagine-video-1.5";
   $("editVideoDailyLimit").value = String(video.daily_limit || 1);
   $("editVideoCooldown").value = String(video.cooldown_seconds || 1800);
-  $("editVideoGroupIds").value = Array.isArray(video.allowed_group_ids)
-    ? video.allowed_group_ids.join("\n")
-    : "";
+  $("editVideoGroupIds").value = unlistedMediaGroupIds(account, video).join("\n");
   fillMediaKnownGroups(account, media);
   $("editProbability").value = String(account.group_reply_probability);
   $("editDelayMin").value = String(account.typing_delay_min_seconds);
@@ -1482,6 +1492,14 @@ function fillEditor(account) {
 
 function fillMediaKnownGroups(account, media) {
   const groups = Array.isArray(account.joined_groups) ? account.joined_groups : [];
+  const accountScopeGroupIds = new Set(
+    groups.filter((group) => Boolean(group.enabled)).map((group) => String(group.id)),
+  );
+  const enabledByPrefix = {
+    Image: Boolean(media.image?.enabled),
+    Voice: Boolean(media.voice?.enabled),
+    Video: Boolean(media.video?.enabled),
+  };
   const selectedByPrefix = {
     Image: new Set((media.image?.allowed_group_ids || []).map(String)),
     Voice: new Set((media.voice?.allowed_group_ids || []).map(String)),
@@ -1489,16 +1507,36 @@ function fillMediaKnownGroups(account, media) {
   };
   for (const prefix of ["Image", "Voice", "Video"]) {
     const select = $(`edit${prefix}KnownGroups`);
+    const configuredGroupIds = selectedByPrefix[prefix];
+    const useSingleGroupDefault = enabledByPrefix[prefix] &&
+      configuredGroupIds.size === 0 &&
+      accountScopeGroupIds.size === 1;
     select.replaceChildren();
     for (const group of groups) {
       const option = document.createElement("option");
       option.value = String(group.id);
       option.textContent = `${String(group.title || group.id)} · ${String(group.id)}`;
-      option.selected = selectedByPrefix[prefix].has(option.value);
+      option.selected = configuredGroupIds.has(option.value) ||
+        (useSingleGroupDefault && accountScopeGroupIds.has(option.value));
       select.appendChild(option);
     }
     select.disabled = !groups.length;
   }
+}
+
+function preselectSoleMediaGroup(prefix) {
+  if (!$(`edit${prefix}Enabled`).checked) return;
+  if ($(`edit${prefix}GroupIds`).value.trim()) return;
+  const select = $(`edit${prefix}KnownGroups`);
+  if (select.selectedOptions.length) return;
+  const account = selectedAccount();
+  if (!account) return;
+  const eligibleGroups = (Array.isArray(account.joined_groups) ? account.joined_groups : [])
+    .filter((group) => Boolean(group.enabled));
+  if (eligibleGroups.length !== 1) return;
+  const soleGroupId = String(eligibleGroups[0].id);
+  const option = [...select.options].find((item) => item.value === soleGroupId);
+  if (option) option.selected = true;
 }
 
 function setProviderState(id, readyValue) {
@@ -2203,6 +2241,12 @@ $("settingsForm").addEventListener("input", () => {
   formDirty = true;
 });
 
+for (const prefix of ["Image", "Voice", "Video"]) {
+  $(`edit${prefix}Enabled`).addEventListener("change", () => {
+    preselectSoleMediaGroup(prefix);
+  });
+}
+
 $("settingsForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const account = selectedAccount();
@@ -2230,7 +2274,7 @@ $("settingsForm").addEventListener("submit", async (event) => {
             voice: "",
             daily_limit: integerValue("editImageDailyLimit"),
             cooldown_seconds: integerValue("editImageCooldown"),
-            allowed_group_ids: mediaGroupIds("Image", "圖片允許群組"),
+            allowed_group_ids: mediaGroupIds("Image", "圖片生成"),
           },
           voice: {
             enabled: $("editVoiceEnabled").checked,
@@ -2238,7 +2282,7 @@ $("settingsForm").addEventListener("submit", async (event) => {
             voice: $("editVoiceName").value,
             daily_limit: integerValue("editVoiceDailyLimit"),
             cooldown_seconds: integerValue("editVoiceCooldown"),
-            allowed_group_ids: mediaGroupIds("Voice", "語音允許群組"),
+            allowed_group_ids: mediaGroupIds("Voice", "語音生成"),
           },
           video: {
             enabled: $("editVideoEnabled").checked,
@@ -2246,7 +2290,7 @@ $("settingsForm").addEventListener("submit", async (event) => {
             voice: "",
             daily_limit: integerValue("editVideoDailyLimit"),
             cooldown_seconds: integerValue("editVideoCooldown"),
-            allowed_group_ids: mediaGroupIds("Video", "影片允許群組"),
+            allowed_group_ids: mediaGroupIds("Video", "影片生成"),
           },
         },
         group_reply_probability: numberValue("editProbability"),

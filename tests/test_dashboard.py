@@ -902,6 +902,15 @@ class DashboardTests(unittest.TestCase):
             'allowed_group_ids: mediaGroupIds("Video"',
             DASHBOARD_JS,
         )
+        self.assertIn(
+            'if ($(`edit${prefix}Enabled`).checked && !result.length)',
+            DASHBOARD_JS,
+        )
+        self.assertIn("accountScopeGroupIds.size === 1", DASHBOARD_JS)
+        self.assertIn("enabledByPrefix[prefix]", DASHBOARD_JS)
+        self.assertIn('preselectSoleMediaGroup(prefix)', DASHBOARD_JS)
+        self.assertIn("unlistedMediaGroupIds(account, image)", DASHBOARD_JS)
+        self.assertIn("媒體允許群組與帳號的回覆群組分開管理", DASHBOARD_HTML)
         self.assertEqual(DASHBOARD_JS.count("providers.openrouter_media"), 3)
         self.assertIn("/media-jobs?", DASHBOARD_JS)
         self.assertIn("const requestSequence = ++mediaJobsRequestSequence;", DASHBOARD_JS)
