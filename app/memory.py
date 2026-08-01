@@ -718,38 +718,73 @@ class MemoryStore:
     async def migrate_existing_accounts_to_grok_adult(self) -> int:
         """Apply the explicit operator-requested Grok adult-text migration.
 
-        This intentionally updates every existing account and records an audit
-        entry for each row. It never reads or writes provider credentials and
-        does not alter the media safety settings or any other account policy.
+        This updates each non-conforming existing account exactly once and
+        records an audit entry for the fields that changed. It never reads or
+        writes provider credentials and does not alter media settings or any
+        other account policy.
         """
+        target_base_url = "https://openrouter.ai/api/v1"
+        target_model = "x-ai/grok-4.20"
         async with self._lock:
             db = self._connection()
-            cursor = await db.execute("SELECT id FROM accounts ORDER BY id")
-            account_ids = [str(row["id"]) for row in await cursor.fetchall()]
-            await cursor.close()
-            if not account_ids:
-                return 0
-
-            now = int(time.time())
-            await db.execute(
-                """
-                UPDATE accounts
-                SET ai_base_url='https://openrouter.ai/api/v1',
-                    ai_model='x-ai/grok-4.20',
-                    adult_text_enabled=1,
-                    revision=revision+1,
-                    updated_at=?
-                """,
-                (now,),
-            )
-            for account_id in account_ids:
-                await self._audit_locked(
-                    account_id,
-                    "migrate_existing_accounts_to_grok_adult",
-                    ["adult_text_enabled", "ai_base_url", "ai_model"],
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    """
+                    SELECT id, ai_base_url, ai_model, adult_text_enabled
+                    FROM accounts
+                    WHERE ai_base_url <> ?
+                       OR ai_model <> ?
+                       OR adult_text_enabled <> 1
+                    ORDER BY id
+                    """,
+                    (target_base_url, target_model),
                 )
-            await db.commit()
-            return len(account_ids)
+                try:
+                    rows = await cursor.fetchall()
+                finally:
+                    await cursor.close()
+
+                now = int(time.time())
+                for row in rows:
+                    changed_fields: list[str] = []
+                    if str(row["ai_base_url"]) != target_base_url:
+                        changed_fields.append("ai_base_url")
+                    if str(row["ai_model"]) != target_model:
+                        changed_fields.append("ai_model")
+                    if int(row["adult_text_enabled"]) != 1:
+                        changed_fields.append("adult_text_enabled")
+
+                    cursor = await db.execute(
+                        """
+                        UPDATE accounts
+                        SET ai_base_url=?, ai_model=?, adult_text_enabled=1,
+                            revision=revision+1, updated_at=?
+                        WHERE id=?
+                        """,
+                        (
+                            target_base_url,
+                            target_model,
+                            now,
+                            str(row["id"]),
+                        ),
+                    )
+                    updated_rows = int(cursor.rowcount)
+                    await cursor.close()
+                    if updated_rows != 1:
+                        raise RuntimeError(
+                            "Account changed during Grok adult migration"
+                        )
+                    await self._audit_locked(
+                        str(row["id"]),
+                        "migrate_existing_accounts_to_grok_adult",
+                        changed_fields,
+                    )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+            return len(rows)
 
     async def migrate_openrouter_defaults(
         self,

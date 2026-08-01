@@ -549,34 +549,141 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
-    def test_operator_grok_adult_migration_updates_every_existing_account(self) -> None:
+    def test_operator_grok_adult_migration_is_idempotent_and_audited(self) -> None:
         async def scenario(path: str) -> None:
             store = MemoryStore(path, ttl_hours=24)
             await store.open()
             await store.create_account(account_record("alpha", revision=3))
             await store.create_account(
                 account_record("beta", revision=8).with_updates(
-                    ai_base_url="https://another.example/v1",
-                    ai_model="custom-model",
+                    ai_base_url="https://openrouter.ai/api/v1",
+                    ai_model="x-ai/grok-4.20",
                     adult_text_enabled=False,
+                )
+            )
+            await store.create_account(
+                account_record("gamma", revision=11).with_updates(
+                    telegram_user_id=3000,
+                    ai_base_url="https://openrouter.ai/api/v1",
+                    ai_model="x-ai/grok-4.20",
+                    adult_text_enabled=True,
                 )
             )
 
             migrated = await store.migrate_existing_accounts_to_grok_adult()
-            alpha = await store.get_account("alpha")
-            beta = await store.get_account("beta")
+            first_alpha = await store.get_account("alpha")
+            first_beta = await store.get_account("beta")
+            first_gamma = await store.get_account("gamma")
+            migrated_again = await store.migrate_existing_accounts_to_grok_adult()
+            second_alpha = await store.get_account("alpha")
+            second_beta = await store.get_account("beta")
+            second_gamma = await store.get_account("gamma")
+            cursor = await store._connection().execute(
+                """
+                SELECT account_id, fields
+                FROM audit_log
+                WHERE action='migrate_existing_accounts_to_grok_adult'
+                ORDER BY account_id
+                """
+            )
+            audit_rows = await cursor.fetchall()
+            await cursor.close()
 
             self.assertEqual(migrated, 2)
-            self.assertEqual(alpha.ai_base_url, "https://openrouter.ai/api/v1")
-            self.assertEqual(beta.ai_base_url, "https://openrouter.ai/api/v1")
-            self.assertEqual(alpha.ai_model, "x-ai/grok-4.20")
-            self.assertEqual(beta.ai_model, "x-ai/grok-4.20")
-            self.assertTrue(alpha.adult_text_enabled)
-            self.assertTrue(beta.adult_text_enabled)
-            self.assertEqual(alpha.revision, 4)
-            self.assertEqual(beta.revision, 9)
-            self.assertGreaterEqual(alpha.updated_at, alpha.created_at)
-            self.assertGreaterEqual(beta.updated_at, beta.created_at)
+            self.assertEqual(migrated_again, 0)
+            self.assertEqual(
+                first_alpha.ai_base_url,
+                "https://openrouter.ai/api/v1",
+            )
+            self.assertEqual(
+                first_beta.ai_base_url,
+                "https://openrouter.ai/api/v1",
+            )
+            self.assertEqual(first_alpha.ai_model, "x-ai/grok-4.20")
+            self.assertEqual(first_beta.ai_model, "x-ai/grok-4.20")
+            self.assertTrue(first_alpha.adult_text_enabled)
+            self.assertTrue(first_beta.adult_text_enabled)
+            self.assertEqual(first_alpha.revision, 4)
+            self.assertEqual(first_beta.revision, 9)
+            self.assertEqual(first_gamma.revision, 11)
+            self.assertGreaterEqual(first_alpha.updated_at, first_alpha.created_at)
+            self.assertGreaterEqual(first_beta.updated_at, first_beta.created_at)
+            self.assertEqual(second_alpha.revision, first_alpha.revision)
+            self.assertEqual(second_beta.revision, first_beta.revision)
+            self.assertEqual(second_gamma.revision, first_gamma.revision)
+            self.assertEqual(second_alpha.updated_at, first_alpha.updated_at)
+            self.assertEqual(second_beta.updated_at, first_beta.updated_at)
+            self.assertEqual(second_gamma.updated_at, first_gamma.updated_at)
+            self.assertEqual(
+                [str(row["account_id"]) for row in audit_rows],
+                ["alpha", "beta"],
+            )
+            self.assertEqual(
+                [json.loads(row["fields"]) for row in audit_rows],
+                [
+                    ["adult_text_enabled", "ai_base_url", "ai_model"],
+                    ["adult_text_enabled"],
+                ],
+            )
+            await store.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_operator_grok_adult_migration_rolls_back_on_audit_failure(self) -> None:
+        class AuditAbort(BaseException):
+            pass
+
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            await store.create_account(account_record("alpha", revision=3))
+            await store.create_account(account_record("beta", revision=8))
+            original_audit = store._audit_locked
+            audit_calls = 0
+
+            async def fail_second_audit(
+                account_id: str | None,
+                action: str,
+                fields: list[str],
+            ) -> None:
+                nonlocal audit_calls
+                audit_calls += 1
+                if audit_calls == 2:
+                    raise AuditAbort("simulated audit failure")
+                await original_audit(account_id, action, fields)
+
+            store._audit_locked = fail_second_audit  # type: ignore[method-assign]
+            try:
+                with self.assertRaises(AuditAbort):
+                    await store.migrate_existing_accounts_to_grok_adult()
+            finally:
+                store._audit_locked = original_audit  # type: ignore[method-assign]
+
+            # A later commit must not persist any part of the failed migration.
+            await store.clear_account_api_keys()
+            alpha = await store.get_account("alpha")
+            beta = await store.get_account("beta")
+            cursor = await store._connection().execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM audit_log
+                WHERE action='migrate_existing_accounts_to_grok_adult'
+                """
+            )
+            audit_row = await cursor.fetchone()
+            await cursor.close()
+
+            self.assertEqual(audit_calls, 2)
+            self.assertEqual(alpha.ai_base_url, "https://api.example.com/v1")
+            self.assertEqual(beta.ai_base_url, "https://api.example.com/v1")
+            self.assertEqual(alpha.ai_model, "model-a")
+            self.assertEqual(beta.ai_model, "model-a")
+            self.assertFalse(alpha.adult_text_enabled)
+            self.assertFalse(beta.adult_text_enabled)
+            self.assertEqual(alpha.revision, 3)
+            self.assertEqual(beta.revision, 8)
+            self.assertEqual(int(audit_row["total"]), 0)
             await store.close()
 
         with tempfile.TemporaryDirectory() as directory:
