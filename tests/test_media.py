@@ -30,6 +30,7 @@ from app.media import (
     MediaTimeoutError,
     MediaTooLargeError,
     parse_media_intent,
+    parse_policy_verdict,
 )
 
 
@@ -155,6 +156,40 @@ def media_settings(**overrides: object) -> MediaSettings:
 
 
 class MediaIntentTests(unittest.TestCase):
+    def test_policy_verdict_accepts_only_safe_formatting_variants(self) -> None:
+        allowed = (
+            "MEDIA_ALLOW",
+            " MEDIA_ALLOW。 ",
+            "```MEDIA_ALLOW```",
+            "```text\nMEDIA_ALLOW\n```",
+        )
+        for value in allowed:
+            with self.subTest(value=value):
+                self.assertIs(
+                    parse_policy_verdict(value, "MEDIA_ALLOW"),
+                    True,
+                )
+
+        blocked = ("BLOCK", "BLOCK。", "```txt\nBLOCK\n```")
+        for value in blocked:
+            with self.subTest(value=value):
+                self.assertIs(
+                    parse_policy_verdict(value, "MEDIA_ALLOW"),
+                    False,
+                )
+
+        invalid = (
+            None,
+            "The verdict is MEDIA_ALLOW",
+            "MEDIA_ALLOW BLOCK",
+            "ALLOW",
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertIsNone(
+                    parse_policy_verdict(value, "MEDIA_ALLOW")
+                )
+
     def test_parses_all_four_strict_intents(self) -> None:
         cases = (
             (
@@ -439,6 +474,16 @@ class MediaProviderTests(unittest.TestCase):
             self.assertTrue(decision.allowed)
             payload = json.loads(transport.calls[0]["content"])
             self.assertEqual(payload["model"], "x-ai/grok-4.20")
+            self.assertEqual(
+                payload["models"],
+                [
+                    "x-ai/grok-4.5",
+                    "x-ai/grok-4.3",
+                    "openrouter/auto",
+                ],
+            )
+            self.assertEqual(payload["temperature"], 0)
+            self.assertEqual(payload["max_tokens"], 16)
             self.assertIn("不得因為內容是成人主題", payload["messages"][0]["content"])
             self.assertIn("未成年人", payload["messages"][0]["content"])
             self.assertNotIn("reasoning", payload)

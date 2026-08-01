@@ -147,6 +147,73 @@ class WorkerGuardTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_near_duplicate_recent_reply_is_rewritten(self) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+            worker._completion = AsyncMock(  # type: ignore[method-assign]
+                side_effect=[
+                    "我覺得先慢慢聊，互相熟悉會比較自在。",
+                    "也可以從最近看過的電影聊起，比較容易找到共同話題。",
+                    "MEMBER_ALLOW",
+                ]
+            )
+            safety_context = json.dumps(
+                [
+                    {
+                        "role": "assistant",
+                        "sender": "測試帳號",
+                        "content": "我覺得先慢慢聊，互相熟悉比較自在。",
+                    },
+                    {
+                        "role": "user",
+                        "sender": "群友",
+                        "content": "還能聊什麼？",
+                    },
+                ],
+                ensure_ascii=False,
+            )
+
+            reply = await worker.generate(
+                "請自然回覆",
+                safety_context=safety_context,
+            )
+
+            self.assertEqual(
+                reply.text,
+                "也可以從最近看過的電影聊起，比較容易找到共同話題。",
+            )
+            self.assertEqual(worker.style_rejections, 1)
+            self.assertEqual(worker._completion.await_count, 3)
+
+        asyncio.run(scenario())
+
+    def test_semantic_audit_explicitly_blocks_same_meaning_replies(self) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+            worker._completion = AsyncMock(return_value="MEMBER_ALLOW")  # type: ignore[method-assign]
+
+            self.assertTrue(
+                await worker._output_policy_allows(
+                    "換一種說法",
+                    safety_context='[{"role":"assistant","content":"先前說法"}]',
+                )
+            )
+
+            audit_messages = worker._completion.await_args.args[0]
+            self.assertIn(
+                "同義詞、語助詞、標點、表情、語序或開頭",
+                audit_messages[0]["content"],
+            )
+            self.assertIn("先前說法", audit_messages[1]["content"])
+
+        asyncio.run(scenario())
+
     def test_zero_reply_probability_never_replies_at_random_zero(self) -> None:
         async def scenario() -> None:
             worker = self.make_worker()
@@ -222,7 +289,16 @@ class WorkerGuardTests(unittest.TestCase):
                 ),
                 "自然回覆",
             )
-            self.assertNotIn("extra_body", endpoint.calls[0])
+            self.assertEqual(
+                endpoint.calls[0]["extra_body"],
+                {
+                    "models": [
+                        "x-ai/grok-4.5",
+                        "x-ai/grok-4.3",
+                        "openrouter/auto",
+                    ]
+                },
+            )
 
         asyncio.run(scenario())
 

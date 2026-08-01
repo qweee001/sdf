@@ -32,6 +32,11 @@ OPENROUTER_IMAGE_MODEL = "x-ai/grok-imagine-image-quality"
 OPENROUTER_TTS_MODEL = "x-ai/grok-voice-tts-1.0"
 OPENROUTER_VIDEO_MODEL = "x-ai/grok-imagine-video-1.5"
 OPENROUTER_SAFETY_MODEL = "x-ai/grok-4.20"
+OPENROUTER_SAFETY_FALLBACK_MODELS = (
+    "x-ai/grok-4.5",
+    "x-ai/grok-4.3",
+    "openrouter/auto",
+)
 OPENROUTER_FEMALE_VOICE = "eve"
 OPENROUTER_MALE_VOICE = "rex"
 
@@ -67,6 +72,34 @@ FIXED_BLOCKED_TOPICS = (
     "未經同意的私密影像",
     "真實人物色情深偽",
 )
+
+
+def parse_policy_verdict(value: object, allow_token: str) -> bool | None:
+    """Parse a terse classifier verdict while remaining fail-closed.
+
+    Some OpenRouter models wrap an otherwise valid one-token answer in a
+    Markdown fence or append sentence punctuation.  Accept only that narrow
+    formatting variation; explanations, mixed tokens, and unknown output stay
+    invalid so untrusted prompt text cannot turn into an allow decision.
+    """
+
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().upper()
+    if normalized.startswith("```") and normalized.endswith("```"):
+        normalized = normalized[3:-3].strip()
+        if "\n" in normalized:
+            first, remainder = normalized.split("\n", 1)
+            if first.strip().casefold() in {"text", "txt"}:
+                normalized = remainder.strip()
+    normalized = normalized.strip(
+        " \t\r\n`'\".,:;!?()[]{}<>。！？，；："
+    )
+    if normalized == allow_token.upper():
+        return True
+    if normalized == "BLOCK":
+        return False
+    return None
 
 MEDIA_INTENT_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -916,6 +949,13 @@ class MediaService:
             raise MediaPolicyError("Moderation input is invalid")
         payload = {
             "model": self.settings.moderation_model,
+            "models": [
+                model
+                for model in OPENROUTER_SAFETY_FALLBACK_MODELS
+                if model != self.settings.moderation_model
+            ],
+            "temperature": 0,
+            "max_tokens": 16,
             "messages": [
                 {
                     "role": "system",
@@ -948,18 +988,14 @@ class MediaService:
             verdict = _field(message, "content")
         except (IndexError, KeyError, TypeError):
             verdict = None
-        if not isinstance(verdict, str):
+        decision = parse_policy_verdict(verdict, "MEDIA_ALLOW")
+        if decision is None:
             raise MediaProviderError(
                 "OpenRouter media safety review returned an invalid response"
             )
-        normalized = verdict.strip().upper()
-        if normalized == "MEDIA_ALLOW":
+        if decision:
             return ModerationDecision(flagged=False)
-        if normalized == "BLOCK":
-            return ModerationDecision(flagged=True, categories=("policy",))
-        raise MediaProviderError(
-            "OpenRouter media safety review returned an invalid response"
-        )
+        return ModerationDecision(flagged=True, categories=("policy",))
 
     async def _generate_image(
         self,

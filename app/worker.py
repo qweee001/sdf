@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import hmac
 import io
@@ -9,6 +10,7 @@ import logging
 import random
 import re
 import time
+import unicodedata
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from urllib.parse import urlparse
@@ -44,6 +46,7 @@ from .media import (
     MediaService,
     MediaSettings,
     parse_media_intent,
+    parse_policy_verdict,
 )
 from .media_types import MediaJob, utc_day_key
 from .prompts import proactive_prompt, response_prompt, system_prompt
@@ -57,6 +60,12 @@ LAUGHTER_OPENERS = ("哈哈", "呵呵", "嘻嘻", "嘿嘿")
 DISCOURSE_PARTICLE_OPENERS = ("喔", "哦", "噢", "嗯", "欸", "唉")
 REPLY_CONTEXT_MESSAGE_LIMIT = 20
 PROACTIVE_LEASE_SECONDS = 10 * 60
+OPENROUTER_TEXT_FALLBACK_MODELS = (
+    "x-ai/grok-4.5",
+    "x-ai/grok-4.20",
+    "x-ai/grok-4.3",
+    "openrouter/auto",
+)
 _CJK_OR_PUNCTUATION = r"\u3400-\u9fff，。！？；：、～…「」『』（）【】《》"
 
 
@@ -275,7 +284,7 @@ class AccountWorker:
                 self.account.id,
             )
             return False
-        return verdict.strip().upper() == "MEDIA_ALLOW"
+        return parse_policy_verdict(verdict, "MEDIA_ALLOW") is True
 
     async def _detect_media_intent(
         self,
@@ -390,6 +399,10 @@ class AccountWorker:
         self.media_jobs_queued += 1
         return True
 
+    def _uses_openrouter(self) -> bool:
+        host = (urlparse(self.account.ai_base_url).hostname or "").lower()
+        return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
     async def _completion(
         self,
         messages: list[dict[str, str]],
@@ -399,6 +412,14 @@ class AccountWorker:
                 "model": self.account.ai_model,
                 "messages": messages,
             }
+            if self._uses_openrouter():
+                request["extra_body"] = {
+                    "models": [
+                        model
+                        for model in OPENROUTER_TEXT_FALLBACK_MODELS
+                        if model != self.account.ai_model
+                    ]
+                }
             result = await self.ai.chat.completions.create(**request)
             content = self._completion_content(result)
             if content is not None:
@@ -515,6 +536,11 @@ class AccountWorker:
                             " candidate 一起判斷年齡與同意，但不得從模糊暗示自行"
                             "推定。若近期內容明確確認所有人物成年、自願且沒有撤回"
                             "同意，candidate 不必逐句重複年齡與同意。"
+                            "第六，candidate 不得與 safety_context 中這個帳號近期"
+                            "任何 role=assistant 回覆具有相同或高度近似的主要意思；"
+                            "即使只替換同義詞、語助詞、標點、表情、語序或開頭，仍"
+                            "視為重複並一律 BLOCK。自然承接同一話題可以，但必須"
+                            "補充新的觀點、資訊或互動方向，不能反覆表達同一結論。"
                             "上述成年群組確認絕不覆蓋明確相反證據。無論開關為何，"
                             "只要 candidate 或 safety_context 明確指出未滿 18 歲、"
                             "兒童、未成年、非自願、拒絕、撤回同意或"
@@ -538,11 +564,16 @@ class AccountWorker:
                 self.account.id,
             )
             return False
-        return verdict.strip().upper() == "MEMBER_ALLOW"
+        return parse_policy_verdict(verdict, "MEMBER_ALLOW") is True
 
     @staticmethod
     def _bounded_policy_context(history: list[object]) -> str:
-        recent_indices = set(range(max(0, len(history) - 8), len(history)))
+        recent_indices = set(
+            range(
+                max(0, len(history) - REPLY_CONTEXT_MESSAGE_LIMIT),
+                len(history),
+            )
+        )
         assistant_indices = [
             index
             for index, item in enumerate(history)
@@ -555,8 +586,8 @@ class AccountWorker:
             entries.append(
                 {
                     "role": str(getattr(item, "role", ""))[:20],
-                    "sender": str(getattr(item, "sender_name", ""))[:80],
-                    "content": str(getattr(item, "content", ""))[:600],
+                    "sender": str(getattr(item, "sender_name", ""))[:40],
+                    "content": str(getattr(item, "content", ""))[:150],
                 }
             )
         return json.dumps(
@@ -601,6 +632,41 @@ class AccountWorker:
             for entry in recent_assistant[-4:]
         )
 
+    @staticmethod
+    def _reply_similarity_text(value: object) -> str:
+        normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", normalized)
+
+    @classmethod
+    def _lexically_repeats_recent_reply(
+        cls,
+        candidate: str,
+        safety_context: str,
+    ) -> bool:
+        current = cls._reply_similarity_text(candidate)
+        if len(current) < 6:
+            return False
+        try:
+            entries = json.loads(safety_context)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(entries, list):
+            return False
+        recent_assistant = [
+            cls._reply_similarity_text(entry.get("content"))
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("role") == "assistant"
+        ][-8:]
+        for previous in recent_assistant:
+            if len(previous) < 6:
+                continue
+            shorter, longer = sorted((current, previous), key=len)
+            if len(shorter) >= 10 and shorter in longer:
+                return True
+            if difflib.SequenceMatcher(None, current, previous).ratio() >= 0.82:
+                return True
+        return False
+
     async def generate(
         self,
         user_prompt: str,
@@ -620,6 +686,8 @@ class AccountWorker:
             "中國大陸慣用詞、翻譯腔或書面官腔。帳號只是在台灣語境下運作的自動"
             "互動角色，不得假稱自己是真實台灣人、擁有台灣國籍或戶籍、住在台灣"
             "某地，也不得捏造自己的線下見面、約會、親密關係或成功經歷。"
+            "不得換幾個同義詞後重複近期自己已說過的相同意思；必須提出新的"
+            "觀點、細節或互動方向。若沒有真正的新內容，寧可不要發言。"
         )
         for attempt in range(2):
             prompt = user_prompt if attempt == 0 else user_prompt + retry_instruction
@@ -639,6 +707,12 @@ class AccountWorker:
                 self.policy_rejections += 1
                 continue
             if self._repeats_recent_opening(candidate, safety_context):
+                self.style_rejections = getattr(self, "style_rejections", 0) + 1
+                continue
+            if self._lexically_repeats_recent_reply(
+                candidate,
+                safety_context,
+            ):
                 self.style_rejections = getattr(self, "style_rejections", 0) + 1
                 continue
             if not await self._output_policy_allows(
