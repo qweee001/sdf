@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+from app.adult_safety import (
+    FIXED_ADULT_TEXT_BLOCKED_TERMS,
+    FIXED_ADULT_TEXT_BLOCKED_TOPICS,
+)
 from app.content_guard import BlockedReplyError, ContentGuard, SafeReply
 from app.worker import AccountWorker
 
@@ -13,9 +18,11 @@ class FakeCompletionEndpoint:
     def __init__(self, *results: object) -> None:
         self.results = list(results)
         self.call_count = 0
+        self.calls: list[dict[str, object]] = []
 
     async def create(self, **kwargs: object) -> object:
         self.call_count += 1
+        self.calls.append(kwargs)
         return self.results.pop(0)
 
 
@@ -35,10 +42,12 @@ class WorkerGuardTests(unittest.TestCase):
         *,
         blocked_terms: tuple[str, ...] = ("秘密計畫",),
         blocked_topics: tuple[str, ...] = ("限制主題",),
+        adult_text_enabled: bool = False,
     ) -> AccountWorker:
         worker = AccountWorker.__new__(AccountWorker)
         worker.account = SimpleNamespace(
             id="guard-test-account",
+            ai_base_url="https://api.example.com/v1",
             ai_model="test-model",
             role_key="male_observer",
             style="",
@@ -46,10 +55,39 @@ class WorkerGuardTests(unittest.TestCase):
             task_info="",
             blocked_terms=blocked_terms,
             blocked_topics=blocked_topics,
+            adult_text_enabled=adult_text_enabled,
         )
-        worker.content_guard = ContentGuard(blocked_terms, blocked_topics)
+        worker.content_guard = ContentGuard(
+            FIXED_ADULT_TEXT_BLOCKED_TERMS + blocked_terms,
+            FIXED_ADULT_TEXT_BLOCKED_TOPICS + blocked_topics,
+        )
         worker.policy_rejections = 0
         return worker
+
+    def test_openrouter_grok_chat_disables_reasoning_for_fast_group_replies(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker()
+            worker.account.ai_base_url = "https://openrouter.ai/api/v1"
+            worker.account.ai_model = "x-ai/grok-4.20"
+            endpoint = self.attach_completion_endpoint(
+                worker,
+                completion_result("自然回覆"),
+            )
+
+            self.assertEqual(
+                await worker._completion(
+                    [{"role": "user", "content": "哈囉"}]
+                ),
+                "自然回覆",
+            )
+            self.assertEqual(
+                endpoint.calls[0]["extra_body"],
+                {"reasoning": {"enabled": False}},
+            )
+
+        asyncio.run(scenario())
 
     @staticmethod
     def attach_completion_endpoint(
@@ -136,6 +174,78 @@ class WorkerGuardTests(unittest.TestCase):
 
             self.assertFalse(allowed)
             self.assertEqual(endpoint.call_count, 2)
+
+        asyncio.run(scenario())
+
+    def test_adult_text_audit_receives_server_side_opt_in_and_hard_policy(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+                adult_text_enabled=True,
+            )
+            worker._completion = AsyncMock(  # type: ignore[method-assign]
+                return_value="MEMBER_ALLOW"
+            )
+
+            self.assertTrue(
+                await worker._output_policy_allows(
+                    "好呀，那就照剛剛說好的界線繼續聊。",
+                    safety_context=(
+                        '[{"role":"user","content":'
+                        '"我們都已經30歲，也都明確同意這個成人情境。"}]'
+                    ),
+                )
+            )
+            messages = worker._completion.await_args.args[0]
+            payload = json.loads(messages[1]["content"])
+            self.assertTrue(payload["adult_text_enabled"])
+            self.assertIn("30歲", payload["safety_context"])
+            self.assertEqual(
+                payload["output_channel"],
+                "telegram_text_message",
+            )
+            self.assertIn(
+                "age-ambiguous",
+                payload["fixed_adult_safety_policy"],
+            )
+
+            worker._completion.reset_mock()
+            self.assertTrue(
+                await worker._output_policy_allows(
+                    "一般媒體字幕",
+                    adult_text_context=False,
+                )
+            )
+            messages = worker._completion.await_args.args[0]
+            payload = json.loads(messages[1]["content"])
+            self.assertFalse(payload["adult_text_enabled"])
+
+        asyncio.run(scenario())
+
+    def test_hard_adult_safety_terms_are_blocked_before_semantic_audit(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+                adult_text_enabled=True,
+            )
+            worker._completion = AsyncMock(  # type: ignore[method-assign]
+                side_effect=[
+                    "這段包含兒童色情內容",
+                    "再次包含兒童色情內容",
+                ]
+            )
+
+            with self.assertRaises(BlockedReplyError):
+                await worker.generate("請回覆")
+
+            self.assertEqual(worker._completion.await_count, 2)
+            self.assertEqual(worker.policy_rejections, 2)
 
         asyncio.run(scenario())
 

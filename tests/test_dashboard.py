@@ -25,10 +25,11 @@ class FakeAccountManager:
             "blocked_topics": ["測試屏蔽主題"],
             "ai_base_url": "https://api.openai.com/v1",
             "ai_model": "gpt-5-mini",
+            "adult_text_enabled": False,
             "has_custom_api_key": True,
             "image_api_key": "must-never-leave-the-server",
             "media_providers": {
-                "openai_media": True,
+                "openrouter_media": True,
                 "azure_speech": True,
             },
             "media": {
@@ -96,6 +97,9 @@ class FakeAccountManager:
                 "label": payload["label"],
                 "task_name": payload["task_name"],
                 "ai_model": payload["ai_model"],
+                "adult_text_enabled": bool(
+                    payload.get("adult_text_enabled", False)
+                ),
                 "blocked_terms": list(payload.get("blocked_terms", [])),
                 "blocked_topics": list(payload.get("blocked_topics", [])),
                 "revision": 1,
@@ -166,6 +170,12 @@ class FakeAccountManager:
                 "task_name": payload["task_name"],
                 "task_info": payload["task_info"],
                 "ai_model": payload["ai_model"],
+                "adult_text_enabled": bool(
+                    payload.get(
+                        "adult_text_enabled",
+                        self.account["adult_text_enabled"],
+                    )
+                ),
                 "blocked_terms": list(payload.get("blocked_terms", [])),
                 "blocked_topics": list(payload.get("blocked_topics", [])),
                 "revision": int(payload["revision"]) + 1,
@@ -380,7 +390,7 @@ class DashboardTests(unittest.TestCase):
             self.assertNotIn("has_custom_api_key", status.text)
             self.assertNotIn("image_api_key", status.text)
             self.assertTrue(
-                status.json()["accounts"][0]["media_providers"]["openai_media"]
+                status.json()["accounts"][0]["media_providers"]["openrouter_media"]
             )
 
             self.assertEqual(
@@ -448,6 +458,7 @@ class DashboardTests(unittest.TestCase):
                     "task_info": "關心群友近況",
                     "ai_base_url": "https://api.openai.com/v1",
                     "ai_model": "gpt-5-mini",
+                    "adult_text_enabled": True,
                     "blocked_terms": ["測試屏蔽詞"],
                     "blocked_topics": ["測試屏蔽主題"],
                 },
@@ -459,6 +470,7 @@ class DashboardTests(unittest.TestCase):
             self.assertNotIn("image_api_key", created.text)
             self.assertEqual(created.json()["blocked_terms"], ["測試屏蔽詞"])
             self.assertEqual(created.json()["blocked_topics"], ["測試屏蔽主題"])
+            self.assertTrue(created.json()["adult_text_enabled"])
 
             rejected_key = client.put(
                 "/api/accounts/acct_one",
@@ -478,6 +490,7 @@ class DashboardTests(unittest.TestCase):
                     "task_info": "依照目前群聊內容自然接話",
                     "ai_base_url": "https://openrouter.ai/api/v1",
                     "ai_model": "openai/gpt-5-mini",
+                    "adult_text_enabled": False,
                     "blocked_terms": ["更新後屏蔽詞"],
                     "blocked_topics": ["更新後屏蔽主題"],
                     "media": {
@@ -514,6 +527,7 @@ class DashboardTests(unittest.TestCase):
             self.assertNotIn("image_api_key", updated.text)
             self.assertEqual(updated.json()["blocked_terms"], ["更新後屏蔽詞"])
             self.assertEqual(updated.json()["blocked_topics"], ["更新後屏蔽主題"])
+            self.assertFalse(updated.json()["adult_text_enabled"])
             self.assertEqual(
                 updated.json()["media"]["image"]["allowed_group_ids"],
                 [-1001, -1002],
@@ -851,20 +865,31 @@ class DashboardTests(unittest.TestCase):
             "editVideoKnownGroups",
             "imageProviderState",
             "videoProviderState",
-            "azureProviderState",
+            "voiceProviderState",
             "refreshMediaJobsButton",
             "mediaJobList",
+            "addAdultTextEnabled",
+            "editAdultTextEnabled",
         ):
             with self.subTest(field_id=field_id):
                 self.assertIn(f'id="{field_id}"', DASHBOARD_HTML)
 
         self.assertIn("Railway Variables", DASHBOARD_HTML)
+        self.assertIn("成人純文字模式", DASHBOARD_HTML)
         self.assertNotIn('id="addApiKey"', DASHBOARD_HTML)
         self.assertNotIn('id="editApiKey"', DASHBOARD_HTML)
         self.assertNotIn('id="clearApiKey"', DASHBOARD_HTML)
         self.assertNotIn("ai_api_key", DASHBOARD_JS)
         self.assertNotIn("clear_ai_api_key", DASHBOARD_JS)
         self.assertIn("media: {\n          image: {", DASHBOARD_JS)
+        self.assertIn(
+            'adult_text_enabled: $("addAdultTextEnabled").checked',
+            DASHBOARD_JS,
+        )
+        self.assertIn(
+            'adult_text_enabled: $("editAdultTextEnabled").checked',
+            DASHBOARD_JS,
+        )
         self.assertIn(
             'allowed_group_ids: mediaGroupIds("Image"',
             DASHBOARD_JS,
@@ -877,8 +902,7 @@ class DashboardTests(unittest.TestCase):
             'allowed_group_ids: mediaGroupIds("Video"',
             DASHBOARD_JS,
         )
-        self.assertEqual(DASHBOARD_JS.count("providers.openai_media"), 2)
-        self.assertIn('providers.azure_speech', DASHBOARD_JS)
+        self.assertEqual(DASHBOARD_JS.count("providers.openrouter_media"), 3)
         self.assertIn("/media-jobs?", DASHBOARD_JS)
         self.assertIn("const requestSequence = ++mediaJobsRequestSequence;", DASHBOARD_JS)
         self.assertIn("selectedAccountId !== accountId", DASHBOARD_JS)
@@ -957,6 +981,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('summary.id = "selectedCompactSummary"', DASHBOARD_JS)
         self.assertIn('$("selectedCompactSummary").textContent', DASHBOARD_JS)
         self.assertIn('account.ai_model || "未設定模型"', DASHBOARD_JS)
+        self.assertIn('account.adult_text_enabled ? "成人純文字開"', DASHBOARD_JS)
         self.assertIn("${groupCount} 個群組", DASHBOARD_JS)
         self.assertIn("function createManualSendRow(account)", DASHBOARD_JS)
         self.assertIn("manualGroupByAccount", DASHBOARD_JS)

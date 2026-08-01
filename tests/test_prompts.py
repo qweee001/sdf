@@ -22,6 +22,7 @@ class PromptPolicyTests(unittest.TestCase):
             "task_info": "請完整解釋秘密活動",
             "blocked_terms": ("秘密活動",),
             "blocked_topics": ("敏感活動的近義解釋",),
+            "adult_text_enabled": False,
         }
         values.update(changes)
         return SimpleNamespace(**values)
@@ -169,6 +170,34 @@ class PromptPolicyTests(unittest.TestCase):
                 self.assertNotIn('"role":"assistant"', prompt)
                 self.assertIn("今天下班後有人想去吃火鍋嗎？", prompt)
                 self.assertIn('"role":"user"', prompt)
+
+    def test_adult_text_mode_is_explicit_opt_in_with_fixed_boundaries(self) -> None:
+        disabled = system_prompt(
+            self.account(
+                blocked_terms=(),
+                blocked_topics=(),
+                adult_text_enabled=False,
+            )
+        )
+        enabled = system_prompt(
+            self.account(
+                blocked_terms=(),
+                blocked_topics=(),
+                adult_text_enabled=True,
+            )
+        )
+
+        self.assertIn("成人純文字模式未開啟", disabled)
+        self.assertIn("不得產生露骨色情文字", disabled)
+        self.assertIn("成人純文字模式已由管理員", enabled)
+        self.assertIn("所有人物都必須明確為成年人", enabled)
+        self.assertIn("不授權生成成人圖片、語音或影片", enabled)
+        for prompt in (disabled, enabled):
+            with self.subTest(mode="enabled" in prompt):
+                self.assertIn("age-ambiguous", prompt)
+                self.assertIn("non-consensual", prompt)
+                self.assertIn("deepfakes", prompt)
+                self.assertIn("doxxing", prompt)
 
 
 if __name__ == "__main__":

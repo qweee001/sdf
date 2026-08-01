@@ -23,7 +23,7 @@ from .media_types import (
 )
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True)
@@ -186,7 +186,8 @@ class MemoryStore:
                 updated_at INTEGER NOT NULL,
                 blocked_terms TEXT NOT NULL DEFAULT '[]',
                 blocked_topics TEXT NOT NULL DEFAULT '[]',
-                media_settings TEXT NOT NULL DEFAULT '{}'
+                media_settings TEXT NOT NULL DEFAULT '{}',
+                adult_text_enabled INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -293,6 +294,11 @@ class MemoryStore:
             await db.execute(
                 "ALTER TABLE accounts ADD COLUMN "
                 "media_settings TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "adult_text_enabled" not in columns:
+            await db.execute(
+                "ALTER TABLE accounts ADD COLUMN "
+                "adult_text_enabled INTEGER NOT NULL DEFAULT 0"
             )
 
     async def _repair_management_foreign_keys(self) -> None:
@@ -520,6 +526,7 @@ class MemoryStore:
             blocked_terms=blocked_terms,
             blocked_topics=blocked_topics,
             media_settings=media_settings,
+            adult_text_enabled=bool(row["adult_text_enabled"]),
         )
 
     @staticmethod
@@ -578,7 +585,8 @@ class MemoryStore:
                     proactive_idle_minutes, proactive_min_interval_minutes,
                     proactive_max_interval_minutes, max_proactive_per_day,
                     all_groups, group_ids, revision, created_at, updated_at,
-                    blocked_terms, blocked_topics, media_settings
+                    blocked_terms, blocked_topics, media_settings,
+                    adult_text_enabled
                 ) VALUES (
                     {", ".join("?" for _ in self._account_values(record))}
                 )
@@ -648,6 +656,7 @@ class MemoryStore:
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
+            int(record.adult_text_enabled),
         )
 
     async def update_account(
@@ -676,7 +685,7 @@ class MemoryStore:
                     proactive_max_interval_minutes=?, max_proactive_per_day=?,
                     all_groups=?, group_ids=?, revision=?, created_at=?,
                     updated_at=?, blocked_terms=?, blocked_topics=?,
-                    media_settings=?
+                    media_settings=?, adult_text_enabled=?
                 WHERE id=? AND revision=?
                 """,
                 (
@@ -705,6 +714,111 @@ class MemoryStore:
             )
             await db.commit()
             return max(0, int(cursor.rowcount))
+
+    async def migrate_openrouter_defaults(
+        self,
+        *,
+        ai_base_url: str,
+        ai_model: str,
+        image_model: str,
+        tts_model: str,
+        video_model: str,
+    ) -> int:
+        """Upgrade only the exact provider defaults used by earlier releases.
+
+        Custom model choices are intentionally left untouched. The operation is
+        idempotent and never reads, writes, or logs provider credentials.
+        """
+        legacy_text_models = {"gpt-5-mini", "openai/gpt-5-mini"}
+        legacy_text_bases = {
+            "https://api.openai.com/v1",
+            "https://openrouter.ai/api/v1",
+        }
+        legacy_image_models = {"gpt-image-1", "gpt-image-1.5"}
+        async with self._lock:
+            db = self._connection()
+            cursor = await db.execute(
+                """
+                SELECT id, gender, ai_base_url, ai_model, media_settings
+                FROM accounts
+                """
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            migrated = 0
+            now = int(time.time())
+            for row in rows:
+                current_base = str(row["ai_base_url"]).rstrip("/")
+                current_model = str(row["ai_model"]).strip()
+                next_base = current_base
+                next_model = current_model
+                changed_fields: list[str] = []
+                if (
+                    current_base in legacy_text_bases
+                    and current_model in legacy_text_models
+                ):
+                    next_base = ai_base_url.rstrip("/")
+                    next_model = ai_model
+                    changed_fields.extend(["ai_base_url", "ai_model"])
+
+                raw_media = str(row["media_settings"])
+                next_media = raw_media
+                try:
+                    media = media_settings_from_json(raw_media).public_dict()
+                except ValueError:
+                    media = None
+                if media is not None:
+                    image = media["image"]
+                    voice = media["voice"]
+                    video = media["video"]
+                    media_changed = False
+                    if image["model"] in legacy_image_models:
+                        image["model"] = image_model
+                        media_changed = True
+                    if voice["model"] == "azure-speech":
+                        voice["model"] = tts_model
+                        media_changed = True
+                    if str(voice["voice"]).startswith("zh-TW-"):
+                        voice["voice"] = (
+                            "rex" if str(row["gender"]) == "male" else "eve"
+                        )
+                        media_changed = True
+                    if video["model"] == "sora-2":
+                        video["model"] = video_model
+                        media_changed = True
+                    if media_changed:
+                        next_media = json.dumps(
+                            media,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                        changed_fields.append("media")
+
+                if not changed_fields:
+                    continue
+                await db.execute(
+                    """
+                    UPDATE accounts
+                    SET ai_base_url=?, ai_model=?, media_settings=?,
+                        revision=revision+1, updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        next_base,
+                        next_model,
+                        next_media,
+                        now,
+                        str(row["id"]),
+                    ),
+                )
+                await self._audit_locked(
+                    str(row["id"]),
+                    "migrate_openrouter_defaults",
+                    changed_fields,
+                )
+                migrated += 1
+            await db.commit()
+            return migrated
 
     async def _audit_locked(
         self,

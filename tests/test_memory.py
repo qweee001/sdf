@@ -376,6 +376,7 @@ class MemoryStoreTests(unittest.TestCase):
             record = account_record().with_updates(
                 blocked_terms=("邀約", "信用卡"),
                 blocked_topics=("政治宣傳", "未成年相關內容"),
+                adult_text_enabled=True,
             )
             await store.create_account(record)
 
@@ -394,28 +395,38 @@ class MemoryStoreTests(unittest.TestCase):
                 loaded.public_dict()["blocked_topics"],
                 ["政治宣傳", "未成年相關內容"],
             )
+            self.assertTrue(loaded.adult_text_enabled)
+            self.assertTrue(loaded.public_dict()["adult_text_enabled"])
 
             saved = await store.update_account(
                 loaded.with_updates(
                     blocked_terms=("投資群",),
                     blocked_topics=("借貸", "個資交換"),
+                    adult_text_enabled=False,
                 ),
                 expected_revision=loaded.revision,
-                changed_fields=["blocked_terms", "blocked_topics"],
+                changed_fields=[
+                    "blocked_terms",
+                    "blocked_topics",
+                    "adult_text_enabled",
+                ],
             )
             self.assertEqual(saved.revision, 2)
             reloaded = await store.get_account("alpha")
             self.assertEqual(reloaded.blocked_terms, ("投資群",))
             self.assertEqual(reloaded.blocked_topics, ("借貸", "個資交換"))
+            self.assertFalse(reloaded.adult_text_enabled)
             await store.close()
 
             db = sqlite3.connect(path)
             raw = db.execute(
-                "SELECT blocked_terms, blocked_topics FROM accounts WHERE id = 'alpha'"
+                "SELECT blocked_terms, blocked_topics, adult_text_enabled "
+                "FROM accounts WHERE id = 'alpha'"
             ).fetchone()
             db.close()
             self.assertEqual(json.loads(raw[0]), ["投資群"])
             self.assertEqual(json.loads(raw[1]), ["借貸", "個資交換"])
+            self.assertEqual(raw[2], 0)
 
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
@@ -470,6 +481,70 @@ class MemoryStoreTests(unittest.TestCase):
             ).fetchone()[0]
             db.close()
             self.assertEqual(json.loads(raw)["voice"]["voice"], "zh-TW-HsiaoChenNeural")
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_openrouter_default_migration_is_idempotent(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            legacy_media = AccountMediaSettings(
+                image=MediaFeatureSettings(model="gpt-image-1.5"),
+                voice=MediaFeatureSettings(
+                    model="azure-speech",
+                    voice="zh-TW-HsiaoChenNeural",
+                ),
+                video=MediaFeatureSettings(model="sora-2"),
+            )
+            await store.create_account(
+                account_record().with_updates(
+                    gender="female",
+                    ai_base_url="https://api.openai.com/v1",
+                    ai_model="gpt-5-mini",
+                    media_settings=legacy_media,
+                )
+            )
+
+            migrated = await store.migrate_openrouter_defaults(
+                ai_base_url="https://openrouter.ai/api/v1",
+                ai_model="x-ai/grok-4.20",
+                image_model="x-ai/grok-imagine-image-quality",
+                tts_model="x-ai/grok-voice-tts-1.0",
+                video_model="x-ai/grok-imagine-video-1.5",
+            )
+            loaded = await store.get_account("alpha")
+
+            self.assertEqual(migrated, 1)
+            self.assertEqual(
+                loaded.ai_base_url,
+                "https://openrouter.ai/api/v1",
+            )
+            self.assertEqual(loaded.ai_model, "x-ai/grok-4.20")
+            self.assertEqual(
+                loaded.media_settings.image.model,
+                "x-ai/grok-imagine-image-quality",
+            )
+            self.assertEqual(
+                loaded.media_settings.voice.model,
+                "x-ai/grok-voice-tts-1.0",
+            )
+            self.assertEqual(loaded.media_settings.voice.voice, "eve")
+            self.assertEqual(
+                loaded.media_settings.video.model,
+                "x-ai/grok-imagine-video-1.5",
+            )
+            self.assertEqual(
+                await store.migrate_openrouter_defaults(
+                    ai_base_url="https://openrouter.ai/api/v1",
+                    ai_model="x-ai/grok-4.20",
+                    image_model="x-ai/grok-imagine-image-quality",
+                    tts_model="x-ai/grok-voice-tts-1.0",
+                    video_model="x-ai/grok-imagine-video-1.5",
+                ),
+                0,
+            )
+            await store.close()
 
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
@@ -784,6 +859,7 @@ class MemoryStoreTests(unittest.TestCase):
                         loaded.media_settings,
                         AccountMediaSettings(),
                     )
+                    self.assertFalse(loaded.adult_text_enabled)
                     await store.close()
 
             asyncio.run(migrate_twice())
@@ -806,7 +882,8 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertIn("blocked_terms", columns)
             self.assertIn("blocked_topics", columns)
             self.assertIn("media_settings", columns)
-            self.assertEqual(version, 5)
+            self.assertIn("adult_text_enabled", columns)
+            self.assertEqual(version, 6)
             self.assertEqual(private_alert_targets, {"accounts"})
             self.assertEqual(row, ("[]", "[]"))
 

@@ -8,6 +8,7 @@ import time
 import uuid
 from collections import defaultdict
 from typing import Any
+from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 from telethon import TelegramClient
@@ -89,6 +90,23 @@ class AccountManager:
                 "read only from Railway Variables",
                 removed_legacy_keys,
             )
+        if (
+            self._is_openrouter_provider(self.settings.ai_base_url)
+            and self.settings.media_uses_openrouter
+        ):
+            migrated_providers = await self.store.migrate_openrouter_defaults(
+                ai_base_url=self.settings.ai_base_url,
+                ai_model=self.settings.ai_model,
+                image_model=self.settings.media_image_model,
+                tts_model=self.settings.media_tts_model,
+                video_model=self.settings.media_video_model,
+            )
+            if migrated_providers:
+                LOGGER.info(
+                    "Migrated %s account(s) from legacy provider defaults "
+                    "to OpenRouter",
+                    migrated_providers,
+                )
         await self._refresh_managed_ids()
         accounts = await self.store.list_accounts()
         for account in accounts:
@@ -461,11 +479,18 @@ class AccountManager:
             media_settings=clean_account_media_settings(
                 payload.get("media", {})
             ),
+            adult_text_enabled=clean_bool(
+                payload.get("adult_text_enabled", False),
+                "adult_text_enabled",
+            ),
         )
         self._validate_intervals(record)
+        self._validate_ai_provider(record.ai_base_url)
         self._validate_media_settings(record.media_settings)
         if not self.settings.ai_api_key:
-            raise ValueError("請在 Railway Variables 設定 AI_API_KEY")
+            raise ValueError(
+                "請在 Railway Variables 設定 OPENROUTER_API_KEY 或 AI_API_KEY"
+            )
         async with self._create_lock:
             if await self.store.count_accounts() >= self.settings.max_accounts:
                 raise ValueError(
@@ -658,11 +683,21 @@ class AccountManager:
                 payload.get("media", {}),
                 current=current.media_settings,
             ),
+            adult_text_enabled=clean_bool(
+                payload.get(
+                    "adult_text_enabled",
+                    current.adult_text_enabled,
+                ),
+                "adult_text_enabled",
+            ),
         )
         self._validate_intervals(updated)
+        self._validate_ai_provider(updated.ai_base_url)
         self._validate_media_settings(updated.media_settings)
         if not self.settings.ai_api_key:
-            raise ValueError("請在 Railway Variables 設定 AI_API_KEY")
+            raise ValueError(
+                "請在 Railway Variables 設定 OPENROUTER_API_KEY 或 AI_API_KEY"
+            )
 
         changed_fields = [
             name
@@ -689,6 +724,7 @@ class AccountManager:
                 "blocked_terms",
                 "blocked_topics",
                 "media",
+                "adult_text_enabled",
             )
             if name in payload
         ]
@@ -1104,6 +1140,21 @@ class AccountManager:
         ):
             raise ValueError("主動發言最大間隔不可小於最小間隔")
 
+    @staticmethod
+    def _is_openrouter_provider(base_url: str) -> bool:
+        host = (urlparse(base_url).hostname or "").lower()
+        return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+    def _validate_ai_provider(self, base_url: str) -> None:
+        if (
+            self.settings.ai_uses_openrouter_key
+            and not self._is_openrouter_provider(base_url)
+        ):
+            raise ValueError(
+                "使用 OPENROUTER_API_KEY 時，AI Base URL 必須是 "
+                "https://openrouter.ai/api/v1"
+            )
+
     def _validate_media_settings(self, media: AccountMediaSettings) -> None:
         for media_type in ("image", "voice", "video"):
             feature = media.for_kind(media_type)
@@ -1124,14 +1175,19 @@ class AccountManager:
                     f"{media_type} allowed groups must be negative Telegram group IDs"
                 )
         if (
-            media.image.enabled or media.video.enabled
+            media.image.enabled or media.voice.enabled or media.video.enabled
         ) and not self.settings.openai_media_api_key:
             raise ValueError(
-                "請先在 Railway Variables 設定 OPENAI_MEDIA_API_KEY"
+                "請先在 Railway Variables 設定 OPENROUTER_API_KEY 或 "
+                "OPENROUTER_MEDIA_API_KEY"
             )
-        if media.voice.enabled and not (
-            self.settings.azure_speech_key
-            and self.settings.azure_speech_region
+        if (
+            media.voice.enabled
+            and not self.settings.media_uses_openrouter
+            and not (
+                self.settings.azure_speech_key
+                and self.settings.azure_speech_region
+            )
         ):
             raise ValueError(
                 "請先在 Railway Variables 設定 AZURE_SPEECH_KEY "

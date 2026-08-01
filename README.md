@@ -12,9 +12,9 @@ Telegram 連線、固定角色、群組範圍、任務說明、AI 模型與 24 �
 - 四種固定角色：男性／女性老成員、男性／女性觀望成員。
 - 每個帳號可編輯語氣、任務名稱、任務說明及回覆行為。
 - 每個帳號可選擇所有群組或指定群組。
-- 每個帳號可設定 OpenAI-compatible Base URL 與模型；API Key 只從 Railway Variables 讀取。
+- 文字模型預設透過 OpenRouter 使用 Grok；每個帳號仍可設定 OpenAI-compatible Base URL 與模型，API Key 只從 Railway Variables 讀取。
 - 每個帳號可設定輸出屏蔽詞與屏蔽主題；草稿會經字面、變形、近似詞與語意審核，未通過時不會發送。
-- 每個帳號可獨立開啟圖片、台灣口語語音與影片，並設定模型／聲線、每日上限、冷卻時間及允許群組。
+- 每個帳號可獨立開啟 OpenRouter 圖片、台灣口語語音與影片，並設定模型／聲線、每日上限、冷卻時間及允許群組。
 - 媒體請求由聊天模型輸出結構化意圖，通過屏蔽及安全審核後才排入背景任務；影片不會阻塞文字群聊。
 - 圖片與完成的影片會再次執行視覺安全審核；所有媒體都由目前登入的 Telegram 帳號透過 `send_file` 發送。
 - 模型可從控制台測試及切換，儲存後只重啟該帳號。
@@ -34,6 +34,9 @@ Telegram 連線、固定角色、群組範圍、任務說明、AI 模型與 24 �
 2. 加密 Session 並建立 `primary` 帳號。
 3. 保留原本角色、群組範圍、模型及啟停狀態。
 4. 將舊訊息補上 `primary` 帳號 ID，不會清空現有 24 小時記憶。
+5. 將舊版預設的 `gpt-5-mini`、`gpt-image-1.5`、`azure-speech` 與
+   `sora-2` 設定一次性遷移到本版 OpenRouter／Grok 預設；自行指定的其他模型
+   不會被改寫。
 
 之後新增的帳號直接在控制台輸入新的 `TG_SESSION_STRING`，不需要再建立 Railway
 Service。
@@ -45,12 +48,19 @@ TG_API_ID=
 TG_API_HASH=
 TG_SESSION_STRING=
 
-AI_API_KEY=
-AI_BASE_URL=https://api.openai.com/v1
-AI_MODEL=gpt-5-mini
+OPENROUTER_API_KEY=
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+AI_MODEL=x-ai/grok-4.20
 
-OPENAI_MEDIA_API_KEY=
-OPENAI_MEDIA_BASE_URL=https://api.openai.com/v1
+# 可選：媒體使用另一把 OpenRouter Key；留白時沿用 OPENROUTER_API_KEY
+OPENROUTER_MEDIA_API_KEY=
+OPENROUTER_MEDIA_BASE_URL=https://openrouter.ai/api/v1
+MEDIA_IMAGE_MODEL=x-ai/grok-imagine-image-quality
+MEDIA_TTS_MODEL=x-ai/grok-voice-tts-1.0
+MEDIA_VIDEO_MODEL=x-ai/grok-imagine-video-1.5
+MEDIA_MODERATION_MODEL=x-ai/grok-4.20
+
+# 只有改用非 OpenRouter 語音供應商時才需要
 AZURE_SPEECH_KEY=
 AZURE_SPEECH_REGION=
 
@@ -76,7 +86,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 這個 Key 只能放在 Railway Variables。建立帳號後不可任意更換，否則已保存的
 Telegram Session 將無法解密。
 
-媒體金鑰也只能放在 Railway Variables。控制台只顯示供應商是否就緒，不提供
+OpenRouter 金鑰只能放在 Railway Variables。控制台只顯示供應商是否就緒，不提供
 金鑰輸入欄，也不會把金鑰保存到 SQLite、API 回應或日誌。沒有媒體金鑰時，原有
 文字群聊仍可正常運作；各帳號的圖片、語音及影片預設皆為關閉。
 
@@ -123,8 +133,21 @@ Session String 與 API Key 都不會由任何 GET API、HTML、狀態或日誌�
 - AI Base URL（必須是公開 HTTPS 位址）
 - Model ID
 
-所有帳號共用 Railway Variables 內的 `AI_API_KEY`；控制台不接受或保存 Key。
+所有帳號共用 Railway Variables 內的 `OPENROUTER_API_KEY`；舊環境的
+`AI_API_KEY` 仍可作為相容備援。控制台不接受或保存 Key。
 控制台提供小型「測試模型」請求，測試失敗不會自動改寫其他帳號。
+當 `OPENROUTER_API_KEY` 已設定時，系統只允許把該 Key 傳往
+`https://openrouter.ai/api/v1`，避免誤把 OpenRouter 憑證送到其他供應商。
+
+預設文字模型是 `x-ai/grok-4.20`，適合嚴格遵循角色與輸出規則的長對話；若偏好
+更高品質可在帳號設定改成 `x-ai/grok-4.5`，若偏好較快回覆可使用
+`x-ai/grok-4.1-fast`。這些是本專案依模型能力做的配置建議，並非供應商官方宣稱
+的「成人聊天專用模型」。
+
+每個帳號另有「成人純文字模式」開關，預設關閉。開啟後只會放行所有人物均
+明確成年、互動明確自願的純文字成人情境；這個開關不會放寬圖片、語音或影片
+的安全審核。未成年或年齡不明、非自願或脅迫、剝削與人口販運、偷拍或未經
+同意的私密內容、真實人物性深偽、騷擾、開盒／個資暴露及非法內容仍固定攔截。
 
 ## 輸出屏蔽規則
 
@@ -147,14 +170,16 @@ Session String 與 API Key 都不會由任何 GET API、HTML、狀態或日誌�
 
 控制台可針對每個帳號分別設定：
 
-- 圖片：開關、OpenAI 圖片模型、每日上限、冷卻秒數、允許群組。
-- 語音：開關、Azure 台灣中文聲線、每日上限、冷卻秒數、允許群組。
-- 影片：開關、OpenAI 影片模型、每日上限、冷卻秒數、允許群組。
+- 圖片：開關、OpenRouter 圖片模型、每日上限、冷卻秒數、允許群組；預設 `x-ai/grok-imagine-image-quality`。
+- 語音：開關、OpenRouter TTS 模型與聲線、每日上限、冷卻秒數、允許群組；預設 `x-ai/grok-voice-tts-1.0`，女性 `eve`、男性 `rex`。
+- 影片：開關、OpenRouter 影片模型、每日上限、冷卻秒數、允許群組；預設 `x-ai/grok-imagine-video-1.5`。
 
 只有成員明確要求圖片、語音或影片時，聊天模型才會建立結構化媒體需求。需求會先
 經現有屏蔽詞／屏蔽主題與媒體安全審核；圖片生成後再審核圖片，影片完成後則審核
-預覽圖，再由該帳號的 Telethon 連線發送。語音文案採台灣繁體口語，Azure 直接
-輸出 OGG/Opus，並以 Telegram 語音訊息送出。
+預覽圖，再由該帳號的 Telethon 連線發送。語音文案採台灣繁體口語，OpenRouter
+先輸出 MP3，再由容器內的 FFmpeg 轉成 OGG/Opus，以 Telegram 語音訊息送出。
+Grok TTS 可讀中文，但供應商目前沒有保證特定台灣口音；本系統能保證文案使用
+台灣繁體口語，若必須鎖定特定台灣聲線，可改用保留的 Azure Speech 備援設定。
 
 媒體任務及配額保存在同一個 Railway Volume 的 SQLite。部署重新啟動時，未完成
 任務可由帳號背景工作重新接手；每日上限及冷卻在排隊時原子檢查，避免同時訊息

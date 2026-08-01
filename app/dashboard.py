@@ -681,11 +681,13 @@ DASHBOARD_HTML = """<!doctype html>
               <span class="hint">禁止輸出相關解釋、改寫或暗示。每行一項，最多 50 項、每項最多 300 字；語意審核會增加模型呼叫，審核失敗時不發送。</span>
             </label>
             <label class="field">AI Base URL（可留白使用系統預設）
-              <input id="addBaseUrl" inputmode="url" maxlength="500" placeholder="https://api.openai.com/v1">
+              <input id="addBaseUrl" inputmode="url" maxlength="500" placeholder="https://openrouter.ai/api/v1">
             </label>
             <label class="field">模型（可留白使用系統預設）
               <input id="addModel" maxlength="200" placeholder="模型名稱">
             </label>
+            <label class="check field full"><input id="addAdultTextEnabled" type="checkbox"> 啟用成人純文字模式</label>
+            <div class="hint field full">只放行人物皆明確成年且明確自願的純文字成人情境；不套用到圖片、語音或影片。未成年／年齡不明、非自願、剝削、騷擾、個資濫用與非法內容仍固定攔截。</div>
             <div class="hint field full">AI 與媒體 Provider API Key 僅由 Railway Variables 提供；控制台不接受、保存或顯示任何 Key。</div>
             <label class="check field full"><input id="addEnabled" type="checkbox" checked> 建立後立即啟用</label>
             <div class="actions field full">
@@ -774,13 +776,15 @@ DASHBOARD_HTML = """<!doctype html>
               <label class="field">模型名稱
                 <input id="editModel" required maxlength="200">
               </label>
+              <label class="check field full"><input id="editAdultTextEnabled" type="checkbox"> 啟用成人純文字模式</label>
+              <div class="hint field full">僅適用自動文字回覆，且只可處理人物皆明確成年、互動明確自願的情境。媒體安全政策不會因此放寬。</div>
               <div class="hint field full">AI 與媒體 Provider API Key 僅由 Railway Variables 提供；控制台不接受、保存或顯示任何 Key。</div>
 
               <div class="field full"><div class="divider"></div><h3>媒體生成</h3></div>
               <div class="provider-grid field full" aria-label="媒體 Provider 狀態">
-                <div id="imageProviderState" class="provider-state"><span>圖片 Provider</span><strong>未就緒</strong></div>
-                <div id="videoProviderState" class="provider-state"><span>影片 Provider</span><strong>未就緒</strong></div>
-                <div id="azureProviderState" class="provider-state"><span>Azure 語音</span><strong>未就緒</strong></div>
+                <div id="imageProviderState" class="provider-state"><span>OpenRouter 圖片</span><strong>未就緒</strong></div>
+                <div id="voiceProviderState" class="provider-state"><span>OpenRouter 語音</span><strong>未就緒</strong></div>
+                <div id="videoProviderState" class="provider-state"><span>OpenRouter 影片</span><strong>未就緒</strong></div>
               </div>
 
               <label class="check field full"><input id="editImageEnabled" type="checkbox"> 啟用圖片生成</label>
@@ -1073,8 +1077,9 @@ function compactAccountSummary(account) {
   const groupCount = Array.isArray(account.joined_groups) ? account.joined_groups.length : 0;
   const connectionState = account.connected ? "已連線" : "未連線";
   const privateUnread = Math.max(0, Number(account.private_unread_count || 0));
+  const adultTextMode = account.adult_text_enabled ? "成人純文字開" : "成人純文字關";
   return `${account.label || "未命名帳號"} · ${stateName(account)}／${connectionState} · ` +
-    `${roleName(account)} · ${account.ai_model || "未設定模型"} · ${groupCount} 個群組 · ` +
+    `${roleName(account)} · ${account.ai_model || "未設定模型"} · ${adultTextMode} · ${groupCount} 個群組 · ` +
     `私聊未讀 ${privateUnread}`;
 }
 
@@ -1432,19 +1437,20 @@ function fillEditor(account) {
     : "";
   $("editBaseUrl").value = account.ai_base_url || "";
   $("editModel").value = account.ai_model || "";
+  $("editAdultTextEnabled").checked = Boolean(account.adult_text_enabled);
   $("editImageEnabled").checked = Boolean(image.enabled);
-  $("editImageModel").value = image.model || "gpt-image-1.5";
+  $("editImageModel").value = image.model || "x-ai/grok-imagine-image-quality";
   $("editImageDailyLimit").value = String(image.daily_limit || 5);
   $("editImageCooldown").value = String(image.cooldown_seconds || 300);
   $("editImageGroupIds").value = Array.isArray(image.allowed_group_ids)
     ? image.allowed_group_ids.join("\n")
     : "";
   $("editVoiceEnabled").checked = Boolean(voice.enabled);
-  $("editVoiceModel").value = voice.model || "azure-speech";
+  $("editVoiceModel").value = voice.model || "x-ai/grok-voice-tts-1.0";
   $("editVoiceName").value = voice.voice || (
     account.gender === "male"
-      ? "zh-TW-YunJheNeural"
-      : "zh-TW-HsiaoChenNeural"
+      ? "rex"
+      : "eve"
   );
   $("editVoiceDailyLimit").value = String(voice.daily_limit || 10);
   $("editVoiceCooldown").value = String(voice.cooldown_seconds || 120);
@@ -1452,7 +1458,7 @@ function fillEditor(account) {
     ? voice.allowed_group_ids.join("\n")
     : "";
   $("editVideoEnabled").checked = Boolean(video.enabled);
-  $("editVideoModel").value = video.model || "sora-2";
+  $("editVideoModel").value = video.model || "x-ai/grok-imagine-video-1.5";
   $("editVideoDailyLimit").value = String(video.daily_limit || 1);
   $("editVideoCooldown").value = String(video.cooldown_seconds || 1800);
   $("editVideoGroupIds").value = Array.isArray(video.allowed_group_ids)
@@ -1469,9 +1475,9 @@ function fillEditor(account) {
   $("editIntervalMin").value = String(account.proactive_min_interval_minutes);
   $("editIntervalMax").value = String(account.proactive_max_interval_minutes);
   $("editProactiveMax").value = String(account.max_proactive_per_day);
-  setProviderState("imageProviderState", providers.openai_media);
-  setProviderState("videoProviderState", providers.openai_media);
-  setProviderState("azureProviderState", providers.azure_speech);
+  setProviderState("imageProviderState", providers.openrouter_media);
+  setProviderState("voiceProviderState", providers.openrouter_media);
+  setProviderState("videoProviderState", providers.openrouter_media);
 }
 
 function fillMediaKnownGroups(account, media) {
@@ -1999,6 +2005,7 @@ function collectNewAccountPayload() {
     task_info: $("addTaskInfo").value,
     blocked_terms: parseBlockedTerms($("addBlockedTerms").value),
     blocked_topics: parseBlockedTopics($("addBlockedTopics").value),
+    adult_text_enabled: $("addAdultTextEnabled").checked,
     enabled: $("addEnabled").checked,
   };
   if ($("addBaseUrl").value.trim()) payload.ai_base_url = $("addBaseUrl").value;
@@ -2215,6 +2222,7 @@ $("settingsForm").addEventListener("submit", async (event) => {
         blocked_topics: parseBlockedTopics($("editBlockedTopics").value),
         ai_base_url: $("editBaseUrl").value,
         ai_model: $("editModel").value,
+        adult_text_enabled: $("editAdultTextEnabled").checked,
         media: {
           image: {
             enabled: $("editImageEnabled").checked,

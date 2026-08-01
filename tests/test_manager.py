@@ -249,6 +249,7 @@ class ManagerTests(unittest.TestCase):
                     "task_info": "自然歡迎新加入的成員",
                     "ai_base_url": "https://api.example.com/v1",
                     "ai_model": "model-a",
+                    "adult_text_enabled": True,
                 }
             )
             account_id = str(created["id"])
@@ -256,6 +257,7 @@ class ManagerTests(unittest.TestCase):
             self.assertNotIn("session_ciphertext", created)
             stored = await store.get_account(account_id)
             self.assertEqual(secrets.decrypt(stored.session_ciphertext), "session-secret")
+            self.assertTrue(stored.adult_text_enabled)
 
             updated = await manager.update_account(
                 account_id,
@@ -268,9 +270,11 @@ class ManagerTests(unittest.TestCase):
                     "task_info": "更新後任務",
                     "ai_base_url": "https://api.example.com/v2",
                     "ai_model": "model-b",
+                    "adult_text_enabled": False,
                 },
             )
             self.assertEqual(updated["ai_model"], "model-b")
+            self.assertFalse(updated["adult_text_enabled"])
             self.assertFalse(updated["has_custom_api_key"])
             self.assertNotIn("ai_api_key", updated)
             with self.assertRaisesRegex(
@@ -286,6 +290,7 @@ class ManagerTests(unittest.TestCase):
                 )
             reloaded = await store.get_account(account_id)
             self.assertEqual(reloaded.ai_api_key_ciphertext, "")
+            self.assertFalse(reloaded.adult_text_enabled)
             await manager.close()
 
         with tempfile.TemporaryDirectory() as directory:
@@ -549,6 +554,23 @@ class ManagerTests(unittest.TestCase):
             "https://api.example.com/v1",
         )
 
+    def test_openrouter_key_is_never_forwarded_to_another_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            key = Fernet.generate_key().decode()
+            config = replace(
+                settings(str(Path(directory) / "memory.db"), key),
+                ai_uses_openrouter_key=True,
+            )
+            manager = AccountManager(
+                config,
+                MemoryStore(config.memory_db_path, ttl_hours=24),
+                SecretBox(key),
+            )
+
+            manager._validate_ai_provider("https://openrouter.ai/api/v1")
+            with self.assertRaisesRegex(ValueError, "OPENROUTER_API_KEY"):
+                manager._validate_ai_provider("https://api.openai.com/v1")
+
     def test_media_settings_require_railway_providers_and_jobs_are_redacted(
         self,
     ) -> None:
@@ -556,9 +578,8 @@ class ManagerTests(unittest.TestCase):
             key = Fernet.generate_key().decode()
             config = replace(
                 settings(path, key),
-                openai_media_api_key="railway-openai-media-key",
-                azure_speech_key="railway-azure-key",
-                azure_speech_region="eastasia",
+                openai_media_api_key="railway-openrouter-media-key",
+                openai_media_base_url="https://openrouter.ai/api/v1",
             )
             store = MemoryStore(path, ttl_hours=24)
             manager = AccountManager(config, store, SecretBox(key))
@@ -578,7 +599,7 @@ class ManagerTests(unittest.TestCase):
                         "media": {
                             "image": {
                                 "enabled": True,
-                                "model": "gpt-image-1.5",
+                                "model": "x-ai/grok-imagine-image-quality",
                                 "voice": "",
                                 "daily_limit": 5,
                                 "cooldown_seconds": 60,
@@ -586,8 +607,8 @@ class ManagerTests(unittest.TestCase):
                             },
                             "voice": {
                                 "enabled": True,
-                                "model": "azure-speech",
-                                "voice": "zh-TW-HsiaoChenNeural",
+                                "model": "x-ai/grok-voice-tts-1.0",
+                                "voice": "eve",
                                 "daily_limit": 10,
                                 "cooldown_seconds": 30,
                                 "allowed_group_ids": [-100123],
@@ -598,7 +619,7 @@ class ManagerTests(unittest.TestCase):
                 self.assertTrue(created["media"]["image"]["enabled"])
                 self.assertEqual(
                     created["media_providers"],
-                    {"openai_media": True, "azure_speech": True},
+                    {"openrouter_media": True, "azure_speech": False},
                 )
                 reservation = await store.enqueue_media_job(
                     str(created["id"]),

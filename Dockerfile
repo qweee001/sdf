@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update && \
-    apt-get install --no-install-recommends --yes gosu && \
+    apt-get install --no-install-recommends --yes ffmpeg gosu && \
     rm -rf /var/lib/apt/lists/* && \
     addgroup --system app && \
     adduser --system --ingroup app app && \

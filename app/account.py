@@ -50,6 +50,7 @@ class AccountRecord:
     media_settings: AccountMediaSettings = field(
         default_factory=AccountMediaSettings
     )
+    adult_text_enabled: bool = False
 
     @property
     def role_key(self) -> str:
@@ -91,6 +92,7 @@ class AccountRecord:
             "blocked_terms": list(self.blocked_terms),
             "blocked_topics": list(self.blocked_topics),
             "media": self.media_settings.public_dict(),
+            "adult_text_enabled": self.adult_text_enabled,
             "revision": self.revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,

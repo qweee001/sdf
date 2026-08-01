@@ -366,6 +366,163 @@ class HTTPTransportTests(unittest.TestCase):
 
 
 class MediaProviderTests(unittest.TestCase):
+    def test_openrouter_image_uses_dedicated_api_and_model(self) -> None:
+        async def scenario() -> None:
+            expected = b"\x89PNG\r\nopenrouter"
+            transport = FakeTransport(
+                json_response(
+                    {
+                        "data": [
+                            {
+                                "b64_json": base64.b64encode(expected).decode(),
+                                "media_type": "image/png",
+                            }
+                        ]
+                    }
+                )
+            )
+            service = MediaService(
+                media_settings(
+                    openai_base_url="https://openrouter.ai/api/v1",
+                    image_model="x-ai/grok-imagine-image-quality",
+                ),
+                http_transport=transport,
+            )
+
+            artifact = await service.generate_image("台北雨夜", "夜景")
+
+            self.assertEqual(artifact.data, expected)
+            self.assertEqual(artifact.filename, "image.png")
+            call = transport.calls[0]
+            self.assertEqual(
+                call["url"],
+                "https://openrouter.ai/api/v1/images",
+            )
+            self.assertEqual(
+                json.loads(call["content"]),
+                {
+                    "model": "x-ai/grok-imagine-image-quality",
+                    "prompt": "台北雨夜",
+                    "n": 1,
+                },
+            )
+            self.assertEqual(
+                call["headers"]["Authorization"],
+                "Bearer openai-test-key",
+            )
+
+        asyncio.run(scenario())
+
+    def test_openrouter_moderation_allows_consensual_adult_text_only(self) -> None:
+        async def scenario() -> None:
+            transport = FakeTransport(
+                json_response(
+                    {
+                        "choices": [
+                            {"message": {"content": "MEDIA_ALLOW"}}
+                        ]
+                    }
+                )
+            )
+            service = MediaService(
+                media_settings(
+                    openai_base_url="https://openrouter.ai/api/v1",
+                    moderation_model="x-ai/grok-4.20",
+                ),
+                http_transport=transport,
+            )
+
+            decision = await service.moderation_text(
+                "兩位明確成年的角色在雙方自願下進行成人情境聊天"
+            )
+
+            self.assertTrue(decision.allowed)
+            payload = json.loads(transport.calls[0]["content"])
+            self.assertEqual(payload["model"], "x-ai/grok-4.20")
+            self.assertIn("不得因為內容是成人主題", payload["messages"][0]["content"])
+            self.assertIn("未成年人", payload["messages"][0]["content"])
+            self.assertEqual(payload["reasoning"], {"enabled": False})
+
+        asyncio.run(scenario())
+
+    def test_openrouter_tts_is_converted_to_telegram_ogg_opus(self) -> None:
+        async def scenario() -> None:
+            transport = FakeTransport(
+                HTTPResponse(
+                    200,
+                    {"Content-Type": "audio/mpeg"},
+                    b"mp3-data",
+                )
+            )
+            service = MediaService(
+                media_settings(
+                    openai_base_url="https://openrouter.ai/api/v1",
+                    tts_model="x-ai/grok-voice-tts-1.0",
+                    azure_speech_key="",
+                    azure_speech_region="",
+                ),
+                http_transport=transport,
+            )
+            service._ffmpeg_convert = AsyncMock(return_value=b"OggS-opus")
+
+            artifact = await service.synthesize_voice(
+                "今晚想聊什麼？",
+                gender="female",
+            )
+
+            self.assertEqual(artifact.data, b"OggS-opus")
+            self.assertEqual(artifact.content_type, "audio/ogg")
+            self.assertEqual(artifact.filename, "voice.ogg")
+            payload = json.loads(transport.calls[0]["content"])
+            self.assertEqual(payload["model"], "x-ai/grok-voice-tts-1.0")
+            self.assertEqual(payload["voice"], "eve")
+            self.assertEqual(payload["response_format"], "mp3")
+            service._ffmpeg_convert.assert_awaited_once()
+
+        asyncio.run(scenario())
+
+    def test_openrouter_video_uses_async_api_and_extracts_safe_preview(self) -> None:
+        async def scenario() -> None:
+            transport = FakeTransport(
+                json_response({"id": "job_1", "status": "pending"}, 202),
+                json_response({"id": "job_1", "status": "completed"}),
+                HTTPResponse(200, {"Content-Type": "video/mp4"}, b"mp4"),
+            )
+            service = MediaService(
+                media_settings(
+                    openai_base_url="https://openrouter.ai/api/v1",
+                    video_model="x-ai/grok-imagine-video-1.5",
+                ),
+                http_transport=transport,
+            )
+            service._ffmpeg_convert = AsyncMock(return_value=b"png-preview")
+
+            artifact = await service.generate_video("海邊慢慢散步", "週末")
+
+            self.assertEqual(artifact.data, b"mp4")
+            self.assertEqual(artifact.safety_preview, b"png-preview")
+            self.assertEqual(artifact.safety_preview_variant, "extracted-frame")
+            create = transport.calls[0]
+            self.assertEqual(
+                create["url"],
+                "https://openrouter.ai/api/v1/videos",
+            )
+            self.assertEqual(
+                json.loads(create["content"]),
+                {
+                "model": "x-ai/grok-imagine-video-1.5",
+                    "prompt": "海邊慢慢散步",
+                },
+            )
+            self.assertEqual(
+                transport.calls[1]["url"],
+                "https://openrouter.ai/api/v1/videos/job_1",
+            )
+            self.assertEqual(transport.calls[2]["params"], {"index": "0"})
+            service._ffmpeg_convert.assert_awaited_once()
+
+        asyncio.run(scenario())
+
     def test_openai_image_returns_bytes_and_post_moderation_preview(self) -> None:
         async def scenario() -> None:
             expected = b"\x89PNG\r\nimage"
@@ -888,6 +1045,27 @@ class MediaProviderTests(unittest.TestCase):
             {"AI_API_KEY": "text-only-secret"}
         )
         self.assertEqual(no_fallback.openai_api_key, "")
+
+        openrouter = MediaSettings.from_env(
+            {"OPENROUTER_API_KEY": "openrouter-secret"}
+        )
+        self.assertEqual(openrouter.openai_api_key, "openrouter-secret")
+        self.assertEqual(
+            openrouter.openai_base_url,
+            "https://openrouter.ai/api/v1",
+        )
+        self.assertEqual(
+            openrouter.image_model,
+            "x-ai/grok-imagine-image-quality",
+        )
+        self.assertEqual(
+            openrouter.tts_model,
+            "x-ai/grok-voice-tts-1.0",
+        )
+        self.assertEqual(
+            openrouter.video_model,
+            "x-ai/grok-imagine-video-1.5",
+        )
 
 
 if __name__ == "__main__":
