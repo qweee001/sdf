@@ -8,6 +8,28 @@ from fastapi.testclient import TestClient
 from app.dashboard import DASHBOARD_HTML, DASHBOARD_JS, DashboardServer
 
 
+RANDOM_PROFILE_FIELDS = {
+    "label",
+    "gender",
+    "stage",
+    "style",
+    "task_name",
+    "task_info",
+    "ai_model",
+    "adult_text_enabled",
+    "group_reply_probability",
+    "reply_on_mention",
+    "reply_on_reply",
+    "typing_delay_min_seconds",
+    "typing_delay_max_seconds",
+    "proactive_enabled",
+    "proactive_idle_minutes",
+    "proactive_min_interval_minutes",
+    "proactive_max_interval_minutes",
+    "max_proactive_per_day",
+}
+
+
 class FakeAccountManager:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
@@ -219,6 +241,36 @@ class FakeAccountManager:
         self.calls.append(("model_test", account_id))
         return {"ok": True, "model": self.account["ai_model"]}
 
+    async def preview_random_profile(
+        self,
+        account_id: str,
+        revision: int,
+    ) -> dict[str, object]:
+        self.calls.append(("preview_random_profile", (account_id, revision)))
+        return {
+            "label": "隨機夜貓群友",
+            "gender": "male",
+            "stage": "old_member",
+            "style": (
+                "成人純文字取向：成熟直球；僅限成年、自願、尊重與隱私，"
+                "拒絕即停止"
+            ),
+            "task_name": "深夜自然群聊",
+            "task_info": "依照最近訊息自然接話，不搶話也不使用客服口吻。",
+            "ai_model": "x-ai/grok-4.20",
+            "adult_text_enabled": True,
+            "group_reply_probability": 0.47,
+            "reply_on_mention": True,
+            "reply_on_reply": True,
+            "typing_delay_min_seconds": 1.2,
+            "typing_delay_max_seconds": 4.8,
+            "proactive_enabled": True,
+            "proactive_idle_minutes": 18,
+            "proactive_min_interval_minutes": 30,
+            "proactive_max_interval_minutes": 70,
+            "max_proactive_per_day": 12,
+        }
+
     async def manual_send_text(
         self,
         account_id: str,
@@ -235,9 +287,15 @@ class FakeAccountManager:
             "image_api_key": "must-never-leave-the-server",
         }
 
-    async def clear_memory(self, account_id: str) -> int:
-        self.calls.append(("clear_memory", account_id))
-        return 7
+    async def clear_memory(
+        self,
+        account_id: str,
+        revision: int,
+    ) -> dict[str, object]:
+        self.calls.append(("clear_memory", (account_id, revision)))
+        self.account["style"] = "清除記憶後的新隨機性格"
+        self.account["revision"] = revision + 1
+        return {"removed": 7, "account": dict(self.account)}
 
     async def conversation_log(
         self,
@@ -574,9 +632,14 @@ class DashboardTests(unittest.TestCase):
             cleared = client.post(
                 "/api/accounts/acct_one/memory/clear",
                 headers=headers,
-                json={},
+                json={"revision": 4},
             )
             self.assertEqual(cleared.json()["removed"], 7)
+            self.assertEqual(
+                cleared.json()["account"]["style"],
+                "清除記憶後的新隨機性格",
+            )
+            self.assertEqual(cleared.json()["account"]["revision"], 5)
 
     def test_login_rate_limit(self) -> None:
         with TestClient(self.server.app, base_url="https://testserver") as client:
@@ -597,6 +660,203 @@ class DashboardTests(unittest.TestCase):
             )
             self.assertEqual(blocked.status_code, 429)
             self.assertIn("Retry-After", blocked.headers)
+
+    def test_random_profile_preview_auth_csrf_and_safe_shape(self) -> None:
+        path = "/api/accounts/acct_one/persona/preview"
+        with TestClient(self.server.app, base_url="https://testserver") as client:
+            self.assertEqual(client.post(path, json={}).status_code, 401)
+            csrf = self.login(client)
+            self.assertEqual(client.post(path, json={}).status_code, 403)
+
+            response = client.post(
+                path,
+                headers={"X-CSRF-Token": csrf},
+                json={"revision": 1},
+            )
+            self.assertEqual(response.status_code, 200)
+            result = response.json()
+            self.assertEqual(set(result), RANDOM_PROFILE_FIELDS)
+            self.assertEqual(result["label"], "隨機夜貓群友")
+            self.assertEqual(result["ai_model"], "x-ai/grok-4.20")
+            self.assertTrue(result["adult_text_enabled"])
+            self.assertIn("成年", result["style"])
+            self.assertIn("自願", result["style"])
+            self.assertIn("拒絕即停止", result["style"])
+            for forbidden in (
+                "ai_base_url",
+                "ai_api_key",
+                "session_string",
+                "revision",
+                "all_groups",
+                "group_ids",
+                "blocked_terms",
+                "blocked_topics",
+                "media",
+            ):
+                self.assertNotIn(forbidden, result)
+            self.assertIn(
+                ("preview_random_profile", ("acct_one", 1)),
+                self.manager.calls,
+            )
+
+    def test_random_profile_button_only_prefills_editable_form_fields(self) -> None:
+        heading = DASHBOARD_HTML.index("角色、任務與模型")
+        button = DASHBOARD_HTML.index('id="randomProfileButton"')
+        form = DASHBOARD_HTML.index('id="settingsForm"')
+        self.assertLess(heading, button)
+        self.assertLess(button, form)
+        self.assertLess(button - heading, 600)
+        self.assertIn("隨機生成", DASHBOARD_HTML[heading:form])
+
+        helper_start = DASHBOARD_JS.index(
+            "function applyRandomProfilePreview(profile)"
+        )
+        helper_end = DASHBOARD_JS.index("\n}\n", helper_start) + 2
+        handler_start = DASHBOARD_JS.index(
+            '$("randomProfileButton").addEventListener',
+            helper_end,
+        )
+        helper = DASHBOARD_JS[helper_start:helper_end]
+        for editable_id in (
+            "editLabel",
+            "editGender",
+            "editStage",
+            "editStyle",
+            "editTaskName",
+            "editTaskInfo",
+            "editModel",
+            "editAdultTextEnabled",
+            "editProbability",
+            "editReplyMention",
+            "editReplyReply",
+            "editDelayMin",
+            "editDelayMax",
+            "editProactive",
+            "editIdle",
+            "editIntervalMin",
+            "editIntervalMax",
+            "editProactiveMax",
+        ):
+            with self.subTest(editable_id=editable_id):
+                self.assertIn(editable_id, helper)
+        for preserved_id in (
+            "editBaseUrl",
+            "editBlockedTerms",
+            "editBlockedTopics",
+            "editImageEnabled",
+            "editVoiceEnabled",
+            "editVideoEnabled",
+            "editImageDailyLimit",
+            "editVoiceDailyLimit",
+            "editVideoDailyLimit",
+            "editImageGroupIds",
+            "editVoiceGroupIds",
+            "editVideoGroupIds",
+        ):
+            with self.subTest(preserved_id=preserved_id):
+                self.assertNotIn(preserved_id, helper)
+        self.assertIn("formDirty = true", helper)
+
+        handler_end = DASHBOARD_JS.find(
+            '\n$("',
+            handler_start + len('$("randomProfileButton").addEventListener'),
+        )
+        if handler_end < 0:
+            handler_end = len(DASHBOARD_JS)
+        handler = DASHBOARD_JS[handler_start:handler_end]
+        self.assertIn("/persona/preview", handler)
+        self.assertIn("applyRandomProfilePreview", handler)
+        self.assertNotIn('method: "PUT"', handler)
+        self.assertNotIn("refresh()", handler)
+
+    def test_editor_revision_and_generation_guard_async_profile_races(self) -> None:
+        self.assertIn('let editorAccountId = "";', DASHBOARD_JS)
+        self.assertIn("let editorRevision = 0;", DASHBOARD_JS)
+        self.assertIn("let editorEditGeneration = 0;", DASHBOARD_JS)
+
+        fill_start = DASHBOARD_JS.index("function fillEditor(account)")
+        fill_end = DASHBOARD_JS.index("\n}\n", fill_start) + 2
+        fill = DASHBOARD_JS[fill_start:fill_end]
+        self.assertIn("editorAccountId = account.id;", fill)
+        self.assertIn("editorRevision = Number(account.revision);", fill)
+        self.assertIn("editorEditGeneration += 1;", fill)
+
+        input_start = DASHBOARD_JS.index(
+            '$("settingsForm").addEventListener("input"'
+        )
+        input_end = DASHBOARD_JS.index("\n});", input_start) + 4
+        input_handler = DASHBOARD_JS[input_start:input_end]
+        self.assertIn("editorEditGeneration += 1;", input_handler)
+        self.assertIn("formDirty = true;", input_handler)
+
+        submit_start = DASHBOARD_JS.index(
+            '$("settingsForm").addEventListener("submit"'
+        )
+        submit_end = DASHBOARD_JS.index(
+            '$("controlButton").addEventListener',
+            submit_start,
+        )
+        submit = DASHBOARD_JS[submit_start:submit_end]
+        self.assertIn("const revision = editorRevisionFor(account);", submit)
+        self.assertIn("invalidateRandomProfilePreview();", submit)
+        self.assertIn("revision,", submit)
+        self.assertNotIn("revision: account.revision", submit)
+
+        handler_start = DASHBOARD_JS.index(
+            '$("randomProfileButton").addEventListener'
+        )
+        handler_end = DASHBOARD_JS.index(
+            '$("modelTestButton").addEventListener',
+            handler_start,
+        )
+        handler = DASHBOARD_JS[handler_start:handler_end]
+        self.assertIn("const revision = editorRevisionFor(account);", handler)
+        self.assertIn("const editGeneration = editorEditGeneration;", handler)
+        self.assertGreaterEqual(
+            handler.count("editorEditGeneration"),
+            3,
+        )
+        self.assertIn("editorRevision !== revision", handler)
+        self.assertIn("editorEditGeneration !== editGeneration", handler)
+        self.assertIn("editorRevision === revision", handler)
+        self.assertIn("editorEditGeneration === editGeneration", handler)
+
+        for action_id in (
+            "controlButton",
+            "restartButton",
+            "saveGroupsButton",
+            "clearMemoryButton",
+            "refreshButton",
+        ):
+            with self.subTest(action_id=action_id):
+                action_start = DASHBOARD_JS.index(f'$("{action_id}").addEventListener')
+                action_end = DASHBOARD_JS.find(
+                    '\n$("',
+                    action_start + len(f'$("{action_id}").addEventListener'),
+                )
+                if action_end < 0:
+                    action_end = len(DASHBOARD_JS)
+                self.assertIn(
+                    "invalidateRandomProfilePreview();",
+                    DASHBOARD_JS[action_start:action_end],
+                )
+
+    def test_clear_memory_preserves_success_when_status_refresh_fails(self) -> None:
+        handler_start = DASHBOARD_JS.index(
+            '$("clearMemoryButton").addEventListener'
+        )
+        handler_end = DASHBOARD_JS.index(
+            '$("refreshButton").addEventListener',
+            handler_start,
+        )
+        handler = DASHBOARD_JS[handler_start:handler_end]
+        self.assertIn("尚未儲存的帳號設定草稿也會被捨棄", handler)
+        self.assertIn("const revision = editorRevisionFor(account);", handler)
+        self.assertIn("body: JSON.stringify({revision})", handler)
+        self.assertIn("replaceDashboardAccount(result.account)", handler)
+        self.assertIn("catch (refreshError)", handler)
+        self.assertIn("已清除 ${result.removed} 筆記憶並生成新性格；", handler)
+        self.assertIn('"warning"', handler)
 
     def test_conversation_log_auth_validation_and_public_shape(self) -> None:
         path = (

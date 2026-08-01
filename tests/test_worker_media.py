@@ -177,6 +177,13 @@ class WorkerMediaIntentTests(unittest.TestCase):
                 worker._allowed_media_kinds(GROUP_ID),
                 frozenset({MediaKind.IMAGE}),
             )
+            routing_messages = worker._completion.await_args.args[0]
+            routing_prompt = routing_messages[0]["content"]
+            self.assertIn("任何非空的 text", routing_prompt)
+            self.assertIn("image/video 說明", routing_prompt)
+            self.assertIn("台灣繁體中文", routing_prompt)
+            self.assertIn("不得使用簡體字、中國大陸用詞", routing_prompt)
+            self.assertIn("不得假稱帳號是真實台灣人", routing_prompt)
 
             worker._completion.reset_mock()
             self.assertIsNone(
@@ -344,6 +351,35 @@ class WorkerMediaIntentTests(unittest.TestCase):
 
 
 class WorkerMediaSafetyTests(unittest.TestCase):
+    def test_image_and_video_captions_use_the_final_locale_identity_audit(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = make_worker(media_settings(image=feature(), video=feature()))
+            worker._output_policy_allows = AsyncMock(  # type: ignore[method-assign]
+                side_effect=[False, False]
+            )
+            captions = (
+                "这个视频挺有氛围的。",
+                "我是住台北的台灣人，這是我真的約會經歷。",
+            )
+
+            for caption in captions:
+                with self.assertRaises(MediaPolicyError):
+                    await worker._verify_media_text(caption)
+
+            self.assertEqual(
+                [
+                    call.args[0]
+                    for call in worker._output_policy_allows.await_args_list
+                ],
+                list(captions),
+            )
+            for call in worker._output_policy_allows.await_args_list:
+                self.assertFalse(call.kwargs["adult_text_context"])
+
+        asyncio.run(scenario())
+
     def test_image_and_video_use_prompt_preflight_and_preview_postflight(
         self,
     ) -> None:

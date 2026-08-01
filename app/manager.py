@@ -30,6 +30,7 @@ from .config import Settings
 from .crypto import SecretBox
 from .memory import MemoryStore
 from .media_types import AccountMediaSettings, clean_account_media_settings
+from .persona import generate_account_profile, generate_persona
 from .security import safe_error
 from .telegram_login import TelegramLoginService, VerifiedTelegramSession
 from .worker import AccountWorker
@@ -69,6 +70,7 @@ class AccountManager:
         self._managed_ids: frozenset[int] = frozenset()
         self._lock = asyncio.Lock()
         self._create_lock = asyncio.Lock()
+        self._persona_mutation_lock = asyncio.Lock()
         self._account_operation_locks: dict[str, asyncio.Lock] = defaultdict(
             asyncio.Lock
         )
@@ -166,7 +168,14 @@ class AccountManager:
             enabled=enabled,
             gender=self.settings.legacy_gender,
             stage=self.settings.legacy_stage,
-            style=self.settings.legacy_style,
+            style=(
+                self.settings.legacy_style
+                or generate_persona(
+                    self.settings.legacy_gender,
+                    self.settings.legacy_stage,
+                    False,
+                )
+            ),
             task_name="一般群聊互動",
             task_info="依照群內話題自然接話，並遵守成年、自願、尊重與隱私原則。",
             ai_base_url=validate_provider_url(self.settings.ai_base_url),
@@ -227,6 +236,11 @@ class AccountManager:
         )
 
     async def start_account(self, account_id: str) -> None:
+        async with self._account_operation_locks[account_id]:
+            await self._start_account_locked(account_id)
+
+    async def _start_account_locked(self, account_id: str) -> None:
+        """Start a worker while the caller owns the account operation lock."""
         async with self._lock:
             existing = self.worker_tasks.get(account_id)
             if existing is not None and not existing.done():
@@ -262,20 +276,32 @@ class AccountManager:
         drain_messages: bool = False,
     ) -> None:
         async with self._account_operation_locks[account_id]:
-            async with self._lock:
-                worker = self.workers.get(account_id)
-                task = self.worker_tasks.get(account_id)
-                if worker is not None:
-                    await worker.close(drain_messages=drain_messages)
-                if task is not None and not task.done():
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                self.workers.pop(account_id, None)
-                self.worker_tasks.pop(account_id, None)
-                if worker is not None or not (
-                    await self._require_account(account_id)
-                ).enabled:
-                    self.start_errors.pop(account_id, None)
+            await self._stop_account_locked(
+                account_id,
+                drain_messages=drain_messages,
+            )
+
+    async def _stop_account_locked(
+        self,
+        account_id: str,
+        *,
+        drain_messages: bool = False,
+    ) -> None:
+        """Stop a worker while the caller owns the account operation lock."""
+        async with self._lock:
+            worker = self.workers.get(account_id)
+            task = self.worker_tasks.get(account_id)
+            if worker is not None:
+                await worker.close(drain_messages=drain_messages)
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            self.workers.pop(account_id, None)
+            self.worker_tasks.pop(account_id, None)
+            if worker is not None or not (
+                await self._require_account(account_id)
+            ).enabled:
+                self.start_errors.pop(account_id, None)
 
     async def restart_account(self, account_id: str) -> dict[str, object]:
         account = await self._require_account(account_id)
@@ -514,12 +540,29 @@ class AccountManager:
                 raise ValueError(
                     f"最多可管理 {self.settings.max_accounts} 個帳號"
                 )
-            try:
-                await self.store.create_account(record)
-            except Exception as exc:
-                if "UNIQUE constraint failed" in str(exc):
-                    raise AccountConflictError("這個 Telegram 帳號已經存在") from exc
-                raise
+            async with self._persona_mutation_lock:
+                if not record.style:
+                    existing_styles = {
+                        account.style
+                        for account in await self.store.list_accounts()
+                        if account.style
+                    }
+                    record = record.with_updates(
+                        style=generate_persona(
+                            record.gender,
+                            record.stage,
+                            record.adult_text_enabled,
+                            exclude=existing_styles,
+                        )
+                    )
+                try:
+                    await self.store.create_account(record)
+                except Exception as exc:
+                    if "UNIQUE constraint failed" in str(exc):
+                        raise AccountConflictError(
+                            "這個 Telegram 帳號已經存在"
+                        ) from exc
+                    raise
         await self.store.adopt_legacy_messages(record.id)
         await self._refresh_managed_ids()
         if record.enabled:
@@ -896,15 +939,131 @@ class AccountManager:
                     raise AccountConflictError(str(exc)) from exc
                 raise
 
-    async def clear_memory(self, account_id: str) -> int:
-        await self._require_account(account_id)
-        worker = self.workers.get(account_id)
-        if worker is not None:
-            worker.last_activity.clear()
-            worker.last_proactive.clear()
-            worker.next_proactive_interval.clear()
-            worker.proactive_counts.clear()
-        return await self.store.clear_all(account_id)
+    async def _new_persona_style(self, account: AccountRecord) -> str:
+        excluded = {
+            item.style
+            for item in await self.store.list_accounts()
+            if item.style
+        }
+        excluded.add(account.style)
+        return generate_persona(
+            account.gender,
+            account.stage,
+            account.adult_text_enabled,
+            exclude=excluded,
+        )
+
+    @staticmethod
+    def _apply_persona_to_worker(
+        worker: AccountWorker | None,
+        previous: AccountRecord,
+        updated: AccountRecord,
+    ) -> None:
+        if worker is not None and worker.account.revision == previous.revision:
+            worker.account = updated
+
+    async def regenerate_persona(
+        self,
+        account_id: str,
+        revision: int,
+    ) -> dict[str, object]:
+        revision = clean_int(
+            revision,
+            "revision",
+            minimum=1,
+            maximum=2_000_000_000,
+        )
+        async with self._account_operation_locks[account_id]:
+            current = await self._require_account(account_id)
+            if revision != current.revision:
+                raise AccountConflictError("設定已被其他操作更新，請重新整理")
+            async with self._persona_mutation_lock:
+                style = await self._new_persona_style(current)
+                try:
+                    saved = await self.store.update_account(
+                        current.with_updates(style=style),
+                        expected_revision=current.revision,
+                        changed_fields=["style"],
+                    )
+                except RuntimeError as exc:
+                    raise AccountConflictError(str(exc)) from exc
+                self._apply_persona_to_worker(
+                    self.workers.get(account_id),
+                    current,
+                    saved,
+                )
+        return await self.account_status(account_id)
+
+    async def preview_random_profile(
+        self,
+        account_id: str,
+        revision: int | None = None,
+    ) -> dict[str, object]:
+        current = await self._require_account(account_id)
+        if revision is not None:
+            cleaned_revision = clean_int(
+                revision,
+                "revision",
+                minimum=1,
+                maximum=2_000_000_000,
+            )
+            if cleaned_revision != current.revision:
+                raise AccountConflictError(
+                    "設定已被其他操作更新，請重新整理"
+                )
+        excluded = {
+            item.style
+            for item in await self.store.list_accounts()
+            if item.style
+        }
+        profile = generate_account_profile(exclude_style=excluded)
+        if not self._is_openrouter_provider(current.ai_base_url):
+            profile["ai_model"] = current.ai_model
+        return profile
+
+    async def clear_memory(
+        self,
+        account_id: str,
+        revision: int,
+    ) -> dict[str, object]:
+        revision = clean_int(
+            revision,
+            "revision",
+            minimum=1,
+            maximum=2_000_000_000,
+        )
+        async with self._account_operation_locks[account_id]:
+            current = await self._require_account(account_id)
+            if revision != current.revision:
+                raise AccountConflictError("設定已被其他操作更新，請重新整理")
+            try:
+                await self._stop_account_locked(
+                    account_id,
+                    drain_messages=True,
+                )
+                async with self._persona_mutation_lock:
+                    style = await self._new_persona_style(current)
+                    removed, saved = await self.store.clear_memory_with_persona(
+                        current,
+                        style=style,
+                        expected_revision=current.revision,
+                    )
+            except RuntimeError as exc:
+                latest = await self._require_account(account_id)
+                if latest.enabled:
+                    await self._start_account_locked(account_id)
+                raise AccountConflictError(str(exc)) from exc
+            except BaseException:
+                latest = await self._require_account(account_id)
+                if latest.enabled:
+                    await self._start_account_locked(account_id)
+                raise
+            if saved.enabled:
+                await self._start_account_locked(account_id)
+        return {
+            "removed": removed,
+            "account": await self.account_status(account_id),
+        }
 
     async def conversation_log(
         self,

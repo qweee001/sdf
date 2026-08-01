@@ -1815,3 +1815,63 @@ class MemoryStore:
             await self._audit_locked(account_id, "memory_cleared", ["messages"])
             await db.commit()
             return max(cursor.rowcount, 0)
+
+    async def clear_memory_with_persona(
+        self,
+        record: AccountRecord,
+        *,
+        style: str,
+        expected_revision: int,
+    ) -> tuple[int, AccountRecord]:
+        """Atomically clear one account's messages and replace its persona."""
+        now = int(time.time())
+        updated = record.with_updates(
+            style=style,
+            revision=expected_revision + 1,
+            updated_at=now,
+        )
+        async with self._lock:
+            db = self._connection()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                update_cursor = await db.execute(
+                    """
+                    UPDATE accounts
+                    SET style=?, revision=?, updated_at=?
+                    WHERE id=? AND revision=?
+                    """,
+                    (
+                        style,
+                        updated.revision,
+                        now,
+                        record.id,
+                        expected_revision,
+                    ),
+                )
+                updated_rows = int(update_cursor.rowcount)
+                await update_cursor.close()
+                if updated_rows != 1:
+                    raise RuntimeError(
+                        "Account settings changed in another request"
+                    )
+                delete_cursor = await db.execute(
+                    "DELETE FROM messages WHERE account_id = ?",
+                    (record.id,),
+                )
+                removed = max(int(delete_cursor.rowcount), 0)
+                await delete_cursor.close()
+                await self._audit_locked(
+                    record.id,
+                    "memory_cleared",
+                    ["messages"],
+                )
+                await self._audit_locked(
+                    record.id,
+                    "account_updated",
+                    ["style"],
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+        return removed, updated

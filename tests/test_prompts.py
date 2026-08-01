@@ -189,6 +189,37 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn("剛忙完", prompt)
         self.assertIn("背景填充句", prompt)
 
+    def test_every_role_uses_taiwan_traditional_local_wording_without_claiming_a_real_identity(
+        self,
+    ) -> None:
+        for role_key in (
+            "male_old_member",
+            "female_old_member",
+            "male_observer",
+            "female_observer",
+        ):
+            for adult_text_enabled in (False, True):
+                with self.subTest(
+                    role_key=role_key,
+                    adult_text_enabled=adult_text_enabled,
+                ):
+                    prompt = system_prompt(
+                        self.account(
+                            role_key=role_key,
+                            adult_text_enabled=adult_text_enabled,
+                            blocked_terms=(),
+                            blocked_topics=(),
+                        )
+                    )
+                    self.assertIn("台灣繁體中文", prompt)
+                    self.assertIn("台灣常用詞", prompt)
+                    self.assertIn("簡體", prompt)
+                    self.assertIn("中國大陸用詞", prompt)
+                    self.assertIn("翻譯腔", prompt)
+                    self.assertIn("不得假稱真實國籍", prompt)
+                    self.assertIn("不是真人會員", prompt)
+                    self.assertIn("自動互動角色帳號", prompt)
+
     def test_adult_text_mode_is_explicit_opt_in_with_fixed_boundaries(self) -> None:
         disabled = system_prompt(
             self.account(

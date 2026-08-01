@@ -545,6 +545,20 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .add-panel { border-color: #53663c; }
     .row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .settings-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px 12px;
+      flex-wrap: wrap;
+      margin-bottom: 7px;
+    }
+    .settings-heading h3 { min-width: 0; margin: 0; }
+    .settings-heading .btn {
+      flex: 0 0 auto;
+      margin-left: auto;
+      white-space: nowrap;
+    }
     .danger-zone { border-color: #553b35; }
     footer { padding: 6px; color: var(--muted); text-align: center; font-size: 12px; }
     @media (max-width: 1050px) {
@@ -664,7 +678,8 @@ DASHBOARD_HTML = """<!doctype html>
               <select id="addStage"><option value="observer">觀望成員</option><option value="old_member">老成員</option></select>
             </label>
             <label class="field">角色風格
-              <input id="addStyle" maxlength="500" placeholder="例如：自然、穩重、偶爾幽默">
+              <input id="addStyle" maxlength="500" placeholder="留白會在登入完成後自動生成">
+              <span class="hint">留白時會依性別、角色及成人純文字開關，為這個帳號產生獨立的隨機性格。</span>
             </label>
             <label class="field full">任務名稱
               <input id="addTaskName" maxlength="120" value="一般群聊互動">
@@ -743,7 +758,10 @@ DASHBOARD_HTML = """<!doctype html>
             </section>
 
             <section class="account-section">
-            <h3>角色、任務與模型</h3>
+            <div class="settings-heading">
+              <h3>角色、任務與模型</h3>
+              <button id="randomProfileButton" class="btn small" type="button">隨機生成</button>
+            </div>
             <form id="settingsForm" class="form-grid">
               <label class="field">帳號名稱
                 <input id="editLabel" required maxlength="60">
@@ -756,6 +774,7 @@ DASHBOARD_HTML = """<!doctype html>
               </label>
               <label class="field full">角色風格
                 <textarea id="editStyle" maxlength="500"></textarea>
+                <span class="hint">可手動修改；「隨機生成」會先填入完整設定草稿，按儲存後才生效。</span>
               </label>
               <label class="field full">任務名稱
                 <input id="editTaskName" required maxlength="120">
@@ -936,9 +955,9 @@ DASHBOARD_HTML = """<!doctype html>
 
             <section class="account-section danger-zone">
             <h3>記憶管理</h3>
-            <div class="hint">清除聊天記憶不會刪除帳號、Telegram Session 或模型設定。此操作無法復原。</div>
+            <div class="hint">清除聊天記憶時會同時重新生成這個帳號的性格；不會刪除帳號、Telegram Session 或模型設定。此操作無法復原。</div>
             <div class="actions">
-              <button id="clearMemoryButton" class="btn danger">清除這個帳號的聊天記憶</button>
+              <button id="clearMemoryButton" class="btn danger">清除記憶並重新生成性格</button>
             </div>
             </section>
           </article>
@@ -958,6 +977,9 @@ let dashboardState = null;
 let selectedAccountId = "";
 let csrfToken = "";
 let formDirty = false;
+let editorAccountId = "";
+let editorRevision = 0;
+let editorEditGeneration = 0;
 let groupsDirty = false;
 let telegramAuthId = "";
 let telegramAuthState = "idle";
@@ -977,6 +999,7 @@ let privateAlertsLoadedAccountId = "";
 let privateAlertsLoadedUnreadCount = -1;
 let privateAlertsLoadedLatestAt = 0;
 let privateIndicatorRefreshPending = false;
+let randomProfileRequestSequence = 0;
 
 function showLogin() {
   document.title = "Telegram AI 多帳號控制台";
@@ -993,6 +1016,9 @@ function resetDashboardClientState() {
   dashboardState = null;
   selectedAccountId = "";
   formDirty = false;
+  editorAccountId = "";
+  editorRevision = 0;
+  editorEditGeneration += 1;
   groupsDirty = false;
   manualGroupByAccount.clear();
   manualMessageDraftByAccount.clear();
@@ -1006,6 +1032,7 @@ function resetDashboardClientState() {
   privateAlertsLoadedAccountId = "";
   privateAlertsLoadedUnreadCount = -1;
   privateAlertsLoadedLatestAt = 0;
+  randomProfileRequestSequence += 1;
   clearConversationList();
   clearMediaJobs();
   clearPrivateAlerts();
@@ -1073,6 +1100,29 @@ function stateName(account) {
 
 function selectedAccount() {
   return dashboardState?.accounts.find((account) => account.id === selectedAccountId) || null;
+}
+
+function editorRevisionFor(account) {
+  if (editorAccountId === account.id && Number.isInteger(editorRevision) && editorRevision > 0) {
+    return editorRevision;
+  }
+  return Number(account.revision);
+}
+
+function replaceDashboardAccount(updatedAccount) {
+  if (!dashboardState || !updatedAccount || typeof updatedAccount !== "object") return false;
+  const accounts = Array.isArray(dashboardState.accounts) ? dashboardState.accounts : [];
+  const index = accounts.findIndex((account) => account.id === updatedAccount.id);
+  if (index < 0) return false;
+  const nextAccounts = [...accounts];
+  nextAccounts[index] = updatedAccount;
+  dashboardState = {...dashboardState, accounts: nextAccounts};
+  renderDashboard();
+  return true;
+}
+
+function invalidateRandomProfilePreview() {
+  randomProfileRequestSequence += 1;
 }
 
 function compactAccountSummary(account) {
@@ -1433,6 +1483,9 @@ function unlistedMediaGroupIds(account, feature) {
 }
 
 function fillEditor(account) {
+  editorAccountId = account.id;
+  editorRevision = Number(account.revision);
+  editorEditGeneration += 1;
   const media = account.media && typeof account.media === "object" ? account.media : {};
   const image = media.image && typeof media.image === "object" ? media.image : {};
   const voice = media.voice && typeof media.voice === "object" ? media.voice : {};
@@ -1489,6 +1542,57 @@ function fillEditor(account) {
   setProviderState("imageProviderState", providers.openrouter_media);
   setProviderState("voiceProviderState", providers.openrouter_media);
   setProviderState("videoProviderState", providers.openrouter_media);
+}
+
+const RANDOM_PROFILE_FIELD_IDS = [
+  "editLabel",
+  "editGender",
+  "editStage",
+  "editStyle",
+  "editTaskName",
+  "editTaskInfo",
+  "editModel",
+  "editAdultTextEnabled",
+  "editProbability",
+  "editReplyMention",
+  "editReplyReply",
+  "editDelayMin",
+  "editDelayMax",
+  "editProactive",
+  "editIdle",
+  "editIntervalMin",
+  "editIntervalMax",
+  "editProactiveMax",
+];
+
+function randomProfileEditorFingerprint() {
+  return RANDOM_PROFILE_FIELD_IDS.map((id) => {
+    const node = $(id);
+    return node.type === "checkbox" ? String(node.checked) : node.value;
+  }).join("\u0000");
+}
+
+function applyRandomProfilePreview(profile) {
+  $("editLabel").value = String(profile.label || "");
+  $("editGender").value = String(profile.gender || "male");
+  $("editStage").value = String(profile.stage || "observer");
+  $("editStyle").value = String(profile.style || "");
+  $("editTaskName").value = String(profile.task_name || "一般群聊互動");
+  $("editTaskInfo").value = String(profile.task_info || "");
+  $("editModel").value = String(profile.ai_model || "");
+  $("editAdultTextEnabled").checked = Boolean(profile.adult_text_enabled);
+  $("editProbability").value = String(profile.group_reply_probability);
+  $("editReplyMention").checked = Boolean(profile.reply_on_mention);
+  $("editReplyReply").checked = Boolean(profile.reply_on_reply);
+  $("editDelayMin").value = String(profile.typing_delay_min_seconds);
+  $("editDelayMax").value = String(profile.typing_delay_max_seconds);
+  $("editProactive").checked = Boolean(profile.proactive_enabled);
+  $("editIdle").value = String(profile.proactive_idle_minutes);
+  $("editIntervalMin").value = String(profile.proactive_min_interval_minutes);
+  $("editIntervalMax").value = String(profile.proactive_max_interval_minutes);
+  $("editProactiveMax").value = String(profile.max_proactive_per_day);
+  editorEditGeneration += 1;
+  formDirty = true;
 }
 
 function fillMediaKnownGroups(account, media) {
@@ -2240,6 +2344,7 @@ $("addForm").addEventListener("submit", async (event) => {
 updateAddLoginMode();
 
 $("settingsForm").addEventListener("input", () => {
+  editorEditGeneration += 1;
   formDirty = true;
 });
 
@@ -2253,11 +2358,13 @@ $("settingsForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const account = selectedAccount();
   if (!account) return;
+  const revision = editorRevisionFor(account);
+  invalidateRandomProfilePreview();
   setNotice("settingsNotice", "正在儲存…", "warning");
   await runButton($("saveSettingsButton"), async () => {
     try {
       const payload = {
-        revision: account.revision,
+        revision,
         label: $("editLabel").value,
         gender: $("editGender").value,
         stage: $("editStage").value,
@@ -2322,11 +2429,13 @@ $("settingsForm").addEventListener("submit", async (event) => {
 $("controlButton").addEventListener("click", async () => {
   const account = selectedAccount();
   if (!account) return;
+  const revision = editorRevisionFor(account);
+  invalidateRandomProfilePreview();
   await runButton($("controlButton"), async () => {
     try {
       await api(`/api/accounts/${encodeURIComponent(account.id)}/control`, {
         method: "POST",
-        body: JSON.stringify({enabled: !account.enabled, revision: account.revision}),
+        body: JSON.stringify({enabled: !account.enabled, revision}),
       });
       formDirty = false;
       await refresh();
@@ -2340,6 +2449,7 @@ $("controlButton").addEventListener("click", async () => {
 $("restartButton").addEventListener("click", async () => {
   const account = selectedAccount();
   if (!account) return;
+  invalidateRandomProfilePreview();
   setNotice("accountNotice", "正在重新啟動帳號…", "warning");
   await runButton($("restartButton"), async () => {
     try {
@@ -2351,6 +2461,53 @@ $("restartButton").addEventListener("click", async () => {
       setNotice("accountNotice", "帳號已重新啟動", "success");
     } catch (error) {
       setNotice("accountNotice", error.message, "error");
+    }
+  });
+});
+
+$("randomProfileButton").addEventListener("click", async () => {
+  const account = selectedAccount();
+  if (!account) return;
+  const requestSequence = ++randomProfileRequestSequence;
+  const accountId = account.id;
+  const revision = editorRevisionFor(account);
+  const editGeneration = editorEditGeneration;
+  const editorFingerprint = randomProfileEditorFingerprint();
+  const wasDirty = formDirty;
+  formDirty = true;
+  setNotice("settingsNotice", "正在生成隨機設定草稿…", "warning");
+  await runButton($("randomProfileButton"), async () => {
+    try {
+      const profile = await api(`/api/accounts/${encodeURIComponent(accountId)}/persona/preview`, {
+        method: "POST",
+        body: JSON.stringify({revision}),
+      });
+      if (
+        requestSequence !== randomProfileRequestSequence ||
+        selectedAccountId !== accountId ||
+        editorAccountId !== accountId ||
+        editorRevision !== revision ||
+        editorEditGeneration !== editGeneration ||
+        randomProfileEditorFingerprint() !== editorFingerprint
+      ) return;
+      applyRandomProfilePreview(profile);
+      setNotice(
+        "settingsNotice",
+        "已填入完整隨機設定草稿；群組、屏蔽詞、API 位址與媒體開關未變。按「儲存帳號設定」後才會生效。",
+        "success",
+      );
+    } catch (error) {
+      if (
+        requestSequence === randomProfileRequestSequence &&
+        selectedAccountId === accountId &&
+        editorAccountId === accountId &&
+        editorRevision === revision &&
+        editorEditGeneration === editGeneration &&
+        randomProfileEditorFingerprint() === editorFingerprint
+      ) {
+        formDirty = wasDirty;
+        setNotice("settingsNotice", error.message, "error");
+      }
     }
   });
 });
@@ -2391,6 +2548,7 @@ $("groupList").addEventListener("change", () => {
 $("saveGroupsButton").addEventListener("click", async () => {
   const account = selectedAccount();
   if (!account) return;
+  invalidateRandomProfilePreview();
   const allGroups = $("allGroups").checked;
   const groupIds = [...$("groupList").querySelectorAll("input[type='checkbox']:checked")]
     .map((input) => Number(input.value));
@@ -2528,12 +2686,20 @@ $("refreshConversationButton").addEventListener("click", async () => {
 
 $("clearMemoryButton").addEventListener("click", async () => {
   const account = selectedAccount();
-  if (!account || !window.confirm("確定清除這個帳號的全部聊天記憶？此操作無法復原。")) return;
+  if (!account) return;
+  const unsavedWarning = formDirty
+    ? "\n\n目前尚未儲存的帳號設定草稿也會被捨棄。"
+    : "";
+  if (!window.confirm(
+    `確定清除這個帳號的全部聊天記憶，並重新生成角色性格？此操作無法復原。${unsavedWarning}`,
+  )) return;
+  const revision = editorRevisionFor(account);
+  invalidateRandomProfilePreview();
   await runButton($("clearMemoryButton"), async () => {
     try {
       const result = await api(`/api/accounts/${encodeURIComponent(account.id)}/memory/clear`, {
         method: "POST",
-        body: "{}",
+        body: JSON.stringify({revision}),
       });
       conversationRequestSequence += 1;
       conversationPendingKey = "";
@@ -2541,8 +2707,22 @@ $("clearMemoryButton").addEventListener("click", async () => {
       conversationLoadedKey = "";
       clearConversationList("聊天記憶已清除。");
       setNotice("conversationNotice", "");
-      await refresh();
-      setNotice("accountNotice", `已清除 ${result.removed} 筆記憶`, "success");
+      formDirty = false;
+      if (!replaceDashboardAccount(result.account)) {
+        editorEditGeneration += 1;
+      }
+      try {
+        await refresh();
+        setNotice("accountNotice", `已清除 ${result.removed} 筆記憶並生成新性格`, "success");
+      } catch (refreshError) {
+        if (refreshError.message !== "unauthorized") {
+          setNotice(
+            "accountNotice",
+            `已清除 ${result.removed} 筆記憶並生成新性格；最新狀態暫時無法重新整理：${refreshError.message}`,
+            "warning",
+          );
+        }
+      }
     } catch (error) {
       setNotice("accountNotice", error.message, "error");
     }
@@ -2550,6 +2730,7 @@ $("clearMemoryButton").addEventListener("click", async () => {
 });
 
 $("refreshButton").addEventListener("click", async () => {
+  invalidateRandomProfilePreview();
   formDirty = false;
   groupsDirty = false;
   try {
@@ -3392,8 +3573,45 @@ class DashboardServer:
             _, blocked = self._require_action(request)
             if blocked is not None:
                 return blocked
-            removed = await self.manager.clear_memory(account_id)
-            return JSONResponse({"ok": True, "removed": removed})
+            payload = await self._read_payload(request)
+            revision = self._revision(payload)
+            result = await self.manager.clear_memory(account_id, revision)
+            return JSONResponse(
+                {"ok": True, **self._without_api_key_fields(result)}
+            )
+
+        @web.post("/api/accounts/{account_id}/persona/regenerate")
+        async def regenerate_persona(
+            account_id: str,
+            request: Request,
+        ) -> JSONResponse:
+            _, blocked = self._require_action(request)
+            if blocked is not None:
+                return blocked
+            payload = await self._read_payload(request)
+            revision = self._revision(payload)
+            return JSONResponse(
+                self._without_api_key_fields(
+                    await self.manager.regenerate_persona(account_id, revision)
+                )
+            )
+
+        @web.post("/api/accounts/{account_id}/persona/preview")
+        async def preview_persona(
+            account_id: str,
+            request: Request,
+        ) -> JSONResponse:
+            _, blocked = self._require_action(request)
+            if blocked is not None:
+                return blocked
+            payload = await self._read_payload(request)
+            revision = self._revision(payload)
+            return JSONResponse(
+                await self.manager.preview_random_profile(
+                    account_id,
+                    revision,
+                )
+            )
 
         return web
 

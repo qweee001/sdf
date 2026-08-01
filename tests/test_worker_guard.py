@@ -391,6 +391,48 @@ class WorkerGuardTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_final_audit_requires_taiwan_locale_and_truthful_identity(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+            worker._completion = AsyncMock(  # type: ignore[method-assign]
+                side_effect=["BLOCK", "BLOCK", "MEMBER_ALLOW"]
+            )
+            candidates = (
+                "这个周末咱们去吃烧烤吧。",
+                "我是土生土長的台灣人，現在住台中，也真的約過群友。",
+                "這週末去吃燒烤好像不錯耶。",
+            )
+
+            self.assertFalse(await worker._output_policy_allows(candidates[0]))
+            self.assertFalse(await worker._output_policy_allows(candidates[1]))
+            self.assertTrue(await worker._output_policy_allows(candidates[2]))
+
+            for index, call in enumerate(worker._completion.await_args_list):
+                messages = call.args[0]
+                audit_prompt = messages[0]["content"]
+                payload = json.loads(messages[1]["content"])
+                self.assertEqual(payload["candidate"], candidates[index])
+                self.assertEqual(
+                    payload["server_trusted_required_locale"],
+                    "zh-TW",
+                )
+                self.assertEqual(
+                    payload["server_trusted_identity_mode"],
+                    "taiwan_localized_automated_character",
+                )
+                self.assertIn("台灣繁體中文", audit_prompt)
+                self.assertIn("簡體字、中國大陸慣用詞", audit_prompt)
+                self.assertIn("不得假稱自己是真實台灣人", audit_prompt)
+                self.assertIn("住在台灣某地", audit_prompt)
+                self.assertIn("真實見面、約會、親密關係", audit_prompt)
+
+        asyncio.run(scenario())
+
     def test_adult_group_audit_contract_does_not_infer_age_from_titles(
         self,
     ) -> None:
@@ -611,6 +653,9 @@ class WorkerGuardTests(unittest.TestCase):
             retry_messages = worker._completion.await_args_list[1].args[0]
             self.assertIn("上一個草稿未通過", retry_messages[-1]["content"])
             self.assertIn("一般群組成員口吻", retry_messages[-1]["content"])
+            self.assertIn("固定使用台灣繁體中文", retry_messages[-1]["content"])
+            self.assertIn("中國大陸慣用詞", retry_messages[-1]["content"])
+            self.assertIn("不得假稱自己是真實台灣人", retry_messages[-1]["content"])
 
         asyncio.run(scenario())
 
