@@ -93,7 +93,7 @@ def parse_policy_verdict(value: object, allow_token: str) -> bool | None:
             if first.strip().casefold() in {"text", "txt"}:
                 normalized = remainder.strip()
     normalized = normalized.strip(
-        " \t\r\n`'\".,:;!?()[]{}<>。！？，；："
+        " \t\r\n`*_~'\".,:;!?()[]{}<>。！？，；："
     )
     if normalized == allow_token.upper():
         return True

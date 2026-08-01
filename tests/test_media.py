@@ -160,6 +160,8 @@ class MediaIntentTests(unittest.TestCase):
         allowed = (
             "MEDIA_ALLOW",
             " MEDIA_ALLOW。 ",
+            "**MEDIA_ALLOW**",
+            "_MEDIA_ALLOW_",
             "```MEDIA_ALLOW```",
             "```text\nMEDIA_ALLOW\n```",
         )
