@@ -61,10 +61,10 @@ DISCOURSE_PARTICLE_OPENERS = ("喔", "哦", "噢", "嗯", "欸", "唉")
 REPLY_CONTEXT_MESSAGE_LIMIT = 20
 PROACTIVE_LEASE_SECONDS = 10 * 60
 OPENROUTER_TEXT_FALLBACK_MODELS = (
-    "x-ai/grok-4.5",
-    "x-ai/grok-4.20",
-    "x-ai/grok-4.3",
-    "openrouter/auto",
+    "openrouter/auto-beta",
+)
+OPENROUTER_AUTO_MODELS = frozenset(
+    {"openrouter/auto", "openrouter/auto-beta"}
 )
 _CJK_OR_PUNCTUATION = r"\u3400-\u9fff，。！？；：、～…「」『』（）【】《》"
 
@@ -412,7 +412,10 @@ class AccountWorker:
                 "model": self.account.ai_model,
                 "messages": messages,
             }
-            if self._uses_openrouter():
+            if (
+                self._uses_openrouter()
+                and self.account.ai_model not in OPENROUTER_AUTO_MODELS
+            ):
                 request["extra_body"] = {
                     "models": [
                         model

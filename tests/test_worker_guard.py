@@ -271,13 +271,13 @@ class WorkerGuardTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_openrouter_grok_chat_uses_provider_reasoning_defaults(
+    def test_openrouter_gpt_sol_falls_back_to_auto_beta(
         self,
     ) -> None:
         async def scenario() -> None:
             worker = self.make_worker()
             worker.account.ai_base_url = "https://openrouter.ai/api/v1"
-            worker.account.ai_model = "x-ai/grok-4.20"
+            worker.account.ai_model = "openai/gpt-5.6-sol"
             endpoint = self.attach_completion_endpoint(
                 worker,
                 completion_result("自然回覆"),
@@ -292,13 +292,29 @@ class WorkerGuardTests(unittest.TestCase):
             self.assertEqual(
                 endpoint.calls[0]["extra_body"],
                 {
-                    "models": [
-                        "x-ai/grok-4.5",
-                        "x-ai/grok-4.3",
-                        "openrouter/auto",
-                    ]
+                    "models": ["openrouter/auto-beta"]
                 },
             )
+
+        asyncio.run(scenario())
+
+    def test_openrouter_auto_beta_controls_its_own_model_pool(self) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker()
+            worker.account.ai_base_url = "https://openrouter.ai/api/v1"
+            worker.account.ai_model = "openrouter/auto-beta"
+            endpoint = self.attach_completion_endpoint(
+                worker,
+                completion_result("自動路由回覆"),
+            )
+
+            self.assertEqual(
+                await worker._completion(
+                    [{"role": "user", "content": "測試自動路由"}]
+                ),
+                "自動路由回覆",
+            )
+            self.assertNotIn("extra_body", endpoint.calls[0])
 
         asyncio.run(scenario())
 
