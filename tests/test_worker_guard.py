@@ -747,6 +747,59 @@ class WorkerGuardTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_automatic_reply_is_compacted_before_telegram_send(self) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+            sender = AsyncMock(return_value=SimpleNamespace())
+            reply = SafeReply(
+                text=(
+                    "  第一段有連續空格：hello   world。  \r\n"
+                    "\r\n"
+                    "   第二段也會接續。   \n"
+                    "  最後一句。  "
+                ),
+                policy_digest=worker.content_guard.policy_digest,
+            )
+
+            sent_text, _ = await worker._send_verified(reply, sender)
+
+            expected = "第一段有連續空格：hello world。第二段也會接續。最後一句。"
+            self.assertEqual(sent_text, expected)
+            sender.assert_awaited_once_with(
+                expected,
+                parse_mode=None,
+                link_preview=False,
+            )
+
+        asyncio.run(scenario())
+
+    def test_automatic_reply_joins_chinese_line_wrap_without_spaces(self) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+            sender = AsyncMock(return_value=SimpleNamespace())
+            reply = SafeReply(
+                text="這是一段中文\r\n跨行內容，請不要留\n多餘空格。",
+                policy_digest=worker.content_guard.policy_digest,
+            )
+
+            sent_text, _ = await worker._send_verified(reply, sender)
+
+            expected = "這是一段中文跨行內容，請不要留多餘空格。"
+            self.assertEqual(sent_text, expected)
+            sender.assert_awaited_once_with(
+                expected,
+                parse_mode=None,
+                link_preview=False,
+            )
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()

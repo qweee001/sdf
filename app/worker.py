@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import random
+import re
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
@@ -54,6 +55,8 @@ LOGGER = logging.getLogger("telegram-ai-userbot.worker")
 COMPLETION_MAX_ATTEMPTS = 2
 MESSAGE_DRAIN_TIMEOUT_SECONDS = 20
 LAUGHTER_OPENERS = ("哈哈", "呵呵", "嘻嘻", "嘿嘿")
+REPLY_CONTEXT_MESSAGE_LIMIT = 20
+_CJK_OR_PUNCTUATION = r"\u3400-\u9fff，。！？；：、～…「」『』（）【】《》"
 
 
 class AccountWorker:
@@ -615,9 +618,32 @@ class AccountWorker:
     def _verified_text(self, reply: SafeReply) -> str:
         if reply.policy_digest != self.content_guard.policy_digest:
             raise BlockedReplyError("Content policy changed before sending")
-        if self.content_guard.screen(reply.text).blocked:
+        compacted = self._compact_auto_reply_layout(reply.text)
+        if not compacted:
+            raise BlockedReplyError("Reply became empty before sending")
+        if self.content_guard.screen(compacted).blocked:
             raise BlockedReplyError("Reply failed the final content policy check")
-        return reply.text
+        return compacted
+
+    @staticmethod
+    def _compact_auto_reply_layout(value: str) -> str:
+        """Flatten model-only formatting while retaining spaces in Latin text."""
+        compacted = " ".join(str(value or "").split())
+        compacted = re.sub(
+            rf"(?<=[{_CJK_OR_PUNCTUATION}]) +",
+            "",
+            compacted,
+        )
+        compacted = re.sub(
+            rf" +(?=[{_CJK_OR_PUNCTUATION}])",
+            "",
+            compacted,
+        )
+        return compacted.strip()
+
+    def _reply_history_limit(self) -> int:
+        configured = int(getattr(self.settings, "memory_history_limit", 20))
+        return max(1, min(configured, REPLY_CONTEXT_MESSAGE_LIMIT))
 
     async def _send_verified(
         self,
@@ -1107,7 +1133,7 @@ class AccountWorker:
             history = await self.store.recent_group(
                 self.account.id,
                 group_id,
-                self.settings.memory_history_limit,
+                self._reply_history_limit(),
                 through_id=trigger_row_id,
             )
             try:
@@ -1210,7 +1236,7 @@ class AccountWorker:
                     history = await self.store.recent_group(
                         self.account.id,
                         group_id,
-                        self.settings.memory_history_limit,
+                        self._reply_history_limit(),
                     )
                     try:
                         message = await self.generate(

@@ -142,6 +142,25 @@ class WorkerManualSendTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_manual_text_keeps_original_whitespace_and_line_breaks(self) -> None:
+        async def scenario() -> None:
+            worker = make_worker()
+            text = "  第一段   保留空格。\r\n\r\n  中文跨\n行也保留。  "
+
+            result = await worker.manual_send_text(GROUP_ID, text)
+
+            self.assertEqual(result["message_count"], 1)
+            worker.client.send_message.assert_awaited_once_with(
+                GROUP_ID,
+                text,
+                parse_mode=None,
+                link_preview=False,
+            )
+            worker.store.add.assert_awaited_once()
+            self.assertEqual(worker.store.add.await_args.args[5], text)
+
+        asyncio.run(scenario())
+
     def test_success_uses_own_client_group_lock_memory_and_stats(self) -> None:
         async def scenario() -> None:
             worker = make_worker()

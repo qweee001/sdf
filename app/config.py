@@ -217,7 +217,7 @@ def load_settings() -> Settings:
         or "x-ai/grok-4.20",
         account_encryption_key=_required("ACCOUNT_ENCRYPTION_KEY"),
         memory_ttl_hours=_integer("MEMORY_TTL_HOURS", 24, 1),
-        memory_history_limit=_integer("MEMORY_HISTORY_LIMIT", 30, 1),
+        memory_history_limit=_integer("MEMORY_HISTORY_LIMIT", 20, 1),
         memory_db_path=os.getenv("MEMORY_DB_PATH", "/data/memory.db"),
         dashboard_enabled=dashboard_enabled,
         dashboard_username=os.getenv("DASHBOARD_USERNAME", "admin").strip() or "admin",
