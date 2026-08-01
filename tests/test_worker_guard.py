@@ -4,7 +4,7 @@ import asyncio
 import unittest
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from app.adult_safety import (
     FIXED_ADULT_TEXT_BLOCKED_TERMS,
@@ -62,7 +62,147 @@ class WorkerGuardTests(unittest.TestCase):
             FIXED_ADULT_TEXT_BLOCKED_TOPICS + blocked_topics,
         )
         worker.policy_rejections = 0
+        worker.style_rejections = 0
         return worker
+
+    def test_repeated_laughter_opening_retries_with_a_natural_opening(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+            worker._completion = AsyncMock(  # type: ignore[method-assign]
+                side_effect=[
+                    "呵呵，這個我懂。",
+                    "我反而比較想先聽你怎麼想。",
+                    "MEMBER_ALLOW",
+                ]
+            )
+            safety_context = json.dumps(
+                [
+                    {
+                        "role": "assistant",
+                        "sender": "測試帳號",
+                        "content": "哈哈，我也是這樣想。",
+                    },
+                    {
+                        "role": "user",
+                        "sender": "群友",
+                        "content": "你覺得呢？",
+                    },
+                ],
+                ensure_ascii=False,
+            )
+
+            reply = await worker.generate(
+                "請自然回覆",
+                safety_context=safety_context,
+            )
+
+            self.assertEqual(reply.text, "我反而比較想先聽你怎麼想。")
+            self.assertEqual(worker.style_rejections, 1)
+            self.assertEqual(worker.policy_rejections, 0)
+            self.assertEqual(worker._completion.await_count, 3)
+            retry_messages = worker._completion.await_args_list[1].args[0]
+            self.assertIn("不要用哈哈、呵呵、嘻嘻或嘿嘿開場", retry_messages[-1]["content"])
+
+        asyncio.run(scenario())
+
+    def test_first_laughter_opening_is_allowed_without_recent_laughter(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+            worker._completion = AsyncMock(  # type: ignore[method-assign]
+                side_effect=[
+                    "哈哈，這個真的有趣。",
+                    "MEMBER_ALLOW",
+                ]
+            )
+            safety_context = json.dumps(
+                [
+                    {
+                        "role": "assistant",
+                        "sender": "測試帳號",
+                        "content": "我覺得可以慢慢聊。",
+                    }
+                ],
+                ensure_ascii=False,
+            )
+
+            reply = await worker.generate(
+                "請自然回覆",
+                safety_context=safety_context,
+            )
+
+            self.assertEqual(reply.text, "哈哈，這個真的有趣。")
+            self.assertEqual(worker.style_rejections, 0)
+            self.assertEqual(worker.policy_rejections, 0)
+            self.assertEqual(worker._completion.await_count, 2)
+
+        asyncio.run(scenario())
+
+    def test_zero_reply_probability_never_replies_at_random_zero(self) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker()
+            worker.account.reply_on_mention = False
+            worker.account.reply_on_reply = False
+            worker.account.group_reply_probability = 0.0
+            event = SimpleNamespace(
+                message=SimpleNamespace(mentioned=False, is_reply=False)
+            )
+
+            with patch("app.worker.random.random", return_value=0.0):
+                self.assertFalse(await worker.should_reply(event))
+
+        asyncio.run(scenario())
+
+    def test_failed_cross_account_reply_claim_stops_before_media_or_model(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker()
+            worker.group_allowed = lambda _group_id: True  # type: ignore[method-assign]
+            worker.managed_ids_provider = lambda: set()
+            worker.last_activity = {}
+            worker.store = SimpleNamespace(
+                add=AsyncMock(return_value=17),
+                claim_group_reply=AsyncMock(return_value=False),
+            )
+            worker.should_reply = AsyncMock(  # type: ignore[method-assign]
+                return_value=True
+            )
+            worker._detect_media_intent = AsyncMock()  # type: ignore[method-assign]
+            worker._queue_media_intent = AsyncMock()  # type: ignore[method-assign]
+            worker.generate = AsyncMock()  # type: ignore[method-assign]
+            event = SimpleNamespace(
+                is_private=False,
+                is_group=True,
+                chat_id=-100111,
+                raw_text="今天大家在聊什麼？",
+                sender_id=987654,
+                message=SimpleNamespace(id=321),
+                get_sender=AsyncMock(return_value=None),
+            )
+
+            await worker._handle_message(event)
+
+            worker.store.add.assert_awaited_once()
+            worker.store.claim_group_reply.assert_awaited_once_with(
+                worker.account.id,
+                -100111,
+                321,
+            )
+            worker._detect_media_intent.assert_not_awaited()
+            worker._queue_media_intent.assert_not_awaited()
+            worker.generate.assert_not_awaited()
+
+        asyncio.run(scenario())
 
     def test_openrouter_grok_chat_disables_reasoning_for_fast_group_replies(
         self,
@@ -202,6 +342,9 @@ class WorkerGuardTests(unittest.TestCase):
             messages = worker._completion.await_args.args[0]
             payload = json.loads(messages[1]["content"])
             self.assertTrue(payload["adult_text_enabled"])
+            self.assertTrue(
+                payload["server_trusted_allowed_groups_are_18_plus"]
+            )
             self.assertIn("30歲", payload["safety_context"])
             self.assertEqual(
                 payload["output_channel"],
@@ -222,6 +365,97 @@ class WorkerGuardTests(unittest.TestCase):
             messages = worker._completion.await_args.args[0]
             payload = json.loads(messages[1]["content"])
             self.assertFalse(payload["adult_text_enabled"])
+            self.assertTrue(
+                payload["server_trusted_allowed_groups_are_18_plus"]
+            )
+
+            disabled_worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+                adult_text_enabled=False,
+            )
+            disabled_worker._completion = AsyncMock(  # type: ignore[method-assign]
+                return_value="MEMBER_ALLOW"
+            )
+            self.assertTrue(
+                await disabled_worker._output_policy_allows("一般群組聊天")
+            )
+            disabled_messages = disabled_worker._completion.await_args.args[0]
+            disabled_payload = json.loads(disabled_messages[1]["content"])
+            self.assertFalse(disabled_payload["adult_text_enabled"])
+            self.assertFalse(
+                disabled_payload[
+                    "server_trusted_allowed_groups_are_18_plus"
+                ]
+            )
+
+        asyncio.run(scenario())
+
+    def test_adult_group_audit_contract_does_not_infer_age_from_titles(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+                adult_text_enabled=True,
+            )
+            worker._completion = AsyncMock(  # type: ignore[method-assign]
+                return_value="MEMBER_ALLOW"
+            )
+
+            self.assertTrue(
+                await worker._output_policy_allows(
+                    "哥哥跟妹妹都同意繼續這個成人情境。",
+                )
+            )
+            messages = worker._completion.await_args.args[0]
+            system_prompt = messages[0]["content"]
+            payload = json.loads(messages[1]["content"])
+            self.assertTrue(payload["adult_text_enabled"])
+            self.assertTrue(
+                payload["server_trusted_allowed_groups_are_18_plus"]
+            )
+            self.assertIn("哥哥、姐姐、妹妹、弟弟", system_prompt)
+            self.assertIn("不得只因這些稱呼推定為未成年", system_prompt)
+            self.assertIn("普通成人玩笑、聊天或虛構情境的參與預設為自願", system_prompt)
+            self.assertIn("不能只因沒有在每一句重新聲明同意", system_prompt)
+
+        asyncio.run(scenario())
+
+    def test_adult_group_audit_contract_keeps_minor_and_consent_blocks(
+        self,
+    ) -> None:
+        async def scenario() -> None:
+            worker = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+                adult_text_enabled=True,
+            )
+            worker._completion = AsyncMock(  # type: ignore[method-assign]
+                return_value="BLOCK"
+            )
+
+            self.assertFalse(
+                await worker._output_policy_allows(
+                    "對方明確說自己未滿 18 歲。",
+                )
+            )
+            self.assertFalse(
+                await worker._output_policy_allows(
+                    "對方拒絕後仍然被強迫繼續。",
+                )
+            )
+            for call in worker._completion.await_args_list:
+                messages = call.args[0]
+                system_prompt = messages[0]["content"]
+                payload = json.loads(messages[1]["content"])
+                self.assertTrue(
+                    payload["server_trusted_allowed_groups_are_18_plus"]
+                )
+                self.assertIn("絕不覆蓋明確相反證據", system_prompt)
+                self.assertIn("未滿 18 歲", system_prompt)
+                self.assertIn("拒絕、撤回同意", system_prompt)
 
         asyncio.run(scenario())
 

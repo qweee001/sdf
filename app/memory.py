@@ -23,7 +23,7 @@ from .media_types import (
 )
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -258,6 +258,23 @@ class MemoryStore:
                 FOREIGN KEY (account_id) REFERENCES accounts(id)
                     ON DELETE CASCADE
             )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reply_claims (
+                group_id INTEGER NOT NULL,
+                telegram_message_id INTEGER NOT NULL,
+                account_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (group_id, telegram_message_id)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_reply_claims_created_at
+            ON reply_claims (created_at)
             """
         )
         await db.execute(
@@ -1344,11 +1361,11 @@ class MemoryStore:
         content: str,
         *,
         created_at: int | None = None,
-    ) -> None:
+    ) -> int:
         timestamp = created_at if created_at is not None else int(time.time())
         async with self._lock:
             db = self._connection()
-            await db.execute(
+            cursor = await db.execute(
                 """
                 INSERT INTO messages
                     (account_id, group_id, sender_id, sender_name, role, content, created_at)
@@ -1364,7 +1381,83 @@ class MemoryStore:
                     timestamp,
                 ),
             )
+            row_id = int(cursor.lastrowid)
+            await cursor.close()
             await db.commit()
+            return row_id
+
+    async def claim_group_reply(
+        self,
+        account_id: str,
+        group_id: int,
+        telegram_message_id: int,
+        *,
+        now: int | None = None,
+    ) -> bool:
+        """Atomically reserve one group message for exactly one account.
+
+        Claims expire with the rest of the short-lived conversation memory. A
+        second account can therefore claim a reused Telegram message ID only
+        after the original claim has fallen outside the configured TTL.
+        """
+        cleaned_account_id = (
+            account_id.strip() if isinstance(account_id, str) else ""
+        )
+        if not cleaned_account_id or len(cleaned_account_id) > 128:
+            raise ValueError("account_id must be a non-empty string up to 128 characters")
+        sqlite_integer_max = (1 << 63) - 1
+        sqlite_integer_min = -(1 << 63)
+        if (
+            isinstance(group_id, bool)
+            or not isinstance(group_id, int)
+            or not sqlite_integer_min <= group_id <= sqlite_integer_max
+            or group_id == 0
+        ):
+            raise ValueError("group_id must be a non-zero 64-bit integer")
+        if (
+            isinstance(telegram_message_id, bool)
+            or not isinstance(telegram_message_id, int)
+            or not 1 <= telegram_message_id <= sqlite_integer_max
+        ):
+            raise ValueError("telegram_message_id must be a positive 64-bit integer")
+        timestamp = int(time.time()) if now is None else now
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, int)
+            or not 0 <= timestamp <= sqlite_integer_max
+        ):
+            raise ValueError("now must be a non-negative 64-bit integer timestamp")
+
+        cutoff = timestamp - self.ttl_seconds
+        async with self._lock:
+            db = self._connection()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._require_account_locked(cleaned_account_id)
+                await db.execute(
+                    "DELETE FROM reply_claims WHERE created_at < ?",
+                    (cutoff,),
+                )
+                cursor = await db.execute(
+                    """
+                    INSERT OR IGNORE INTO reply_claims (
+                        group_id, telegram_message_id, account_id, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        group_id,
+                        telegram_message_id,
+                        cleaned_account_id,
+                        timestamp,
+                    ),
+                )
+                claimed = cursor.rowcount == 1
+                await cursor.close()
+                await db.commit()
+                return claimed
+            except BaseException:
+                await db.rollback()
+                raise
 
     async def add_private_alert(
         self,
@@ -1569,21 +1662,46 @@ class MemoryStore:
         account_id: str,
         group_id: int,
         limit: int,
+        *,
+        through_id: int | None = None,
     ) -> list[MemoryMessage]:
+        if (
+            through_id is not None
+            and (
+                isinstance(through_id, bool)
+                or not isinstance(through_id, int)
+                or through_id <= 0
+            )
+        ):
+            raise ValueError("through_id must be a positive integer")
         cutoff = int(time.time()) - self.ttl_seconds
         async with self._lock:
             db = self._connection()
-            cursor = await db.execute(
-                """
-                SELECT account_id, group_id, sender_id, sender_name, role,
-                       content, created_at
-                FROM messages
-                WHERE account_id = ? AND group_id = ? AND created_at >= ?
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-                """,
-                (account_id, group_id, cutoff, limit),
-            )
+            if through_id is None:
+                cursor = await db.execute(
+                    """
+                    SELECT account_id, group_id, sender_id, sender_name, role,
+                           content, created_at
+                    FROM messages
+                    WHERE account_id = ? AND group_id = ? AND created_at >= ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (account_id, group_id, cutoff, limit),
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT account_id, group_id, sender_id, sender_name, role,
+                           content, created_at
+                    FROM messages
+                    WHERE account_id = ? AND group_id = ? AND created_at >= ?
+                      AND id <= ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (account_id, group_id, cutoff, through_id, limit),
+                )
             rows = await cursor.fetchall()
             await cursor.close()
         return [MemoryMessage(**dict(row)) for row in reversed(rows)]
@@ -1622,6 +1740,11 @@ class MemoryStore:
                 (cutoff,),
             )
             removed_alerts = max(cursor.rowcount, 0)
+            cursor = await db.execute(
+                "DELETE FROM reply_claims WHERE created_at < ?",
+                (cutoff,),
+            )
+            removed_reply_claims = max(cursor.rowcount, 0)
             await db.execute(
                 """
                 UPDATE media_jobs
@@ -1640,7 +1763,7 @@ class MemoryStore:
                 (cutoff,),
             )
             await db.commit()
-            return removed_messages + removed_alerts
+            return removed_messages + removed_alerts + removed_reply_claims
 
     async def legacy_runtime_settings(self) -> dict[str, str]:
         async with self._lock:

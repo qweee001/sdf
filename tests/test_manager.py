@@ -54,6 +54,386 @@ def settings(path: str, key: str) -> Settings:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_update_account_drains_in_flight_messages_before_restart(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                return 100101, "settings-restart-test"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "session_string": "settings-restart-session",
+                    "task_name": "group chat",
+                }
+            )
+            account_id = str(created["id"])
+
+            class RecordingWorker:
+                def __init__(self) -> None:
+                    self.close_calls: list[bool] = []
+
+                async def close(self, *, drain_messages: bool = False) -> None:
+                    self.close_calls.append(drain_messages)
+
+            worker = RecordingWorker()
+            manager.workers[account_id] = worker  # type: ignore[assignment]
+            updated = await manager.update_account(
+                account_id,
+                {
+                    "revision": created["revision"],
+                    "label": "updated label",
+                },
+            )
+
+            self.assertEqual(updated["label"], "updated label")
+            self.assertEqual(worker.close_calls, [True])
+            self.assertNotIn(account_id, manager.workers)
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_manual_restart_drains_in_flight_messages(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                return 100102, "manual-restart-test"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "session_string": "manual-restart-session",
+                    "task_name": "group chat",
+                }
+            )
+            account_id = str(created["id"])
+
+            class RecordingWorker:
+                def __init__(self) -> None:
+                    self.close_calls: list[bool] = []
+
+                async def close(self, *, drain_messages: bool = False) -> None:
+                    self.close_calls.append(drain_messages)
+
+            worker = RecordingWorker()
+            manager.workers[account_id] = worker  # type: ignore[assignment]
+            restarted = await manager.restart_account(account_id)
+
+            self.assertEqual(restarted["state"], "disabled")
+            self.assertEqual(worker.close_calls, [True])
+            self.assertNotIn(account_id, manager.workers)
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_disabling_account_stops_worker_immediately(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                return 100103, "disable-test"
+
+            async def no_op_start(account_id: str) -> None:
+                return None
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            manager.start_account = no_op_start  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "session_string": "disable-session",
+                    "task_name": "group chat",
+                    "enabled": True,
+                }
+            )
+            account_id = str(created["id"])
+
+            class RecordingWorker:
+                def __init__(self) -> None:
+                    self.close_calls: list[bool] = []
+
+                async def close(self, *, drain_messages: bool = False) -> None:
+                    self.close_calls.append(drain_messages)
+
+            worker = RecordingWorker()
+            manager.workers[account_id] = worker  # type: ignore[assignment]
+            disabled = await manager.set_enabled(
+                account_id,
+                False,
+                int(created["revision"]),
+            )
+
+            self.assertFalse(disabled["enabled"])
+            self.assertEqual(worker.close_calls, [False])
+            self.assertNotIn(account_id, manager.workers)
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_manager_shutdown_stops_worker_immediately(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                return 100104, "shutdown-test"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "session_string": "shutdown-session",
+                    "task_name": "group chat",
+                }
+            )
+            account_id = str(created["id"])
+
+            class RecordingWorker:
+                def __init__(self) -> None:
+                    self.close_calls: list[bool] = []
+
+                async def close(self, *, drain_messages: bool = False) -> None:
+                    self.close_calls.append(drain_messages)
+
+            worker = RecordingWorker()
+            manager.workers[account_id] = worker  # type: ignore[assignment]
+            await manager.close()
+
+            self.assertEqual(worker.close_calls, [False])
+            self.assertNotIn(account_id, manager.workers)
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_new_accounts_default_to_a_disabled_empty_group_scope(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                self.assertEqual(session, "fail-closed-session")
+                return 100111, "安全預設帳號"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "session_string": "fail-closed-session",
+                    "task_name": "群組互動",
+                }
+            )
+
+            self.assertFalse(created["enabled"])
+            self.assertFalse(created["all_groups"])
+            self.assertEqual(created["group_ids"], [])
+            self.assertFalse(created["proactive_enabled"])
+            self.assertEqual(created["state"], "disabled")
+            self.assertNotIn(str(created["id"]), manager.workers)
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_explicitly_enabled_account_can_connect_with_empty_safe_scope(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                return 100112, "啟用範圍測試"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            started: list[str] = []
+
+            async def record_start(account_id: str) -> None:
+                started.append(account_id)
+
+            manager.start_account = record_start  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "session_string": "missing-scope-session",
+                    "task_name": "群組互動",
+                    "enabled": True,
+                    "proactive_enabled": True,
+                }
+            )
+            self.assertTrue(created["enabled"])
+            self.assertFalse(created["all_groups"])
+            self.assertEqual(created["group_ids"], [])
+            self.assertTrue(created["proactive_enabled"])
+            self.assertEqual(started, [created["id"]])
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_enabling_empty_scope_connects_for_group_discovery(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                return 100113, "啟動保護測試"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "session_string": "start-guard-session",
+                    "task_name": "群組互動",
+                }
+            )
+            account_id = str(created["id"])
+            started: list[str] = []
+
+            async def record_start(value: str) -> None:
+                started.append(value)
+
+            manager.start_account = record_start  # type: ignore[method-assign]
+            enabled = await manager.set_enabled(
+                account_id,
+                True,
+                int(created["revision"]),
+            )
+            self.assertTrue(enabled["enabled"])
+            self.assertFalse(enabled["all_groups"])
+            self.assertEqual(enabled["group_ids"], [])
+            self.assertEqual(started, [account_id])
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_set_groups_allows_empty_safe_scope_and_rejects_unknown_groups(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                return 100114, "群組驗證測試"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "session_string": "group-validation-session",
+                    "task_name": "群組互動",
+                }
+            )
+            account_id = str(created["id"])
+            revision = int(created["revision"])
+
+            empty_scope = await manager.set_groups(
+                account_id,
+                False,
+                [],
+                revision,
+            )
+            self.assertFalse(empty_scope["all_groups"])
+            self.assertEqual(empty_scope["group_ids"], [])
+            revision = int(empty_scope["revision"])
+
+            class RefreshingWorker:
+                def __init__(self) -> None:
+                    self.joined_groups = [{"id": -100999, "title": "舊快取群組"}]
+                    self.refresh_count = 0
+                    self.closed = False
+
+                async def refresh_joined_groups(self) -> None:
+                    self.refresh_count += 1
+                    self.joined_groups = [{"id": -100111, "title": "群組 111"}]
+
+                async def close(self, *, drain_messages: bool = False) -> None:
+                    self.drain_messages = drain_messages
+                    self.closed = True
+
+            worker = RefreshingWorker()
+            manager.workers[account_id] = worker  # type: ignore[assignment]
+            with self.assertRaisesRegex(
+                ValueError,
+                "不在此 Telegram 帳號目前加入的群組中：-100999",
+            ):
+                await manager.set_groups(account_id, False, [-100999], revision)
+            self.assertEqual(worker.refresh_count, 1)
+            self.assertFalse(worker.closed)
+            unchanged = await store.get_account(account_id)
+            self.assertEqual(unchanged.revision, revision)
+            self.assertEqual(unchanged.group_ids, frozenset())
+
+            saved = await manager.set_groups(
+                account_id,
+                False,
+                [-100111],
+                revision,
+            )
+            self.assertEqual(worker.refresh_count, 2)
+            self.assertTrue(worker.closed)
+            self.assertTrue(worker.drain_messages)
+            self.assertFalse(saved["all_groups"])
+            self.assertEqual(saved["group_ids"], [-100111])
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_set_groups_keeps_all_groups_mode_with_an_empty_selection(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                return 100115, "所有群組模式測試"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "session_string": "all-group-update-session",
+                    "task_name": "群組互動",
+                }
+            )
+            saved = await manager.set_groups(
+                str(created["id"]),
+                True,
+                [],
+                int(created["revision"]),
+            )
+            self.assertTrue(saved["all_groups"])
+            self.assertEqual(saved["group_ids"], [])
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
     def test_start_runs_explicit_grok_adult_migration_flag(self) -> None:
         async def scenario(path: str) -> None:
             key = Fernet.generate_key().decode()

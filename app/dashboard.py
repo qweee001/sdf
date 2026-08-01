@@ -687,9 +687,10 @@ DASHBOARD_HTML = """<!doctype html>
               <input id="addModel" maxlength="200" placeholder="模型名稱">
             </label>
             <label class="check field full"><input id="addAdultTextEnabled" type="checkbox"> 啟用成人純文字模式</label>
-            <div class="hint field full">只放行人物皆明確成年且明確自願的純文字成人情境；不套用到圖片、語音或影片。未成年／年齡不明、非自願、剝削、騷擾、個資濫用與非法內容仍固定攔截。</div>
+            <div class="hint field full">勾選即確認此帳號的允許群組為 18+；群內成人文字聊天預設為成年、自願，不必每句重複確認。明確未成年、拒絕、強迫、剝削、偷拍、私密資料濫用與非法內容仍固定攔截；不套用到圖片、語音或影片。</div>
             <div class="hint field full">AI 與媒體 Provider API Key 僅由 Railway Variables 提供；控制台不接受、保存或顯示任何 Key。</div>
-            <label class="check field full"><input id="addEnabled" type="checkbox" checked> 建立後立即啟用</label>
+            <label class="check field full"><input id="addEnabled" type="checkbox"> 建立後立即啟用</label>
+            <div class="hint field full">帳號建立後先手動啟用以載入群組；尚未選擇群組時只會連線，不會自動回覆。選好允許群組後即可開始。</div>
             <div class="actions field full">
               <button id="addSubmitButton" class="btn primary" type="submit">傳送 Telegram 驗證碼</button>
             </div>
@@ -777,7 +778,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <input id="editModel" required maxlength="200">
               </label>
               <label class="check field full"><input id="editAdultTextEnabled" type="checkbox"> 啟用成人純文字模式</label>
-              <div class="hint field full">僅適用自動文字回覆，且只可處理人物皆明確成年、互動明確自願的情境。媒體安全政策不會因此放寬。</div>
+              <div class="hint field full">勾選即確認允許群組為 18+；群內成人文字聊天預設為成年、自願，明確拒絕或其他相反證據會立即覆蓋此預設。媒體安全政策不會因此放寬。</div>
               <div class="hint field full">AI 與媒體 Provider API Key 僅由 Railway Variables 提供；控制台不接受、保存或顯示任何 Key。</div>
 
               <div class="field full"><div class="divider"></div><h3>媒體生成</h3></div>
@@ -1881,7 +1882,8 @@ function renderSelected(account) {
   $("metricPrivateUnread").textContent = String(privateUnread);
   $("ackAllPrivateAlertsButton").disabled = privateUnread <= 0;
   $("metricBlocked").textContent = String(account.blocked_messages || 0);
-  $("metricBlocked").title = `被拒絕的草稿：${account.policy_rejections || 0}`;
+  $("metricBlocked").title =
+    `政策攔截：${account.policy_rejections || 0}；風格重試：${account.style_rejections || 0}`;
   $("metricErrors").textContent = String(account.errors || 0);
   setNotice("accountNotice", account.last_error || "", account.last_error ? "error" : "");
   // A status request may have started just before the user edited a field.
@@ -2125,7 +2127,7 @@ function resetAddForm() {
   telegramAuthState = "idle";
   $("addForm").reset();
   $("addTaskName").value = "一般群聊互動";
-  $("addEnabled").checked = true;
+  $("addEnabled").checked = false;
   $("addLoginMode").value = "phone";
   updateAddLoginMode();
 }

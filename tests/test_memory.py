@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from app.account import AccountRecord
-from app.memory import MemoryStore
+from app.memory import SCHEMA_VERSION, MemoryStore
 from app.media_types import AccountMediaSettings, MediaFeatureSettings
 
 
@@ -150,6 +150,194 @@ def rebuild_as_v2_account_schema(
 
 
 class MemoryStoreTests(unittest.TestCase):
+    def test_add_returns_row_id_and_history_can_stop_at_trigger_row(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            await store.create_account(account_record("alpha"))
+
+            first_id = await store.add(
+                "alpha", -100111, 10, "甲", "user", "第一則"
+            )
+            trigger_id = await store.add(
+                "alpha", -100111, 11, "乙", "user", "要回覆這一則"
+            )
+            later_id = await store.add(
+                "alpha", -100111, 12, "丙", "user", "稍後才進來"
+            )
+
+            self.assertLess(first_id, trigger_id)
+            self.assertLess(trigger_id, later_id)
+            bounded = await store.recent_group(
+                "alpha",
+                -100111,
+                20,
+                through_id=trigger_id,
+            )
+            self.assertEqual(
+                [message.content for message in bounded],
+                ["第一則", "要回覆這一則"],
+            )
+            with self.assertRaises(ValueError):
+                await store.recent_group("alpha", -100111, 20, through_id=0)
+            await store.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_group_reply_claim_is_atomic_across_account_connections(self) -> None:
+        async def scenario(path: str) -> None:
+            first = MemoryStore(path, ttl_hours=24)
+            second = MemoryStore(path, ttl_hours=24)
+            await first.open()
+            await first.create_account(account_record("alpha"))
+            await first.create_account(account_record("beta"))
+            await second.open()
+
+            claims = await asyncio.gather(
+                first.claim_group_reply("alpha", -100111, 321, now=1_800_000_000),
+                second.claim_group_reply("beta", -100111, 321, now=1_800_000_000),
+            )
+            self.assertEqual(sum(claims), 1)
+            winner = "alpha" if claims[0] else "beta"
+            loser_store = second if claims[0] else first
+            loser = "beta" if claims[0] else "alpha"
+            self.assertFalse(
+                await loser_store.claim_group_reply(
+                    loser,
+                    -100111,
+                    321,
+                    now=1_800_000_001,
+                )
+            )
+
+            cursor = await first._connection().execute(
+                """
+                SELECT account_id, created_at FROM reply_claims
+                WHERE group_id=? AND telegram_message_id=?
+                """,
+                (-100111, 321),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            self.assertEqual(str(row["account_id"]), winner)
+            self.assertEqual(int(row["created_at"]), 1_800_000_000)
+            await second.close()
+            await first.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_group_reply_claim_expires_and_is_purged_with_memory_ttl(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=1)
+            await store.open()
+            await store.create_account(account_record("alpha"))
+            await store.create_account(account_record("beta"))
+            now = 1_800_000_000
+
+            self.assertTrue(
+                await store.claim_group_reply("alpha", -100111, 10, now=now)
+            )
+            self.assertFalse(
+                await store.claim_group_reply(
+                    "beta",
+                    -100111,
+                    10,
+                    now=now + 60 * 60,
+                )
+            )
+            self.assertEqual(await store.purge_expired(now=now + 60 * 60 + 1), 1)
+            self.assertTrue(
+                await store.claim_group_reply(
+                    "beta",
+                    -100111,
+                    10,
+                    now=now + 60 * 60 + 1,
+                )
+            )
+
+            self.assertTrue(
+                await store.claim_group_reply("alpha", -100111, 11, now=now)
+            )
+            self.assertTrue(
+                await store.claim_group_reply(
+                    "beta",
+                    -100111,
+                    11,
+                    now=now + 60 * 60 + 1,
+                )
+            )
+            await store.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_group_reply_claim_validates_identifiers_and_migrates_safely(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            await store.create_account(account_record("alpha"))
+            current = int(time.time())
+
+            invalid_calls = (
+                ("", -100111, 1, 100),
+                ("missing", -100111, 1, 100),
+                ("alpha", True, 1, 100),
+                ("alpha", 0, 1, 100),
+                ("alpha", -100111, True, 100),
+                ("alpha", -100111, 0, 100),
+                ("alpha", -100111, 1, True),
+                ("alpha", -100111, 1, -1),
+            )
+            for account_id, group_id, message_id, now in invalid_calls:
+                with self.subTest(
+                    account_id=account_id,
+                    group_id=group_id,
+                    message_id=message_id,
+                    now=now,
+                ):
+                    with self.assertRaises(ValueError):
+                        await store.claim_group_reply(
+                            account_id,
+                            group_id,
+                            message_id,
+                            now=now,
+                        )
+            self.assertTrue(
+                await store.claim_group_reply(
+                    "alpha",
+                    -100111,
+                    1,
+                    now=current,
+                )
+            )
+            await store.close()
+
+            reopened = MemoryStore(path, ttl_hours=24)
+            await reopened.open()
+            self.assertFalse(
+                await reopened.claim_group_reply(
+                    "alpha",
+                    -100111,
+                    1,
+                    now=current + 1,
+                )
+            )
+            cursor = await reopened._connection().execute(
+                "PRAGMA table_info(reply_claims)"
+            )
+            columns = {str(row["name"]) for row in await cursor.fetchall()}
+            await cursor.close()
+            self.assertEqual(
+                columns,
+                {"group_id", "telegram_message_id", "account_id", "created_at"},
+            )
+            await reopened.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
     def test_memory_is_account_and_group_scoped_and_expires(self) -> None:
         async def scenario(path: str) -> None:
             store = MemoryStore(path, ttl_hours=24)
@@ -1023,7 +1211,7 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertIn("blocked_topics", columns)
             self.assertIn("media_settings", columns)
             self.assertIn("adult_text_enabled", columns)
-            self.assertEqual(version, 6)
+            self.assertEqual(version, SCHEMA_VERSION)
             self.assertEqual(private_alert_targets, {"accounts"})
             self.assertEqual(row, ("[]", "[]"))
 

@@ -255,13 +255,18 @@ class AccountManager:
             self.workers[account_id] = worker
             self.worker_tasks[account_id] = asyncio.create_task(worker.run())
 
-    async def stop_account(self, account_id: str) -> None:
+    async def stop_account(
+        self,
+        account_id: str,
+        *,
+        drain_messages: bool = False,
+    ) -> None:
         async with self._account_operation_locks[account_id]:
             async with self._lock:
                 worker = self.workers.get(account_id)
                 task = self.worker_tasks.get(account_id)
                 if worker is not None:
-                    await worker.close()
+                    await worker.close(drain_messages=drain_messages)
                 if task is not None and not task.done():
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
@@ -276,7 +281,7 @@ class AccountManager:
         account = await self._require_account(account_id)
         self._retry_attempts.pop(account_id, None)
         self._next_retry_at.pop(account_id, None)
-        await self.stop_account(account_id)
+        await self.stop_account(account_id, drain_messages=True)
         if account.enabled:
             await self.start_account(account_id)
         return await self.account_status(account_id)
@@ -392,7 +397,7 @@ class AccountManager:
             session_fingerprint=verified.session_fingerprint,
             telegram_user_id=verified.telegram_user_id,
             telegram_name=verified.telegram_name,
-            enabled=clean_bool(payload.get("enabled", True), "enabled"),
+            enabled=clean_bool(payload.get("enabled", False), "enabled"),
             gender=gender,
             stage=stage,
             style=clean_text(payload.get("style"), "style", maximum=500),
@@ -440,7 +445,7 @@ class AccountManager:
                 maximum=60,
             ),
             proactive_enabled=clean_bool(
-                payload.get("proactive_enabled", True),
+                payload.get("proactive_enabled", False),
                 "proactive_enabled",
             ),
             proactive_idle_minutes=clean_int(
@@ -467,8 +472,11 @@ class AccountManager:
                 minimum=0,
                 maximum=200,
             ),
-            all_groups=True,
-            group_ids=frozenset(),
+            all_groups=clean_bool(
+                payload.get("all_groups", False),
+                "all_groups",
+            ),
+            group_ids=clean_group_ids(payload.get("group_ids", [])),
             revision=1,
             created_at=now,
             updated_at=now,
@@ -750,7 +758,7 @@ class AccountManager:
             except sqlite3.IntegrityError as exc:
                 raise AccountConflictError("這個 Telegram 帳號已經存在") from exc
         await self._refresh_managed_ids()
-        await self.stop_account(account_id)
+        await self.stop_account(account_id, drain_messages=True)
         if saved.enabled:
             await self.start_account(account_id)
         return await self.account_status(account_id)
@@ -799,9 +807,16 @@ class AccountManager:
             raise AccountConflictError("設定已被其他操作更新，請重新整理")
         cleaned_ids = clean_group_ids(group_ids)
         worker = self.workers.get(account_id)
-        if worker is not None and worker.joined_groups:
+        if worker is not None:
+            await worker.refresh_joined_groups()
             joined = frozenset(int(group["id"]) for group in worker.joined_groups)
-            cleaned_ids = frozenset(item for item in cleaned_ids if item in joined)
+            unknown_ids = cleaned_ids - joined
+            if unknown_ids:
+                formatted_ids = ", ".join(str(item) for item in sorted(unknown_ids))
+                raise ValueError(
+                    "所選群組不在此 Telegram 帳號目前加入的群組中："
+                    f"{formatted_ids}；請重新整理群組清單後再試"
+                )
         async with self._account_operation_locks[account_id]:
             try:
                 saved = await self.store.update_account(
@@ -814,7 +829,7 @@ class AccountManager:
                 )
             except RuntimeError as exc:
                 raise AccountConflictError(str(exc)) from exc
-        await self.stop_account(account_id)
+        await self.stop_account(account_id, drain_messages=True)
         if saved.enabled:
             await self.start_account(account_id)
         return await self.account_status(account_id)
@@ -1068,6 +1083,7 @@ class AccountManager:
             "replies_sent": 0,
             "errors": 1 if account_id in self.start_errors else 0,
             "policy_rejections": 0,
+            "style_rejections": 0,
             "blocked_messages": 0,
             "media_jobs_queued": 0,
             "media_sent": 0,

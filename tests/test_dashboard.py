@@ -876,6 +876,18 @@ class DashboardTests(unittest.TestCase):
 
         self.assertIn("Railway Variables", DASHBOARD_HTML)
         self.assertIn("成人純文字模式", DASHBOARD_HTML)
+        self.assertIn(
+            "帳號建立後先手動啟用以載入群組；尚未選擇群組時只會連線，不會自動回覆。選好允許群組後即可開始。",
+            DASHBOARD_HTML,
+        )
+        self.assertIn(
+            '<input id="addEnabled" type="checkbox">',
+            DASHBOARD_HTML,
+        )
+        self.assertNotIn(
+            '<input id="addEnabled" type="checkbox" checked>',
+            DASHBOARD_HTML,
+        )
         self.assertNotIn('id="addApiKey"', DASHBOARD_HTML)
         self.assertNotIn('id="editApiKey"', DASHBOARD_HTML)
         self.assertNotIn('id="clearApiKey"', DASHBOARD_HTML)
@@ -918,6 +930,9 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("title.textContent", DASHBOARD_JS)
         self.assertIn("meta.textContent", DASHBOARD_JS)
         self.assertNotIn("innerHTML", DASHBOARD_JS)
+        self.assertIn('$("addEnabled").checked = false;', DASHBOARD_JS)
+        self.assertIn("政策攔截：${account.policy_rejections || 0}", DASHBOARD_JS)
+        self.assertIn("風格重試：${account.style_rejections || 0}", DASHBOARD_JS)
 
     def test_manual_message_auth_csrf_validation_and_send(self) -> None:
         path = "/api/accounts/acct_one/manual-message"

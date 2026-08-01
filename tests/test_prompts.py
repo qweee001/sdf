@@ -121,7 +121,7 @@ class PromptPolicyTests(unittest.TestCase):
                 )
                 self.assertIn("一般群組成員", prompt)
 
-    def test_generation_history_excludes_old_assistant_but_keeps_users(self) -> None:
+    def test_generation_history_keeps_assistant_for_continuity_as_untrusted(self) -> None:
         account = self.account(
             style="自然聊天",
             task_name="一般聊天",
@@ -165,11 +165,29 @@ class PromptPolicyTests(unittest.TestCase):
 
         for prompt in (rendered, response, proactive):
             with self.subTest(prompt=prompt[:20]):
-                self.assertNotIn("【舊回覆甲】", prompt)
-                self.assertNotIn("【舊回覆乙】", prompt)
-                self.assertNotIn('"role":"assistant"', prompt)
+                self.assertIn("【舊回覆甲】", prompt)
+                self.assertIn("【舊回覆乙】", prompt)
+                self.assertIn('"role":"assistant"', prompt)
                 self.assertIn("今天下班後有人想去吃火鍋嗎？", prompt)
                 self.assertIn('"role":"user"', prompt)
+        self.assertIn("避免重複開頭", response)
+        self.assertGreater(
+            response.rindex("固定角色合約"),
+            response.index("【舊回覆乙】"),
+        )
+
+    def test_system_prompt_forbids_canned_laughter_and_persona_filler(self) -> None:
+        prompt = system_prompt(
+            self.account(
+                blocked_terms=(),
+                blocked_topics=(),
+            )
+        )
+
+        self.assertIn("不要把「哈哈」、「呵呵」、「嘻嘻」", prompt)
+        self.assertIn("可以不提問、不加表情", prompt)
+        self.assertIn("剛忙完", prompt)
+        self.assertIn("背景填充句", prompt)
 
     def test_adult_text_mode_is_explicit_opt_in_with_fixed_boundaries(self) -> None:
         disabled = system_prompt(
@@ -190,7 +208,9 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn("成人純文字模式未開啟", disabled)
         self.assertIn("不得產生露骨色情文字", disabled)
         self.assertIn("成人純文字模式已由管理員", enabled)
-        self.assertIn("所有人物都必須明確為成年人", enabled)
+        self.assertIn("預設為成年且自願", enabled)
+        self.assertIn("18+ 允許群組", enabled)
+        self.assertIn("上述預設立即失效", enabled)
         self.assertIn("不授權生成成人圖片、語音或影片", enabled)
         for prompt in (disabled, enabled):
             with self.subTest(mode="enabled" in prompt):

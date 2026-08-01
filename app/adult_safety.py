@@ -3,15 +3,20 @@ from __future__ import annotations
 
 FIXED_ADULT_TEXT_SAFETY_POLICY = """
 The adult-text option applies only to text sent into the Telegram group. When
-it is enabled, sexually explicit fictional or conversational text is allowed
-only when every participant is clearly an adult and every sexual interaction
-is clearly voluntary. Never produce sexual content involving a minor, an
+it is enabled for an administrator-confirmed 18+ allowed group, participants
+are treated as adults and ordinary participation in adult banter or fictional
+roleplay is treated as voluntary without repeatedly restating age or consent.
+This conversational default never establishes consent to real-world contact,
+private-material sharing, or a directed act, and any explicit contrary evidence
+overrides it immediately. Never produce sexual content involving a minor, an
 age-ambiguous person, coercion, incapacity, exploitation, trafficking, sexual
 violence, blackmail, harassment, or an ignored/revoked refusal. Never expose
 personal data, facilitate stalking or doxxing, or create/solicit non-consensual
 intimate material. Never sexualize an identifiable real person, create sexual
 deepfakes, or facilitate illegal activity. Consent must be specific and may be
-withdrawn at any time. If age or consent is unclear, keep the reply non-sexual.
+withdrawn at any time for real-world contact, private-material sharing, or a
+directed act. Outside an administrator-confirmed 18+ group, if age or consent
+is unclear, keep the reply non-sexual.
 """.strip()
 
 
@@ -58,9 +63,10 @@ def adult_text_mode_contract(enabled: bool) -> str:
     if enabled:
         return """
 成人純文字模式已由管理員為此帳號明確開啟：
-- 可以回應或創作露骨的成人純文字聊天／虛構情境，但所有人物都必須明確為成年人，所有互動都必須明確自願。
+- 這代表管理員已確認此帳號的允許群組為 18+；群內成人聊天、玩笑或虛構情境中的參與者預設為成年且自願，不必每句重複年齡或同意。
+- 明確出現未成年、拒絕、停止、不舒服、撤回同意、強迫、失去行為能力或其他相反證據時，上述預設立即失效並停止相關內容。
 - 這項開關只適用於 Telegram 文字回覆，不授權生成成人圖片、語音或影片，也不能把虛構內容冒充為帳號的真實經歷。
-- 年齡不明、同意不明、拒絕、沉默、撤回同意或任何不確定情況，都不得進入性內容；改用一般安全話題或尊重界線的簡短回覆。
+- 群內成人聊天的預設自願不等於同意現實接觸、私下交易或分享私密素材；這些情況仍需明確同意。
 """.strip()
     return """
 成人純文字模式未開啟：可以自然討論成年人交友、感情、界線與安全，但不得產生露骨色情文字或成人情境角色扮演。
