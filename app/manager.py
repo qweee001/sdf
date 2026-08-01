@@ -1073,12 +1073,30 @@ class AccountManager:
                 raise AccountConflictError(
                     "設定已被其他操作更新，請重新整理"
                 )
+        accounts = await self.store.list_accounts()
         excluded = {
             item.style
-            for item in await self.store.list_accounts()
+            for item in accounts
             if item.style
         }
-        profile = generate_account_profile(exclude_style=excluded)
+        role_counts = {
+            (gender, stage): 0
+            for gender in ("male", "female")
+            for stage in ("old_member", "observer")
+        }
+        for item in accounts:
+            if item.id != current.id:
+                role_counts[(item.gender, item.stage)] += 1
+        least_used = min(role_counts.values())
+        role_candidates = tuple(
+            role
+            for role, count in role_counts.items()
+            if count == least_used
+        )
+        profile = generate_account_profile(
+            exclude_style=excluded,
+            role_candidates=role_candidates,
+        )
         if not self._is_openrouter_provider(current.ai_base_url):
             profile["ai_model"] = current.ai_model
         return profile

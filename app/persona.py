@@ -103,9 +103,7 @@ _ADULT_TASKS = (
 )
 
 _TEXT_MODELS = (
-    "x-ai/grok-4.20",
-    "x-ai/grok-4.5",
-    "x-ai/grok-4.3",
+    "openai/gpt-5.6-sol",
 )
 
 _BEHAVIOR_PRESETS = (
@@ -210,11 +208,19 @@ def generate_persona(
 def generate_account_profile(
     *,
     exclude_style: str | Collection[str] = "",
+    role_candidates: Collection[tuple[str, str]] = (),
 ) -> dict[str, object]:
     """Generate a complete, safe-to-preview account settings preset."""
     chooser = secrets.SystemRandom()
-    gender = chooser.choice(tuple(_GENDER_TONE))
-    stage = chooser.choice(tuple(_STAGE_STANCE))
+    roles = tuple(role_candidates) or tuple(
+        itertools.product(_GENDER_TONE, _STAGE_STANCE)
+    )
+    if any(
+        gender not in _GENDER_TONE or stage not in _STAGE_STANCE
+        for gender, stage in roles
+    ):
+        raise ValueError("role_candidates contains an unsupported role")
+    gender, stage = chooser.choice(roles)
     adult_text_enabled = chooser.choice((True, True, False))
     style = generate_persona(
         gender,

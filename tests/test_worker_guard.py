@@ -110,7 +110,7 @@ class WorkerGuardTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_first_laughter_opening_is_allowed_without_recent_laughter(
+    def test_first_laughter_opening_is_rewritten_even_without_recent_laughter(
         self,
     ) -> None:
         async def scenario() -> None:
@@ -121,6 +121,7 @@ class WorkerGuardTests(unittest.TestCase):
             worker._completion = AsyncMock(  # type: ignore[method-assign]
                 side_effect=[
                     "哈哈，這個真的有趣。",
+                    "這個真的蠻有趣。",
                     "MEMBER_ALLOW",
                 ]
             )
@@ -140,10 +141,10 @@ class WorkerGuardTests(unittest.TestCase):
                 safety_context=safety_context,
             )
 
-            self.assertEqual(reply.text, "哈哈，這個真的有趣。")
-            self.assertEqual(worker.style_rejections, 0)
+            self.assertEqual(reply.text, "這個真的蠻有趣。")
+            self.assertEqual(worker.style_rejections, 1)
             self.assertEqual(worker.policy_rejections, 0)
-            self.assertEqual(worker._completion.await_count, 2)
+            self.assertEqual(worker._completion.await_count, 3)
 
         asyncio.run(scenario())
 

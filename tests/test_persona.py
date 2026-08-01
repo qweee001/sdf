@@ -121,7 +121,7 @@ class PersonaGeneratorTests(unittest.TestCase):
         self.assertTrue(str(profile["task_info"]).strip())
         self.assertIn(
             profile["ai_model"],
-            {"x-ai/grok-4.20", "x-ai/grok-4.3", "x-ai/grok-4.5"},
+            {"openai/gpt-5.6-sol"},
         )
         self.assertIsInstance(profile["adult_text_enabled"], bool)
         self.assertGreaterEqual(float(profile["group_reply_probability"]), 0)
@@ -147,6 +147,17 @@ class PersonaGeneratorTests(unittest.TestCase):
         if profile["adult_text_enabled"]:
             for required in ("成人純文字", "成年", "自願", "拒絕即停止"):
                 self.assertIn(required, str(profile["style"]))
+
+    def test_full_profile_can_be_limited_to_least_used_roles(self) -> None:
+        candidates = (("male", "observer"), ("female", "observer"))
+
+        for _ in range(20):
+            profile = generate_account_profile(role_candidates=candidates)
+            self.assertIn(
+                (profile["gender"], profile["stage"]),
+                candidates,
+            )
+            self.assertEqual(profile["ai_model"], "openai/gpt-5.6-sol")
 
     def test_full_profile_can_exclude_the_current_account_style(self) -> None:
         first = generate_account_profile()

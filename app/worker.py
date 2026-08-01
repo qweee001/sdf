@@ -709,6 +709,12 @@ class AccountWorker:
             if lexical.blocked:
                 self.policy_rejections += 1
                 continue
+            # A stock discourse particle or laugh at the very start is the
+            # strongest recurring signal that multiple replies are templated.
+            # It may still appear naturally later in the sentence.
+            if self._opening_family(candidate):
+                self.style_rejections = getattr(self, "style_rejections", 0) + 1
+                continue
             if self._repeats_recent_opening(candidate, safety_context):
                 self.style_rejections = getattr(self, "style_rejections", 0) + 1
                 continue
