@@ -13,6 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from .manager import AccountConflictError, AccountManager, AccountNotFoundError
+from .openrouter_models import OpenRouterModelCatalogError
 from .telegram_login import (
     TelegramLoginConflict,
     TelegramLoginExpired,
@@ -794,7 +795,10 @@ DASHBOARD_HTML = """<!doctype html>
                 <input id="editBaseUrl" required maxlength="500" inputmode="url">
               </label>
               <label class="field">模型名稱
-                <input id="editModel" required maxlength="200">
+                <input id="editModel" required maxlength="200" list="editTextModelOptions" autocomplete="off">
+                <datalist id="editTextModelOptions"></datalist>
+                <span id="textModelsNotice" class="hint">可手動輸入模型 ID</span>
+                <button id="refreshTextModelsButton" class="btn small" type="button">重新整理可用模型</button>
               </label>
               <label class="check field full"><input id="editAdultTextEnabled" type="checkbox"> 啟用成人純文字模式</label>
               <div class="hint field full">勾選即確認允許群組為 18+；群內成人文字聊天預設為成年、自願，明確拒絕或其他相反證據會立即覆蓋此預設。媒體安全政策不會因此放寬。</div>
@@ -806,7 +810,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <div id="voiceProviderState" class="provider-state"><span>OpenRouter 語音</span><strong>未就緒</strong></div>
                 <div id="videoProviderState" class="provider-state"><span>OpenRouter 影片</span><strong>未就緒</strong></div>
               </div>
-              <div class="hint field full">媒體允許群組與帳號的回覆群組分開管理。啟用每種媒體時都要明確選擇至少一個群組；若帳號目前只有一個可回覆群組，控制台會自動預選。</div>
+              <div class="hint field full">媒體允許群組必須位於帳號互動範圍內。啟用每種媒體時都要明確選擇至少一個群組；若帳號目前只有一個可互動群組，控制台會自動預選。</div>
 
               <label class="check field full"><input id="editImageEnabled" type="checkbox"> 啟用圖片生成</label>
               <label class="field">圖片模型
@@ -820,7 +824,7 @@ DASHBOARD_HTML = """<!doctype html>
               </label>
               <label class="field full">圖片允許群組 ID
                 <textarea id="editImageGroupIds" maxlength="12000" spellcheck="false" placeholder="-1001234567890, -1009876543210"></textarea>
-                <span class="hint">可用逗號、空白或換行輸入；也可在下方從此帳號已知群組複選。</span>
+                <span class="hint">可用逗號、空白或換行輸入；也可在下方從帳號互動範圍內的群組複選。</span>
               </label>
               <label class="field full">從已知群組複用到圖片
                 <select id="editImageKnownGroups" multiple size="4"></select>
@@ -981,6 +985,7 @@ let editorAccountId = "";
 let editorRevision = 0;
 let editorEditGeneration = 0;
 let groupsDirty = false;
+let groupSelectionBeforeAllGroups = null;
 let telegramAuthId = "";
 let telegramAuthState = "idle";
 const conversationGroupByAccount = new Map();
@@ -1000,6 +1005,7 @@ let privateAlertsLoadedUnreadCount = -1;
 let privateAlertsLoadedLatestAt = 0;
 let privateIndicatorRefreshPending = false;
 let randomProfileRequestSequence = 0;
+let textModelsRequestSequence = 0;
 
 function showLogin() {
   document.title = "Telegram AI 多帳號控制台";
@@ -1020,6 +1026,7 @@ function resetDashboardClientState() {
   editorRevision = 0;
   editorEditGeneration += 1;
   groupsDirty = false;
+  groupSelectionBeforeAllGroups = null;
   manualGroupByAccount.clear();
   manualMessageDraftByAccount.clear();
   manualMessagePendingAccounts.clear();
@@ -1033,6 +1040,8 @@ function resetDashboardClientState() {
   privateAlertsLoadedUnreadCount = -1;
   privateAlertsLoadedLatestAt = 0;
   randomProfileRequestSequence += 1;
+  textModelsRequestSequence += 1;
+  $("editTextModelOptions").replaceChildren();
   clearConversationList();
   clearMediaJobs();
   clearPrivateAlerts();
@@ -1228,6 +1237,18 @@ function mediaGroupIds(prefix, label) {
     .map((option) => Number(option.value))
     .filter((groupId) => Number.isSafeInteger(groupId));
   const result = [...new Set([...typed, ...known])];
+  const account = selectedAccount();
+  if (account && !account.all_groups) {
+    const accountScope = new Set(
+      (Array.isArray(account.group_ids) ? account.group_ids : []).map(Number),
+    );
+    const outsideScope = result.filter((groupId) => !accountScope.has(groupId));
+    if (outsideScope.length) {
+      throw new Error(
+        `${label}允許群組必須位於帳號互動範圍內：${outsideScope.join(", ")}`,
+      );
+    }
+  }
   if ($(`edit${prefix}Enabled`).checked && !result.length) {
     throw new Error(`啟用${label}時，請至少選擇一個允許群組`);
   }
@@ -1472,14 +1493,67 @@ function renderAccountList() {
 }
 
 function unlistedMediaGroupIds(account, feature) {
+  const accountScope = new Set(
+    (Array.isArray(account.group_ids) ? account.group_ids : []).map(String),
+  );
   const knownGroupIds = new Set(
     (Array.isArray(account.joined_groups) ? account.joined_groups : [])
+      .filter((group) => Boolean(group.enabled))
       .map((group) => String(group.id)),
   );
   const allowedGroupIds = Array.isArray(feature.allowed_group_ids)
     ? feature.allowed_group_ids
     : [];
-  return allowedGroupIds.filter((groupId) => !knownGroupIds.has(String(groupId)));
+  return allowedGroupIds.filter((groupId) => {
+    const key = String(groupId);
+    const inScope = Boolean(account.all_groups) || accountScope.has(key);
+    return inScope && !knownGroupIds.has(key);
+  });
+}
+
+function isOpenRouterBaseUrl(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === "openrouter.ai" || host.endsWith(".openrouter.ai");
+  } catch (_) {
+    return false;
+  }
+}
+
+async function loadTextModels(account, refresh = false) {
+  const requestSequence = ++textModelsRequestSequence;
+  const accountId = String(account?.id || "");
+  if (!accountId || !isOpenRouterBaseUrl(account.ai_base_url || "")) {
+    $("editTextModelOptions").replaceChildren();
+    $("refreshTextModelsButton").disabled = true;
+    $("textModelsNotice").textContent = "非 OpenRouter 帳號，請手動輸入模型 ID";
+    return;
+  }
+  $("refreshTextModelsButton").disabled = false;
+  $("textModelsNotice").textContent = "正在讀取可用模型…";
+  try {
+    const suffix = refresh ? "?refresh=true" : "";
+    const result = await api(`/api/accounts/${encodeURIComponent(accountId)}/text-models${suffix}`);
+    if (requestSequence !== textModelsRequestSequence || selectedAccountId !== accountId) return;
+    if (!result.available) {
+      $("editTextModelOptions").replaceChildren();
+      $("textModelsNotice").textContent = result.message || "請手動輸入模型 ID";
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    for (const model of Array.isArray(result.models) ? result.models : []) {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.label = model.name;
+      fragment.appendChild(option);
+    }
+    $("editTextModelOptions").replaceChildren(fragment);
+    $("textModelsNotice").textContent = `可搜尋或選擇 ${result.models.length} 個文字模型，也可手動輸入 ID`;
+  } catch (error) {
+    if (requestSequence === textModelsRequestSequence && selectedAccountId === accountId) {
+      $("textModelsNotice").textContent = `${error.message}；仍可手動輸入模型 ID`;
+    }
+  }
 }
 
 function fillEditor(account) {
@@ -1542,6 +1616,7 @@ function fillEditor(account) {
   setProviderState("imageProviderState", providers.openrouter_media);
   setProviderState("voiceProviderState", providers.openrouter_media);
   setProviderState("videoProviderState", providers.openrouter_media);
+  loadTextModels(account);
 }
 
 const RANDOM_PROFILE_FIELD_IDS = [
@@ -1597,8 +1672,9 @@ function applyRandomProfilePreview(profile) {
 
 function fillMediaKnownGroups(account, media) {
   const groups = Array.isArray(account.joined_groups) ? account.joined_groups : [];
+  const scopedGroups = groups.filter((group) => Boolean(group.enabled));
   const accountScopeGroupIds = new Set(
-    groups.filter((group) => Boolean(group.enabled)).map((group) => String(group.id)),
+    scopedGroups.map((group) => String(group.id)),
   );
   const enabledByPrefix = {
     Image: Boolean(media.image?.enabled),
@@ -1617,7 +1693,7 @@ function fillMediaKnownGroups(account, media) {
       configuredGroupIds.size === 0 &&
       accountScopeGroupIds.size === 1;
     select.replaceChildren();
-    for (const group of groups) {
+    for (const group of scopedGroups) {
       const option = document.createElement("option");
       option.value = String(group.id);
       option.textContent = `${String(group.title || group.id)} · ${String(group.id)}`;
@@ -1625,7 +1701,7 @@ function fillMediaKnownGroups(account, media) {
         (useSingleGroupDefault && accountScopeGroupIds.has(option.value));
       select.appendChild(option);
     }
-    select.disabled = !groups.length;
+    select.disabled = !scopedGroups.length;
   }
 }
 
@@ -1653,9 +1729,13 @@ function setProviderState(id, readyValue) {
 
 function renderGroups(account) {
   $("allGroups").checked = account.all_groups;
+  groupSelectionBeforeAllGroups = null;
   const list = $("groupList");
   list.replaceChildren();
   const groups = account.joined_groups || [];
+  const selectedGroupIds = new Set(
+    (Array.isArray(account.group_ids) ? account.group_ids : []).map(String),
+  );
   if (!groups.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
@@ -1669,7 +1749,7 @@ function renderGroups(account) {
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.value = String(group.id);
-    checkbox.checked = Boolean(group.enabled);
+    checkbox.checked = selectedGroupIds.has(checkbox.value);
     checkbox.disabled = account.all_groups;
     const copy = document.createElement("span");
     copy.textContent = String(group.title || group.id);
@@ -2343,6 +2423,11 @@ $("addForm").addEventListener("submit", async (event) => {
 
 updateAddLoginMode();
 
+$("refreshTextModelsButton").addEventListener("click", async () => {
+  const account = selectedAccount();
+  if (account) await loadTextModels(account, true);
+});
+
 $("settingsForm").addEventListener("input", () => {
   editorEditGeneration += 1;
   formDirty = true;
@@ -2535,9 +2620,20 @@ $("modelTestButton").addEventListener("click", async () => {
 
 $("allGroups").addEventListener("change", () => {
   groupsDirty = true;
-  for (const input of $("groupList").querySelectorAll("input[type='checkbox']")) {
-    input.disabled = $("allGroups").checked;
-    if ($("allGroups").checked) input.checked = true;
+  const allGroups = $("allGroups").checked;
+  const inputs = [...$("groupList").querySelectorAll("input[type='checkbox']")];
+  if (allGroups) {
+    groupSelectionBeforeAllGroups = new Set(
+      inputs.filter((input) => input.checked).map((input) => input.value),
+    );
+  } else if (groupSelectionBeforeAllGroups !== null) {
+    for (const input of inputs) {
+      input.checked = groupSelectionBeforeAllGroups.has(input.value);
+    }
+    groupSelectionBeforeAllGroups = null;
+  }
+  for (const input of inputs) {
+    input.disabled = allGroups;
   }
 });
 
@@ -2550,8 +2646,10 @@ $("saveGroupsButton").addEventListener("click", async () => {
   if (!account) return;
   invalidateRandomProfilePreview();
   const allGroups = $("allGroups").checked;
-  const groupIds = [...$("groupList").querySelectorAll("input[type='checkbox']:checked")]
-    .map((input) => Number(input.value));
+  const groupIds = allGroups
+    ? []
+    : [...$("groupList").querySelectorAll("input[type='checkbox']:checked")]
+      .map((input) => Number(input.value));
   if (!allGroups && groupIds.length === 0 &&
       !window.confirm("沒有選擇任何群組，儲存後此帳號不會在任何群組互動。確定繼續？")) return;
   await runButton($("saveGroupsButton"), async () => {
@@ -2994,6 +3092,40 @@ class DashboardServer:
         return value
 
     @staticmethod
+    def _public_text_models(result: object, *, account_id: str) -> dict[str, object]:
+        if not isinstance(result, dict):
+            raise RuntimeError("invalid text models response")
+        raw_models = result.get("models", [])
+        if not isinstance(raw_models, list) or len(raw_models) > 2_000:
+            raise RuntimeError("invalid text models response")
+        models: list[dict[str, str]] = []
+        for raw_model in raw_models:
+            if not isinstance(raw_model, dict):
+                raise RuntimeError("invalid text model")
+            model_id = raw_model.get("id")
+            name = raw_model.get("name")
+            if (
+                not isinstance(model_id, str)
+                or not model_id
+                or len(model_id) > 200
+                or not isinstance(name, str)
+                or not name
+                or len(name) > 300
+            ):
+                raise RuntimeError("invalid text model")
+            models.append({"id": model_id, "name": name})
+        public: dict[str, object] = {
+            "account_id": account_id,
+            "available": result.get("available") is True,
+            "cached": result.get("cached") is True,
+            "models": models,
+        }
+        message = result.get("message")
+        if isinstance(message, str) and 0 < len(message) <= 500:
+            public["message"] = message
+        return public
+
+    @staticmethod
     def _public_media_jobs(
         result: object,
         *,
@@ -3280,6 +3412,31 @@ class DashboardServer:
                 return blocked  # type: ignore[return-value]
             return JSONResponse(
                 self._without_api_key_fields(await self.manager.status()),
+                headers={"X-CSRF-Token": session.csrf_token},
+            )
+
+        @web.get("/api/accounts/{account_id}/text-models")
+        async def text_models(account_id: str, request: Request) -> JSONResponse:
+            session, blocked = self._require_auth(request)
+            if blocked is not None or session is None:
+                return blocked  # type: ignore[return-value]
+            if set(request.query_params.keys()) - {"refresh"}:
+                raise ValueError("unsupported text models query parameter")
+            refresh_values = request.query_params.getlist("refresh")
+            if len(refresh_values) > 1:
+                raise ValueError("refresh must not be repeated")
+            raw_refresh = refresh_values[0] if refresh_values else "false"
+            if raw_refresh not in {"true", "false"}:
+                raise ValueError("refresh must be true or false")
+            try:
+                result = await self.manager.text_models(  # type: ignore[attr-defined]
+                    account_id,
+                    refresh=raw_refresh == "true",
+                )
+            except OpenRouterModelCatalogError as exc:
+                return JSONResponse({"detail": str(exc)}, status_code=503)
+            return JSONResponse(
+                self._public_text_models(result, account_id=account_id),
                 headers={"X-CSRF-Token": session.csrf_token},
             )
 

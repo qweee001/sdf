@@ -929,7 +929,6 @@ class MediaService:
                 },
                 {"role": "user", "content": user_content},
             ],
-            "reasoning": {"enabled": False},
         }
         response = await self._request(
             "POST",

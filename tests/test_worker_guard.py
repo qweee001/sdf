@@ -204,7 +204,7 @@ class WorkerGuardTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_openrouter_grok_chat_disables_reasoning_for_fast_group_replies(
+    def test_openrouter_grok_chat_uses_provider_reasoning_defaults(
         self,
     ) -> None:
         async def scenario() -> None:
@@ -222,10 +222,7 @@ class WorkerGuardTests(unittest.TestCase):
                 ),
                 "自然回覆",
             )
-            self.assertEqual(
-                endpoint.calls[0]["extra_body"],
-                {"reasoning": {"enabled": False}},
-            )
+            self.assertNotIn("extra_body", endpoint.calls[0])
 
         asyncio.run(scenario())
 

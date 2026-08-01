@@ -105,7 +105,7 @@ _ADULT_TASKS = (
 _TEXT_MODELS = (
     "x-ai/grok-4.20",
     "x-ai/grok-4.5",
-    "x-ai/grok-4.1-fast",
+    "x-ai/grok-4.3",
 )
 
 _BEHAVIOR_PRESETS = (

@@ -119,7 +119,10 @@ class PersonaGeneratorTests(unittest.TestCase):
         self.assertTrue(str(profile["style"]).strip())
         self.assertTrue(str(profile["task_name"]).strip())
         self.assertTrue(str(profile["task_info"]).strip())
-        self.assertTrue(str(profile["ai_model"]).strip())
+        self.assertIn(
+            profile["ai_model"],
+            {"x-ai/grok-4.20", "x-ai/grok-4.3", "x-ai/grok-4.5"},
+        )
         self.assertIsInstance(profile["adult_text_enabled"], bool)
         self.assertGreaterEqual(float(profile["group_reply_probability"]), 0)
         self.assertLessEqual(float(profile["group_reply_probability"]), 1)

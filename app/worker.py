@@ -11,7 +11,6 @@ import re
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from datetime import date
 from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
@@ -46,7 +45,7 @@ from .media import (
     MediaSettings,
     parse_media_intent,
 )
-from .media_types import MediaJob
+from .media_types import MediaJob, utc_day_key
 from .prompts import proactive_prompt, response_prompt, system_prompt
 from .security import safe_error
 
@@ -55,7 +54,9 @@ LOGGER = logging.getLogger("telegram-ai-userbot.worker")
 COMPLETION_MAX_ATTEMPTS = 2
 MESSAGE_DRAIN_TIMEOUT_SECONDS = 20
 LAUGHTER_OPENERS = ("哈哈", "呵呵", "嘻嘻", "嘿嘿")
+DISCOURSE_PARTICLE_OPENERS = ("喔", "哦", "噢", "嗯", "欸", "唉")
 REPLY_CONTEXT_MESSAGE_LIMIT = 20
+PROACTIVE_LEASE_SECONDS = 10 * 60
 _CJK_OR_PUNCTUATION = r"\u3400-\u9fff，。！？；：、～…「」『』（）【】《》"
 
 
@@ -155,7 +156,7 @@ class AccountWorker:
         self.last_activity: dict[int, float] = {}
         self.last_proactive: dict[int, float] = {}
         self.next_proactive_interval: dict[int, float] = {}
-        self.proactive_counts: dict[tuple[int, date], int] = defaultdict(int)
+        self.proactive_counts: dict[tuple[int, str], int] = defaultdict(int)
         self.group_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.background_tasks: list[asyncio.Task[None]] = []
         self._message_tasks: set[asyncio.Task[object]] = set()
@@ -209,6 +210,18 @@ class AccountWorker:
 
     def group_allowed(self, group_id: int) -> bool:
         return self.account.all_groups or group_id in self.account.group_ids
+
+    async def _record_group_activity(
+        self,
+        group_id: int,
+        *,
+        observed_at: float | None = None,
+    ) -> None:
+        timestamp = time.time() if observed_at is None else observed_at
+        self.last_activity[group_id] = timestamp
+        recorder = getattr(self.store, "record_group_activity", None)
+        if recorder is not None:
+            await recorder(group_id, now=max(int(timestamp), 0))
 
     def _media_enabled(self) -> bool:
         media = self.account.media_settings
@@ -386,14 +399,6 @@ class AccountWorker:
                 "model": self.account.ai_model,
                 "messages": messages,
             }
-            if (
-                self.account.ai_base_url.rstrip("/")
-                == "https://openrouter.ai/api/v1"
-                and self.account.ai_model.startswith("x-ai/grok-")
-            ):
-                request["extra_body"] = {
-                    "reasoning": {"enabled": False},
-                }
             result = await self.ai.chat.completions.create(**request)
             content = self._completion_content(result)
             if content is not None:
@@ -537,8 +542,16 @@ class AccountWorker:
 
     @staticmethod
     def _bounded_policy_context(history: list[object]) -> str:
+        recent_indices = set(range(max(0, len(history) - 8), len(history)))
+        assistant_indices = [
+            index
+            for index, item in enumerate(history)
+            if str(getattr(item, "role", "")) == "assistant"
+        ][-4:]
+        selected_indices = sorted(recent_indices.union(assistant_indices))
         entries: list[dict[str, str]] = []
-        for item in history[-8:]:
+        for index in selected_indices:
+            item = history[index]
             entries.append(
                 {
                     "role": str(getattr(item, "role", ""))[:20],
@@ -559,6 +572,8 @@ class AccountWorker:
         )
         if cleaned.startswith(LAUGHTER_OPENERS):
             return "laughter"
+        if cleaned.startswith(DISCOURSE_PARTICLE_OPENERS):
+            return "discourse_particle"
         return ""
 
     @classmethod
@@ -578,7 +593,7 @@ class AccountWorker:
             return False
         recent_assistant = [
             entry
-            for entry in entries[-8:]
+            for entry in entries
             if isinstance(entry, dict) and entry.get("role") == "assistant"
         ]
         return any(
@@ -600,6 +615,7 @@ class AccountWorker:
             "偷拍、性深偽、騷擾、個資暴露或非法活動；不要說明拒絕原因。"
             "同時必須換掉近期用過的開頭、笑聲、句型、表情與生活背景；不要"
             "用哈哈、呵呵、嘻嘻或嘿嘿開場，也不要再說剛忙完、躺平或發呆。"
+            "不要用喔、哦、噢、嗯、欸或唉等語助詞開場。"
             "固定使用台灣繁體中文、台灣常用詞與自然群聊語序，不得使用簡體字、"
             "中國大陸慣用詞、翻譯腔或書面官腔。帳號只是在台灣語境下運作的自動"
             "互動角色，不得假稱自己是真實台灣人、擁有台灣國籍或戶籍、住在台灣"
@@ -607,14 +623,16 @@ class AccountWorker:
         )
         for attempt in range(2):
             prompt = user_prompt if attempt == 0 else user_prompt + retry_instruction
-            candidate = await self._completion(
-                [
-                    {
-                        "role": "system",
-                        "content": system_prompt(self.account),
-                    },
-                    {"role": "user", "content": prompt},
-                ]
+            candidate = self._compact_auto_reply_layout(
+                await self._completion(
+                    [
+                        {
+                            "role": "system",
+                            "content": system_prompt(self.account),
+                        },
+                        {"role": "user", "content": prompt},
+                    ]
+                )
             )
             lexical = self.content_guard.screen(candidate)
             if lexical.blocked:
@@ -748,7 +766,7 @@ class AccountWorker:
                     sent_messages.append((chunk, sent))
                     sent_utf16_units += len(chunk.encode("utf-16-le")) // 2
                     self.replies_sent += 1
-                    self.last_activity[group_id] = time.time()
+                    await self._record_group_activity(group_id)
                     await self.store.add(
                         self.account.id,
                         group_id,
@@ -924,7 +942,7 @@ class AccountWorker:
         )
         self.replies_sent += 1
         self.media_sent += 1
-        self.last_activity[job.group_id] = time.time()
+        await self._record_group_activity(job.group_id)
         return int(sent.id)
 
     async def media_loop(self) -> None:
@@ -989,17 +1007,131 @@ class AccountWorker:
         }
 
     async def was_reply_to_me(self, message: Message) -> bool:
+        return await self._reply_target_sender_id(message) == self.me_id
+
+    async def _reply_target_sender_id(self, message: Message) -> int | None:
         if not message.is_reply:
-            return False
+            return None
         replied = await message.get_reply_message()
-        return bool(replied and replied.sender_id == self.me_id)
+        sender_id = getattr(replied, "sender_id", None)
+        if isinstance(sender_id, bool) or not isinstance(sender_id, int):
+            return None
+        return sender_id
+
+    @staticmethod
+    def _contains_explicit_mention(message: Message) -> bool:
+        """Recognize Telegram mention entities without trusting message text."""
+        entities = getattr(message, "entities", None) or ()
+        return any(
+            type(entity).__name__
+            in {
+                "MessageEntityMention",
+                "MessageEntityMentionName",
+                "InputMessageEntityMentionName",
+            }
+            for entity in entities
+        )
+
+    @staticmethod
+    def _stable_media_fingerprint(message: Message) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for attribute in (
+            "photo",
+            "document",
+            "poll",
+            "contact",
+            "geo",
+            "venue",
+            "action",
+        ):
+            value = getattr(message, attribute, None)
+            if value is None:
+                continue
+            result["kind"] = attribute
+            result["type"] = type(value).__name__
+            stable_id = getattr(value, "id", None)
+            if isinstance(stable_id, int) and not isinstance(stable_id, bool):
+                result["id"] = stable_id
+            if attribute == "contact":
+                result["phone"] = str(
+                    getattr(value, "phone_number", "") or ""
+                )[:80]
+            if attribute == "geo":
+                for coordinate in ("lat", "long"):
+                    number = getattr(value, coordinate, None)
+                    if isinstance(number, (int, float)) and not isinstance(
+                        number,
+                        bool,
+                    ):
+                        result[coordinate] = round(float(number), 7)
+            break
+        grouped_id = getattr(message, "grouped_id", None)
+        if isinstance(grouped_id, int) and not isinstance(grouped_id, bool):
+            result["grouped_id"] = grouped_id
+        return result
+
+    def _group_message_claim_key(
+        self,
+        group_id: int,
+        sender_id: int,
+        message: Message,
+        text: str,
+    ) -> int | str:
+        """Build the same claim key on every account in a basic group.
+
+        Telegram basic-group message IDs are local to each account. Server time,
+        sender, content and stable media IDs are shared. The key must not depend
+        on local observation order because accounts can receive or replay the
+        same events in a different order.
+        """
+        created_at = self._telegram_message_created_at(message)
+        if created_at is None:
+            # Compatibility for synthetic events and a safe fallback when an
+            # incomplete Telegram object has no server timestamp.
+            message_id = getattr(message, "id", None)
+            if isinstance(message_id, int) and not isinstance(message_id, bool):
+                return message_id
+            created_at = int(time.time())
+        payload = json.dumps(
+            {
+                "version": 1,
+                "group_id": group_id,
+                "sender_id": sender_id,
+                "created_at": created_at,
+                "text": text,
+                "is_reply": bool(getattr(message, "is_reply", False)),
+                "via_bot_id": getattr(message, "via_bot_id", None),
+                "media": self._stable_media_fingerprint(message),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     async def should_reply(self, event: events.NewMessage.Event) -> bool:
         message = event.message
-        if self.account.reply_on_mention and bool(message.mentioned):
+        mentioned = bool(message.mentioned)
+        if self.account.reply_on_mention and mentioned:
             return True
-        if self.account.reply_on_reply and await self.was_reply_to_me(message):
+        reply_target_sender_id = await self._reply_target_sender_id(message)
+        if (
+            self.account.reply_on_reply
+            and reply_target_sender_id == self.me_id
+        ):
             return True
+
+        # A directed message must be left for its intended managed account.
+        # Otherwise a different account that happens to pass its random
+        # probability check can win the shared group-message claim first and
+        # silence the account that was actually mentioned or replied to.
+        if (
+            reply_target_sender_id is not None
+            and reply_target_sender_id in self.managed_ids_provider()
+        ):
+            return False
+        if self._contains_explicit_mention(message) and not mentioned:
+            return False
         return random.random() < self.account.group_reply_probability
 
     @staticmethod
@@ -1120,6 +1252,7 @@ class AccountWorker:
         group_id = int(event.chat_id)
         if not self.group_allowed(group_id):
             return
+        await self._record_group_activity(group_id)
 
         text = (event.raw_text or "").strip()
         if not text:
@@ -1127,11 +1260,29 @@ class AccountWorker:
 
         sender_id = int(event.sender_id or 0)
         if sender_id in self.managed_ids_provider():
+            sender = await event.get_sender()
+            sender_name = (
+                get_display_name(sender) or f"受管帳號 {sender_id}"
+                if sender is not None
+                else f"受管帳號 {sender_id}"
+            )
+            await self.store.add(
+                self.account.id,
+                group_id,
+                sender_id,
+                sender_name,
+                "user",
+                text,
+            )
             return
+        claim_key = self._group_message_claim_key(
+            group_id,
+            sender_id,
+            event.message,
+            text,
+        )
         sender = await event.get_sender()
         sender_name = get_display_name(sender) if sender is not None else f"成員 {sender_id}"
-        now = time.time()
-        self.last_activity[group_id] = now
 
         trigger_row_id = await self.store.add(
             self.account.id,
@@ -1148,7 +1299,7 @@ class AccountWorker:
         if claim_reply is not None and not await claim_reply(
             self.account.id,
             group_id,
-            int(event.message.id),
+            claim_key,
         ):
             return
 
@@ -1185,7 +1336,7 @@ class AccountWorker:
                     )
                 reply_text, sent = await self._send_verified(reply, event.reply)
                 self.replies_sent += 1
-                self.last_activity[group_id] = time.time()
+                await self._record_group_activity(group_id)
                 try:
                     await self.store.add(
                         self.account.id,
@@ -1237,75 +1388,151 @@ class AccountWorker:
             self.next_proactive_interval[group_id] = interval
         return interval
 
+    async def _try_proactive_message(
+        self,
+        group_id: int,
+        *,
+        now: float | None = None,
+    ) -> bool:
+        current_time = lambda: time.time() if now is None else float(now)
+        idle_seconds = int(self.account.proactive_idle_minutes * 60)
+        observed_activity = self.last_activity.get(group_id)
+        if (
+            observed_activity is None
+            or not self.group_allowed(group_id)
+            or self.account.max_proactive_per_day <= 0
+            or current_time() - observed_activity < idle_seconds
+        ):
+            return False
+
+        claim_lease = getattr(self.store, "claim_proactive_lease", None)
+        commit_lease = getattr(self.store, "commit_proactive_lease", None)
+        release_lease = getattr(self.store, "release_proactive_lease", None)
+        if claim_lease is None or commit_lease is None or release_lease is None:
+            return False
+        cooldown_seconds = max(1, int(self._proactive_interval(group_id)))
+        lease = await claim_lease(
+            self.account.id,
+            group_id,
+            idle_seconds=idle_seconds,
+            cooldown_seconds=cooldown_seconds,
+            daily_limit=self.account.max_proactive_per_day,
+            lease_seconds=PROACTIVE_LEASE_SECONDS,
+            now=max(int(current_time()), 0),
+        )
+        if not bool(getattr(lease, "allowed", False)):
+            return False
+        lease_token = str(getattr(lease, "lease_token", "") or "")
+        try:
+            latest_activity = self.last_activity.get(group_id, current_time())
+            if current_time() - latest_activity < idle_seconds:
+                return False
+            async with self.group_locks[group_id]:
+                latest_activity = self.last_activity.get(group_id, current_time())
+                if current_time() - latest_activity < idle_seconds:
+                    return False
+                history = await self.store.recent_group(
+                    self.account.id,
+                    group_id,
+                    self._reply_history_limit(),
+                )
+                message = await self.generate(
+                    proactive_prompt(self.account, history),
+                    safety_context=self._bounded_policy_context(list(history)),
+                )
+                # Incoming handlers update local activity before waiting for
+                # this lock. The database commit below independently rechecks
+                # activity written by every worker and process.
+                latest_activity = self.last_activity.get(group_id, current_time())
+                if current_time() - latest_activity < idle_seconds:
+                    return False
+                committed = await commit_lease(
+                    self.account.id,
+                    group_id,
+                    lease_token,
+                    idle_seconds=idle_seconds,
+                    cooldown_seconds=cooldown_seconds,
+                    daily_limit=self.account.max_proactive_per_day,
+                    now=max(int(current_time()), 0),
+                )
+                if not bool(getattr(committed, "allowed", False)):
+                    return False
+                # Cooldown and daily usage are durable before Telegram send;
+                # a deploy or crash cannot immediately send the same slot again.
+                lease_token = ""
+                message_text, sent = await self._send_verified(
+                    message,
+                    lambda text, **kwargs: self.client.send_message(
+                        group_id,
+                        text,
+                        **kwargs,
+                    ),
+                )
+                sent_at = current_time()
+                await self._record_group_activity(
+                    group_id,
+                    observed_at=sent_at,
+                )
+                await self.store.add(
+                    self.account.id,
+                    group_id,
+                    self.me_id,
+                    self.me_name,
+                    "assistant",
+                    message_text,
+                    created_at=int(sent.date.timestamp()) if sent.date else None,
+                )
+                self.last_proactive[group_id] = sent_at
+                self.next_proactive_interval.pop(group_id, None)
+                self.proactive_counts[
+                    (group_id, utc_day_key(max(int(sent_at), 0)))
+                ] += 1
+                self.replies_sent += 1
+                return True
+        except asyncio.CancelledError:
+            raise
+        except BlockedReplyError:
+            self.blocked_messages += 1
+            LOGGER.info(
+                "Account %s skipped a proactive message that did not pass "
+                "role/content policy",
+                self.account.id,
+            )
+            return False
+        except Exception as exc:
+            self.errors += 1
+            self.last_error = self._safe_error(exc)
+            LOGGER.error(
+                "Account %s failed proactive message in group %s: %s",
+                self.account.id,
+                group_id,
+                self.last_error,
+            )
+            return False
+        finally:
+            if lease_token:
+                try:
+                    await asyncio.shield(
+                        release_lease(
+                            self.account.id,
+                            group_id,
+                            lease_token,
+                        )
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Account %s could not release proactive lease: %s",
+                        self.account.id,
+                        self._safe_error(exc),
+                    )
+
     async def proactive_loop(self) -> None:
         while True:
             await asyncio.sleep(60)
-            now = time.time()
-            today = date.today()
-            for group_id, last_activity in list(self.last_activity.items()):
-                if not self.group_allowed(group_id):
-                    continue
-                if now - last_activity < self.account.proactive_idle_minutes * 60:
-                    continue
-                if now - self.last_proactive.get(group_id, 0) < self._proactive_interval(
-                    group_id
-                ):
-                    continue
-                count_key = (group_id, today)
-                if self.proactive_counts[count_key] >= self.account.max_proactive_per_day:
-                    continue
-
-                async with self.group_locks[group_id]:
-                    history = await self.store.recent_group(
-                        self.account.id,
-                        group_id,
-                        self._reply_history_limit(),
-                    )
-                    try:
-                        message = await self.generate(
-                            proactive_prompt(self.account, history),
-                            safety_context=self._bounded_policy_context(
-                                list(history)
-                            ),
-                        )
-                        message_text, sent = await self._send_verified(
-                            message,
-                            lambda text, **kwargs: self.client.send_message(
-                                group_id,
-                                text,
-                                **kwargs,
-                            ),
-                        )
-                        await self.store.add(
-                            self.account.id,
-                            group_id,
-                            self.me_id,
-                            self.me_name,
-                            "assistant",
-                            message_text,
-                            created_at=int(sent.date.timestamp()) if sent.date else None,
-                        )
-                        self.last_proactive[group_id] = time.time()
-                        self.last_activity[group_id] = time.time()
-                        self.next_proactive_interval.pop(group_id, None)
-                        self.proactive_counts[count_key] += 1
-                        self.replies_sent += 1
-                    except BlockedReplyError:
-                        self.blocked_messages += 1
-                        LOGGER.info(
-                            "Account %s skipped a proactive message that did "
-                            "not pass role/content policy",
-                            self.account.id,
-                        )
-                    except Exception as exc:
-                        self.errors += 1
-                        self.last_error = self._safe_error(exc)
-                        LOGGER.error(
-                            "Account %s failed proactive message in group %s: %s",
-                            self.account.id,
-                            group_id,
-                            self.last_error,
-                        )
+            for group_id in list(self.last_activity):
+                await self._try_proactive_message(group_id)
 
     async def refresh_joined_groups(self) -> None:
         groups: list[dict[str, object]] = []

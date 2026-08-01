@@ -441,7 +441,7 @@ class MediaProviderTests(unittest.TestCase):
             self.assertEqual(payload["model"], "x-ai/grok-4.20")
             self.assertIn("不得因為內容是成人主題", payload["messages"][0]["content"])
             self.assertIn("未成年人", payload["messages"][0]["content"])
-            self.assertEqual(payload["reasoning"], {"enabled": False})
+            self.assertNotIn("reasoning", payload)
 
         asyncio.run(scenario())
 

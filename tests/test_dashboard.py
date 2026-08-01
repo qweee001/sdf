@@ -6,6 +6,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from app.dashboard import DASHBOARD_HTML, DASHBOARD_JS, DashboardServer
+from app.openrouter_models import OpenRouterModelCatalogError
 
 
 RANDOM_PROFILE_FIELDS = {
@@ -106,6 +107,26 @@ class FakeAccountManager:
                 "private_alert_latest_at": 1_700_000_001,
             },
             "accounts": [dict(self.account)],
+        }
+
+    async def text_models(
+        self, account_id: str, *, refresh: bool = False
+    ) -> dict[str, object]:
+        self.calls.append(("text_models", (account_id, refresh)))
+        if getattr(self, "text_models_fail", False):
+            raise OpenRouterModelCatalogError("模型清單暫時無法取得")
+        return {
+            "account_id": account_id,
+            "available": True,
+            "cached": not refresh,
+            "models": [
+                {
+                    "id": "vendor/text-model",
+                    "name": "Text model",
+                    "api_key": "must-never-leave-the-server",
+                }
+            ],
+            "api_key": "must-never-leave-the-server",
         }
 
     async def create_account(
@@ -432,6 +453,34 @@ class DashboardTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         return str(response.json()["csrf_token"])
+
+    def test_text_models_api_auth_refresh_sanitization_and_failure(self) -> None:
+        with TestClient(self.server.app, base_url="https://testserver") as client:
+            path = "/api/accounts/acct_one/text-models"
+            self.assertEqual(client.get(path).status_code, 401)
+            csrf = self.login(client)
+            response = client.get(path + "?refresh=true")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["x-csrf-token"], csrf)
+            self.assertEqual(
+                response.json()["models"],
+                [{"id": "vendor/text-model", "name": "Text model"}],
+            )
+            self.assertNotIn("must-never-leave-the-server", response.text)
+            self.assertIn(("text_models", ("acct_one", True)), self.manager.calls)
+            self.assertEqual(client.get(path + "?refresh=yes").status_code, 400)
+            self.assertEqual(client.get(path + "?refresh=true&refresh=false").status_code, 400)
+            self.manager.text_models_fail = True
+            failed = client.get(path)
+            self.assertEqual(failed.status_code, 503)
+            self.assertIn("模型清單", failed.json()["detail"])
+
+    def test_text_model_picker_keeps_manual_input_and_refresh(self) -> None:
+        self.assertIn('list="editTextModelOptions"', DASHBOARD_HTML)
+        self.assertIn('id="refreshTextModelsButton"', DASHBOARD_HTML)
+        self.assertIn("/text-models${suffix}", DASHBOARD_JS)
+        self.assertIn("仍可手動輸入模型 ID", DASHBOARD_JS)
+        self.assertIn("requestSequence !== textModelsRequestSequence", DASHBOARD_JS)
 
     def test_auth_csrf_and_multi_account_controls(self) -> None:
         session_secret = "1AA-secret-telegram-session"
@@ -1180,9 +1229,18 @@ class DashboardTests(unittest.TestCase):
         )
         self.assertIn("accountScopeGroupIds.size === 1", DASHBOARD_JS)
         self.assertIn("enabledByPrefix[prefix]", DASHBOARD_JS)
+        self.assertIn(
+            "const scopedGroups = groups.filter((group) => Boolean(group.enabled));",
+            DASHBOARD_JS,
+        )
+        self.assertIn("for (const group of scopedGroups)", DASHBOARD_JS)
+        self.assertIn("select.disabled = !scopedGroups.length", DASHBOARD_JS)
+        self.assertIn("const outsideScope = result.filter", DASHBOARD_JS)
+        self.assertIn("允許群組必須位於帳號互動範圍內", DASHBOARD_JS)
         self.assertIn('preselectSoleMediaGroup(prefix)', DASHBOARD_JS)
         self.assertIn("unlistedMediaGroupIds(account, image)", DASHBOARD_JS)
-        self.assertIn("媒體允許群組與帳號的回覆群組分開管理", DASHBOARD_HTML)
+        self.assertIn("媒體允許群組必須位於帳號互動範圍內", DASHBOARD_HTML)
+        self.assertNotIn("媒體允許群組與帳號的回覆群組分開管理", DASHBOARD_HTML)
         self.assertEqual(DASHBOARD_JS.count("providers.openrouter_media"), 3)
         self.assertIn("/media-jobs?", DASHBOARD_JS)
         self.assertIn("const requestSequence = ++mediaJobsRequestSequence;", DASHBOARD_JS)
@@ -1193,6 +1251,27 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('$("addEnabled").checked = false;', DASHBOARD_JS)
         self.assertIn("政策攔截：${account.policy_rejections || 0}", DASHBOARD_JS)
         self.assertIn("風格重試：${account.style_rejections || 0}", DASHBOARD_JS)
+
+    def test_all_groups_ui_preserves_explicit_selection_without_saving_it(self) -> None:
+        self.assertIn("let groupSelectionBeforeAllGroups = null;", DASHBOARD_JS)
+        self.assertIn(
+            "checkbox.checked = selectedGroupIds.has(checkbox.value);",
+            DASHBOARD_JS,
+        )
+        handler = DASHBOARD_JS.split(
+            '$("allGroups").addEventListener("change", () => {',
+            1,
+        )[1].split('$("groupList").addEventListener', 1)[0]
+        self.assertIn("groupSelectionBeforeAllGroups = new Set(", handler)
+        self.assertIn(
+            "input.checked = groupSelectionBeforeAllGroups.has(input.value);",
+            handler,
+        )
+        self.assertNotIn("input.checked = true", handler)
+        self.assertIn(
+            'const groupIds = allGroups\n    ? []\n    : [...$("groupList")',
+            DASHBOARD_JS,
+        )
 
     def test_manual_message_auth_csrf_validation_and_send(self) -> None:
         path = "/api/accounts/acct_one/manual-message"

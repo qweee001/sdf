@@ -6,12 +6,14 @@ import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from cryptography.fernet import Fernet
 
 from app.config import Settings
 from app.crypto import SecretBox
 from app.manager import AccountManager
+from app.openrouter_models import OpenRouterTextModel
 from app.memory import MemoryStore
 from app.security import safe_error
 from app.telegram_login import VerifiedTelegramSession
@@ -54,6 +56,43 @@ def settings(path: str, key: str) -> Settings:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_text_models_only_use_catalog_for_openrouter_accounts(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = replace(
+                settings(path, key),
+                ai_api_key="railway-secret",
+                ai_uses_openrouter_key=True,
+            )
+
+            class Store:
+                account = SimpleNamespace(ai_base_url="https://openrouter.ai/api/v1")
+
+                async def get_account(self, account_id: str) -> object:
+                    return self.account
+
+            class Catalog:
+                calls: list[bool] = []
+
+                async def list_models(self, *, force_refresh: bool = False):
+                    self.calls.append(force_refresh)
+                    return (OpenRouterTextModel("vendor/model", "Model"),), False
+
+            store = Store()
+            manager = AccountManager(config, store, SecretBox(key))  # type: ignore[arg-type]
+            catalog = Catalog()
+            manager._openrouter_models = catalog  # type: ignore[assignment]
+            result = await manager.text_models("acct", refresh=True)
+            self.assertEqual(result["models"], [{"id": "vendor/model", "name": "Model"}])
+            self.assertEqual(catalog.calls, [True])
+            store.account = SimpleNamespace(ai_base_url="https://api.openai.com/v1")
+            manual = await manager.text_models("acct")
+            self.assertFalse(manual["available"])
+            self.assertEqual(catalog.calls, [True])
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
     def test_update_account_drains_in_flight_messages_before_restart(self) -> None:
         async def scenario(path: str) -> None:
             key = Fernet.generate_key().decode()
@@ -403,7 +442,7 @@ class ManagerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
-    def test_set_groups_keeps_all_groups_mode_with_an_empty_selection(self) -> None:
+    def test_all_groups_mode_canonicalizes_stored_group_ids_to_empty(self) -> None:
         async def scenario(path: str) -> None:
             key = Fernet.generate_key().decode()
             config = settings(path, key)
@@ -419,16 +458,25 @@ class ManagerTests(unittest.TestCase):
                 {
                     "session_string": "all-group-update-session",
                     "task_name": "群組互動",
+                    "all_groups": True,
+                    "group_ids": [-100111],
                 }
             )
+            self.assertTrue(created["all_groups"])
+            self.assertEqual(created["group_ids"], [])
+            stored = await store.get_account(str(created["id"]))
+            self.assertEqual(stored.group_ids, frozenset())
+
             saved = await manager.set_groups(
                 str(created["id"]),
                 True,
-                [],
+                [-100222],
                 int(created["revision"]),
             )
             self.assertTrue(saved["all_groups"])
             self.assertEqual(saved["group_ids"], [])
+            stored = await store.get_account(str(created["id"]))
+            self.assertEqual(stored.group_ids, frozenset())
             await manager.close()
 
         with tempfile.TemporaryDirectory() as directory:
@@ -1003,6 +1051,7 @@ class ManagerTests(unittest.TestCase):
                         "gender": "female",
                         "stage": "observer",
                         "task_name": "媒體測試",
+                        "group_ids": [-100123],
                         "media": {
                             "image": {
                                 "enabled": True,
@@ -1077,9 +1126,120 @@ class ManagerTests(unittest.TestCase):
                 ValueError,
                 "啟用圖片生成時，請至少選擇一個允許群組",
             ):
-                manager._validate_media_settings(media)
+                manager._validate_media_settings(
+                    media,
+                    all_groups=False,
+                    group_ids=frozenset(),
+                )
 
-            manager._validate_media_settings(AccountMediaSettings())
+            manager._validate_media_settings(
+                AccountMediaSettings(),
+                all_groups=False,
+                group_ids=frozenset(),
+            )
+
+    def test_enabled_media_groups_must_remain_inside_account_scope(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = replace(
+                settings(path, key),
+                openai_media_api_key="railway-openrouter-media-key",
+                openai_media_base_url="https://openrouter.ai/api/v1",
+            )
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+            try:
+                async def fake_verify(session: str) -> tuple[int, str]:
+                    return 778812, "媒體範圍測試帳號"
+
+                manager.verify_session = fake_verify  # type: ignore[method-assign]
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "圖片生成允許群組必須位於帳號互動範圍內：-100999",
+                ):
+                    await manager.create_account(
+                        {
+                            "session_string": "invalid-media-scope-session",
+                            "task_name": "媒體範圍測試",
+                            "group_ids": [-100111],
+                            "media": {
+                                "image": {
+                                    "enabled": True,
+                                    "model": "x-ai/grok-imagine-image-quality",
+                                    "daily_limit": 5,
+                                    "cooldown_seconds": 60,
+                                    "allowed_group_ids": [-100999],
+                                }
+                            },
+                        }
+                    )
+
+                created = await manager.create_account(
+                    {
+                        "session_string": "media-scope-session",
+                        "task_name": "媒體範圍測試",
+                        "group_ids": [-100111, -100222],
+                        "media": {
+                            "image": {
+                                "enabled": True,
+                                "model": "x-ai/grok-imagine-image-quality",
+                                "daily_limit": 5,
+                                "cooldown_seconds": 60,
+                                "allowed_group_ids": [-100111],
+                            }
+                        },
+                    }
+                )
+                account_id = str(created["id"])
+                revision = int(created["revision"])
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "圖片生成允許群組必須位於帳號互動範圍內：-100999",
+                ):
+                    await manager.update_account(
+                        account_id,
+                        {
+                            "revision": revision,
+                            "media": {
+                                "image": {
+                                    "allowed_group_ids": [-100999],
+                                }
+                            },
+                        },
+                    )
+                unchanged = await store.get_account(account_id)
+                self.assertEqual(unchanged.revision, revision)
+                self.assertEqual(
+                    unchanged.media_settings.image.allowed_group_ids,
+                    frozenset({-100111}),
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "圖片生成允許群組必須位於帳號互動範圍內：-100111",
+                ):
+                    await manager.set_groups(
+                        account_id,
+                        False,
+                        [-100222],
+                        revision,
+                    )
+
+                all_groups = await manager.set_groups(
+                    account_id,
+                    True,
+                    [-100222],
+                    revision,
+                )
+                self.assertTrue(all_groups["all_groups"])
+                self.assertEqual(all_groups["group_ids"], [])
+            finally:
+                await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
     def test_provider_errors_are_redacted(self) -> None:
         message = safe_error(

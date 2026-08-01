@@ -8,6 +8,7 @@ import unicodedata
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiosqlite
 
@@ -23,7 +24,10 @@ from .media_types import (
 )
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
+# claim_proactive_lease accepts cooldowns up to seven days. Keep one extra UTC
+# day so cleanup near a day boundary cannot erase a still-enforced cooldown.
+PROACTIVE_STATE_MIN_RETENTION_SECONDS = 8 * 24 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -54,12 +58,21 @@ class PrivateAlertEntry:
     acknowledged: bool
 
 
+@dataclass(frozen=True)
+class ProactiveLeaseDecision:
+    allowed: bool
+    reason: str
+    lease_token: str = ""
+    retry_after_seconds: int = 0
+
+
 class MemoryStore:
     def __init__(self, path: str, ttl_hours: int) -> None:
         self.path = path
         self.ttl_seconds = ttl_hours * 60 * 60
         self._db: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
+        self._group_activity_cache: dict[int, int] = {}
 
     async def open(self) -> None:
         parent = Path(self.path).expanduser().resolve().parent
@@ -73,6 +86,7 @@ class MemoryStore:
         await self._migrate_account_policy_columns()
         await self._db.commit()
         await self._repair_management_foreign_keys()
+        await self.repair_retired_grok_model()
         await self._db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         await self._db.commit()
         await self.purge_expired()
@@ -273,8 +287,51 @@ class MemoryStore:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS reply_claims_v2 (
+                group_id INTEGER NOT NULL,
+                claim_key TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (group_id, claim_key)
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS proactive_group_state (
+                group_id INTEGER PRIMARY KEY,
+                last_activity_at INTEGER NOT NULL,
+                last_proactive_at INTEGER NOT NULL,
+                lease_owner TEXT NOT NULL,
+                lease_token TEXT NOT NULL,
+                lease_until INTEGER NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS proactive_usage (
+                account_id TEXT NOT NULL,
+                group_id INTEGER NOT NULL,
+                day_key TEXT NOT NULL,
+                used_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (account_id, group_id, day_key),
+                FOREIGN KEY (account_id) REFERENCES accounts(id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_reply_claims_created_at
             ON reply_claims (created_at)
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_reply_claims_v2_created_at
+            ON reply_claims_v2 (created_at)
             """
         )
         await db.execute(
@@ -283,6 +340,12 @@ class MemoryStore:
             ON private_alerts (
                 account_id, acknowledged_at, created_at DESC, id DESC
             )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_proactive_usage_updated_at
+            ON proactive_usage (updated_at)
             """
         )
         await db.execute(
@@ -322,7 +385,12 @@ class MemoryStore:
         """Repair foreign keys rewritten by legacy account-table migrations."""
         db = self._connection()
         broken_tables: list[str] = []
-        for table in ("media_usage", "media_jobs", "private_alerts"):
+        for table in (
+            "media_usage",
+            "media_jobs",
+            "private_alerts",
+            "proactive_usage",
+        ):
             cursor = await db.execute(f"PRAGMA foreign_key_list({table})")
             targets = {str(row["table"]) for row in await cursor.fetchall()}
             await cursor.close()
@@ -463,6 +531,44 @@ class MemoryStore:
                     ON private_alerts (
                         account_id, acknowledged_at, created_at DESC, id DESC
                     )
+                    """
+                )
+            if "proactive_usage" in broken_tables:
+                await db.execute(
+                    "ALTER TABLE proactive_usage RENAME TO proactive_usage_legacy_fk"
+                )
+                await db.execute(
+                    "DROP INDEX IF EXISTS idx_proactive_usage_updated_at"
+                )
+                await db.execute(
+                    """
+                    CREATE TABLE proactive_usage (
+                        account_id TEXT NOT NULL,
+                        group_id INTEGER NOT NULL,
+                        day_key TEXT NOT NULL,
+                        used_count INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        PRIMARY KEY (account_id, group_id, day_key),
+                        FOREIGN KEY (account_id) REFERENCES accounts(id)
+                            ON DELETE CASCADE
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    INSERT INTO proactive_usage (
+                        account_id, group_id, day_key, used_count, updated_at
+                    )
+                    SELECT account_id, group_id, day_key, used_count, updated_at
+                    FROM proactive_usage_legacy_fk
+                    WHERE account_id IN (SELECT id FROM accounts)
+                    """
+                )
+                await db.execute("DROP TABLE proactive_usage_legacy_fk")
+                await db.execute(
+                    """
+                    CREATE INDEX idx_proactive_usage_updated_at
+                    ON proactive_usage (updated_at)
                     """
                 )
             await db.commit()
@@ -731,6 +837,84 @@ class MemoryStore:
             )
             await db.commit()
             return max(0, int(cursor.rowcount))
+
+    async def repair_retired_grok_model(self) -> int:
+        """Replace only the retired Grok default generated by this project."""
+        retired_model = "x-ai/grok-4.1-fast"
+        replacement_model = "x-ai/grok-4.3"
+
+        def is_project_openrouter_url(value: object) -> bool:
+            try:
+                parsed = urlsplit(str(value or ""))
+                port = parsed.port
+            except ValueError:
+                return False
+            return (
+                parsed.scheme.lower() == "https"
+                and (parsed.hostname or "").lower() == "openrouter.ai"
+                and port in (None, 443)
+                and parsed.username is None
+                and parsed.password is None
+                and parsed.path.rstrip("/") == "/api/v1"
+                and not parsed.query
+                and not parsed.fragment
+            )
+
+        async with self._lock:
+            db = self._connection()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    """
+                    SELECT id, ai_base_url FROM accounts
+                    WHERE ai_model=?
+                    ORDER BY id
+                    """,
+                    (retired_model,),
+                )
+                rows = [
+                    row
+                    for row in await cursor.fetchall()
+                    if is_project_openrouter_url(row["ai_base_url"])
+                ]
+                await cursor.close()
+                if not rows:
+                    await db.commit()
+                    return 0
+
+                now = int(time.time())
+                for row in rows:
+                    account_id = str(row["id"])
+                    cursor = await db.execute(
+                        """
+                        UPDATE accounts
+                        SET ai_model=?, revision=revision+1, updated_at=?
+                        WHERE id=? AND ai_base_url=? AND ai_model=?
+                        """,
+                        (
+                            replacement_model,
+                            now,
+                            account_id,
+                            str(row["ai_base_url"]),
+                            retired_model,
+                        ),
+                    )
+                    changed = int(cursor.rowcount)
+                    await cursor.close()
+                    if changed != 1:
+                        raise RuntimeError(
+                            "Account changed during retired Grok model repair"
+                        )
+                    await self._audit_locked(
+                        account_id,
+                        "repair_retired_grok_model",
+                        ["ai_model"],
+                    )
+                await db.commit()
+                return len(rows)
+            except BaseException:
+                await db.rollback()
+                raise
 
     async def migrate_existing_accounts_to_grok_adult(self) -> int:
         """Apply the explicit operator-requested Grok adult-text migration.
@@ -1386,19 +1570,389 @@ class MemoryStore:
             await db.commit()
             return row_id
 
+    @staticmethod
+    def _validate_proactive_parameters(
+        account_id: str,
+        group_id: int,
+        idle_seconds: int,
+        cooldown_seconds: int,
+        daily_limit: int,
+        timestamp: int,
+    ) -> str:
+        cleaned_account_id = (
+            account_id.strip() if isinstance(account_id, str) else ""
+        )
+        sqlite_integer_max = (1 << 63) - 1
+        sqlite_integer_min = -(1 << 63)
+        if not cleaned_account_id or len(cleaned_account_id) > 128:
+            raise ValueError(
+                "account_id must be a non-empty string up to 128 characters"
+            )
+        if (
+            isinstance(group_id, bool)
+            or not isinstance(group_id, int)
+            or not sqlite_integer_min <= group_id <= sqlite_integer_max
+            or group_id == 0
+        ):
+            raise ValueError("group_id must be a non-zero 64-bit integer")
+        for value, name, maximum in (
+            (idle_seconds, "idle_seconds", 7 * 24 * 60 * 60),
+            (cooldown_seconds, "cooldown_seconds", 7 * 24 * 60 * 60),
+            (daily_limit, "daily_limit", 100_000),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= maximum
+            ):
+                raise ValueError(f"{name} must be between 0 and {maximum}")
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, int)
+            or not 0 <= timestamp <= sqlite_integer_max
+        ):
+            raise ValueError("now must be a non-negative 64-bit integer timestamp")
+        return cleaned_account_id
+
+    async def record_group_activity(
+        self,
+        group_id: int,
+        *,
+        now: int | None = None,
+    ) -> bool:
+        """Persist group activity and invalidate a pending proactive lease."""
+        timestamp = int(time.time()) if now is None else now
+        # Reuse the identifier and timestamp validation without requiring an
+        # account row: activity is intentionally shared by all managed accounts.
+        self._validate_proactive_parameters(
+            "activity",
+            group_id,
+            0,
+            0,
+            0,
+            timestamp,
+        )
+        if self._group_activity_cache.get(group_id, -1) >= timestamp:
+            return False
+        async with self._lock:
+            if self._group_activity_cache.get(group_id, -1) >= timestamp:
+                return False
+            db = self._connection()
+            await db.execute(
+                """
+                INSERT INTO proactive_group_state (
+                    group_id, last_activity_at, last_proactive_at,
+                    lease_owner, lease_token, lease_until
+                ) VALUES (?, ?, 0, '', '', 0)
+                ON CONFLICT(group_id) DO UPDATE SET
+                    last_activity_at=MAX(
+                        proactive_group_state.last_activity_at,
+                        excluded.last_activity_at
+                    ),
+                    lease_owner=CASE
+                        WHEN excluded.last_activity_at >=
+                             proactive_group_state.last_activity_at
+                        THEN '' ELSE proactive_group_state.lease_owner END,
+                    lease_token=CASE
+                        WHEN excluded.last_activity_at >=
+                             proactive_group_state.last_activity_at
+                        THEN '' ELSE proactive_group_state.lease_token END,
+                    lease_until=CASE
+                        WHEN excluded.last_activity_at >=
+                             proactive_group_state.last_activity_at
+                        THEN 0 ELSE proactive_group_state.lease_until END
+                """,
+                (group_id, timestamp),
+            )
+            await db.commit()
+            self._group_activity_cache[group_id] = timestamp
+            return True
+
+    async def claim_proactive_lease(
+        self,
+        account_id: str,
+        group_id: int,
+        *,
+        idle_seconds: int,
+        cooldown_seconds: int,
+        daily_limit: int,
+        lease_seconds: int = 10 * 60,
+        now: int | None = None,
+    ) -> ProactiveLeaseDecision:
+        """Atomically reserve one group's next proactive-generation attempt."""
+        timestamp = int(time.time()) if now is None else now
+        cleaned_account_id = self._validate_proactive_parameters(
+            account_id,
+            group_id,
+            idle_seconds,
+            cooldown_seconds,
+            daily_limit,
+            timestamp,
+        )
+        if (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, int)
+            or not 1 <= lease_seconds <= 60 * 60
+        ):
+            raise ValueError("lease_seconds must be between 1 and 3600")
+        day_key = utc_day_key(timestamp)
+        async with self._lock:
+            db = self._connection()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._require_account_locked(cleaned_account_id)
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO proactive_group_state (
+                        group_id, last_activity_at, last_proactive_at,
+                        lease_owner, lease_token, lease_until
+                    ) VALUES (?, 0, 0, '', '', 0)
+                    """,
+                    (group_id,),
+                )
+                cursor = await db.execute(
+                    "SELECT * FROM proactive_group_state WHERE group_id = ?",
+                    (group_id,),
+                )
+                state = await cursor.fetchone()
+                await cursor.close()
+                if state is None:
+                    raise RuntimeError("proactive group state was not created")
+
+                last_activity = int(state["last_activity_at"])
+                if last_activity and timestamp - last_activity < idle_seconds:
+                    retry_after = idle_seconds - (timestamp - last_activity)
+                    await db.commit()
+                    return ProactiveLeaseDecision(
+                        False,
+                        "active",
+                        retry_after_seconds=max(retry_after, 1),
+                    )
+                lease_until = int(state["lease_until"])
+                if lease_until > timestamp:
+                    await db.commit()
+                    return ProactiveLeaseDecision(
+                        False,
+                        "leased",
+                        retry_after_seconds=lease_until - timestamp,
+                    )
+                last_proactive = int(state["last_proactive_at"])
+                if (
+                    last_proactive
+                    and timestamp - last_proactive < cooldown_seconds
+                ):
+                    retry_after = cooldown_seconds - (
+                        timestamp - last_proactive
+                    )
+                    await db.commit()
+                    return ProactiveLeaseDecision(
+                        False,
+                        "cooldown",
+                        retry_after_seconds=max(retry_after, 1),
+                    )
+                cursor = await db.execute(
+                    """
+                    SELECT used_count FROM proactive_usage
+                    WHERE account_id=? AND group_id=? AND day_key=?
+                    """,
+                    (cleaned_account_id, group_id, day_key),
+                )
+                usage = await cursor.fetchone()
+                await cursor.close()
+                used_count = int(usage["used_count"]) if usage else 0
+                if used_count >= daily_limit:
+                    await db.commit()
+                    return ProactiveLeaseDecision(False, "daily_limit")
+
+                lease_token = uuid.uuid4().hex
+                await db.execute(
+                    """
+                    UPDATE proactive_group_state
+                    SET lease_owner=?, lease_token=?, lease_until=?
+                    WHERE group_id=?
+                    """,
+                    (
+                        cleaned_account_id,
+                        lease_token,
+                        timestamp + lease_seconds,
+                        group_id,
+                    ),
+                )
+                await db.commit()
+                return ProactiveLeaseDecision(
+                    True,
+                    "reserved",
+                    lease_token=lease_token,
+                )
+            except BaseException:
+                await db.rollback()
+                raise
+
+    async def commit_proactive_lease(
+        self,
+        account_id: str,
+        group_id: int,
+        lease_token: str,
+        *,
+        idle_seconds: int,
+        cooldown_seconds: int,
+        daily_limit: int,
+        now: int | None = None,
+    ) -> ProactiveLeaseDecision:
+        """Revalidate activity, then persist cooldown and daily usage."""
+        timestamp = int(time.time()) if now is None else now
+        cleaned_account_id = self._validate_proactive_parameters(
+            account_id,
+            group_id,
+            idle_seconds,
+            cooldown_seconds,
+            daily_limit,
+            timestamp,
+        )
+        cleaned_token = lease_token.strip() if isinstance(lease_token, str) else ""
+        if len(cleaned_token) != 32 or any(
+            char not in "0123456789abcdef" for char in cleaned_token
+        ):
+            raise ValueError("lease_token must be a lowercase hexadecimal UUID")
+        day_key = utc_day_key(timestamp)
+        async with self._lock:
+            db = self._connection()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._require_account_locked(cleaned_account_id)
+                cursor = await db.execute(
+                    "SELECT * FROM proactive_group_state WHERE group_id = ?",
+                    (group_id,),
+                )
+                state = await cursor.fetchone()
+                await cursor.close()
+                if (
+                    state is None
+                    or str(state["lease_owner"]) != cleaned_account_id
+                    or str(state["lease_token"]) != cleaned_token
+                    or int(state["lease_until"]) < timestamp
+                ):
+                    await db.commit()
+                    return ProactiveLeaseDecision(False, "lease_lost")
+
+                async def deny(
+                    reason: str,
+                    retry_after_seconds: int = 0,
+                ) -> ProactiveLeaseDecision:
+                    await db.execute(
+                        """
+                        UPDATE proactive_group_state
+                        SET lease_owner='', lease_token='', lease_until=0
+                        WHERE group_id=? AND lease_owner=? AND lease_token=?
+                        """,
+                        (group_id, cleaned_account_id, cleaned_token),
+                    )
+                    await db.commit()
+                    return ProactiveLeaseDecision(
+                        False,
+                        reason,
+                        retry_after_seconds=max(retry_after_seconds, 0),
+                    )
+
+                last_activity = int(state["last_activity_at"])
+                if last_activity and timestamp - last_activity < idle_seconds:
+                    return await deny(
+                        "active",
+                        idle_seconds - (timestamp - last_activity),
+                    )
+                last_proactive = int(state["last_proactive_at"])
+                if (
+                    last_proactive
+                    and timestamp - last_proactive < cooldown_seconds
+                ):
+                    return await deny(
+                        "cooldown",
+                        cooldown_seconds - (timestamp - last_proactive),
+                    )
+                cursor = await db.execute(
+                    """
+                    SELECT used_count FROM proactive_usage
+                    WHERE account_id=? AND group_id=? AND day_key=?
+                    """,
+                    (cleaned_account_id, group_id, day_key),
+                )
+                usage = await cursor.fetchone()
+                await cursor.close()
+                used_count = int(usage["used_count"]) if usage else 0
+                if used_count >= daily_limit:
+                    return await deny("daily_limit")
+
+                await db.execute(
+                    """
+                    UPDATE proactive_group_state
+                    SET last_proactive_at=?, lease_owner='', lease_token='',
+                        lease_until=0
+                    WHERE group_id=? AND lease_owner=? AND lease_token=?
+                    """,
+                    (
+                        timestamp,
+                        group_id,
+                        cleaned_account_id,
+                        cleaned_token,
+                    ),
+                )
+                await db.execute(
+                    """
+                    INSERT INTO proactive_usage (
+                        account_id, group_id, day_key, used_count, updated_at
+                    ) VALUES (?, ?, ?, 1, ?)
+                    ON CONFLICT(account_id, group_id, day_key) DO UPDATE SET
+                        used_count=proactive_usage.used_count + 1,
+                        updated_at=excluded.updated_at
+                    """,
+                    (cleaned_account_id, group_id, day_key, timestamp),
+                )
+                await db.commit()
+                return ProactiveLeaseDecision(True, "committed")
+            except BaseException:
+                await db.rollback()
+                raise
+
+    async def release_proactive_lease(
+        self,
+        account_id: str,
+        group_id: int,
+        lease_token: str,
+    ) -> bool:
+        cleaned_account_id = (
+            account_id.strip() if isinstance(account_id, str) else ""
+        )
+        cleaned_token = lease_token.strip() if isinstance(lease_token, str) else ""
+        if not cleaned_account_id or not cleaned_token:
+            return False
+        async with self._lock:
+            db = self._connection()
+            cursor = await db.execute(
+                """
+                UPDATE proactive_group_state
+                SET lease_owner='', lease_token='', lease_until=0
+                WHERE group_id=? AND lease_owner=? AND lease_token=?
+                """,
+                (group_id, cleaned_account_id, cleaned_token),
+            )
+            released = cursor.rowcount == 1
+            await cursor.close()
+            await db.commit()
+            return released
+
     async def claim_group_reply(
         self,
         account_id: str,
         group_id: int,
-        telegram_message_id: int,
+        claim_key: int | str,
         *,
         now: int | None = None,
     ) -> bool:
         """Atomically reserve one group message for exactly one account.
 
-        Claims expire with the rest of the short-lived conversation memory. A
-        second account can therefore claim a reused Telegram message ID only
-        after the original claim has fallen outside the configured TTL.
+        String keys are stable cross-account fingerprints used for Telegram
+        basic groups, whose local message IDs differ by account. Integer keys
+        retain compatibility with already-deployed callers and old tests.
         """
         cleaned_account_id = (
             account_id.strip() if isinstance(account_id, str) else ""
@@ -1414,12 +1968,24 @@ class MemoryStore:
             or group_id == 0
         ):
             raise ValueError("group_id must be a non-zero 64-bit integer")
-        if (
-            isinstance(telegram_message_id, bool)
-            or not isinstance(telegram_message_id, int)
-            or not 1 <= telegram_message_id <= sqlite_integer_max
-        ):
-            raise ValueError("telegram_message_id must be a positive 64-bit integer")
+        legacy_message_id: int | None = None
+        stable_claim_key = ""
+        if isinstance(claim_key, int) and not isinstance(claim_key, bool):
+            if not 1 <= claim_key <= sqlite_integer_max:
+                raise ValueError(
+                    "telegram_message_id must be a positive 64-bit integer"
+                )
+            legacy_message_id = claim_key
+        elif isinstance(claim_key, str):
+            stable_claim_key = claim_key.strip().lower()
+            if len(stable_claim_key) != 64 or any(
+                char not in "0123456789abcdef" for char in stable_claim_key
+            ):
+                raise ValueError("claim_key must be a 64-character SHA-256 hex digest")
+        else:
+            raise ValueError(
+                "claim_key must be a positive message ID or SHA-256 hex digest"
+            )
         timestamp = int(time.time()) if now is None else now
         if (
             isinstance(timestamp, bool)
@@ -1438,19 +2004,38 @@ class MemoryStore:
                     "DELETE FROM reply_claims WHERE created_at < ?",
                     (cutoff,),
                 )
-                cursor = await db.execute(
-                    """
-                    INSERT OR IGNORE INTO reply_claims (
-                        group_id, telegram_message_id, account_id, created_at
-                    ) VALUES (?, ?, ?, ?)
-                    """,
-                    (
-                        group_id,
-                        telegram_message_id,
-                        cleaned_account_id,
-                        timestamp,
-                    ),
+                await db.execute(
+                    "DELETE FROM reply_claims_v2 WHERE created_at < ?",
+                    (cutoff,),
                 )
+                if legacy_message_id is not None:
+                    cursor = await db.execute(
+                        """
+                        INSERT OR IGNORE INTO reply_claims (
+                            group_id, telegram_message_id, account_id, created_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            group_id,
+                            legacy_message_id,
+                            cleaned_account_id,
+                            timestamp,
+                        ),
+                    )
+                else:
+                    cursor = await db.execute(
+                        """
+                        INSERT OR IGNORE INTO reply_claims_v2 (
+                            group_id, claim_key, account_id, created_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            group_id,
+                            stable_claim_key,
+                            cleaned_account_id,
+                            timestamp,
+                        ),
+                    )
                 claimed = cursor.rowcount == 1
                 await cursor.close()
                 await db.commit()
@@ -1728,6 +2313,11 @@ class MemoryStore:
     async def purge_expired(self, *, now: int | None = None) -> int:
         current = now if now is not None else int(time.time())
         cutoff = current - self.ttl_seconds
+        proactive_cutoff = current - max(
+            self.ttl_seconds,
+            PROACTIVE_STATE_MIN_RETENTION_SECONDS,
+        )
+        current_day_key = utc_day_key(current)
         async with self._lock:
             db = self._connection()
             cursor = await db.execute(
@@ -1745,6 +2335,27 @@ class MemoryStore:
                 (cutoff,),
             )
             removed_reply_claims = max(cursor.rowcount, 0)
+            cursor = await db.execute(
+                "DELETE FROM reply_claims_v2 WHERE created_at < ?",
+                (cutoff,),
+            )
+            removed_reply_claims += max(cursor.rowcount, 0)
+            cursor = await db.execute(
+                """
+                DELETE FROM proactive_usage
+                WHERE updated_at < ? AND day_key < ?
+                """,
+                (proactive_cutoff, current_day_key),
+            )
+            removed_proactive_usage = max(cursor.rowcount, 0)
+            cursor = await db.execute(
+                """
+                DELETE FROM proactive_group_state
+                WHERE MAX(last_activity_at, last_proactive_at, lease_until) < ?
+                """,
+                (proactive_cutoff,),
+            )
+            removed_proactive_state = max(cursor.rowcount, 0)
             await db.execute(
                 """
                 UPDATE media_jobs
@@ -1763,7 +2374,13 @@ class MemoryStore:
                 (cutoff,),
             )
             await db.commit()
-            return removed_messages + removed_alerts + removed_reply_claims
+            return (
+                removed_messages
+                + removed_alerts
+                + removed_reply_claims
+                + removed_proactive_usage
+                + removed_proactive_state
+            )
 
     async def legacy_runtime_settings(self) -> dict[str, str]:
         async with self._lock:

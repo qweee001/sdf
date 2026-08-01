@@ -30,6 +30,7 @@ from .config import Settings
 from .crypto import SecretBox
 from .memory import MemoryStore
 from .media_types import AccountMediaSettings, clean_account_media_settings
+from .openrouter_models import OpenRouterModelCatalog
 from .persona import generate_account_profile, generate_persona
 from .security import safe_error
 from .telegram_login import TelegramLoginService, VerifiedTelegramSession
@@ -78,13 +79,53 @@ class AccountManager:
         self._supervisor_task: asyncio.Task[None] | None = None
         self._retry_attempts: dict[str, int] = {}
         self._next_retry_at: dict[str, float] = {}
+        self._openrouter_models = (
+            OpenRouterModelCatalog(settings.ai_api_key)
+            if settings.ai_uses_openrouter_key and settings.ai_api_key
+            else None
+        )
 
     def managed_ids(self) -> frozenset[int]:
         return self._managed_ids
 
+    async def text_models(
+        self, account_id: str, *, refresh: bool = False
+    ) -> dict[str, object]:
+        account = await self.store.get_account(account_id)
+        if account is None:
+            raise AccountNotFoundError("找不到帳號")
+        if not self._is_openrouter_provider(account.ai_base_url):
+            return {
+                "account_id": account_id,
+                "available": False,
+                "cached": False,
+                "models": [],
+                "message": "此帳號不是 OpenRouter，請手動輸入模型 ID",
+            }
+        if self._openrouter_models is None:
+            return {
+                "account_id": account_id,
+                "available": False,
+                "cached": False,
+                "models": [],
+                "message": "Railway 尚未設定 OPENROUTER_API_KEY，請手動輸入模型 ID",
+            }
+        models, cached = await self._openrouter_models.list_models(
+            force_refresh=refresh
+        )
+        return {
+            "account_id": account_id,
+            "available": True,
+            "cached": cached,
+            "models": [{"id": model.id, "name": model.name} for model in models],
+        }
+
     async def start(self) -> None:
         await self.store.open()
         await self._import_legacy_account()
+        # A fresh database can receive its first account during the legacy
+        # import above, after MemoryStore.open() has run its startup repairs.
+        await self.store.repair_retired_grok_model()
         removed_legacy_keys = await self.store.clear_account_api_keys()
         if removed_legacy_keys:
             LOGGER.info(
@@ -155,6 +196,8 @@ class AccountManager:
                 )
             except (TypeError, ValueError, json.JSONDecodeError):
                 group_ids = frozenset()
+        if all_groups:
+            group_ids = frozenset()
         now = int(time.time())
         record = AccountRecord(
             id="primary",
@@ -411,6 +454,13 @@ class AccountManager:
             maximum=12000,
         ):
             raise ValueError("AI API Key 只能設定在 Railway Variables")
+        all_groups = clean_bool(
+            payload.get("all_groups", False),
+            "all_groups",
+        )
+        group_ids = clean_group_ids(payload.get("group_ids", []))
+        if all_groups:
+            group_ids = frozenset()
         record = AccountRecord(
             id=f"acct_{uuid.uuid4().hex[:12]}",
             label=clean_text(
@@ -498,11 +548,8 @@ class AccountManager:
                 minimum=0,
                 maximum=200,
             ),
-            all_groups=clean_bool(
-                payload.get("all_groups", False),
-                "all_groups",
-            ),
-            group_ids=clean_group_ids(payload.get("group_ids", [])),
+            all_groups=all_groups,
+            group_ids=group_ids,
             revision=1,
             created_at=now,
             updated_at=now,
@@ -530,7 +577,11 @@ class AccountManager:
         )
         self._validate_intervals(record)
         self._validate_ai_provider(record.ai_base_url)
-        self._validate_media_settings(record.media_settings)
+        self._validate_media_settings(
+            record.media_settings,
+            all_groups=record.all_groups,
+            group_ids=record.group_ids,
+        )
         if not self.settings.ai_api_key:
             raise ValueError(
                 "請在 Railway Variables 設定 OPENROUTER_API_KEY 或 AI_API_KEY"
@@ -754,7 +805,11 @@ class AccountManager:
         )
         self._validate_intervals(updated)
         self._validate_ai_provider(updated.ai_base_url)
-        self._validate_media_settings(updated.media_settings)
+        self._validate_media_settings(
+            updated.media_settings,
+            all_groups=updated.all_groups,
+            group_ids=updated.group_ids,
+        )
         if not self.settings.ai_api_key:
             raise ValueError(
                 "請在 Railway Variables 設定 OPENROUTER_API_KEY 或 AI_API_KEY"
@@ -849,6 +904,8 @@ class AccountManager:
         if revision != current.revision:
             raise AccountConflictError("設定已被其他操作更新，請重新整理")
         cleaned_ids = clean_group_ids(group_ids)
+        if all_groups:
+            cleaned_ids = frozenset()
         worker = self.workers.get(account_id)
         if worker is not None:
             await worker.refresh_joined_groups()
@@ -860,6 +917,11 @@ class AccountManager:
                     "所選群組不在此 Telegram 帳號目前加入的群組中："
                     f"{formatted_ids}；請重新整理群組清單後再試"
                 )
+        self._validate_media_settings(
+            current.media_settings,
+            all_groups=all_groups,
+            group_ids=cleaned_ids,
+        )
         async with self._account_operation_locks[account_id]:
             try:
                 saved = await self.store.update_account(
@@ -1340,7 +1402,13 @@ class AccountManager:
                 "https://openrouter.ai/api/v1"
             )
 
-    def _validate_media_settings(self, media: AccountMediaSettings) -> None:
+    def _validate_media_settings(
+        self,
+        media: AccountMediaSettings,
+        *,
+        all_groups: bool,
+        group_ids: frozenset[int],
+    ) -> None:
         media_labels = {
             "image": "圖片生成",
             "voice": "語音生成",
@@ -1364,6 +1432,16 @@ class AccountManager:
                 raise ValueError(
                     f"{media_type} allowed groups must be negative Telegram group IDs"
                 )
+            if not all_groups:
+                outside_scope = feature.allowed_group_ids - group_ids
+                if outside_scope:
+                    formatted_ids = ", ".join(
+                        str(group_id) for group_id in sorted(outside_scope)
+                    )
+                    raise ValueError(
+                        f"{media_labels[media_type]}允許群組必須位於帳號互動範圍內："
+                        f"{formatted_ids}"
+                    )
         if (
             media.image.enabled or media.voice.enabled or media.video.enabled
         ) and not self.settings.openai_media_api_key:
