@@ -1334,6 +1334,10 @@ class AccountWorker:
 
         sender_id = int(event.sender_id or 0)
         if sender_id in self.managed_ids_provider():
+            # A sibling managed account is another automated speaker, not a
+            # human prompt. Keeping that distinction in each account's local
+            # history prevents several managed accounts from restating the
+            # same idea with slightly different wording.
             sender = await event.get_sender()
             sender_name = (
                 get_display_name(sender) or f"受管帳號 {sender_id}"
@@ -1345,7 +1349,7 @@ class AccountWorker:
                 group_id,
                 sender_id,
                 sender_name,
-                "user",
+                "assistant",
                 text,
             )
             return

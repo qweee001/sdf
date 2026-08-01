@@ -133,7 +133,7 @@ class GroupActivityTests(unittest.TestCase):
                 GROUP_ID,
                 222002,
                 "受管帳號 222002",
-                "user",
+                "assistant",
                 "受管帳號剛發出的文字",
             )
             managed.get_sender.assert_awaited_once()
