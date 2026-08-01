@@ -715,6 +715,42 @@ class MemoryStore:
             await db.commit()
             return max(0, int(cursor.rowcount))
 
+    async def migrate_existing_accounts_to_grok_adult(self) -> int:
+        """Apply the explicit operator-requested Grok adult-text migration.
+
+        This intentionally updates every existing account and records an audit
+        entry for each row. It never reads or writes provider credentials and
+        does not alter the media safety settings or any other account policy.
+        """
+        async with self._lock:
+            db = self._connection()
+            cursor = await db.execute("SELECT id FROM accounts ORDER BY id")
+            account_ids = [str(row["id"]) for row in await cursor.fetchall()]
+            await cursor.close()
+            if not account_ids:
+                return 0
+
+            now = int(time.time())
+            await db.execute(
+                """
+                UPDATE accounts
+                SET ai_base_url='https://openrouter.ai/api/v1',
+                    ai_model='x-ai/grok-4.20',
+                    adult_text_enabled=1,
+                    revision=revision+1,
+                    updated_at=?
+                """,
+                (now,),
+            )
+            for account_id in account_ids:
+                await self._audit_locked(
+                    account_id,
+                    "migrate_existing_accounts_to_grok_adult",
+                    ["adult_text_enabled", "ai_base_url", "ai_model"],
+                )
+            await db.commit()
+            return len(account_ids)
+
     async def migrate_openrouter_defaults(
         self,
         *,

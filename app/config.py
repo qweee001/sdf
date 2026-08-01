@@ -155,6 +155,7 @@ class Settings:
     media_video_model: str = "x-ai/grok-imagine-video-1.5"
     media_moderation_model: str = "x-ai/grok-4.20"
     ai_uses_openrouter_key: bool = False
+    migrate_existing_accounts_to_grok_adult: bool = False
 
     @property
     def media_provider_readiness(self) -> dict[str, bool]:
@@ -266,4 +267,8 @@ def load_settings() -> Settings:
             or "x-ai/grok-4.20"
         ),
         ai_uses_openrouter_key=bool(openrouter_api_key),
+        migrate_existing_accounts_to_grok_adult=_boolean(
+            "MIGRATE_EXISTING_ACCOUNTS_TO_GROK_ADULT",
+            False,
+        ),
     )

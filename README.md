@@ -52,6 +52,9 @@ OPENROUTER_API_KEY=
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 AI_MODEL=x-ai/grok-4.20
 
+# 一次性既有帳號遷移；平常保持 false
+MIGRATE_EXISTING_ACCOUNTS_TO_GROK_ADULT=false
+
 # 可選：媒體使用另一把 OpenRouter Key；留白時沿用 OPENROUTER_API_KEY
 OPENROUTER_MEDIA_API_KEY=
 OPENROUTER_MEDIA_BASE_URL=https://openrouter.ai/api/v1
@@ -89,6 +92,12 @@ Telegram Session 將無法解密。
 OpenRouter 金鑰只能放在 Railway Variables。控制台只顯示供應商是否就緒，不提供
 金鑰輸入欄，也不會把金鑰保存到 SQLite、API 回應或日誌。沒有媒體金鑰時，原有
 文字群聊仍可正常運作；各帳號的圖片、語音及影片預設皆為關閉。
+
+若要把資料庫內所有既有帳號一次改成 OpenRouter `x-ai/grok-4.20` 並開啟受限的
+「成人純文字模式」，可在 Railway Variables 將
+`MIGRATE_EXISTING_ACCOUNTS_TO_GROK_ADULT=true`，只部署一次；確認成功後立即刪除該
+Variable 或改回 `false`，避免日後每次服務重啟都再次增加帳號設定版本。這項遷移
+不會修改媒體安全審核，也不會放寬未成年、非自願、剝削、騷擾或其他固定攔截規則。
 
 ## 新增多個帳號
 

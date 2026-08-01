@@ -549,6 +549,39 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
+    def test_operator_grok_adult_migration_updates_every_existing_account(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            await store.create_account(account_record("alpha", revision=3))
+            await store.create_account(
+                account_record("beta", revision=8).with_updates(
+                    ai_base_url="https://another.example/v1",
+                    ai_model="custom-model",
+                    adult_text_enabled=False,
+                )
+            )
+
+            migrated = await store.migrate_existing_accounts_to_grok_adult()
+            alpha = await store.get_account("alpha")
+            beta = await store.get_account("beta")
+
+            self.assertEqual(migrated, 2)
+            self.assertEqual(alpha.ai_base_url, "https://openrouter.ai/api/v1")
+            self.assertEqual(beta.ai_base_url, "https://openrouter.ai/api/v1")
+            self.assertEqual(alpha.ai_model, "x-ai/grok-4.20")
+            self.assertEqual(beta.ai_model, "x-ai/grok-4.20")
+            self.assertTrue(alpha.adult_text_enabled)
+            self.assertTrue(beta.adult_text_enabled)
+            self.assertEqual(alpha.revision, 4)
+            self.assertEqual(beta.revision, 9)
+            self.assertGreaterEqual(alpha.updated_at, alpha.created_at)
+            self.assertGreaterEqual(beta.updated_at, beta.created_at)
+            await store.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
     def test_media_quota_and_queue_are_atomic_and_persistent(self) -> None:
         async def scenario(path: str) -> None:
             first = MemoryStore(path, ttl_hours=24)

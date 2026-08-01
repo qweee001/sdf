@@ -54,6 +54,33 @@ def settings(path: str, key: str) -> Settings:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_start_runs_explicit_grok_adult_migration_flag(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = replace(
+                settings(path, key),
+                migrate_existing_accounts_to_grok_adult=True,
+            )
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            calls = 0
+            original = store.migrate_existing_accounts_to_grok_adult
+
+            async def tracking_migration() -> int:
+                nonlocal calls
+                calls += 1
+                return await original()
+
+            store.migrate_existing_accounts_to_grok_adult = (  # type: ignore[method-assign]
+                tracking_migration
+            )
+            await manager.start()
+            self.assertEqual(calls, 1)
+            await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
     def test_cancelled_phone_account_creation_releases_login_claim(self) -> None:
         async def scenario(path: str) -> None:
             key = Fernet.generate_key().decode()

@@ -90,6 +90,16 @@ class AccountManager:
                 "read only from Railway Variables",
                 removed_legacy_keys,
             )
+        if self.settings.migrate_existing_accounts_to_grok_adult:
+            migrated_accounts = (
+                await self.store.migrate_existing_accounts_to_grok_adult()
+            )
+            LOGGER.warning(
+                "Operator migration updated %s existing account(s) to "
+                "OpenRouter x-ai/grok-4.20 with adult text enabled; remove "
+                "MIGRATE_EXISTING_ACCOUNTS_TO_GROK_ADULT after this deploy",
+                migrated_accounts,
+            )
         if (
             self._is_openrouter_provider(self.settings.ai_base_url)
             and self.settings.media_uses_openrouter

@@ -20,7 +20,21 @@ class MaxAccountsSettingsTests(unittest.TestCase):
 
     def test_max_accounts_defaults_to_twenty(self) -> None:
         with patch.dict(os.environ, self._environment(), clear=True):
-            self.assertEqual(load_settings().max_accounts, 20)
+            settings = load_settings()
+            self.assertEqual(settings.max_accounts, 20)
+            self.assertFalse(settings.migrate_existing_accounts_to_grok_adult)
+
+    def test_grok_adult_migration_requires_explicit_true(self) -> None:
+        with patch.dict(
+            os.environ,
+            self._environment(
+                MIGRATE_EXISTING_ACCOUNTS_TO_GROK_ADULT="true",
+            ),
+            clear=True,
+        ):
+            self.assertTrue(
+                load_settings().migrate_existing_accounts_to_grok_adult
+            )
 
     def test_max_accounts_can_be_overridden_by_railway_variable(self) -> None:
         with patch.dict(
