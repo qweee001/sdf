@@ -5,6 +5,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from app.memory import GroupActivityProfile, MemoryStore
 from app.worker import AccountWorker
@@ -61,6 +63,33 @@ class AdaptivePolicyTests(unittest.TestCase):
         )
         combined = 1.0 - (1.0 - policy.reply_probability) ** 4
         self.assertAlmostEqual(combined, 0.20)
+
+    def test_runtime_uses_only_accounts_active_in_the_group(self) -> None:
+        async def scenario() -> None:
+            worker = AccountWorker.__new__(AccountWorker)
+            worker.account = SimpleNamespace(
+                id="alpha",
+                group_reply_probability=1.0,
+            )
+            worker.store = SimpleNamespace(
+                group_activity_profile=AsyncMock(
+                    return_value=self.profile(14, 7, 35, 10)
+                )
+            )
+            worker.active_group_account_count_provider = lambda group_id: (
+                2 if group_id == -1001 else 20
+            )
+            worker.managed_ids_provider = lambda: frozenset(range(20))
+            policy = await worker._adaptive_activity_policy(-1001, now=100)
+            combined = 1.0 - (1.0 - policy.reply_probability) ** 2
+            self.assertAlmostEqual(combined, 0.20)
+            worker.store.group_activity_profile.assert_awaited_once_with(
+                "alpha",
+                -1001,
+                now=100,
+            )
+
+        asyncio.run(scenario())
 
 
 class ActivityProfileTests(unittest.TestCase):

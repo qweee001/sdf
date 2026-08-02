@@ -86,12 +86,16 @@ class AccountWorker:
         secrets: SecretBox,
         store: MemoryStore,
         managed_ids_provider: Callable[[], frozenset[int]],
+        active_group_account_count_provider: Callable[[int], int],
         identity_callback: Callable[[str, int, str], Awaitable[None]],
     ) -> None:
         self.settings = settings
         self.account = account
         self.store = store
         self.managed_ids_provider = managed_ids_provider
+        self.active_group_account_count_provider = (
+            active_group_account_count_provider
+        )
         self.identity_callback = identity_callback
         session = secrets.decrypt(account.session_ciphertext)
         self._private_sender_hmac_key = settings.account_encryption_key.encode(
@@ -1331,11 +1335,24 @@ class AccountWorker:
                 self._safe_error(exc),
             )
             return fallback
-        managed_ids = getattr(self, "managed_ids_provider", lambda: frozenset())()
+        active_count_provider = getattr(
+            self,
+            "active_group_account_count_provider",
+            None,
+        )
+        if active_count_provider is not None:
+            managed_account_count = max(1, int(active_count_provider(group_id)))
+        else:
+            managed_ids = getattr(
+                self,
+                "managed_ids_provider",
+                lambda: frozenset(),
+            )()
+            managed_account_count = max(1, len(managed_ids))
         policy = self._activity_policy_from_profile(
             base_probability,
             profile,
-            managed_account_count=max(1, len(managed_ids)),
+            managed_account_count=managed_account_count,
         )
         modes = getattr(self, "adaptive_activity_modes", None)
         if modes is not None:

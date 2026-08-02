@@ -88,6 +88,16 @@ class AccountManager:
     def managed_ids(self) -> frozenset[int]:
         return self._managed_ids
 
+    def active_group_account_count(self, group_id: int) -> int:
+        """Count running account workers that are eligible for this group."""
+        return sum(
+            1
+            for worker in tuple(self.workers.values())
+            if worker.account.enabled
+            and worker.state == "running"
+            and worker.group_allowed(group_id)
+        )
+
     async def text_models(
         self, account_id: str, *, refresh: bool = False
     ) -> dict[str, object]:
@@ -299,6 +309,7 @@ class AccountManager:
                     self.secrets,
                     self.store,
                     self.managed_ids,
+                    self.active_group_account_count,
                     self._record_identity,
                 )
             except Exception as exc:
