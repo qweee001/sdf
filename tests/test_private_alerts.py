@@ -375,6 +375,37 @@ class PrivateAlertWorkerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_startup_dialog_scan_seeds_group_activity_for_proactive_chat(self) -> None:
+        async def scenario() -> None:
+            worker = self.worker()
+            observed_at = datetime.now(timezone.utc) - timedelta(minutes=12)
+            group_dialog = SimpleNamespace(
+                is_user=False,
+                is_group=True,
+                id=-5428680940,
+                name="111",
+                entity=SimpleNamespace(title="111"),
+                message=SimpleNamespace(id=55, date=observed_at),
+            )
+
+            async def iter_dialogs():
+                yield group_dialog
+
+            worker.client = SimpleNamespace(iter_dialogs=iter_dialogs)
+            await worker.refresh_joined_groups()
+
+            self.assertAlmostEqual(
+                worker.last_activity[-5428680940],
+                observed_at.timestamp(),
+                delta=1,
+            )
+            self.assertEqual(
+                worker.joined_groups,
+                [{"id": -5428680940, "title": "111"}],
+            )
+
+        asyncio.run(scenario())
+
 
 class PrivateAlertManagerTests(unittest.TestCase):
     def test_manager_redacts_internal_fields_and_updates_status_counts(self) -> None:

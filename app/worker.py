@@ -1668,9 +1668,27 @@ class AccountWorker:
                 continue
             if not dialog.is_group:
                 continue
+            group_id = int(dialog.id)
+            latest_message = getattr(dialog, "message", None)
+            latest_activity_at = (
+                self._telegram_message_created_at(latest_message)
+                if latest_message is not None
+                else None
+            )
+            if latest_activity_at is not None:
+                previous_activity = self.last_activity.get(group_id)
+                if (
+                    previous_activity is None
+                    or latest_activity_at > previous_activity
+                ):
+                    # Seed proactive timing from Telegram's latest visible
+                    # group message. Without this, a freshly started worker
+                    # never initiates an idle-group topic until a new message
+                    # first arrives after startup.
+                    self.last_activity[group_id] = float(latest_activity_at)
             groups.append(
                 {
-                    "id": int(dialog.id),
+                    "id": group_id,
                     "title": str(
                         dialog.name
                         or getattr(dialog.entity, "title", None)
