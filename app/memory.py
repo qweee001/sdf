@@ -66,6 +66,15 @@ class ProactiveLeaseDecision:
     retry_after_seconds: int = 0
 
 
+@dataclass(frozen=True)
+class GroupActivityProfile:
+    recent_messages: int
+    recent_participants: int
+    trailing_messages: int
+    trailing_participants: int
+    latest_message_at: int | None
+
+
 class MemoryStore:
     def __init__(self, path: str, ttl_hours: int) -> None:
         self.path = path
@@ -1569,6 +1578,93 @@ class MemoryStore:
             await cursor.close()
             await db.commit()
             return row_id
+
+    async def group_activity_profile(
+        self,
+        account_id: str,
+        group_id: int,
+        *,
+        now: int | None = None,
+        recent_window_seconds: int = 5 * 60,
+        trailing_window_seconds: int = 20 * 60,
+    ) -> GroupActivityProfile:
+        """Summarize human traffic for adaptive reply decisions.
+
+        Managed-account messages use the assistant role and are excluded. Each
+        worker reads only its own copy of group history so one Telegram message
+        is counted once rather than once per connected account.
+        """
+        cleaned_account_id = str(account_id or "").strip()
+        if not cleaned_account_id:
+            raise ValueError("account_id is required")
+        if isinstance(group_id, bool) or not isinstance(group_id, int):
+            raise ValueError("group_id must be an integer")
+        timestamp = int(time.time()) if now is None else now
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, int)
+            or timestamp < 0
+        ):
+            raise ValueError("now must be a non-negative integer timestamp")
+        if (
+            isinstance(recent_window_seconds, bool)
+            or not isinstance(recent_window_seconds, int)
+            or recent_window_seconds <= 0
+        ):
+            raise ValueError("recent_window_seconds must be a positive integer")
+        if (
+            isinstance(trailing_window_seconds, bool)
+            or not isinstance(trailing_window_seconds, int)
+            or trailing_window_seconds < recent_window_seconds
+        ):
+            raise ValueError(
+                "trailing_window_seconds must be at least the recent window"
+            )
+
+        recent_cutoff = timestamp - recent_window_seconds
+        trailing_cutoff = timestamp - trailing_window_seconds
+        async with self._lock:
+            cursor = await self._connection().execute(
+                """
+                SELECT
+                    SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END)
+                        AS recent_messages,
+                    COUNT(DISTINCT CASE
+                        WHEN created_at >= ? THEN sender_id
+                    END) AS recent_participants,
+                    COUNT(*) AS trailing_messages,
+                    COUNT(DISTINCT sender_id) AS trailing_participants,
+                    MAX(created_at) AS latest_message_at
+                FROM messages
+                WHERE account_id = ?
+                  AND group_id = ?
+                  AND role = 'user'
+                  AND created_at >= ?
+                  AND created_at <= ?
+                """,
+                (
+                    recent_cutoff,
+                    recent_cutoff,
+                    cleaned_account_id,
+                    group_id,
+                    trailing_cutoff,
+                    timestamp,
+                ),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        latest = row["latest_message_at"] if row is not None else None
+        return GroupActivityProfile(
+            recent_messages=int(row["recent_messages"] or 0) if row else 0,
+            recent_participants=(
+                int(row["recent_participants"] or 0) if row else 0
+            ),
+            trailing_messages=int(row["trailing_messages"] or 0) if row else 0,
+            trailing_participants=(
+                int(row["trailing_participants"] or 0) if row else 0
+            ),
+            latest_message_at=int(latest) if latest is not None else None,
+        )
 
     @staticmethod
     def _validate_proactive_parameters(

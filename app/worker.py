@@ -13,6 +13,7 @@ import time
 import unicodedata
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
@@ -34,7 +35,7 @@ from .content_guard import (
     SafeReply,
 )
 from .crypto import SecretBox
-from .memory import MemoryStore
+from .memory import GroupActivityProfile, MemoryStore
 from .media import (
     MEDIA_INTENT_INSTRUCTIONS,
     MediaIntent,
@@ -67,6 +68,14 @@ OPENROUTER_AUTO_MODELS = frozenset(
     {"openrouter/auto", "openrouter/auto-beta"}
 )
 _CJK_OR_PUNCTUATION = r"\u3400-\u9fff，。！？；：、～…「」『』（）【】《》"
+
+
+@dataclass(frozen=True)
+class AdaptiveActivityPolicy:
+    mode: str
+    reply_probability: float
+    proactive_idle_multiplier: float
+    proactive_cooldown_multiplier: float
 
 
 class AccountWorker:
@@ -166,6 +175,7 @@ class AccountWorker:
         self.last_proactive: dict[int, float] = {}
         self.next_proactive_interval: dict[int, float] = {}
         self.proactive_counts: dict[tuple[int, str], int] = defaultdict(int)
+        self.adaptive_activity_modes: dict[int, str] = {}
         self.group_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.background_tasks: list[asyncio.Task[None]] = []
         self._message_tasks: set[asyncio.Task[object]] = set()
@@ -1215,7 +1225,122 @@ class AccountWorker:
             return False
         if self._contains_explicit_mention(message) and not mentioned:
             return False
-        return random.random() < self.account.group_reply_probability
+        group_id = int(getattr(event, "chat_id", 0) or 0)
+        policy = await self._adaptive_activity_policy(group_id)
+        return random.random() < policy.reply_probability
+
+    @staticmethod
+    def _activity_policy_from_profile(
+        base_probability: float,
+        profile: GroupActivityProfile,
+        managed_account_count: int = 1,
+    ) -> AdaptiveActivityPolicy:
+        """Convert human traffic into group-level response pacing.
+
+        The probability is converted to a per-account chance so adding more
+        connected accounts does not silently multiply the group's total reply
+        rate.
+        """
+        recent = profile.recent_messages
+        recent_people = profile.recent_participants
+        trailing = profile.trailing_messages
+        trailing_people = profile.trailing_participants
+
+        if recent >= 12 or recent_people >= 6 or trailing >= 30:
+            mode, reply_factor, idle_factor, cooldown_factor = (
+                "very_busy",
+                0.20,
+                2.00,
+                2.00,
+            )
+        elif recent >= 6 or recent_people >= 3 or trailing >= 15:
+            mode, reply_factor, idle_factor, cooldown_factor = (
+                "busy",
+                0.45,
+                1.50,
+                1.50,
+            )
+        elif recent <= 1 and trailing <= 3 and trailing_people <= 2:
+            mode, reply_factor, idle_factor, cooldown_factor = (
+                "quiet",
+                1.80,
+                0.50,
+                0.60,
+            )
+        elif recent <= 3 and trailing <= 8:
+            mode, reply_factor, idle_factor, cooldown_factor = (
+                "calm",
+                1.30,
+                0.75,
+                0.80,
+            )
+        else:
+            mode, reply_factor, idle_factor, cooldown_factor = (
+                "steady",
+                1.00,
+                1.00,
+                1.00,
+            )
+        group_probability = min(
+            1.0,
+            max(0.0, base_probability * reply_factor),
+        )
+        account_count = max(1, int(managed_account_count))
+        probability = 1.0 - (1.0 - group_probability) ** (1.0 / account_count)
+        return AdaptiveActivityPolicy(
+            mode=mode,
+            reply_probability=probability,
+            proactive_idle_multiplier=idle_factor,
+            proactive_cooldown_multiplier=cooldown_factor,
+        )
+
+    async def _adaptive_activity_policy(
+        self,
+        group_id: int,
+        *,
+        now: int | None = None,
+    ) -> AdaptiveActivityPolicy:
+        base_probability = min(
+            1.0,
+            max(
+                0.0,
+                float(getattr(self.account, "group_reply_probability", 1.0)),
+            ),
+        )
+        fallback = AdaptiveActivityPolicy(
+            mode="steady",
+            reply_probability=base_probability,
+            proactive_idle_multiplier=1.0,
+            proactive_cooldown_multiplier=1.0,
+        )
+        store = getattr(self, "store", None)
+        read_profile = getattr(store, "group_activity_profile", None)
+        if read_profile is None:
+            return fallback
+        try:
+            profile = await read_profile(
+                self.account.id,
+                group_id,
+                now=now,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Account %s could not read adaptive activity for group %s: %s",
+                self.account.id,
+                group_id,
+                self._safe_error(exc),
+            )
+            return fallback
+        managed_ids = getattr(self, "managed_ids_provider", lambda: frozenset())()
+        policy = self._activity_policy_from_profile(
+            base_probability,
+            profile,
+            managed_account_count=max(1, len(managed_ids)),
+        )
+        modes = getattr(self, "adaptive_activity_modes", None)
+        if modes is not None:
+            modes[group_id] = policy.mode
+        return policy
 
     @staticmethod
     def _private_media_label(message: Message) -> str:
@@ -1482,7 +1607,18 @@ class AccountWorker:
         now: float | None = None,
     ) -> bool:
         current_time = lambda: time.time() if now is None else float(now)
-        idle_seconds = int(self.account.proactive_idle_minutes * 60)
+        policy = await self._adaptive_activity_policy(
+            group_id,
+            now=max(int(current_time()), 0),
+        )
+        idle_seconds = max(
+            1,
+            int(
+                self.account.proactive_idle_minutes
+                * 60
+                * policy.proactive_idle_multiplier
+            ),
+        )
         observed_activity = self.last_activity.get(group_id)
         if (
             observed_activity is None
@@ -1497,7 +1633,13 @@ class AccountWorker:
         release_lease = getattr(self.store, "release_proactive_lease", None)
         if claim_lease is None or commit_lease is None or release_lease is None:
             return False
-        cooldown_seconds = max(1, int(self._proactive_interval(group_id)))
+        cooldown_seconds = max(
+            1,
+            int(
+                self._proactive_interval(group_id)
+                * policy.proactive_cooldown_multiplier
+            ),
+        )
         lease = await claim_lease(
             self.account.id,
             group_id,
