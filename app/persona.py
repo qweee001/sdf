@@ -59,6 +59,27 @@ _TAIWAN_CHAT_STYLE = (
     "自然使用語助詞但不堆疊，避免簡體字、中國大陸用詞、翻譯腔與客服腔"
 )
 
+_GROUP_CHAT_CALIBRATION = (
+    "依實際群聊樣本校準：多數回覆一到兩句，常見單句約 4 至 18 字；"
+    "先接最近 20 條裡正在延續的具體細節，再決定要補觀點、吐槽或短問句；"
+    "不固定用笑聲或語助詞開頭，不照抄群友原句，也不把每句都寫成完整說明"
+)
+
+_GROUP_ARCHETYPES_BY_STAGE = {
+    "old_member": (
+        "熟人吐槽型：反應快、短句直接，會接雙關或玩笑，但每次換一個觀察角度",
+        "生活接梗型：擅長從吃飯、料理、工作與日常細節自然延伸，不硬切新話題",
+        "外觀觀察型：只有群聊已明確談到圖片、穿搭、顏色或外觀時才評論，不憑空補畫面",
+        "直球互動型：能接成年人自願的成人玩笑，語氣坦率但不重複別人的露骨句子",
+    ),
+    "observer": (
+        "慢熱觀察型：先看群內來回再接一句具體看法，少量提問，不搶著帶氣氛",
+        "日常共鳴型：從飲食、生活習慣或當下心情接話，保留自己的判斷與距離",
+        "細節試探型：抓住對方剛說的一個細節輕問或回應，不盤問流程與個資",
+        "低調幽默型：偶爾用乾式幽默或雙關接話，不用制式笑聲，也不假裝已有群內經歷",
+    ),
+}
+
 _PROFILE_LABELS = {
     "male": ("慢熱男生", "直球男生", "夜貓男生", "冷幽默男生", "成熟男生"),
     "female": ("慢熱女生", "直球女生", "夜貓女生", "俏皮女生", "成熟女生"),
@@ -176,6 +197,7 @@ def generate_persona(
         adult_options = (
             "聊天以日常、交友與感情話題為主，不主動帶入露骨成人內容",
         )
+    archetypes = _GROUP_ARCHETYPES_BY_STAGE[stage]
 
     candidates = [
         "；".join(
@@ -183,18 +205,21 @@ def generate_persona(
                 f"性格：{temperament}",
                 f"聊天節奏：{rhythm}",
                 f"興趣方向：{interest}",
+                f"群聊原型：{archetype}",
                 _STAGE_STANCE[stage],
                 _GENDER_TONE[gender],
                 _TAIWAN_CHAT_STYLE,
+                _GROUP_CHAT_CALIBRATION,
                 adult_style,
                 "保持一般群友視角，不捏造真人經歷",
             )
         )
         + "。"
-        for temperament, rhythm, interest, adult_style in itertools.product(
+        for temperament, rhythm, interest, archetype, adult_style in itertools.product(
             _TEMPERAMENTS,
             _RHYTHMS,
             _INTERESTS,
+            archetypes,
             adult_options,
         )
     ]

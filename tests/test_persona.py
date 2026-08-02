@@ -102,6 +102,39 @@ class PersonaGeneratorTests(unittest.TestCase):
                             )
                         )
 
+    def test_every_persona_contains_observed_group_chat_calibration(self) -> None:
+        for gender in ("male", "female"):
+            for stage in ("old_member", "observer"):
+                persona = generate_persona(gender, stage, True)
+                self.assertIn("群聊原型", persona)
+                self.assertIn("最近 20 條", persona)
+                self.assertIn("4 至 18 字", persona)
+                self.assertIn("不照抄群友原句", persona)
+                if stage == "old_member":
+                    self.assertTrue(
+                        any(
+                            marker in persona
+                            for marker in (
+                                "熟人吐槽型",
+                                "生活接梗型",
+                                "外觀觀察型",
+                                "直球互動型",
+                            )
+                        )
+                    )
+                else:
+                    self.assertTrue(
+                        any(
+                            marker in persona
+                            for marker in (
+                                "慢熱觀察型",
+                                "日常共鳴型",
+                                "細節試探型",
+                                "低調幽默型",
+                            )
+                        )
+                    )
+
     def test_every_random_account_profile_keeps_the_locale_contract(self) -> None:
         excluded: list[str] = []
         for _ in range(12):

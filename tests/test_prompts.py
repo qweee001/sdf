@@ -188,6 +188,10 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn("可以不提問、不加表情", prompt)
         self.assertIn("剛忙完", prompt)
         self.assertIn("背景填充句", prompt)
+        self.assertIn("最近 20 條群訊息", prompt)
+        self.assertIn("4 至 18 個中文字", prompt)
+        self.assertIn("看不到媒體細節時不要猜測", prompt)
+        self.assertIn("不照抄群友原句", prompt)
 
     def test_every_role_uses_taiwan_traditional_local_wording_without_claiming_a_real_identity(
         self,
