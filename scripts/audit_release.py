@@ -24,7 +24,8 @@ SECRET_PATTERNS = (
         re.MULTILINE,
     ),
     re.compile(
-        rb"^[ \t]*(?:TG_API_HASH|AI_API_KEY|ACCOUNT_ENCRYPTION_KEY|"
+        rb"^[ \t]*(?:TG_API_HASH|AI_API_KEY|OPENROUTER_API_KEY|VENICE_API_KEY|"
+        rb"ACCOUNT_ENCRYPTION_KEY|"
         rb"DASHBOARD_PASSWORD|OPENAI_MEDIA_API_KEY|AZURE_SPEECH_KEY)"
         rb"[ \t]*=[ \t]*"
         rb"(?!$|your[-_ ]|<|placeholder|please[-_ ])\S+",

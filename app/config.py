@@ -155,6 +155,7 @@ class Settings:
     media_video_model: str = "x-ai/grok-imagine-video-1.5"
     media_moderation_model: str = "x-ai/grok-4.20"
     ai_uses_openrouter_key: bool = False
+    ai_uses_venice_key: bool = False
     migrate_existing_accounts_to_grok_adult: bool = False
 
     @property
@@ -200,12 +201,31 @@ def load_settings() -> Settings:
         raise ValueError("DASHBOARD_PASSWORD must contain at least 12 characters")
 
     openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-    ai_api_key = openrouter_api_key or os.getenv("AI_API_KEY", "").strip()
+    venice_api_key = os.getenv("VENICE_API_KEY", "").strip()
+    generic_ai_api_key = os.getenv("AI_API_KEY", "").strip()
     ai_base_url = (
         os.getenv("AI_BASE_URL", "").strip()
         or os.getenv("OPENROUTER_BASE_URL", "").strip()
         or "https://openrouter.ai/api/v1"
     ).rstrip("/")
+    ai_provider_host = (urlparse(ai_base_url).hostname or "").lower()
+    ai_uses_venice_key = bool(
+        venice_api_key and ai_provider_host == "api.venice.ai"
+    )
+    ai_uses_openrouter_key = bool(
+        openrouter_api_key
+        and (
+            ai_provider_host == "openrouter.ai"
+            or ai_provider_host.endswith(".openrouter.ai")
+        )
+    )
+    ai_api_key = (
+        venice_api_key
+        if ai_uses_venice_key
+        else openrouter_api_key
+        if ai_uses_openrouter_key
+        else generic_ai_api_key
+    )
 
     return Settings(
         tg_api_id=int(_required("TG_API_ID")),
@@ -266,7 +286,8 @@ def load_settings() -> Settings:
             os.getenv("MEDIA_MODERATION_MODEL", "").strip()
             or "x-ai/grok-4.20"
         ),
-        ai_uses_openrouter_key=bool(openrouter_api_key),
+        ai_uses_openrouter_key=ai_uses_openrouter_key,
+        ai_uses_venice_key=ai_uses_venice_key,
         migrate_existing_accounts_to_grok_adult=_boolean(
             "MIGRATE_EXISTING_ACCOUNTS_TO_GROK_ADULT",
             False,

@@ -154,6 +154,17 @@ class AdultSafetyMatrixTests(unittest.TestCase):
         self.assertIn("模式未開啟", contract)
         self.assertIn("不得產生露骨色情文字", contract)
 
+    def test_hard_floor_has_deterministic_chinese_paraphrase_anchors(self) -> None:
+        expected = (
+            "十三歲女孩發生性行為",
+            "拒絕後仍繼續性行為",
+            "真人臉合成成人裸片",
+            "偷錄情侶在房間內的親密畫面",
+        )
+        for anchor in expected:
+            with self.subTest(anchor=anchor):
+                self.assertIn(anchor, FIXED_ADULT_TEXT_BLOCKED_TERMS)
+
     def test_fixed_policy_keeps_the_hard_safety_floor(self) -> None:
         policy = " ".join(FIXED_ADULT_TEXT_SAFETY_POLICY.split())
         for phrase in (
