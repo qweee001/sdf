@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -747,6 +749,91 @@ class ManagerTests(unittest.TestCase):
             self.assertEqual(reloaded.ai_api_key_ciphertext, "")
             self.assertFalse(reloaded.adult_text_enabled)
             await manager.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_manager_mode_create_update_legacy_mapping_conflict_and_audit(self) -> None:
+        async def scenario(path: str) -> None:
+            key = Fernet.generate_key().decode()
+            config = settings(path, key)
+            store = MemoryStore(path, ttl_hours=24)
+            manager = AccountManager(config, store, SecretBox(key))
+            await store.open()
+
+            async def fake_verify(session: str) -> tuple[int, str]:
+                return 771122, "四級策略帳號"
+
+            manager.verify_session = fake_verify  # type: ignore[method-assign]
+            created = await manager.create_account(
+                {
+                    "session_string": "four-level-session",
+                    "enabled": False,
+                    "gender": "female",
+                    "stage": "observer",
+                    "task_name": "一般群聊",
+                    "adult_text_mode": "restricted",
+                }
+            )
+            account_id = str(created["id"])
+            self.assertEqual(created["adult_text_mode"], "restricted")
+            self.assertTrue(created["adult_text_enabled"])
+
+            with self.assertRaisesRegex(ValueError, "conflicts"):
+                await manager.create_account(
+                    {
+                        "session_string": "conflicting-four-level-session",
+                        "adult_text_mode": "strict",
+                        "adult_text_enabled": True,
+                    }
+                )
+
+            with self.assertRaisesRegex(ValueError, "conflicts"):
+                await manager.update_account(
+                    account_id,
+                    {
+                        "revision": created["revision"],
+                        "adult_text_mode": "strict",
+                        "adult_text_enabled": True,
+                    },
+                )
+            unchanged = await store.get_account(account_id)
+            self.assertEqual(unchanged.adult_text_mode, "restricted")
+            self.assertEqual(unchanged.revision, created["revision"])
+
+            lenient = await manager.update_account(
+                account_id,
+                {
+                    "revision": created["revision"],
+                    "adult_text_mode": "lenient",
+                },
+            )
+            self.assertEqual(lenient["adult_text_mode"], "lenient")
+            self.assertTrue(lenient["adult_text_enabled"])
+
+            strict = await manager.update_account(
+                account_id,
+                {
+                    "revision": lenient["revision"],
+                    "adult_text_enabled": False,
+                },
+            )
+            self.assertEqual(strict["adult_text_mode"], "strict")
+            self.assertFalse(strict["adult_text_enabled"])
+            await manager.close()
+
+            db = sqlite3.connect(path)
+            rows = db.execute(
+                "SELECT fields FROM audit_log "
+                "WHERE account_id=? AND action='account_updated' ORDER BY id",
+                (account_id,),
+            ).fetchall()
+            db.close()
+            self.assertEqual(json.loads(rows[-2][0]), ["adult_text_mode"])
+            self.assertEqual(
+                json.loads(rows[-1][0]),
+                ["adult_text_enabled", "adult_text_mode"],
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))

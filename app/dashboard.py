@@ -680,7 +680,7 @@ DASHBOARD_HTML = """<!doctype html>
             </label>
             <label class="field">角色風格
               <input id="addStyle" maxlength="500" placeholder="留白會在登入完成後自動生成">
-              <span class="hint">留白時會依性別、角色及成人純文字開關，為這個帳號產生獨立的隨機性格。</span>
+              <span class="hint">留白時會依性別、角色及成人純文字策略，為這個帳號產生獨立的隨機性格。</span>
             </label>
             <label class="field full">任務名稱
               <input id="addTaskName" maxlength="120" value="一般群聊互動">
@@ -702,8 +702,11 @@ DASHBOARD_HTML = """<!doctype html>
             <label class="field">模型（可留白使用系統預設）
               <input id="addModel" maxlength="200" placeholder="模型名稱">
             </label>
-            <label class="check field full"><input id="addAdultTextEnabled" type="checkbox"> 啟用成人純文字模式</label>
-            <div class="hint field full">勾選即確認此帳號的允許群組為 18+；群內成人文字聊天預設為成年、自願，不必每句重複確認。明確未成年、拒絕、強迫、剝削、偷拍、私密資料濫用與非法內容仍固定攔截；不套用到圖片、語音或影片。</div>
+            <label class="field full">成人純文字策略
+              <select id="addAdultTextMode"><option value="strict">嚴格</option><option value="restricted">限制</option><option value="general">一般</option><option value="lenient">寬鬆</option></select>
+              <span class="hint">寬鬆：既有成年自願文字情境可用較直接詞彙與較高細節；一般：中等細節、最多延展一步；限制：僅輕度曖昧並被動短承接；嚴格：只談非露骨的交友、感情、界線與安全。所有等級都不會從普通話題突然升級。選擇「限制」、「一般」或「寬鬆」即代表管理員確認此帳號的允許群組只限 18+；「嚴格」不做此確認。</span>
+            </label>
+            <div class="hint field full">四級策略只套用 Telegram 純文字。未成年人、非自願、撤回同意、脅迫、剝削、性暴力、騷擾勒索、偷拍、未經同意私密內容、可識別真人色情／性深偽、跟蹤開盒、個資與非法活動固定攔截；圖片、語音、影片不隨等級放寬。</div>
             <div class="hint field full">AI 與媒體 Provider API Key 僅由 Railway Variables 提供；控制台不接受、保存或顯示任何 Key。</div>
             <label class="check field full"><input id="addEnabled" type="checkbox"> 建立後立即啟用</label>
             <div class="hint field full">帳號建立後先手動啟用以載入群組；尚未選擇群組時只會連線，不會自動回覆。選好允許群組後即可開始。</div>
@@ -800,8 +803,11 @@ DASHBOARD_HTML = """<!doctype html>
                 <span id="textModelsNotice" class="hint">可手動輸入模型 ID</span>
                 <button id="refreshTextModelsButton" class="btn small" type="button">重新整理可用模型</button>
               </label>
-              <label class="check field full"><input id="editAdultTextEnabled" type="checkbox"> 啟用成人純文字模式</label>
-              <div class="hint field full">勾選即確認允許群組為 18+；群內成人文字聊天預設為成年、自願，明確拒絕或其他相反證據會立即覆蓋此預設。媒體安全政策不會因此放寬。</div>
+              <label class="field full">成人純文字策略
+                <select id="editAdultTextMode"><option value="strict">嚴格</option><option value="restricted">限制</option><option value="general">一般</option><option value="lenient">寬鬆</option></select>
+                <span class="hint">寬鬆：既有成年自願文字情境可用較直接詞彙與較高細節；一般：中等細節、最多延展一步；限制：僅輕度曖昧並被動短承接；嚴格：只談非露骨的交友、感情、界線與安全。所有等級都不會從普通話題突然升級。選擇「限制」、「一般」或「寬鬆」即代表管理員確認此帳號的允許群組只限 18+；「嚴格」不做此確認。</span>
+              </label>
+              <div class="hint field full">只套用 Telegram 純文字；四級共用固定硬安全底線，媒體政策不會因此放寬。</div>
               <div class="hint field full">AI 與媒體 Provider API Key 僅由 Railway Variables 提供；控制台不接受、保存或顯示任何 Key。</div>
 
               <div class="field full"><div class="divider"></div><h3>媒體生成</h3></div>
@@ -977,6 +983,12 @@ DASHBOARD_HTML = """<!doctype html>
 
 
 DASHBOARD_JS = r"""const $ = (id) => document.getElementById(id);
+const adultTextModeLabels = Object.freeze({
+  lenient: "寬鬆",
+  general: "一般",
+  restricted: "限制",
+  strict: "嚴格",
+});
 let dashboardState = null;
 let selectedAccountId = "";
 let csrfToken = "";
@@ -1095,6 +1107,12 @@ function roleName(account) {
   return `${gender}${stage}`;
 }
 
+function normalizedAdultTextMode(account) {
+  const mode = String(account?.adult_text_mode || "").trim().toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(adultTextModeLabels, mode)) return mode;
+  return account?.adult_text_enabled ? "general" : "strict";
+}
+
 function stateName(account) {
   if (!account.enabled) return "已停用";
   return {
@@ -1138,7 +1156,7 @@ function compactAccountSummary(account) {
   const groupCount = Array.isArray(account.joined_groups) ? account.joined_groups.length : 0;
   const connectionState = account.connected ? "已連線" : "未連線";
   const privateUnread = Math.max(0, Number(account.private_unread_count || 0));
-  const adultTextMode = account.adult_text_enabled ? "成人純文字開" : "成人純文字關";
+  const adultTextMode = `成人純文字${adultTextModeLabels[normalizedAdultTextMode(account)]}`;
   return `${account.label || "未命名帳號"} · ${stateName(account)}／${connectionState} · ` +
     `${roleName(account)} · ${account.ai_model || "未設定模型"} · ${adultTextMode} · ${groupCount} 個群組 · ` +
     `私聊未讀 ${privateUnread}`;
@@ -1581,7 +1599,7 @@ function fillEditor(account) {
     : "";
   $("editBaseUrl").value = account.ai_base_url || "";
   $("editModel").value = account.ai_model || "";
-  $("editAdultTextEnabled").checked = Boolean(account.adult_text_enabled);
+  $("editAdultTextMode").value = normalizedAdultTextMode(account);
   $("editImageEnabled").checked = Boolean(image.enabled);
   $("editImageModel").value = image.model || "x-ai/grok-imagine-image-quality";
   $("editImageDailyLimit").value = String(image.daily_limit || 5);
@@ -1627,7 +1645,7 @@ const RANDOM_PROFILE_FIELD_IDS = [
   "editTaskName",
   "editTaskInfo",
   "editModel",
-  "editAdultTextEnabled",
+  "editAdultTextMode",
   "editProbability",
   "editReplyMention",
   "editReplyReply",
@@ -1655,7 +1673,7 @@ function applyRandomProfilePreview(profile) {
   $("editTaskName").value = String(profile.task_name || "一般群聊互動");
   $("editTaskInfo").value = String(profile.task_info || "");
   $("editModel").value = String(profile.ai_model || "");
-  $("editAdultTextEnabled").checked = Boolean(profile.adult_text_enabled);
+  $("editAdultTextMode").value = normalizedAdultTextMode(profile);
   $("editProbability").value = String(profile.group_reply_probability);
   $("editReplyMention").checked = Boolean(profile.reply_on_mention);
   $("editReplyReply").checked = Boolean(profile.reply_on_reply);
@@ -2229,7 +2247,7 @@ function collectNewAccountPayload() {
     task_info: $("addTaskInfo").value,
     blocked_terms: parseBlockedTerms($("addBlockedTerms").value),
     blocked_topics: parseBlockedTopics($("addBlockedTopics").value),
-    adult_text_enabled: $("addAdultTextEnabled").checked,
+    adult_text_mode: $("addAdultTextMode").value,
     enabled: $("addEnabled").checked,
   };
   if ($("addBaseUrl").value.trim()) payload.ai_base_url = $("addBaseUrl").value;
@@ -2311,6 +2329,7 @@ function resetAddForm() {
   telegramAuthState = "idle";
   $("addForm").reset();
   $("addTaskName").value = "一般群聊互動";
+  $("addAdultTextMode").value = "strict";
   $("addEnabled").checked = false;
   $("addLoginMode").value = "phone";
   updateAddLoginMode();
@@ -2460,7 +2479,7 @@ $("settingsForm").addEventListener("submit", async (event) => {
         blocked_topics: parseBlockedTopics($("editBlockedTopics").value),
         ai_base_url: $("editBaseUrl").value,
         ai_model: $("editModel").value,
-        adult_text_enabled: $("editAdultTextEnabled").checked,
+        adult_text_mode: $("editAdultTextMode").value,
         media: {
           image: {
             enabled: $("editImageEnabled").checked,
@@ -2565,7 +2584,10 @@ $("randomProfileButton").addEventListener("click", async () => {
     try {
       const profile = await api(`/api/accounts/${encodeURIComponent(accountId)}/persona/preview`, {
         method: "POST",
-        body: JSON.stringify({revision}),
+        body: JSON.stringify({
+          revision,
+          gender: $("editGender").value,
+        }),
       });
       if (
         requestSequence !== randomProfileRequestSequence ||
@@ -2578,7 +2600,7 @@ $("randomProfileButton").addEventListener("click", async () => {
       applyRandomProfilePreview(profile);
       setNotice(
         "settingsNotice",
-        "已填入完整隨機設定草稿；群組、屏蔽詞、API 位址與媒體開關未變。按「儲存帳號設定」後才會生效。",
+        "已依目前選擇的性別填入完整隨機設定草稿；群組、屏蔽詞、API 位址與媒體開關未變。按「儲存帳號設定」後才會生效。",
         "success",
       );
     } catch (error) {
@@ -3767,6 +3789,7 @@ class DashboardServer:
                 await self.manager.preview_random_profile(
                     account_id,
                     revision,
+                    payload.get("gender"),
                 )
             )
 

@@ -26,6 +26,10 @@ from .account import (
     clean_text,
     validate_provider_url,
 )
+from .adult_safety import (
+    adult_text_enabled_for_mode,
+    resolve_adult_text_mode,
+)
 from .config import Settings
 from .crypto import SecretBox
 from .memory import MemoryStore
@@ -472,6 +476,12 @@ class AccountManager:
         group_ids = clean_group_ids(payload.get("group_ids", []))
         if all_groups:
             group_ids = frozenset()
+        mode_arguments: dict[str, object] = {}
+        if "adult_text_mode" in payload:
+            mode_arguments["adult_text_mode"] = payload["adult_text_mode"]
+        if "adult_text_enabled" in payload:
+            mode_arguments["adult_text_enabled"] = payload["adult_text_enabled"]
+        adult_text_mode = resolve_adult_text_mode(**mode_arguments)
         record = AccountRecord(
             id=f"acct_{uuid.uuid4().hex[:12]}",
             label=clean_text(
@@ -581,10 +591,8 @@ class AccountManager:
             media_settings=clean_account_media_settings(
                 payload.get("media", {})
             ),
-            adult_text_enabled=clean_bool(
-                payload.get("adult_text_enabled", False),
-                "adult_text_enabled",
-            ),
+            adult_text_enabled=adult_text_enabled_for_mode(adult_text_mode),
+            adult_text_mode=adult_text_mode,
         )
         self._validate_intervals(record)
         self._validate_ai_provider(record.ai_base_url)
@@ -613,7 +621,7 @@ class AccountManager:
                         style=generate_persona(
                             record.gender,
                             record.stage,
-                            record.adult_text_enabled,
+                            record.adult_text_mode,
                             exclude=existing_styles,
                         )
                     )
@@ -649,6 +657,16 @@ class AccountManager:
         gender, stage = clean_role(
             payload.get("gender", current.gender),
             payload.get("stage", current.stage),
+        )
+        mode_arguments = {}
+        if "adult_text_mode" in payload:
+            mode_arguments["adult_text_mode"] = payload["adult_text_mode"]
+        if "adult_text_enabled" in payload:
+            mode_arguments["adult_text_enabled"] = payload["adult_text_enabled"]
+        adult_text_mode = (
+            resolve_adult_text_mode(**mode_arguments)
+            if mode_arguments
+            else current.adult_text_mode
         )
         session_ciphertext = current.session_ciphertext
         session_fingerprint = current.session_fingerprint
@@ -806,13 +824,8 @@ class AccountManager:
                 payload.get("media", {}),
                 current=current.media_settings,
             ),
-            adult_text_enabled=clean_bool(
-                payload.get(
-                    "adult_text_enabled",
-                    current.adult_text_enabled,
-                ),
-                "adult_text_enabled",
-            ),
+            adult_text_enabled=adult_text_enabled_for_mode(adult_text_mode),
+            adult_text_mode=adult_text_mode,
         )
         self._validate_intervals(updated)
         self._validate_ai_provider(updated.ai_base_url)
@@ -851,10 +864,13 @@ class AccountManager:
                 "blocked_terms",
                 "blocked_topics",
                 "media",
-                "adult_text_enabled",
             )
             if name in payload
         ]
+        if updated.adult_text_mode != current.adult_text_mode:
+            changed_fields.append("adult_text_mode")
+        if updated.adult_text_enabled != current.adult_text_enabled:
+            changed_fields.append("adult_text_enabled")
         async with self._account_operation_locks[account_id]:
             try:
                 saved = await self.store.update_account(
@@ -1022,7 +1038,7 @@ class AccountManager:
         return generate_persona(
             account.gender,
             account.stage,
-            account.adult_text_enabled,
+            account.adult_text_mode,
             exclude=excluded,
         )
 
@@ -1071,8 +1087,15 @@ class AccountManager:
         self,
         account_id: str,
         revision: int | None = None,
+        gender: str | None = None,
     ) -> dict[str, object]:
         current = await self._require_account(account_id)
+        if gender is not None:
+            if not isinstance(gender, str):
+                raise ValueError("gender must be male or female")
+            gender = gender.strip().lower()
+            if gender not in {"male", "female"}:
+                raise ValueError("gender must be male or female")
         if revision is not None:
             cleaned_revision = clean_int(
                 revision,
@@ -1098,15 +1121,21 @@ class AccountManager:
         for item in accounts:
             if item.id != current.id:
                 role_counts[(item.gender, item.stage)] += 1
-        least_used = min(role_counts.values())
+        considered_role_counts = {
+            role: count
+            for role, count in role_counts.items()
+            if gender is None or role[0] == gender
+        }
+        least_used = min(considered_role_counts.values())
         role_candidates = tuple(
             role
-            for role, count in role_counts.items()
+            for role, count in considered_role_counts.items()
             if count == least_used
         )
         profile = generate_account_profile(
             exclude_style=excluded,
             role_candidates=role_candidates,
+            gender=gender,
         )
         if not self._is_openrouter_provider(current.ai_base_url):
             profile["ai_model"] = current.ai_model

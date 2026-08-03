@@ -43,6 +43,7 @@ class WorkerGuardTests(unittest.TestCase):
         blocked_terms: tuple[str, ...] = ("秘密計畫",),
         blocked_topics: tuple[str, ...] = ("限制主題",),
         adult_text_enabled: bool = False,
+        adult_text_mode: str | None = None,
     ) -> AccountWorker:
         worker = AccountWorker.__new__(AccountWorker)
         worker.account = SimpleNamespace(
@@ -56,6 +57,11 @@ class WorkerGuardTests(unittest.TestCase):
             blocked_terms=blocked_terms,
             blocked_topics=blocked_topics,
             adult_text_enabled=adult_text_enabled,
+            adult_text_mode=(
+                adult_text_mode
+                if adult_text_mode is not None
+                else ("general" if adult_text_enabled else "strict")
+            ),
         )
         worker.content_guard = ContentGuard(
             FIXED_ADULT_TEXT_BLOCKED_TERMS + blocked_terms,
@@ -478,6 +484,118 @@ class WorkerGuardTests(unittest.TestCase):
                     "server_trusted_allowed_groups_are_18_plus"
                 ]
             )
+
+        asyncio.run(scenario())
+
+    def test_semantic_audit_payload_has_distinct_four_level_thresholds(self) -> None:
+        async def scenario() -> None:
+            expected = {
+                "strict": (0, 0, 0),
+                "restricted": (1, 1, 0),
+                "general": (2, 2, 1),
+                "lenient": (3, 3, 2),
+            }
+            for mode, thresholds in expected.items():
+                worker = self.make_worker(
+                    blocked_terms=(),
+                    blocked_topics=(),
+                    adult_text_mode=mode,
+                    adult_text_enabled=mode != "strict",
+                )
+                worker._completion = AsyncMock(  # type: ignore[method-assign]
+                    return_value="MEMBER_ALLOW"
+                )
+                self.assertTrue(await worker._output_policy_allows("一般群聊回覆"))
+                messages = worker._completion.await_args.args[0]
+                payload = json.loads(messages[1]["content"])
+                policy = payload["adult_text_policy"]
+                self.assertEqual(payload["adult_text_mode"], mode)
+                self.assertEqual(payload["adult_text_enabled"], mode != "strict")
+                self.assertEqual(
+                    (
+                        policy["adult_vocabulary_level"],
+                        policy["reply_detail_level"],
+                        policy["max_extension_steps"],
+                    ),
+                    thresholds,
+                )
+                self.assertIn("adult_text_mode", messages[0]["content"])
+                self.assertIn("max_extension_steps", messages[0]["content"])
+
+            lenient = self.make_worker(
+                blocked_terms=(),
+                blocked_topics=(),
+                adult_text_mode="lenient",
+                adult_text_enabled=True,
+            )
+            lenient._completion = AsyncMock(  # type: ignore[method-assign]
+                return_value="MEMBER_ALLOW"
+            )
+            self.assertTrue(
+                await lenient._output_policy_allows(
+                    "媒體字幕",
+                    adult_text_context=False,
+                )
+            )
+            payload = json.loads(
+                lenient._completion.await_args.args[0][1]["content"]
+            )
+            self.assertEqual(payload["configured_adult_text_mode"], "lenient")
+            self.assertEqual(payload["adult_text_mode"], "strict")
+            self.assertEqual(payload["adult_text_policy"]["max_extension_steps"], 0)
+
+        asyncio.run(scenario())
+
+    def test_semantic_audit_payload_and_instructions_distinguish_four_modes(self) -> None:
+        async def scenario() -> None:
+            expected = {
+                "strict": (0, 0, 0, 0, "不得延展成人情境"),
+                "restricted": (1, 1, 1, 0, "只被動簡短承接"),
+                "general": (2, 2, 2, 1, "最多延展一步"),
+                "lenient": (3, 3, 3, 2, "最多自然延展兩步"),
+            }
+            for mode, thresholds in expected.items():
+                worker = self.make_worker(
+                    blocked_terms=(),
+                    blocked_topics=(),
+                    adult_text_enabled=mode != "strict",
+                    adult_text_mode=mode,
+                )
+                worker._completion = AsyncMock(  # type: ignore[method-assign]
+                    return_value="MEMBER_ALLOW"
+                )
+                self.assertTrue(await worker._output_policy_allows("一般群組聊天"))
+                messages = worker._completion.await_args.args[0]
+                audit_prompt = messages[0]["content"]
+                payload = json.loads(messages[1]["content"])
+                policy = payload["adult_text_policy"]
+                self.assertEqual(payload["adult_text_mode"], mode)
+                self.assertEqual(policy["adult_vocabulary_level"], thresholds[0])
+                self.assertEqual(policy["reply_detail_level"], thresholds[1])
+                self.assertEqual(policy["topic_extension_level"], thresholds[2])
+                self.assertEqual(policy["max_extension_steps"], thresholds[3])
+                self.assertFalse(policy["may_initiate_adult_topic"])
+                self.assertEqual(policy["media_scope"], "telegram_text_only")
+                self.assertIn(thresholds[4], policy["contract"])
+                self.assertIn("strict、restricted、general、lenient", audit_prompt)
+                self.assertIn("adult_text_policy", audit_prompt)
+                self.assertIn("任何等級都不得", audit_prompt)
+
+                worker._completion.reset_mock()
+                self.assertTrue(
+                    await worker._output_policy_allows(
+                        "媒體字幕",
+                        adult_text_context=False,
+                    )
+                )
+                media_payload = json.loads(
+                    worker._completion.await_args.args[0][1]["content"]
+                )
+                self.assertEqual(media_payload["adult_text_mode"], "strict")
+                self.assertEqual(
+                    media_payload["configured_adult_text_mode"],
+                    mode,
+                )
 
         asyncio.run(scenario())
 

@@ -9,11 +9,13 @@ from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 
+from app.adult_safety import ADULT_TEXT_MODES
 from app.config import Settings
 from app.crypto import SecretBox
 from app.manager import AccountManager
 from app.memory import MemoryStore
 from app.persona import generate_account_profile, generate_persona
+from app.adult_safety import ADULT_TEXT_MODES, ADULT_TEXT_MODE_LABELS
 
 
 PROFILE_FIELDS = {
@@ -24,7 +26,9 @@ PROFILE_FIELDS = {
     "task_name",
     "task_info",
     "ai_model",
+    "adult_text_mode",
     "adult_text_enabled",
+    "adult_text_mode",
     "group_reply_probability",
     "reply_on_mention",
     "reply_on_reply",
@@ -82,6 +86,37 @@ class PersonaGeneratorTests(unittest.TestCase):
         self.assertIn("簡體", rendered)
         self.assertIn("中國大陸用詞", rendered)
         self.assertIn("翻譯腔", rendered)
+
+    def test_persona_style_and_random_profile_follow_all_four_modes(self) -> None:
+        markers = {
+            "strict": ("嚴格", "不得延展成人情境"),
+            "restricted": ("限制", "只被動簡短承接"),
+            "general": ("一般", "最多延展一步"),
+            "lenient": ("寬鬆", "最多自然延展兩步"),
+        }
+        for mode, required in markers.items():
+            with self.subTest(mode=mode):
+                style = generate_persona("female", "observer", mode)
+                self.assertLessEqual(len(style), 500)
+                for marker in required:
+                    self.assertIn(marker, style)
+
+                class ModeChooser:
+                    def choice(self, options: object) -> object:
+                        values = tuple(options)
+                        if all(isinstance(item, str) for item in values) and set(values) == set(ADULT_TEXT_MODES):
+                            return mode
+                        return values[0]
+
+                with patch("app.persona.secrets.SystemRandom", return_value=ModeChooser()):
+                    profile = generate_account_profile()
+                self.assertEqual(profile["adult_text_mode"], mode)
+                self.assertEqual(
+                    profile["adult_text_enabled"],
+                    mode != "strict",
+                )
+                for marker in required:
+                    self.assertIn(marker, str(profile["style"]))
 
     def test_every_persona_contains_the_taiwan_local_language_contract(
         self,
@@ -142,6 +177,44 @@ class PersonaGeneratorTests(unittest.TestCase):
             self.assert_taiwan_locale_style(profile["style"])
             excluded.append(str(profile["style"]))
 
+    def test_every_adult_mode_produces_a_matching_persona_contract(self) -> None:
+        for mode in ADULT_TEXT_MODES:
+            with self.subTest(mode=mode):
+                style = generate_persona("female", "observer", mode)
+                self.assertIn(f"成人純文字策略：{ADULT_TEXT_MODE_LABELS[mode]}", style)
+                if mode == "strict":
+                    self.assertIn("不得延展成人情境", style)
+                elif mode == "restricted":
+                    self.assertIn("只被動簡短承接", style)
+                elif mode == "general":
+                    self.assertIn("最多延展一步", style)
+                else:
+                    self.assertIn("最多自然延展兩步", style)
+
+    def test_random_profile_respects_selected_gender_and_description(self) -> None:
+        for gender, marker in (
+            ("male", "男性角色描寫"),
+            ("female", "女性角色描寫"),
+        ):
+            for _ in range(12):
+                profile = generate_account_profile(gender=gender)
+                self.assertEqual(profile["gender"], gender)
+                self.assertIn(marker, str(profile["style"]))
+                opposite = "女性角色描寫" if gender == "male" else "男性角色描寫"
+                self.assertNotIn(opposite, str(profile["style"]))
+
+    def test_adult_profile_pool_includes_expanded_flirting_topics(self) -> None:
+        combined = " ".join(
+            generate_persona("female", "old_member", True)
+            for _ in range(80)
+        )
+        self.assertTrue(
+            any(
+                marker in combined
+                for marker in ("曖昧拉扯", "聊騷", "成人深夜話題", "親密關係")
+            )
+        )
+
     def test_full_account_profile_has_only_editable_randomized_fields(self) -> None:
         profile = generate_account_profile()
 
@@ -157,6 +230,15 @@ class PersonaGeneratorTests(unittest.TestCase):
             {"openai/gpt-5.6-sol"},
         )
         self.assertIsInstance(profile["adult_text_enabled"], bool)
+        self.assertIn(profile["adult_text_mode"], ADULT_TEXT_MODES)
+        self.assertEqual(
+            profile["adult_text_enabled"],
+            profile["adult_text_mode"] != "strict",
+        )
+        self.assertIn(
+            f"成人純文字策略：{ADULT_TEXT_MODE_LABELS[profile['adult_text_mode']]}",
+            str(profile["style"]),
+        )
         self.assertGreaterEqual(float(profile["group_reply_probability"]), 0)
         self.assertLessEqual(float(profile["group_reply_probability"]), 1)
         self.assertIsInstance(profile["reply_on_mention"], bool)
@@ -222,7 +304,7 @@ class PersonaGeneratorTests(unittest.TestCase):
     def test_non_adult_persona_does_not_enable_adult_or_explicit_chat(self) -> None:
         persona = generate_persona("male", "observer", False)
 
-        self.assertNotIn("成人純文字", persona)
+        self.assertIn("成人純文字策略：嚴格", persona)
         self.assertNotIn("色情", persona)
         self.assertNotIn("能自然談曖昧與露骨", persona)
         self.assertIn("不主動帶入露骨成人內容", persona)

@@ -6,6 +6,12 @@ from dataclasses import dataclass, field, replace
 from ipaddress import ip_address
 from urllib.parse import urlparse
 
+from .adult_safety import (
+    adult_text_enabled_for_mode,
+    adult_text_mode_from_legacy,
+    clean_adult_text_mode,
+    resolve_adult_text_mode,
+)
 from .media_types import AccountMediaSettings
 
 
@@ -50,7 +56,29 @@ class AccountRecord:
     media_settings: AccountMediaSettings = field(
         default_factory=AccountMediaSettings
     )
-    adult_text_enabled: bool = False
+    adult_text_enabled: bool | None = None
+    adult_text_mode: str = ""
+
+    def __post_init__(self) -> None:
+        if self.adult_text_mode:
+            mode = resolve_adult_text_mode(
+                self.adult_text_mode,
+                **(
+                    {"adult_text_enabled": self.adult_text_enabled}
+                    if self.adult_text_enabled is not None
+                    else {}
+                ),
+            )
+        elif self.adult_text_enabled is not None:
+            mode = adult_text_mode_from_legacy(self.adult_text_enabled)
+        else:
+            mode = "strict"
+        object.__setattr__(self, "adult_text_mode", mode)
+        object.__setattr__(
+            self,
+            "adult_text_enabled",
+            adult_text_enabled_for_mode(mode),
+        )
 
     @property
     def role_key(self) -> str:
@@ -93,12 +121,25 @@ class AccountRecord:
             "blocked_topics": list(self.blocked_topics),
             "media": self.media_settings.public_dict(),
             "adult_text_enabled": self.adult_text_enabled,
+            "adult_text_mode": self.adult_text_mode,
             "revision": self.revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
 
     def with_updates(self, **changes: object) -> AccountRecord:
+        if "adult_text_mode" in changes and "adult_text_enabled" in changes:
+            resolve_adult_text_mode(
+                changes["adult_text_mode"],
+                adult_text_enabled=changes["adult_text_enabled"],
+            )
+        elif "adult_text_mode" in changes:
+            mode = clean_adult_text_mode(changes["adult_text_mode"])
+            changes["adult_text_enabled"] = adult_text_enabled_for_mode(mode)
+        elif "adult_text_enabled" in changes:
+            changes["adult_text_mode"] = adult_text_mode_from_legacy(
+                changes["adult_text_enabled"]
+            )
         return replace(self, **changes)
 
 

@@ -557,6 +557,99 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
+    def test_account_record_canonicalizes_mode_and_legacy_bool(self) -> None:
+        legacy_enabled = account_record().with_updates(adult_text_enabled=True)
+        self.assertEqual(legacy_enabled.adult_text_mode, "general")
+        self.assertTrue(legacy_enabled.adult_text_enabled)
+
+        restricted = legacy_enabled.with_updates(adult_text_mode="restricted")
+        self.assertEqual(restricted.adult_text_mode, "restricted")
+        self.assertTrue(restricted.adult_text_enabled)
+        self.assertEqual(restricted.public_dict()["adult_text_mode"], "restricted")
+        self.assertTrue(restricted.public_dict()["adult_text_enabled"])
+
+        strict = restricted.with_updates(adult_text_enabled=False)
+        self.assertEqual(strict.adult_text_mode, "strict")
+        self.assertFalse(strict.adult_text_enabled)
+
+    def test_adult_text_mode_round_trips_and_synchronizes_legacy_column(self) -> None:
+        async def scenario(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            await store.create_account(
+                account_record().with_updates(adult_text_mode="lenient")
+            )
+            loaded = await store.get_account("alpha")
+            self.assertEqual(loaded.adult_text_mode, "lenient")
+            self.assertTrue(loaded.adult_text_enabled)
+
+            saved = await store.update_account(
+                loaded.with_updates(adult_text_mode="restricted"),
+                expected_revision=loaded.revision,
+                changed_fields=["adult_text_mode", "adult_text_enabled"],
+            )
+            self.assertEqual(saved.adult_text_mode, "restricted")
+            self.assertTrue(saved.adult_text_enabled)
+            await store.close()
+
+            db = sqlite3.connect(path)
+            raw = db.execute(
+                "SELECT adult_text_mode, adult_text_enabled FROM accounts "
+                "WHERE id = 'alpha'"
+            ).fetchone()
+            db.close()
+            self.assertEqual(raw, ("restricted", 1))
+
+        with tempfile.TemporaryDirectory() as directory:
+            asyncio.run(scenario(str(Path(directory) / "memory.db")))
+
+    def test_legacy_bool_migrates_to_mode_and_invalid_mode_is_normalized(self) -> None:
+        async def seed(path: str) -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            await store.create_account(
+                account_record("alpha").with_updates(adult_text_enabled=True)
+            )
+            await store.create_account(
+                account_record("beta").with_updates(
+                    telegram_user_id=2001,
+                    adult_text_enabled=False,
+                )
+            )
+            await store.close()
+
+        async def verify_legacy(path: str, beta_mode: str = "strict") -> None:
+            store = MemoryStore(path, ttl_hours=24)
+            await store.open()
+            alpha = await store.get_account("alpha")
+            beta = await store.get_account("beta")
+            self.assertEqual(alpha.adult_text_mode, "general")
+            self.assertTrue(alpha.adult_text_enabled)
+            self.assertEqual(beta.adult_text_mode, beta_mode)
+            self.assertEqual(beta.adult_text_enabled, beta_mode != "strict")
+            await store.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "legacy.db")
+            asyncio.run(seed(path))
+            db = sqlite3.connect(path)
+            db.execute("ALTER TABLE accounts DROP COLUMN adult_text_mode")
+            db.execute("UPDATE accounts SET adult_text_enabled=1 WHERE id='alpha'")
+            db.execute("UPDATE accounts SET adult_text_enabled=0 WHERE id='beta'")
+            db.commit()
+            db.close()
+            asyncio.run(verify_legacy(path))
+            asyncio.run(verify_legacy(path))
+
+            db = sqlite3.connect(path)
+            db.execute(
+                "UPDATE accounts SET adult_text_mode='invalid', "
+                "adult_text_enabled=1 WHERE id='beta'"
+            )
+            db.commit()
+            db.close()
+            asyncio.run(verify_legacy(path, "general"))
+
     def test_account_policy_round_trips_through_create_update_and_public_data(self) -> None:
         async def scenario(path: str) -> None:
             store = MemoryStore(path, ttl_hours=24)
@@ -791,6 +884,8 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(first_beta.ai_model, "x-ai/grok-4.20")
             self.assertTrue(first_alpha.adult_text_enabled)
             self.assertTrue(first_beta.adult_text_enabled)
+            self.assertEqual(first_alpha.adult_text_mode, "general")
+            self.assertEqual(first_beta.adult_text_mode, "general")
             self.assertEqual(first_alpha.revision, 4)
             self.assertEqual(first_beta.revision, 9)
             self.assertEqual(first_gamma.revision, 11)
@@ -809,8 +904,8 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(
                 [json.loads(row["fields"]) for row in audit_rows],
                 [
-                    ["adult_text_enabled", "ai_base_url", "ai_model"],
-                    ["adult_text_enabled"],
+                    ["adult_text_enabled", "adult_text_mode", "ai_base_url", "ai_model"],
+                    ["adult_text_enabled", "adult_text_mode"],
                 ],
             )
             await store.close()

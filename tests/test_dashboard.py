@@ -17,6 +17,7 @@ RANDOM_PROFILE_FIELDS = {
     "task_name",
     "task_info",
     "ai_model",
+    "adult_text_mode",
     "adult_text_enabled",
     "group_reply_probability",
     "reply_on_mention",
@@ -48,6 +49,7 @@ class FakeAccountManager:
             "blocked_topics": ["測試屏蔽主題"],
             "ai_base_url": "https://api.openai.com/v1",
             "ai_model": "gpt-5-mini",
+            "adult_text_mode": "strict",
             "adult_text_enabled": False,
             "has_custom_api_key": True,
             "image_api_key": "must-never-leave-the-server",
@@ -135,14 +137,19 @@ class FakeAccountManager:
         owner_id: str | None = None,
     ) -> dict[str, object]:
         self.calls.append(("create", (dict(payload), owner_id)))
+        mode = str(
+            payload.get(
+                "adult_text_mode",
+                "general" if payload.get("adult_text_enabled", False) else "strict",
+            )
+        )
         self.account.update(
             {
                 "label": payload["label"],
                 "task_name": payload["task_name"],
                 "ai_model": payload["ai_model"],
-                "adult_text_enabled": bool(
-                    payload.get("adult_text_enabled", False)
-                ),
+                "adult_text_mode": mode,
+                "adult_text_enabled": mode != "strict",
                 "blocked_terms": list(payload.get("blocked_terms", [])),
                 "blocked_topics": list(payload.get("blocked_topics", [])),
                 "revision": 1,
@@ -207,18 +214,18 @@ class FakeAccountManager:
         payload: dict[str, Any],
     ) -> dict[str, object]:
         self.calls.append(("update", (account_id, dict(payload))))
+        legacy_mode = self.account["adult_text_mode"]
+        if "adult_text_enabled" in payload:
+            legacy_mode = "general" if payload["adult_text_enabled"] else "strict"
+        mode = str(payload.get("adult_text_mode", legacy_mode))
         self.account.update(
             {
                 "label": payload["label"],
                 "task_name": payload["task_name"],
                 "task_info": payload["task_info"],
                 "ai_model": payload["ai_model"],
-                "adult_text_enabled": bool(
-                    payload.get(
-                        "adult_text_enabled",
-                        self.account["adult_text_enabled"],
-                    )
-                ),
+                "adult_text_mode": mode,
+                "adult_text_enabled": mode != "strict",
                 "blocked_terms": list(payload.get("blocked_terms", [])),
                 "blocked_topics": list(payload.get("blocked_topics", [])),
                 "revision": int(payload["revision"]) + 1,
@@ -266,11 +273,14 @@ class FakeAccountManager:
         self,
         account_id: str,
         revision: int,
+        gender: str | None = None,
     ) -> dict[str, object]:
-        self.calls.append(("preview_random_profile", (account_id, revision)))
+        self.calls.append(
+            ("preview_random_profile", (account_id, revision, gender))
+        )
         return {
             "label": "隨機夜貓群友",
-            "gender": "male",
+            "gender": gender or "male",
             "stage": "old_member",
             "style": (
                 "成人純文字取向：成熟直球；僅限成年、自願、尊重與隱私，"
@@ -279,6 +289,7 @@ class FakeAccountManager:
             "task_name": "深夜自然群聊",
             "task_info": "依照最近訊息自然接話，不搶話也不使用客服口吻。",
             "ai_model": "x-ai/grok-4.20",
+            "adult_text_mode": "general",
             "adult_text_enabled": True,
             "group_reply_probability": 0.47,
             "reply_on_mention": True,
@@ -578,6 +589,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(created.json()["blocked_terms"], ["測試屏蔽詞"])
             self.assertEqual(created.json()["blocked_topics"], ["測試屏蔽主題"])
             self.assertTrue(created.json()["adult_text_enabled"])
+            self.assertEqual(created.json()["adult_text_mode"], "general")
 
             rejected_key = client.put(
                 "/api/accounts/acct_one",
@@ -635,6 +647,7 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(updated.json()["blocked_terms"], ["更新後屏蔽詞"])
             self.assertEqual(updated.json()["blocked_topics"], ["更新後屏蔽主題"])
             self.assertFalse(updated.json()["adult_text_enabled"])
+            self.assertEqual(updated.json()["adult_text_mode"], "strict")
             self.assertEqual(
                 updated.json()["media"]["image"]["allowed_group_ids"],
                 [-1001, -1002],
@@ -720,14 +733,16 @@ class DashboardTests(unittest.TestCase):
             response = client.post(
                 path,
                 headers={"X-CSRF-Token": csrf},
-                json={"revision": 1},
+                json={"revision": 1, "gender": "female"},
             )
             self.assertEqual(response.status_code, 200)
             result = response.json()
             self.assertEqual(set(result), RANDOM_PROFILE_FIELDS)
             self.assertEqual(result["label"], "隨機夜貓群友")
+            self.assertEqual(result["gender"], "female")
             self.assertEqual(result["ai_model"], "x-ai/grok-4.20")
             self.assertTrue(result["adult_text_enabled"])
+            self.assertEqual(result["adult_text_mode"], "general")
             self.assertIn("成年", result["style"])
             self.assertIn("自願", result["style"])
             self.assertIn("拒絕即停止", result["style"])
@@ -744,7 +759,7 @@ class DashboardTests(unittest.TestCase):
             ):
                 self.assertNotIn(forbidden, result)
             self.assertIn(
-                ("preview_random_profile", ("acct_one", 1)),
+                ("preview_random_profile", ("acct_one", 1, "female")),
                 self.manager.calls,
             )
 
@@ -774,7 +789,7 @@ class DashboardTests(unittest.TestCase):
             "editTaskName",
             "editTaskInfo",
             "editModel",
-            "editAdultTextEnabled",
+            "editAdultTextMode",
             "editProbability",
             "editReplyMention",
             "editReplyReply",
@@ -814,6 +829,7 @@ class DashboardTests(unittest.TestCase):
             handler_end = len(DASHBOARD_JS)
         handler = DASHBOARD_JS[handler_start:handler_end]
         self.assertIn("/persona/preview", handler)
+        self.assertIn('gender: $("editGender").value', handler)
         self.assertIn("applyRandomProfilePreview", handler)
         self.assertNotIn('method: "PUT"', handler)
         self.assertNotIn("refresh()", handler)
@@ -1177,14 +1193,34 @@ class DashboardTests(unittest.TestCase):
             "voiceProviderState",
             "refreshMediaJobsButton",
             "mediaJobList",
-            "addAdultTextEnabled",
-            "editAdultTextEnabled",
+            "addAdultTextMode",
+            "editAdultTextMode",
         ):
             with self.subTest(field_id=field_id):
                 self.assertIn(f'id="{field_id}"', DASHBOARD_HTML)
 
         self.assertIn("Railway Variables", DASHBOARD_HTML)
-        self.assertIn("成人純文字模式", DASHBOARD_HTML)
+        self.assertIn("成人純文字策略", DASHBOARD_HTML)
+        self.assertGreaterEqual(
+            DASHBOARD_HTML.count(
+                "選擇「限制」、「一般」或「寬鬆」即代表管理員確認此帳號的允許群組只限 18+"
+            ),
+            2,
+        )
+        for value, label in (
+            ("lenient", "寬鬆"),
+            ("general", "一般"),
+            ("restricted", "限制"),
+            ("strict", "嚴格"),
+        ):
+            with self.subTest(mode=value):
+                self.assertGreaterEqual(
+                    DASHBOARD_HTML.count(f'<option value="{value}"'),
+                    2,
+                )
+                self.assertGreaterEqual(DASHBOARD_HTML.count(f'>{label}</option>'), 2)
+        self.assertNotIn('id="addAdultTextEnabled"', DASHBOARD_HTML)
+        self.assertNotIn('id="editAdultTextEnabled"', DASHBOARD_HTML)
         self.assertIn(
             "帳號建立後先手動啟用以載入群組；尚未選擇群組時只會連線，不會自動回覆。選好允許群組後即可開始。",
             DASHBOARD_HTML,
@@ -1204,11 +1240,11 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("clear_ai_api_key", DASHBOARD_JS)
         self.assertIn("media: {\n          image: {", DASHBOARD_JS)
         self.assertIn(
-            'adult_text_enabled: $("addAdultTextEnabled").checked',
+            'adult_text_mode: $("addAdultTextMode").value',
             DASHBOARD_JS,
         )
         self.assertIn(
-            'adult_text_enabled: $("editAdultTextEnabled").checked',
+            'adult_text_mode: $("editAdultTextMode").value',
             DASHBOARD_JS,
         )
         self.assertIn(
@@ -1344,7 +1380,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn('summary.id = "selectedCompactSummary"', DASHBOARD_JS)
         self.assertIn('$("selectedCompactSummary").textContent', DASHBOARD_JS)
         self.assertIn('account.ai_model || "未設定模型"', DASHBOARD_JS)
-        self.assertIn('account.adult_text_enabled ? "成人純文字開"', DASHBOARD_JS)
+        self.assertIn("adultTextModeLabels", DASHBOARD_JS)
+        self.assertIn('adultTextModeLabels[normalizedAdultTextMode(account)]', DASHBOARD_JS)
         self.assertIn("${groupCount} 個群組", DASHBOARD_JS)
         self.assertIn("function createManualSendRow(account)", DASHBOARD_JS)
         self.assertIn("manualGroupByAccount", DASHBOARD_JS)

@@ -4,6 +4,11 @@ import itertools
 import secrets
 from collections.abc import Collection
 
+from .adult_safety import (
+    adult_text_enabled_for_mode,
+    clean_adult_text_mode,
+    resolve_adult_text_mode,
+)
 
 _TEMPERAMENTS = (
     "慢熱細膩，先觀察氣氛再接話",
@@ -42,6 +47,10 @@ _ADULT_STYLES = (
     "成熟開放，談成人慾望時直接、自然且不羞辱他人",
     "俏皮敢聊，能接住成人玩笑與雙方同意的露骨文字情境",
     "溫柔主動，偏好有安全感、界線清楚的成人調情",
+    "曖昧拉扯感強，會用雙關、留白與反問延續成年人之間的撩人對話",
+    "偏好親密關係、慾望偏好與界線協調等成人深夜話題，表達直接但不施壓",
+    "敢接聊騷與露骨玩笑，會依對方語氣調整尺度，不把每句都寫得同樣直接",
+    "重視互相回應的節奏，能在甜、壞、直球與慢熱之間自然切換",
 )
 
 _STAGE_STANCE = {
@@ -52,6 +61,23 @@ _STAGE_STANCE = {
 _GENDER_TONE = {
     "male": "維持男性角色的一致口吻",
     "female": "維持女性角色的一致口吻",
+}
+
+_GENDER_DETAILS = {
+    "male": (
+        "男性角色描寫：爽朗有主見，說話直接但會看對方反應",
+        "男性角色描寫：沉穩慢熱，熟悉後會露出幽默與撩人的反差",
+        "男性角色描寫：自在坦率，能在日常閒聊與曖昧話題間自然切換",
+        "男性角色描寫：外冷內熱，回覆簡短但會抓住對方在意的細節",
+        "男性角色描寫：成熟帶點壞壞的幽默，調情時不油膩也不說教",
+    ),
+    "female": (
+        "女性角色描寫：自然有主見，親切之外也保留自己的節奏與界線",
+        "女性角色描寫：成熟慢熱，熟悉後會展現俏皮與撩人的反差",
+        "女性角色描寫：自在直球，能在生活閒聊與曖昧話題間自然切換",
+        "女性角色描寫：細膩但不黏膩，會接住情緒也敢說自己的想法",
+        "女性角色描寫：甜中帶壞、幽默有分寸，調情時不使用制式撒嬌句",
+    ),
 }
 
 _TAIWAN_CHAT_STYLE = (
@@ -121,6 +147,37 @@ _ADULT_TASKS = (
         "大膽但尊重地接話",
         "成人話題可以直接、不必制式說教；遇到拒絕、不舒服或停止要求便立刻收住。",
     ),
+    (
+        "延續曖昧與撩人節奏",
+        "依最近對話在甜、直球、雙關與留白之間切換，不固定使用同一套聊騷句型。",
+    ),
+    (
+        "參與成人深夜話題",
+        "可自然聊成年人之間的慾望、親密偏好、情境想像與界線，回覆要有來有往且不施壓。",
+    ),
+    (
+        "接住露骨成人玩笑",
+        "在成人純文字模式內可回應露骨玩笑或情境，但要貼合最近二十條內容、避免重複與突然升高尺度。",
+    ),
+)
+
+_ADULT_TEXT_MODE_WEIGHTS = (
+    "general",
+    "general",
+    "restricted",
+    "lenient",
+    "strict",
+)
+
+_RESTRICTED_TASKS = (
+    (
+        "輕度曖昧與感情互動",
+        "只被動簡短承接群內已有的輕度曖昧或暗示，不主動升級、延展或加入圖像化細節。",
+    ),
+    (
+        "界線清楚的成人話題",
+        "以非圖像化用詞簡短回應成年人話題，避免器官與性行為細節。",
+    ),
 )
 
 _TEXT_MODELS = (
@@ -176,8 +233,9 @@ def _excluded_styles(value: str | Collection[str]) -> set[str]:
 def generate_persona(
     gender: str,
     stage: str,
-    adult_text_enabled: bool,
+    adult_text_enabled: object = None,
     *,
+    adult_text_mode: object = None,
     exclude: str | Collection[str] = "",
 ) -> str:
     """Generate a stored, account-specific chat style without model calls."""
@@ -186,21 +244,50 @@ def generate_persona(
     if stage not in _STAGE_STANCE:
         raise ValueError("stage must be old_member or observer")
 
-    adult_options: tuple[str, ...]
-    if adult_text_enabled:
+    if adult_text_mode is not None:
+        mode = resolve_adult_text_mode(
+            adult_text_mode=adult_text_mode,
+            **(
+                {"adult_text_enabled": adult_text_enabled}
+                if isinstance(adult_text_enabled, bool)
+                else {}
+            ),
+        )
+    elif isinstance(adult_text_enabled, bool):
+        mode = resolve_adult_text_mode(adult_text_enabled=adult_text_enabled)
+    elif adult_text_enabled is None:
+        mode = "strict"
+    else:
+        mode = clean_adult_text_mode(adult_text_enabled)
+
+    common_floor = "僅限成年、自願、尊重與隱私，拒絕即停止；只適用 Telegram 純文字"
+    if mode == "strict":
+        adult_options = (
+            "成人純文字策略：嚴格；聊天以日常、交友與感情為主，不主動帶入露骨成人內容；只談非露骨的交友、感情、界線與安全，不得延展成人情境",
+        )
+    elif mode == "restricted":
         adult_options = tuple(
-            f"成人純文字取向：{item}；僅限成年、自願、尊重與隱私，"
-            "拒絕即停止，不追問、不施壓"
+            f"成人純文字策略：限制；{item}；只被動簡短承接；{common_floor}"
+            for item in (
+                "輕度曖昧與暗示可簡短承接，避免器官或性行為細節",
+                "以留白和非圖像化用詞回應，不主動升級尺度",
+            )
+        )
+    elif mode == "general":
+        adult_options = tuple(
+            f"成人純文字策略：一般；{item}；中等細節，依既有上下文最多延展一步；{common_floor}"
             for item in _ADULT_STYLES
         )
     else:
-        adult_options = (
-            "聊天以日常、交友與感情話題為主，不主動帶入露骨成人內容",
+        adult_options = tuple(
+            f"成人純文字策略：寬鬆；{item}；較高細節，依既有上下文最多自然延展兩步；{common_floor}"
+            for item in _ADULT_STYLES
         )
     archetypes = _GROUP_ARCHETYPES_BY_STAGE[stage]
 
-    candidates = [
-        "；".join(
+    def render_candidate(parts: tuple[str, str, str, str, str, str]) -> str:
+        temperament, rhythm, interest, archetype, adult_style, gender_detail = parts
+        return "；".join(
             (
                 f"性格：{temperament}",
                 f"聊天節奏：{rhythm}",
@@ -208,54 +295,73 @@ def generate_persona(
                 f"群聊原型：{archetype}",
                 _STAGE_STANCE[stage],
                 _GENDER_TONE[gender],
+                gender_detail,
                 _TAIWAN_CHAT_STYLE,
                 _GROUP_CHAT_CALIBRATION,
                 adult_style,
                 "保持一般群友視角，不捏造真人經歷",
             )
-        )
-        + "。"
-        for temperament, rhythm, interest, archetype, adult_style in itertools.product(
-            _TEMPERAMENTS,
-            _RHYTHMS,
-            _INTERESTS,
-            archetypes,
-            adult_options,
-        )
-    ]
+        ) + "。"
+
+    pools = (
+        _TEMPERAMENTS,
+        _RHYTHMS,
+        _INTERESTS,
+        archetypes,
+        adult_options,
+        _GENDER_DETAILS[gender],
+    )
+    chooser = secrets.SystemRandom()
     excluded = _excluded_styles(exclude)
+    for _ in range(max(32, min(256, len(excluded) * 4 + 8))):
+        candidate = render_candidate(tuple(chooser.choice(pool) for pool in pools))
+        if candidate not in excluded:
+            return candidate
+
+    candidates = [render_candidate(parts) for parts in itertools.product(*pools)]
     available = [candidate for candidate in candidates if candidate not in excluded]
-    if not available:
-        available = candidates
-    return secrets.SystemRandom().choice(available)
+    return chooser.choice(available or candidates)
 
 
 def generate_account_profile(
     *,
     exclude_style: str | Collection[str] = "",
     role_candidates: Collection[tuple[str, str]] = (),
+    gender: str | None = None,
 ) -> dict[str, object]:
     """Generate a complete, safe-to-preview account settings preset."""
     chooser = secrets.SystemRandom()
+    if gender is not None and gender not in _GENDER_TONE:
+        raise ValueError("gender must be male or female")
     roles = tuple(role_candidates) or tuple(
         itertools.product(_GENDER_TONE, _STAGE_STANCE)
     )
+    if gender is not None:
+        roles = tuple(role for role in roles if role[0] == gender)
+        if not roles:
+            roles = tuple((gender, stage) for stage in _STAGE_STANCE)
     if any(
         gender not in _GENDER_TONE or stage not in _STAGE_STANCE
         for gender, stage in roles
     ):
         raise ValueError("role_candidates contains an unsupported role")
     gender, stage = chooser.choice(roles)
-    adult_text_enabled = chooser.choice((True, True, False))
+    adult_text_mode = chooser.choice(_ADULT_TEXT_MODE_WEIGHTS)
+    adult_text_enabled = adult_text_enabled_for_mode(adult_text_mode)
     style = generate_persona(
         gender,
         stage,
-        adult_text_enabled,
+        adult_text_mode,
         exclude=exclude_style,
     )
-    task_name, task_info = chooser.choice(
-        _ADULT_TASKS if adult_text_enabled else _TASKS
+    task_pool = (
+        _ADULT_TASKS
+        if adult_text_mode in {"general", "lenient"}
+        else _RESTRICTED_TASKS
+        if adult_text_mode == "restricted"
+        else _TASKS
     )
+    task_name, task_info = chooser.choice(task_pool)
     stage_label = "老成員" if stage == "old_member" else "觀望"
     profile: dict[str, object] = {
         "label": f"{chooser.choice(_PROFILE_LABELS[gender])}｜{stage_label}",
@@ -265,6 +371,7 @@ def generate_account_profile(
         "task_name": task_name,
         "task_info": task_info,
         "ai_model": chooser.choice(_TEXT_MODELS),
+        "adult_text_mode": adult_text_mode,
         "adult_text_enabled": adult_text_enabled,
     }
     profile.update(dict(chooser.choice(_BEHAVIOR_PRESETS)))

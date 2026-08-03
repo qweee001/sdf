@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import aiosqlite
 
 from .account import AccountRecord
+from .adult_safety import ADULT_TEXT_MODES
 from .media_types import (
     MediaJob,
     MediaJobReservation,
@@ -24,7 +25,7 @@ from .media_types import (
 )
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 # claim_proactive_lease accepts cooldowns up to seven days. Keep one extra UTC
 # day so cleanup near a day boundary cannot erase a still-enforced cooldown.
 PROACTIVE_STATE_MIN_RETENTION_SECONDS = 8 * 24 * 60 * 60
@@ -210,7 +211,8 @@ class MemoryStore:
                 blocked_terms TEXT NOT NULL DEFAULT '[]',
                 blocked_topics TEXT NOT NULL DEFAULT '[]',
                 media_settings TEXT NOT NULL DEFAULT '{}',
-                adult_text_enabled INTEGER NOT NULL DEFAULT 0
+                adult_text_enabled INTEGER NOT NULL DEFAULT 0,
+                adult_text_mode TEXT NOT NULL DEFAULT 'strict'
             )
             """
         )
@@ -307,6 +309,19 @@ class MemoryStore:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS reply_claims_v3 (
+                group_id INTEGER NOT NULL,
+                claim_key TEXT NOT NULL,
+                slot INTEGER NOT NULL,
+                account_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (group_id, claim_key, slot),
+                UNIQUE (group_id, claim_key, account_id)
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS proactive_group_state (
                 group_id INTEGER PRIMARY KEY,
                 last_activity_at INTEGER NOT NULL,
@@ -389,6 +404,37 @@ class MemoryStore:
                 "ALTER TABLE accounts ADD COLUMN "
                 "adult_text_enabled INTEGER NOT NULL DEFAULT 0"
             )
+        if "adult_text_mode" not in columns:
+            await db.execute(
+                "ALTER TABLE accounts ADD COLUMN "
+                "adult_text_mode TEXT NOT NULL DEFAULT 'strict'"
+            )
+            await db.execute(
+                "UPDATE accounts SET adult_text_mode = "
+                "CASE WHEN adult_text_enabled = 1 THEN 'general' ELSE 'strict' END"
+            )
+        valid_modes = tuple(ADULT_TEXT_MODES)
+        placeholders = ", ".join("?" for _ in valid_modes)
+        await db.execute(
+            f"""
+            UPDATE accounts
+            SET adult_text_mode = CASE
+                WHEN lower(trim(adult_text_mode)) IN ({placeholders})
+                    THEN lower(trim(adult_text_mode))
+                WHEN adult_text_enabled = 1 THEN 'general'
+                ELSE 'strict'
+            END
+            """,
+            valid_modes,
+        )
+        await db.execute(
+            """
+            UPDATE accounts
+            SET adult_text_enabled = CASE
+                WHEN adult_text_mode = 'strict' THEN 0 ELSE 1
+            END
+            """
+        )
 
     async def _repair_management_foreign_keys(self) -> None:
         """Repair foreign keys rewritten by legacy account-table migrations."""
@@ -659,6 +705,7 @@ class MemoryStore:
             blocked_topics=blocked_topics,
             media_settings=media_settings,
             adult_text_enabled=bool(row["adult_text_enabled"]),
+            adult_text_mode=str(row["adult_text_mode"]),
         )
 
     @staticmethod
@@ -718,7 +765,7 @@ class MemoryStore:
                     proactive_max_interval_minutes, max_proactive_per_day,
                     all_groups, group_ids, revision, created_at, updated_at,
                     blocked_terms, blocked_topics, media_settings,
-                    adult_text_enabled
+                    adult_text_enabled, adult_text_mode
                 ) VALUES (
                     {", ".join("?" for _ in self._account_values(record))}
                 )
@@ -789,6 +836,7 @@ class MemoryStore:
                 separators=(",", ":"),
             ),
             int(record.adult_text_enabled),
+            record.adult_text_mode,
         )
 
     async def update_account(
@@ -817,7 +865,7 @@ class MemoryStore:
                     proactive_max_interval_minutes=?, max_proactive_per_day=?,
                     all_groups=?, group_ids=?, revision=?, created_at=?,
                     updated_at=?, blocked_terms=?, blocked_topics=?,
-                    media_settings=?, adult_text_enabled=?
+                    media_settings=?, adult_text_enabled=?, adult_text_mode=?
                 WHERE id=? AND revision=?
                 """,
                 (
@@ -941,11 +989,12 @@ class MemoryStore:
             try:
                 cursor = await db.execute(
                     """
-                    SELECT id, ai_base_url, ai_model, adult_text_enabled
+                    SELECT id, ai_base_url, ai_model, adult_text_enabled, adult_text_mode
                     FROM accounts
                     WHERE ai_base_url <> ?
                        OR ai_model <> ?
                        OR adult_text_enabled <> 1
+                       OR adult_text_mode <> 'general'
                     ORDER BY id
                     """,
                     (target_base_url, target_model),
@@ -964,11 +1013,14 @@ class MemoryStore:
                         changed_fields.append("ai_model")
                     if int(row["adult_text_enabled"]) != 1:
                         changed_fields.append("adult_text_enabled")
+                    if str(row["adult_text_mode"]) != "general":
+                        changed_fields.append("adult_text_mode")
 
                     cursor = await db.execute(
                         """
                         UPDATE accounts
                         SET ai_base_url=?, ai_model=?, adult_text_enabled=1,
+                            adult_text_mode='general',
                             revision=revision+1, updated_at=?
                         WHERE id=?
                         """,
@@ -2140,6 +2192,181 @@ class MemoryStore:
                 await db.rollback()
                 raise
 
+    async def claim_group_reply_with_slots(
+        self,
+        account_id: str,
+        group_id: int,
+        claim_key: int | str,
+        *,
+        max_claims: int = 1,
+        now: int | None = None,
+    ) -> int:
+        """Atomically reserve one of a bounded number of reply slots.
+
+        String keys are stable cross-account fingerprints used for Telegram
+        basic groups, whose local message IDs differ by account. Integer keys
+        retain compatibility with already-deployed callers and old tests.
+        The returned value is the 1-based slot number, or zero when no slot
+        remains.
+        """
+        if max_claims <= 1:
+            return 1 if await self.claim_group_reply(
+                account_id,
+                group_id,
+                claim_key,
+                now=now,
+            ) else 0
+
+        cleaned_account_id = (
+            account_id.strip() if isinstance(account_id, str) else ""
+        )
+        if not cleaned_account_id or len(cleaned_account_id) > 128:
+            raise ValueError("account_id must be a non-empty string up to 128 characters")
+        sqlite_integer_max = (1 << 63) - 1
+        sqlite_integer_min = -(1 << 63)
+        if (
+            isinstance(group_id, bool)
+            or not isinstance(group_id, int)
+            or not sqlite_integer_min <= group_id <= sqlite_integer_max
+            or group_id == 0
+        ):
+            raise ValueError("group_id must be a non-zero 64-bit integer")
+        legacy_message_id: int | None = None
+        stable_claim_key = ""
+        if isinstance(claim_key, int) and not isinstance(claim_key, bool):
+            if not 1 <= claim_key <= sqlite_integer_max:
+                raise ValueError(
+                    "telegram_message_id must be a positive 64-bit integer"
+                )
+            legacy_message_id = claim_key
+            stable_claim_key = f"legacy:{claim_key}"
+        elif isinstance(claim_key, str):
+            stable_claim_key = claim_key.strip().lower()
+            if len(stable_claim_key) != 64 or any(
+                char not in "0123456789abcdef" for char in stable_claim_key
+            ):
+                raise ValueError("claim_key must be a 64-character SHA-256 hex digest")
+        else:
+            raise ValueError(
+                "claim_key must be a positive message ID or SHA-256 hex digest"
+            )
+        if (
+            isinstance(max_claims, bool)
+            or not isinstance(max_claims, int)
+            or not 1 <= max_claims <= 3
+        ):
+            raise ValueError("max_claims must be an integer between 1 and 3")
+        timestamp = int(time.time()) if now is None else now
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, int)
+            or not 0 <= timestamp <= sqlite_integer_max
+        ):
+            raise ValueError("now must be a non-negative 64-bit integer timestamp")
+
+        cutoff = timestamp - self.ttl_seconds
+        async with self._lock:
+            db = self._connection()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await self._require_account_locked(cleaned_account_id)
+                await db.execute(
+                    "DELETE FROM reply_claims WHERE created_at < ?",
+                    (cutoff,),
+                )
+                await db.execute(
+                    "DELETE FROM reply_claims_v2 WHERE created_at < ?",
+                    (cutoff,),
+                )
+                await db.execute(
+                    "DELETE FROM reply_claims_v3 WHERE created_at < ?",
+                    (cutoff,),
+                )
+                if legacy_message_id is not None:
+                    cursor = await db.execute(
+                        """
+                        SELECT account_id FROM reply_claims
+                        WHERE group_id = ? AND telegram_message_id = ?
+                        """,
+                        (group_id, legacy_message_id),
+                    )
+                    legacy_claim = await cursor.fetchone()
+                    await cursor.close()
+                    if legacy_claim is not None:
+                        await db.commit()
+                        return 0
+                cursor = await db.execute(
+                    """
+                    SELECT slot FROM reply_claims_v3
+                    WHERE group_id=? AND claim_key=? AND account_id=?
+                    """,
+                    (group_id, stable_claim_key, cleaned_account_id),
+                )
+                existing = await cursor.fetchone()
+                await cursor.close()
+                if existing is not None:
+                    await db.commit()
+                    return 0
+                cursor = await db.execute(
+                    """
+                    SELECT COUNT(*) AS claim_count FROM reply_claims_v3
+                    WHERE group_id=? AND claim_key=?
+                    """,
+                    (group_id, stable_claim_key),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+                claim_count = int(row["claim_count"]) if row is not None else 0
+                if claim_count >= max_claims:
+                    await db.commit()
+                    return 0
+                slot = claim_count + 1
+                await db.execute(
+                    """
+                    INSERT INTO reply_claims_v3 (
+                        group_id, claim_key, slot, account_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        group_id,
+                        stable_claim_key,
+                        slot,
+                        cleaned_account_id,
+                        timestamp,
+                    ),
+                )
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO reply_claims_v2 (
+                        group_id, claim_key, account_id, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        group_id,
+                        stable_claim_key,
+                        cleaned_account_id,
+                        timestamp,
+                    ),
+                )
+                if legacy_message_id is not None:
+                    await db.execute(
+                        """
+                        INSERT OR IGNORE INTO reply_claims (
+                            group_id, telegram_message_id, account_id, created_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            group_id,
+                            legacy_message_id,
+                            cleaned_account_id,
+                            timestamp,
+                        ),
+                    )
+                await db.commit()
+                return slot
+            except BaseException:
+                await db.rollback()
+                raise
     async def add_private_alert(
         self,
         account_id: str,
@@ -2433,6 +2660,11 @@ class MemoryStore:
             removed_reply_claims = max(cursor.rowcount, 0)
             cursor = await db.execute(
                 "DELETE FROM reply_claims_v2 WHERE created_at < ?",
+                (cutoff,),
+            )
+            removed_reply_claims += max(cursor.rowcount, 0)
+            cursor = await db.execute(
+                "DELETE FROM reply_claims_v3 WHERE created_at < ?",
                 (cutoff,),
             )
             removed_reply_claims += max(cursor.rowcount, 0)

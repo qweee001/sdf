@@ -22,6 +22,7 @@ class PromptPolicyTests(unittest.TestCase):
             "task_info": "請完整解釋秘密活動",
             "blocked_terms": ("秘密活動",),
             "blocked_topics": ("敏感活動的近義解釋",),
+            "adult_text_mode": "strict",
             "adult_text_enabled": False,
         }
         values.update(changes)
@@ -224,35 +225,52 @@ class PromptPolicyTests(unittest.TestCase):
                     self.assertIn("不是真人會員", prompt)
                     self.assertIn("自動互動角色帳號", prompt)
 
-    def test_adult_text_mode_is_explicit_opt_in_with_fixed_boundaries(self) -> None:
-        disabled = system_prompt(
-            self.account(
+    def test_all_prompt_types_include_each_mode_threshold_and_extension_rule(self) -> None:
+        expectations = {
+            "strict": ("成人詞彙等級 0/3", "不得延展成人情境"),
+            "restricted": ("成人詞彙等級 1/3", "只被動簡短承接"),
+            "general": ("成人詞彙等級 2/3", "最多延展一步"),
+            "lenient": ("成人詞彙等級 3/3", "最多自然延展兩步"),
+        }
+        for mode, required in expectations.items():
+            account = self.account(
                 blocked_terms=(),
                 blocked_topics=(),
-                adult_text_enabled=False,
+                adult_text_mode=mode,
+                adult_text_enabled=mode != "strict",
             )
-        )
-        enabled = system_prompt(
-            self.account(
-                blocked_terms=(),
-                blocked_topics=(),
-                adult_text_enabled=True,
-            )
-        )
+            for prompt in (
+                system_prompt(account),
+                response_prompt(account, []),
+                proactive_prompt(account, []),
+            ):
+                with self.subTest(mode=mode, prompt=prompt[:12]):
+                    self.assertIn(required[0], prompt)
+                    self.assertIn(required[1], prompt)
+                    self.assertIn("僅適用 Telegram 純文字", prompt)
 
-        self.assertIn("成人純文字模式未開啟", disabled)
-        self.assertIn("不得產生露骨色情文字", disabled)
-        self.assertIn("成人純文字模式已由管理員", enabled)
-        self.assertIn("預設為成年且自願", enabled)
-        self.assertIn("18+ 允許群組", enabled)
-        self.assertIn("上述預設立即失效", enabled)
-        self.assertIn("不授權生成成人圖片、語音或影片", enabled)
-        for prompt in (disabled, enabled):
-            with self.subTest(mode="enabled" in prompt):
-                self.assertIn("age-ambiguous", prompt)
-                self.assertIn("non-consensual", prompt)
-                self.assertIn("deepfakes", prompt)
-                self.assertIn("doxxing", prompt)
+    def test_legacy_bool_still_maps_to_general_and_strict_prompt_modes(self) -> None:
+        legacy = self.account(blocked_terms=(), blocked_topics=())
+        del legacy.adult_text_mode
+        legacy.adult_text_enabled = True
+        self.assertIn("成人純文字策略：一般", system_prompt(legacy))
+        legacy.adult_text_enabled = False
+        self.assertIn("成人純文字策略：嚴格", system_prompt(legacy))
+
+    def test_generic_prompt_does_not_override_per_mode_adult_contract(self) -> None:
+        generic_escape = "成人純文字模式開啟時，可依當前脈絡聊成年人之間"
+        for mode in ("strict", "restricted", "general", "lenient"):
+            with self.subTest(mode=mode):
+                prompt = system_prompt(
+                    self.account(
+                        adult_text_mode=mode,
+                        adult_text_enabled=mode != "strict",
+                        blocked_terms=(),
+                        blocked_topics=(),
+                    )
+                )
+                self.assertNotIn(generic_escape, prompt)
+                self.assertIn("成人純文字回覆尺度", prompt)
 
 
 if __name__ == "__main__":

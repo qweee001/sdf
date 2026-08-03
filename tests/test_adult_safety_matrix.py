@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from app.adult_safety import (
+    ADULT_TEXT_MODE_LABELS,
+    ADULT_TEXT_MODES,
     FIXED_ADULT_TEXT_BLOCKED_TERMS,
     FIXED_ADULT_TEXT_BLOCKED_TOPICS,
     FIXED_ADULT_TEXT_SAFETY_POLICY,
     adult_text_mode_contract,
+    adult_text_mode_policy,
+    clean_adult_text_mode,
+    resolve_adult_text_mode,
 )
 from app.content_guard import ContentGuard
 
@@ -17,6 +23,92 @@ class AdultSafetyMatrixTests(unittest.TestCase):
             FIXED_ADULT_TEXT_BLOCKED_TERMS,
             FIXED_ADULT_TEXT_BLOCKED_TOPICS,
         )
+
+    def test_four_stable_modes_have_chinese_labels(self) -> None:
+        self.assertEqual(
+            ADULT_TEXT_MODES,
+            ("lenient", "general", "restricted", "strict"),
+        )
+        self.assertEqual(
+            ADULT_TEXT_MODE_LABELS,
+            {
+                "lenient": "寬鬆",
+                "general": "一般",
+                "restricted": "限制",
+                "strict": "嚴格",
+            },
+        )
+
+    def test_mode_cleaning_legacy_mapping_and_conflicts(self) -> None:
+        for mode in ADULT_TEXT_MODES:
+            with self.subTest(mode=mode):
+                self.assertEqual(clean_adult_text_mode(mode), mode)
+        with self.assertRaises(ValueError):
+            clean_adult_text_mode("enabled")
+        self.assertEqual(
+            resolve_adult_text_mode(adult_text_enabled=True),
+            "general",
+        )
+        self.assertEqual(
+            resolve_adult_text_mode(adult_text_enabled=False),
+            "strict",
+        )
+        self.assertEqual(
+            resolve_adult_text_mode("lenient", adult_text_enabled=True),
+            "lenient",
+        )
+        with self.assertRaises(ValueError):
+            resolve_adult_text_mode("restricted", adult_text_enabled=False)
+        with self.assertRaises(ValueError):
+            resolve_adult_text_mode("strict", adult_text_enabled=True)
+
+    def test_each_mode_has_distinct_structured_thresholds(self) -> None:
+        policies = {
+            mode: adult_text_mode_policy(mode)
+            for mode in ADULT_TEXT_MODES
+        }
+        self.assertEqual(
+            [policies[mode]["adult_vocabulary_level"] for mode in reversed(ADULT_TEXT_MODES)],
+            [0, 1, 2, 3],
+        )
+        self.assertEqual(
+            [policies[mode]["reply_detail_level"] for mode in reversed(ADULT_TEXT_MODES)],
+            [0, 1, 2, 3],
+        )
+        self.assertEqual(
+            [policies[mode]["topic_extension_level"] for mode in reversed(ADULT_TEXT_MODES)],
+            [0, 1, 2, 3],
+        )
+        self.assertEqual(
+            [policies[mode].topic_extension_threshold for mode in reversed(ADULT_TEXT_MODES)],
+            [0, 1, 2, 3],
+        )
+        self.assertEqual(policies["strict"]["max_extension_steps"], 0)
+        self.assertEqual(policies["restricted"]["max_extension_steps"], 0)
+        self.assertEqual(policies["general"]["max_extension_steps"], 1)
+        self.assertEqual(policies["lenient"]["max_extension_steps"], 2)
+        for policy in policies.values():
+            self.assertFalse(policy["may_initiate_adult_topic"])
+            self.assertEqual(policy["media_scope"], "telegram_text_only")
+            self.assertTrue(policy["hard_safety_floor"])
+
+    def test_each_mode_contract_names_its_thresholds_and_behavior(self) -> None:
+        contracts = {
+            mode: adult_text_mode_contract(mode)
+            for mode in ADULT_TEXT_MODES
+        }
+        self.assertEqual(len(set(contracts.values())), 4)
+        self.assertIn("成人詞彙等級 0/3", contracts["strict"])
+        self.assertIn("不得延展成人情境", contracts["strict"])
+        self.assertIn("成人詞彙等級 1/3", contracts["restricted"])
+        self.assertIn("只被動簡短承接", contracts["restricted"])
+        self.assertIn("成人詞彙等級 2/3", contracts["general"])
+        self.assertIn("最多延展一步", contracts["general"])
+        self.assertIn("成人詞彙等級 3/3", contracts["lenient"])
+        self.assertIn("最多自然延展兩步", contracts["lenient"])
+        for mode in ("restricted", "general", "lenient"):
+            with self.subTest(mode=mode):
+                self.assertIn("管理員確認的 18+ 群組", contracts[mode])
 
     def test_consensual_adult_text_is_not_lexically_blocked(self) -> None:
         allowed = (
@@ -74,6 +166,19 @@ class AdultSafetyMatrixTests(unittest.TestCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, policy)
+
+    def test_readme_documents_four_modes_and_legacy_migration(self) -> None:
+        readme = Path("README.md").read_text(encoding="utf-8")
+        for value, label in (
+            ("lenient", "寬鬆"),
+            ("general", "一般"),
+            ("restricted", "限制"),
+            ("strict", "嚴格"),
+        ):
+            self.assertIn(f"`{value}`（{label}）", readme)
+        self.assertIn("`adult_text_enabled=true` 映射為 `general`", readme)
+        self.assertIn("`adult_text_enabled=false` 映射為 `strict`", readme)
+        self.assertIn("SQLite schema version 9", readme)
 
 
 if __name__ == "__main__":
