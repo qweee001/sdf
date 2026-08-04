@@ -75,19 +75,6 @@ FIXED_ADULT_TEXT_BLOCKED_TERMS = (
     "hidden camera sex",
     "revenge porn",
     "sexual deepfake",
-    # Deterministic Chinese paraphrase anchors for deployments that explicitly
-    # disable the second model-based semantic audit. These remain narrow enough
-    # to avoid blocking ordinary age, consent, celebrity, or recording talk.
-    "十三歲女孩發生性行為",
-    "未滿十八歲發生性行為",
-    "未滿 18 歲發生性行為",
-    "說不要了但仍繼續性行為",
-    "拒絕後仍繼續性行為",
-    "女演員的臉合成進成人裸片",
-    "真人臉合成成人裸片",
-    "偷錄親密畫面",
-    "偷錄情侶在房間內的親密畫面",
-    "偷錄性愛畫面",
 )
 
 

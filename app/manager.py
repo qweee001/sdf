@@ -603,7 +603,7 @@ class AccountManager:
         )
         if not self.settings.ai_api_key:
             raise ValueError(
-                "請在 Railway Variables 設定 OPENROUTER_API_KEY、VENICE_API_KEY 或 AI_API_KEY"
+                "請在 Railway Variables 設定 OPENROUTER_API_KEY 或 AI_API_KEY"
             )
         async with self._create_lock:
             if await self.store.count_accounts() >= self.settings.max_accounts:
@@ -836,7 +836,7 @@ class AccountManager:
         )
         if not self.settings.ai_api_key:
             raise ValueError(
-                "請在 Railway Variables 設定 OPENROUTER_API_KEY、VENICE_API_KEY 或 AI_API_KEY"
+                "請在 Railway Variables 設定 OPENROUTER_API_KEY 或 AI_API_KEY"
             )
 
         changed_fields = [
@@ -1450,11 +1450,6 @@ class AccountManager:
         host = (urlparse(base_url).hostname or "").lower()
         return host == "openrouter.ai" or host.endswith(".openrouter.ai")
 
-    @staticmethod
-    def _is_venice_provider(base_url: str) -> bool:
-        host = (urlparse(base_url).hostname or "").lower()
-        return host == "api.venice.ai"
-
     def _validate_ai_provider(self, base_url: str) -> None:
         if (
             self.settings.ai_uses_openrouter_key
@@ -1463,14 +1458,6 @@ class AccountManager:
             raise ValueError(
                 "使用 OPENROUTER_API_KEY 時，AI Base URL 必須是 "
                 "https://openrouter.ai/api/v1"
-            )
-        if (
-            self.settings.ai_uses_venice_key
-            and not self._is_venice_provider(base_url)
-        ):
-            raise ValueError(
-                "使用 VENICE_API_KEY 時，AI Base URL 必須是 "
-                "https://api.venice.ai/api/v1"
             )
 
     def _validate_media_settings(

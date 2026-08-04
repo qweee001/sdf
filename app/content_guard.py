@@ -21,108 +21,6 @@ _LEET_TRANSLATION = str.maketrans(
         "9": "g",
     }
 )
-_SEXUAL_CONTENT_MARKERS = (
-    "性行為",
-    "性愛",
-    "性交",
-    "性關係",
-    "上床",
-    "做愛",
-    "色情",
-    "裸片",
-    "裸照",
-    "裸體",
-    "露骨",
-)
-_MINOR_MARKERS = (
-    "未成年",
-    "兒童",
-    "幼童",
-    "男童",
-    "女童",
-    "小孩",
-    "未滿十八歲",
-    "未滿18歲",
-    "十七歲",
-    "十六歲",
-    "十五歲",
-    "十四歲",
-    "十三歲",
-    "十二歲",
-)
-_NONCONSENT_MARKERS = (
-    "不同意",
-    "沒同意",
-    "未同意",
-    "拒絕",
-    "說不要",
-    "不願意",
-    "不情願",
-    "撤回同意",
-    "強迫",
-    "逼迫",
-    "逼她",
-    "逼他",
-    "失去意識",
-    "昏迷",
-    "灌醉",
-    "迷昏",
-)
-_REAL_PERSON_MARKERS = (
-    "真人",
-    "真實人物",
-    "演員",
-    "歌手",
-    "明星",
-    "藝人",
-    "網紅",
-    "名人",
-)
-_DEEPFAKE_MARKERS = ("深偽", "換臉", "合成")
-_COVERT_RECORDING_MARKERS = (
-    "偷拍",
-    "偷錄",
-    "暗中錄",
-    "偷偷錄",
-    "隱藏攝影機",
-    "針孔攝影",
-    "藏一台相機",
-    "藏相機",
-)
-_INTIMATE_RECORDING_MARKERS = _SEXUAL_CONTENT_MARKERS + (
-    "親密行為",
-    "親密畫面",
-    "私密畫面",
-    "床上畫面",
-)
-_UNDERAGE_NUMBER = re.compile(r"(?<!\d)(?:[0-9]|1[0-7])\s*歲")
-_CJK_NAME_RE = re.compile(r"(?:把|將)([\u3400-\u9fff]{2,4})(?:換臉|合成)")
-_HARMFUL_CONTINUATION_MARKERS = (
-    "仍然",
-    "還是",
-    "繼續",
-    "照樣",
-    "無視",
-    "不顧",
-    "硬是",
-)
-_MINOR_SAFETY_RE = re.compile(
-    r"(?:未成年(?:人)?|兒童|幼童|男童|女童|小孩|"
-    r"未滿(?:18|十八)歲|(?:[0-9]|1[0-7])歲).{0,6}"
-    r"(?:不得|不能|不可以|禁止)(?:發生|進行|有|涉及)?"
-    r"(?:性行為|性愛|性交|性關係|上床|做愛)"
-)
-_NONCONSENT_SAFETY_RE = re.compile(
-    r"(?:性行為|性愛|性交|性關係|上床|做愛).{0,8}"
-    r"(?:必須|應該|應|要)(?:立即|立刻)?停止"
-)
-_DEEPFAKE_SAFETY_RE = re.compile(
-    r"(?:不得|不能|不可以|禁止).{0,12}(?:深偽|換臉|合成)"
-)
-_COVERT_RECORDING_SAFETY_RE = re.compile(
-    r"(?:不得|不能|不可以|禁止).{0,12}"
-    r"(?:偷拍|偷錄|暗中錄|偷偷錄|藏一台相機|藏相機)"
-)
 
 
 def normalize_visible(value: str) -> str:
@@ -141,53 +39,6 @@ def compact_text(value: str) -> str:
         char
         for char in visible
         if unicodedata.category(char)[0] in {"L", "N"}
-    )
-
-
-def _contains_any(value: str, markers: tuple[str, ...]) -> bool:
-    return any(compact_text(marker) in value for marker in markers)
-
-
-def _is_explicit_safety_statement(compact: str, pattern: re.Pattern[str]) -> bool:
-    return not _contains_any(
-        compact,
-        _HARMFUL_CONTINUATION_MARKERS,
-    ) and bool(pattern.search(compact))
-
-
-def _fixed_adult_hard_floor_violation(value: str) -> bool:
-    visible = normalize_visible(value[:MAX_REPLY_CHARACTERS])
-    compact = compact_text(value[:MAX_REPLY_CHARACTERS])
-    sexual = _contains_any(compact, _SEXUAL_CONTENT_MARKERS)
-    minor = _contains_any(compact, _MINOR_MARKERS) or bool(
-        _UNDERAGE_NUMBER.search(visible)
-    )
-    if minor and sexual and not _is_explicit_safety_statement(
-        compact,
-        _MINOR_SAFETY_RE,
-    ):
-        return True
-    if (
-        sexual
-        and _contains_any(compact, _NONCONSENT_MARKERS)
-        and not _is_explicit_safety_statement(compact, _NONCONSENT_SAFETY_RE)
-    ):
-        return True
-    named_real_person = bool(_CJK_NAME_RE.search(visible))
-    if (
-        sexual
-        and _contains_any(compact, _DEEPFAKE_MARKERS)
-        and (_contains_any(compact, _REAL_PERSON_MARKERS) or named_real_person)
-        and not _is_explicit_safety_statement(compact, _DEEPFAKE_SAFETY_RE)
-    ):
-        return True
-    covert_intimate = _contains_any(
-        compact,
-        _COVERT_RECORDING_MARKERS,
-    ) and _contains_any(compact, _INTIMATE_RECORDING_MARKERS)
-    return covert_intimate and not _is_explicit_safety_statement(
-        compact,
-        _COVERT_RECORDING_SAFETY_RE,
     )
 
 
@@ -358,16 +209,7 @@ class ContentGuard:
         return bool(self.rules)
 
     def screen(self, value: str) -> ScreeningResult:
-        if not value:
-            return ScreeningResult(False)
-        if _fixed_adult_hard_floor_violation(value):
-            return ScreeningResult(
-                True,
-                "adult_hard_floor",
-                "hard_floor",
-                -1,
-            )
-        if not self.rules:
+        if not self.rules or not value:
             return ScreeningResult(False)
         visible = normalize_visible(value[:MAX_REPLY_CHARACTERS])
         compact = compact_text(value[:MAX_REPLY_CHARACTERS])

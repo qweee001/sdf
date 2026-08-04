@@ -1113,24 +1113,6 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "OPENROUTER_API_KEY"):
                 manager._validate_ai_provider("https://api.openai.com/v1")
 
-    def test_venice_provider_requires_venice_key_source(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            key = Fernet.generate_key().decode()
-            config = replace(
-                settings(str(Path(directory) / "memory.db"), key),
-                ai_api_key="venice-key",
-                ai_uses_venice_key=True,
-            )
-            manager = AccountManager(
-                config,
-                MemoryStore(config.memory_db_path, ttl_hours=24),
-                SecretBox(key),
-            )
-
-            manager._validate_ai_provider("https://api.venice.ai/api/v1")
-            with self.assertRaisesRegex(ValueError, "VENICE_API_KEY"):
-                manager._validate_ai_provider("https://api.openai.com/v1")
-
     def test_media_settings_require_railway_providers_and_jobs_are_redacted(
         self,
     ) -> None:

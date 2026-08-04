@@ -57,11 +57,11 @@ class MaxAccountsSettingsTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             self._environment(
+                OPENROUTER_API_KEY="test-openrouter-key",
                 MEDIA_IMAGE_MODEL="vendor/image-model",
                 MEDIA_TTS_MODEL="vendor/tts-model",
                 MEDIA_VIDEO_MODEL="vendor/video-model",
                 MEDIA_MODERATION_MODEL="vendor/review-model",
-                **{"OPENROUTER_API_KEY": "test-openrouter-key"},
             ),
             clear=True,
         ):
@@ -80,62 +80,6 @@ class MaxAccountsSettingsTests(unittest.TestCase):
         self.assertEqual(
             settings.media_moderation_model,
             "vendor/review-model",
-        )
-
-    def test_venice_key_can_power_the_text_provider_without_reusing_openrouter(self) -> None:
-        with patch.dict(
-            os.environ,
-            self._environment(
-                AI_BASE_URL="https://api.venice.ai/api/v1",
-                AI_MODEL="venice-uncensored-1-2",
-                **{"VENICE_API_KEY": "test-venice-key"},
-            ),
-            clear=True,
-        ):
-            settings = load_settings()
-
-        self.assertEqual(settings.ai_api_key, "test-venice-key")
-        self.assertFalse(settings.ai_uses_openrouter_key)
-        self.assertEqual(settings.ai_base_url, "https://api.venice.ai/api/v1")
-        self.assertEqual(settings.ai_model, "venice-uncensored-1-2")
-        self.assertTrue(settings.ai_uses_venice_key)
-
-    def test_unmatched_named_provider_key_is_not_forwarded_to_generic_host(self) -> None:
-        with patch.dict(
-            os.environ,
-            self._environment(
-                AI_BASE_URL="https://api.example.com/v1",
-                **{"VENICE_API_KEY": "test-venice-key"},
-            ),
-            clear=True,
-        ):
-            settings = load_settings()
-
-        self.assertEqual(settings.ai_api_key, "")
-        self.assertFalse(settings.ai_uses_venice_key)
-        self.assertFalse(settings.ai_uses_openrouter_key)
-
-    def test_venice_text_key_can_coexist_with_openrouter_media_key(self) -> None:
-        with patch.dict(
-            os.environ,
-            self._environment(
-                AI_BASE_URL="https://api.venice.ai/api/v1",
-                AI_MODEL="venice-uncensored-1-2",
-                **{
-                    "OPENROUTER_API_KEY": "test-openrouter-key",
-                    "VENICE_API_KEY": "test-venice-key",
-                },
-            ),
-            clear=True,
-        ):
-            settings = load_settings()
-
-        self.assertEqual(settings.ai_api_key, "test-venice-key")
-        self.assertTrue(settings.ai_uses_venice_key)
-        self.assertFalse(settings.ai_uses_openrouter_key)
-        self.assertEqual(
-            settings.openai_media_api_key,
-            "test-openrouter-key",
         )
 
 

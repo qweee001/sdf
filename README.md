@@ -64,11 +64,6 @@ OPENROUTER_API_KEY=
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 AI_MODEL=x-ai/grok-4.20
 
-# 可選：文字模型改用 Venice Uncensored；啟用時把 AI_BASE_URL／AI_MODEL 一併改成下列值
-VENICE_API_KEY=
-# AI_BASE_URL=https://api.venice.ai/api/v1
-# AI_MODEL=venice-uncensored-1-2
-
 # 一次性既有帳號遷移；平常保持 false
 MIGRATE_EXISTING_ACCOUNTS_TO_GROK_ADULT=false
 
@@ -172,11 +167,6 @@ Session String 與 API Key 都不會由任何 GET API、HTML、狀態或日誌�
 當 `OPENROUTER_API_KEY` 已設定時，系統只允許把該 Key 傳往
 `https://openrouter.ai/api/v1`，避免誤把 OpenRouter 憑證送到其他供應商。
 
-若文字模型改用 Venice，請設定 `VENICE_API_KEY`、
-`AI_BASE_URL=https://api.venice.ai/api/v1` 與
-`AI_MODEL=venice-uncensored-1-2`。Venice 文字和 OpenRouter 媒體 Key 可同時存在；
-系統依文字 Base URL 選擇正確金鑰，且不把具名供應商金鑰送往其他 host。
-
 預設文字模型是 `x-ai/grok-4.20`，適合嚴格遵循角色與輸出規則的長對話；若偏好
 更高品質可在帳號設定改成 `x-ai/grok-4.5`，也可使用
 `x-ai/grok-4.3`。這些是本專案依模型能力做的配置建議，並非供應商官方宣稱
@@ -194,12 +184,6 @@ Session String 與 API Key 都不會由任何 GET API、HTML、狀態或日誌�
 
 選擇 `restricted`、`general` 或 `lenient`，同時代表管理員確認該帳號的允許群組
 只限 18+；`strict` 不做此確認。
-
-當帳號同時使用 Venice Uncensored (`venice-uncensored-1-2` 或
-`venice-uncensored-role-play`) 與 `lenient` 時，第二次模型語意審查會停用，並要求
-Venice 不注入供應商預設 system prompt，以減少成年自願純文字被一般模型審查誤擋。
-產生後與送出前仍保留固定硬底線、帳號自訂屏蔽詞／主題及 deterministic 詞彙檢查。
-其他 provider、其他成人模式、以及所有圖片、語音、影片仍使用既有完整審查流程。
 
 四級都只套用 Telegram 純文字，圖片、語音與影片不隨等級放寬；也都固定攔截
 未成年人或年齡不符、非自願、拒絕或撤回同意、脅迫或失去行為能力、剝削或人口

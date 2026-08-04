@@ -109,8 +109,8 @@ class AccountWorker:
         api_key = settings.ai_api_key
         if not api_key:
             raise ValueError(
-                f"Account {account.id} requires global OPENROUTER_API_KEY, "
-                "VENICE_API_KEY, or AI_API_KEY"
+                f"Account {account.id} requires global OPENROUTER_API_KEY or "
+                "AI_API_KEY"
             )
         provider_host = (
             urlparse(account.ai_base_url).hostname or ""
@@ -122,13 +122,6 @@ class AccountWorker:
         ):
             raise ValueError(
                 "OPENROUTER_API_KEY cannot be sent to a non-OpenRouter host"
-            )
-        if (
-            settings.ai_uses_venice_key
-            and provider_host != "api.venice.ai"
-        ):
-            raise ValueError(
-                "VENICE_API_KEY cannot be sent to a non-Venice host"
             )
         self.client = TelegramClient(
             StringSession(session),
@@ -429,23 +422,6 @@ class AccountWorker:
         host = (urlparse(self.account.ai_base_url).hostname or "").lower()
         return host == "openrouter.ai" or host.endswith(".openrouter.ai")
 
-    def _uses_venice(self) -> bool:
-        host = (urlparse(self.account.ai_base_url).hostname or "").lower()
-        return host == "api.venice.ai"
-
-    def _uses_venice_uncensored(self) -> bool:
-        return (
-            self._uses_venice()
-            and self.account.ai_model == "venice-uncensored-1-2"
-        )
-
-    def _skip_lenient_model_audit(self, *, adult_text_context: bool) -> bool:
-        return (
-            adult_text_context
-            and self._uses_venice_uncensored()
-            and getattr(self.account, "adult_text_mode", "") == "lenient"
-        )
-
     async def _completion(
         self,
         messages: list[dict[str, str]],
@@ -465,12 +441,6 @@ class AccountWorker:
                         for model in OPENROUTER_TEXT_FALLBACK_MODELS
                         if model != self.account.ai_model
                     ]
-                }
-            elif self._uses_venice():
-                request["extra_body"] = {
-                    "venice_parameters": {
-                        "include_venice_system_prompt": False,
-                    }
                 }
             result = await self.ai.chat.completions.create(**request)
             content = self._completion_content(result)
@@ -510,10 +480,6 @@ class AccountWorker:
         adult_text_context: bool = True,
         safety_context: str = "",
     ) -> bool:
-        if self._skip_lenient_model_audit(
-            adult_text_context=adult_text_context,
-        ):
-            return True
         stored_mode = getattr(self.account, "adult_text_mode", "")
         configured_adult_text_mode = (
             clean_adult_text_mode(stored_mode)
