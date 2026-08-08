@@ -121,6 +121,33 @@ DASHBOARD_HTML = """<!doctype html>
       background: rgba(26, 29, 23, .96);
       box-shadow: 0 24px 80px rgba(0, 0, 0, .3);
     }
+    .login .field input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(184, 244, 109, .14);
+    }
+    .login .btn.primary { width: 100%; margin-top: 4px; }
+    .login .password-wrap { position: relative; display: block; }
+    .login .password-wrap input { padding-right: 42px; }
+    .login .password-toggle {
+      position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+      background: none; border: none; color: var(--muted);
+      cursor: pointer; font-size: 15px; padding: 4px; line-height: 1;
+    }
+    .login .password-toggle:hover { color: var(--accent); }
+    .login .btn .spinner {
+      display: none; width: 14px; height: 14px;
+      border: 2px solid rgba(23, 32, 13, .3); border-top-color: #17200d;
+      border-radius: 50%; animation: spin .7s linear infinite;
+      vertical-align: -2px; margin-right: 6px;
+    }
+    .login .btn.loading .spinner { display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .login .notice.error { animation: shake .4s; }
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      25% { transform: translateX(-4px); }
+      75% { transform: translateX(4px); }
+    }
     .eyebrow {
       color: var(--accent);
       font-size: 12px;
@@ -595,8 +622,13 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="eyebrow">Private access</div>
     <h1>多帳號控制台</h1>
     <label class="field full">管理員帳號<input id="loginUsername" autocomplete="username" value="admin"></label>
-    <label class="field full">管理員密碼<input id="loginPassword" type="password" autocomplete="current-password"></label>
-    <button id="loginButton" class="btn primary">登入控制台</button>
+    <label class="field full">管理員密碼
+      <span class="password-wrap">
+        <input id="loginPassword" type="password" autocomplete="current-password">
+        <button type="button" class="password-toggle" id="loginPasswordToggle" aria-label="顯示密碼">👁</button>
+      </span>
+    </label>
+    <button id="loginButton" class="btn primary"><span class="spinner"></span>登入控制台</button>
     <div id="loginNotice" class="notice"></div>
   </section>
 
@@ -2205,12 +2237,21 @@ async function refreshPrivateIndicators() {
 async function runButton(button, operation) {
   const oldDisabled = button.disabled;
   button.disabled = true;
+  button.classList.add("loading");
   try {
     return await operation();
   } finally {
     button.disabled = oldDisabled;
+    button.classList.remove("loading");
   }
 }
+
+$("loginPasswordToggle").addEventListener("click", () => {
+  const input = $("loginPassword");
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  $("loginPasswordToggle").textContent = show ? "🙈" : "👁";
+});
 
 $("loginButton").addEventListener("click", async () => {
   setNotice("loginNotice", "");
