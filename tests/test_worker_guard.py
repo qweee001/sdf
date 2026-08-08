@@ -493,7 +493,7 @@ class WorkerGuardTests(unittest.TestCase):
                 "strict": (0, 0, 0),
                 "restricted": (1, 1, 0),
                 "general": (2, 2, 1),
-                "lenient": (3, 3, 2),
+                "lenient": (3, 3, 5),
             }
             for mode, thresholds in expected.items():
                 worker = self.make_worker(
@@ -552,7 +552,7 @@ class WorkerGuardTests(unittest.TestCase):
                 "strict": (0, 0, 0, 0, "不得延展成人情境"),
                 "restricted": (1, 1, 1, 0, "只被動簡短承接"),
                 "general": (2, 2, 2, 1, "最多延展一步"),
-                "lenient": (3, 3, 3, 2, "最多自然延展兩步"),
+                "lenient": (3, 3, 3, 5, "最多自然延展五步"),
             }
             for mode, thresholds in expected.items():
                 worker = self.make_worker(

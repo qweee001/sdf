@@ -280,7 +280,7 @@ def generate_persona(
         )
     else:
         adult_options = tuple(
-            f"成人純文字策略：寬鬆；{item}；較高細節，依既有上下文最多自然延展兩步；{common_floor}"
+            f"成人純文字策略：寬鬆；{item}；較高細節，依既有上下文最多自然延展五步；{common_floor}"
             for item in _ADULT_STYLES
         )
     archetypes = _GROUP_ARCHETYPES_BY_STAGE[stage]

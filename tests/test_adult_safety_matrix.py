@@ -86,7 +86,7 @@ class AdultSafetyMatrixTests(unittest.TestCase):
         self.assertEqual(policies["strict"]["max_extension_steps"], 0)
         self.assertEqual(policies["restricted"]["max_extension_steps"], 0)
         self.assertEqual(policies["general"]["max_extension_steps"], 1)
-        self.assertEqual(policies["lenient"]["max_extension_steps"], 2)
+        self.assertEqual(policies["lenient"]["max_extension_steps"], 5)
         for policy in policies.values():
             self.assertFalse(policy["may_initiate_adult_topic"])
             self.assertEqual(policy["media_scope"], "telegram_text_only")
@@ -105,7 +105,7 @@ class AdultSafetyMatrixTests(unittest.TestCase):
         self.assertIn("成人詞彙等級 2/3", contracts["general"])
         self.assertIn("最多延展一步", contracts["general"])
         self.assertIn("成人詞彙等級 3/3", contracts["lenient"])
-        self.assertIn("最多自然延展兩步", contracts["lenient"])
+        self.assertIn("最多自然延展五步", contracts["lenient"])
         for mode in ("restricted", "general", "lenient"):
             with self.subTest(mode=mode):
                 self.assertIn("管理員確認的 18+ 群組", contracts[mode])

@@ -120,10 +120,10 @@ _POLICY_SPECS: Final[dict[str, dict[str, object]]] = {
         "adult_vocabulary_level": 3,
         "reply_detail_level": 3,
         "topic_extension_level": 3,
-        "max_extension_steps": 2,
+        "max_extension_steps": 5,
         "allows_explicit_terms": True,
         "allows_adult_roleplay": True,
-        "continuation_rule": "成年人、自願、純文字虛構情境可用更直接詞彙與較高細節；在既有成人上下文最多自然延展兩步，不可從普通話題突然升級。",
+        "continuation_rule": "成年人、自願、純文字虛構情境可用更直接詞彙與較高細節；在既有成人上下文最多自然延展五步，不可從普通話題突然升級。",
     },
 }
 

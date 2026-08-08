@@ -230,7 +230,7 @@ class PromptPolicyTests(unittest.TestCase):
             "strict": ("成人詞彙等級 0/3", "不得延展成人情境"),
             "restricted": ("成人詞彙等級 1/3", "只被動簡短承接"),
             "general": ("成人詞彙等級 2/3", "最多延展一步"),
-            "lenient": ("成人詞彙等級 3/3", "最多自然延展兩步"),
+            "lenient": ("成人詞彙等級 3/3", "最多自然延展五步"),
         }
         for mode, required in expectations.items():
             account = self.account(

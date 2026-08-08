@@ -92,7 +92,7 @@ class PersonaGeneratorTests(unittest.TestCase):
             "strict": ("嚴格", "不得延展成人情境"),
             "restricted": ("限制", "只被動簡短承接"),
             "general": ("一般", "最多延展一步"),
-            "lenient": ("寬鬆", "最多自然延展兩步"),
+            "lenient": ("寬鬆", "最多自然延展五步"),
         }
         for mode, required in markers.items():
             with self.subTest(mode=mode):
@@ -189,7 +189,7 @@ class PersonaGeneratorTests(unittest.TestCase):
                 elif mode == "general":
                     self.assertIn("最多延展一步", style)
                 else:
-                    self.assertIn("最多自然延展兩步", style)
+                    self.assertIn("最多自然延展五步", style)
 
     def test_random_profile_respects_selected_gender_and_description(self) -> None:
         for gender, marker in (
