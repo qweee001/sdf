@@ -917,6 +917,49 @@ class AccountManager:
         await self.stop_account(account_id, drain_messages=True)
         return await self.account_status(account_id)
 
+    async def relogin_account(
+        self,
+        account_id: str,
+        payload: dict[str, Any],
+        owner_id: str,
+    ) -> dict[str, object]:
+        """重新登入：把新的 Telegram session 寫回既有帳號記錄（不新建）。"""
+        current = await self._require_account(account_id)
+        auth_id = clean_text(
+            payload.get("telegram_auth_id"),
+            "telegram_auth_id",
+            maximum=200,
+        )
+        if not auth_id:
+            raise ValueError("請先完成手機驗證登入")
+        verified = await self.telegram_login.claim_authorized(owner_id, auth_id)
+        try:
+            async with self._account_operation_locks[account_id]:
+                await self.store.update_account(
+                    current.with_updates(
+                        session_ciphertext=verified.session_ciphertext,
+                        session_fingerprint=verified.session_fingerprint,
+                        telegram_user_id=verified.telegram_user_id,
+                        telegram_name=verified.telegram_name,
+                        enabled=True,
+                    ),
+                    expected_revision=current.revision,
+                    changed_fields=["session", "enabled"],
+                )
+        except RuntimeError as exc:
+            await self.telegram_login.release_claim(owner_id, auth_id)
+            raise AccountConflictError(str(exc)) from exc
+        except Exception:
+            await self.telegram_login.release_claim(owner_id, auth_id)
+            raise
+        await asyncio.shield(
+            self.telegram_login.complete(owner_id, auth_id)
+        )
+        await self._refresh_managed_ids()
+        await self.stop_account(account_id, drain_messages=True)
+        await self.start_account(account_id)
+        return await self.account_status(account_id)
+
     async def set_enabled(
         self,
         account_id: str,

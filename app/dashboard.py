@@ -784,6 +784,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <button id="controlButton" class="btn primary">切換啟用狀態</button>
                 <button id="restartButton" class="btn">重新啟動</button>
                 <button id="modelTestButton" class="btn">測試模型</button>
+                <button id="reloginAccountButton" class="btn hidden">重新登入 Telegram</button>
                 <button id="logoutAccountButton" class="btn danger">退出 Telegram</button>
               </div>
             </div>
@@ -1053,6 +1054,7 @@ let groupsDirty = false;
 let groupSelectionBeforeAllGroups = null;
 let telegramAuthId = "";
 let telegramAuthState = "idle";
+let reloginAccountId = ""; // 非空 = 目前手機驗證流程是「重新登入」既有帳號
 const conversationGroupByAccount = new Map();
 const manualGroupByAccount = new Map();
 const manualMessageDraftByAccount = new Map();
@@ -2130,6 +2132,10 @@ function renderSelected(account) {
   $("selectedLabel").textContent = account.label;
   $("selectedIdentity").textContent = `${account.telegram_name || "Telegram 帳號"} · ${roleName(account)} · ID ${account.telegram_user_id}`;
   $("controlButton").textContent = account.enabled ? "停用帳號" : "啟用帳號";
+  $("reloginAccountButton").classList.toggle(
+    "hidden",
+    Boolean(account.session_configured),
+  );
   $("metricConnection").textContent = account.connected ? "已連線" : "未連線";
   $("metricMessages").textContent = Number(account.message_count || 0).toLocaleString();
   $("metricReplies").textContent = Number(account.replies_sent || 0).toLocaleString();
@@ -2403,16 +2409,18 @@ async function cancelTelegramAuth() {
   }
   telegramAuthId = "";
   telegramAuthState = "idle";
+  reloginAccountId = "";
   $("addPhone").value = "";
   $("addCode").value = "";
   $("addTwoFactorPassword").value = "";
   updateAddLoginMode();
   return true;
-}
+  }
 
-function resetAddForm() {
+  function resetAddForm() {
   telegramAuthId = "";
   telegramAuthState = "idle";
+  reloginAccountId = "";
   $("addForm").reset();
   $("addTaskName").value = "一般群聊互動";
   $("addAdultTextMode").value = "strict";
@@ -2515,6 +2523,23 @@ $("addForm").addEventListener("submit", async (event) => {
       }
 
       if (telegramAuthState === "authorized") {
+        if (reloginAccountId) {
+          setNotice("addNotice", "登入成功，正在寫回帳號並啟動…", "warning");
+          const accountId = reloginAccountId;
+          reloginAccountId = "";
+          const updated = await api(`/api/accounts/${encodeURIComponent(accountId)}/relogin`, {
+            method: "POST",
+            body: JSON.stringify({telegram_auth_id: telegramAuthId}),
+          });
+          telegramAuthId = "";
+          telegramAuthState = "idle";
+          resetAddForm();
+          $("addPanel").classList.add("hidden");
+          selectedAccountId = accountId;
+          await refresh();
+          setNotice("accountNotice", "帳號已重新登入並啟動", "success");
+          return;
+        }
         setNotice("addNotice", "登入成功，正在加密保存並啟動帳號…", "warning");
         payload.telegram_auth_id = telegramAuthId;
         await finishNewAccount(payload);
@@ -2653,6 +2678,16 @@ $("restartButton").addEventListener("click", async () => {
       setNotice("accountNotice", error.message, "error");
     }
   });
+});
+
+$("reloginAccountButton").addEventListener("click", async () => {
+  const account = selectedAccount();
+  if (!account || account.session_configured) return;
+  reloginAccountId = account.id;
+  resetAddForm();
+  $("addPanel").classList.remove("hidden");
+  setNotice("addNotice", `重新登入「${account.label}」：請輸入手機號碼，驗證碼會由 Telegram 傳送。`, "warning");
+  $("addPhone").focus();
 });
 
 $("logoutAccountButton").addEventListener("click", async () => {
@@ -3808,6 +3843,23 @@ class DashboardServer:
             return JSONResponse(
                 self._without_api_key_fields(
                     await self.manager.logout_account(account_id, revision)
+                )
+            )
+
+        @web.post("/api/accounts/{account_id}/relogin")
+        async def relogin_account(account_id: str, request: Request) -> JSONResponse:
+            session, blocked = self._require_action(request)
+            if blocked is not None or session is None:
+                return blocked  # type: ignore[return-value]
+            payload = await self._read_payload(request)
+            self._reject_api_key_fields(payload)
+            return JSONResponse(
+                self._without_api_key_fields(
+                    await self.manager.relogin_account(
+                        account_id,
+                        payload,
+                        session.session_id,
+                    )
                 )
             )
 
