@@ -1362,8 +1362,8 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("manual-send-button", DASHBOARD_HTML)
         self.assertIn('data-panel-title="帳號概覽"', DASHBOARD_HTML)
         self.assertEqual(DASHBOARD_HTML.count("data-collapsible"), 1)
-        self.assertEqual(DASHBOARD_HTML.count('data-expanded="false"'), 1)
-        self.assertNotIn('data-expanded="true"', DASHBOARD_HTML)
+        self.assertEqual(DASHBOARD_HTML.count('data-expanded="true"'), 1)
+        self.assertNotIn('data-expanded="false"', DASHBOARD_HTML)
         self.assertGreaterEqual(DASHBOARD_HTML.count('class="account-section'), 6)
         for element_id in (
             "settingsForm",

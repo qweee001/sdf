@@ -191,7 +191,7 @@ DASHBOARD_HTML = """<!doctype html>
     .summary-item strong { display: block; margin-top: 4px; font-size: 21px; }
     .workspace {
       display: grid;
-      grid-template-columns: 280px minmax(0, 1fr);
+      grid-template-columns: 340px minmax(0, 1fr);
       gap: 14px;
       align-items: start;
     }
@@ -230,16 +230,17 @@ DASHBOARD_HTML = """<!doctype html>
     }
     .manual-send-row {
       display: grid;
-      grid-template-columns: minmax(0, .85fr) minmax(0, 1.4fr) 38px;
+      grid-template-columns: minmax(0, 1fr) 38px;
       gap: 6px;
       align-items: center;
       padding: 4px;
     }
-    .manual-send-row select, .manual-send-row textarea {
+    .manual-send-row select {
+      grid-column: 1 / -1;
       width: 100%;
       min-width: 0;
-      height: 38px;
-      padding: 8px 9px;
+      height: 34px;
+      padding: 7px 9px;
       color: #fff;
       border: 1px solid var(--line);
       border-radius: 9px;
@@ -247,8 +248,17 @@ DASHBOARD_HTML = """<!doctype html>
       background: #0f110d;
     }
     .manual-send-row textarea {
-      min-height: 38px;
-      max-height: 38px;
+      width: 100%;
+      min-width: 0;
+      height: 34px;
+      min-height: 34px;
+      max-height: 34px;
+      padding: 7px 9px;
+      color: #fff;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      outline: none;
+      background: #0f110d;
       resize: none;
       line-height: 1.35;
       overflow-y: auto;
@@ -762,7 +772,7 @@ DASHBOARD_HTML = """<!doctype html>
         <article id="emptyPanel" class="panel empty">請從左側選擇帳號，或新增第一個帳號。</article>
 
         <div id="accountPanels" class="hidden">
-          <article class="panel collapsible-panel account-overview-accordion" data-collapsible data-panel-title="帳號概覽" data-expanded="false">
+          <article class="panel collapsible-panel account-overview-accordion" data-collapsible data-panel-title="帳號概覽" data-expanded="true">
             <section class="account-section account-section-primary">
             <div class="account-head">
               <div>
