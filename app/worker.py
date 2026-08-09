@@ -430,6 +430,10 @@ class AccountWorker:
             request: dict[str, object] = {
                 "model": self.account.ai_model,
                 "messages": messages,
+                # 提高采样随机性：默认 temperature 偏低导致模板化/复读，
+                # 0.9 让回复更多样、更少"机器人感"（配合提示词防重复约束）。
+                "temperature": 0.9,
+                "top_p": 0.95,
             }
             if (
                 self._uses_openrouter()
