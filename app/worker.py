@@ -1628,7 +1628,14 @@ class AccountWorker:
                             list(history)
                         ),
                     )
-                reply_text, sent = await self._send_verified(reply, event.reply)
+                reply_text, sent = await self._send_verified(
+                    reply,
+                    lambda text, **kwargs: self.client.send_message(
+                        group_id,
+                        text,
+                        **kwargs,
+                    ),
+                )
                 self.replies_sent += 1
                 await self._record_group_activity(group_id)
                 try:
