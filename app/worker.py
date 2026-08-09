@@ -11,6 +11,7 @@ import random
 import re
 import time
 import unicodedata
+import urllib.request
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -723,6 +724,9 @@ class AccountWorker:
         *,
         safety_context: str = "",
     ) -> SafeReply:
+        weather_note = await self._weather_note()
+        if weather_note:
+            user_prompt = f"{user_prompt}\n\n{weather_note}"
         retry_instruction = (
             "\n\n上一個草稿未通過固定角色或帳號內容政策。請產生完全不同的回覆；"
             "只能用自然、口語的一般群組成員口吻，不得像助理、客服、管理員、"
@@ -785,6 +789,32 @@ class AccountWorker:
         raise BlockedReplyError(
             "AI reply did not pass the fixed-role content policy"
         )
+
+    _weather_cache: tuple[float, str] | None = None
+
+    async def _weather_note(self) -> str:
+        """桃園即時天氣（30 分鐘緩存）。失敗靜默返回空字串，不阻塞回覆。"""
+        now = time.time()
+        if self._weather_cache is not None and now - self._weather_cache[0] < 1800:
+            return self._weather_cache[1]
+        try:
+            req = urllib.request.Request(
+                "https://wttr.in/Taoyuan?format=j1",
+                headers={"User-Agent": "curl/8.0"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            cur = (data.get("current_condition") or [{}])[0]
+            temp = cur.get("temp_C", "?")
+            desc = (cur.get("lang_zh") or [{}])[0].get("value", "") or (
+                (cur.get("weatherDesc") or [{}])[0].get("value", "")
+            )
+            rain = cur.get("precipMM", "0")
+            note = f"（現實天氣參考：桃園現在 {desc} {temp}°C，降雨 {rain}mm。群友談天氣時依此回應，不要無腦附和。）"
+            self._weather_cache = (now, note)
+            return note
+        except Exception:
+            return ""
 
     def _verified_text(self, reply: SafeReply) -> str:
         if reply.policy_digest != self.content_guard.policy_digest:
