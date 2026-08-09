@@ -1279,12 +1279,14 @@ class AccountWorker:
         trailing = profile.trailing_messages
         trailing_people = profile.trailing_participants
 
-        if recent >= 12 or recent_people >= 6 or trailing >= 30:
+        if recent >= 12 or recent_people >= 6:
+            # very_busy 只由 5min 窗口判定（recent），trailing 只提升到 busy，
+            # 避免 20min 恒饱和的群永远锁死 very_busy 导致账号隐身。
             mode, reply_factor, idle_factor, cooldown_factor = (
                 "very_busy",
-                0.20,
-                2.00,
-                2.00,
+                0.35,
+                1.40,
+                1.60,
             )
         elif recent >= 6 or recent_people >= 3 or trailing >= 15:
             mode, reply_factor, idle_factor, cooldown_factor = (

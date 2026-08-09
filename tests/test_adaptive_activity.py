@@ -34,9 +34,19 @@ class AdaptivePolicyTests(unittest.TestCase):
             self.profile(14, 7, 35, 10),
         )
         self.assertEqual(policy.mode, "very_busy")
-        self.assertAlmostEqual(policy.reply_probability, 0.16)
-        self.assertEqual(policy.proactive_idle_multiplier, 2.0)
-        self.assertEqual(policy.proactive_cooldown_multiplier, 2.0)
+        self.assertAlmostEqual(policy.reply_probability, 0.28)
+        self.assertEqual(policy.proactive_idle_multiplier, 1.4)
+        self.assertEqual(policy.proactive_cooldown_multiplier, 1.6)
+
+    def test_trailing_saturation_alone_no_longer_forces_very_busy(self) -> None:
+        # 5min 窗口冷清但 20min 饱和 → 只升到 busy，不锁死 very_busy（防隐身）
+        policy = AccountWorker._activity_policy_from_profile(
+            0.80,
+            self.profile(2, 2, 45, 15),
+        )
+        self.assertEqual(policy.mode, "busy")
+        self.assertAlmostEqual(policy.reply_probability, 0.36)
+        self.assertEqual(policy.proactive_idle_multiplier, 1.5)
 
     def test_quiet_group_increases_replies_and_proactive_frequency(self) -> None:
         policy = AccountWorker._activity_policy_from_profile(
@@ -62,7 +72,7 @@ class AdaptivePolicyTests(unittest.TestCase):
             managed_account_count=4,
         )
         combined = 1.0 - (1.0 - policy.reply_probability) ** 4
-        self.assertAlmostEqual(combined, 0.20)
+        self.assertAlmostEqual(combined, 0.35)
 
     def test_runtime_uses_only_accounts_active_in_the_group(self) -> None:
         async def scenario() -> None:
@@ -82,7 +92,7 @@ class AdaptivePolicyTests(unittest.TestCase):
             worker.managed_ids_provider = lambda: frozenset(range(20))
             policy = await worker._adaptive_activity_policy(-1001, now=100)
             combined = 1.0 - (1.0 - policy.reply_probability) ** 2
-            self.assertAlmostEqual(combined, 0.20)
+            self.assertAlmostEqual(combined, 0.35)
             worker.store.group_activity_profile.assert_awaited_once_with(
                 "alpha",
                 -1001,
