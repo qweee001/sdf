@@ -17,6 +17,7 @@ from telethon.utils import get_display_name
 
 from .account import (
     AccountRecord,
+    clean_account_state,
     clean_bool,
     clean_float,
     clean_group_ids,
@@ -723,6 +724,9 @@ class AccountManager:
                 "ai_model",
                 maximum=200,
                 required=True,
+            ),
+            account_state=clean_account_state(
+                payload.get("account_state", current.account_state)
             ),
             ai_api_key_ciphertext="",
             group_reply_probability=clean_float(

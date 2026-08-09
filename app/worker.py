@@ -792,6 +792,55 @@ class AccountWorker:
 
     _weather_cache: tuple[float, str] | None = None
 
+    async def _update_account_state(self, peer_name: str, message: str) -> None:
+        """回复后更新账号人格状态：情绪（mood）+ 关系记忆（memory）。
+
+        情绪状态机：正向互动（讚美/感謝/熱情）→ 情緒上升；負向（抱怨/冷淡/爭執）→ 下降。
+        記憶：記錄最近互動對象與話題，供後續回覆延續。
+        失敗靜默（不阻塞回覆流程）。
+        """
+        try:
+            state: dict[str, object] = {}
+            if self.account.account_state:
+                try:
+                    parsed = json.loads(self.account.account_state)
+                    if isinstance(parsed, dict):
+                        state = parsed
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    state = {}
+            mood = state.get("mood") or {}
+            if not isinstance(mood, dict):
+                mood = {}
+            current = int(mood.get("level", 0))
+            positive = any(
+                token in message for token in ("讚", "謝", "好棒", "喜歡", "愛", "開心", "哈哈", "笑")
+            )
+            negative = any(
+                token in message for token in ("煩", "氣", "討厭", "無聊", "累", "悶", "哭", "唉")
+            )
+            if positive:
+                current = min(2, current + 1)
+            elif negative:
+                current = max(-2, current - 1)
+            mood["level"] = current
+            mood["label"] = {
+                -2: "低落", -1: "平淡", 0: "平穩", 1: "愉悅", 2: "開心",
+            }.get(current, "平穩")
+            state["mood"] = mood
+            memory = state.get("memory") or {}
+            if not isinstance(memory, dict):
+                memory = {}
+            memory["last_peer"] = peer_name
+            memory["last_topic"] = message[:60]
+            memory["interactions"] = int(memory.get("interactions", 0)) + 1
+            state["memory"] = memory
+            await self.store.update_account_state(self.account.id, state)
+            self.account = self.account.with_updates(account_state=json.dumps(
+                state, ensure_ascii=False, separators=(",", ":")
+            ))
+        except Exception:
+            pass
+
     async def _weather_note(self) -> str:
         """桃園即時天氣（30 分鐘緩存）。失敗靜默返回空字串，不阻塞回覆。"""
         now = time.time()
@@ -1674,6 +1723,7 @@ class AccountWorker:
                 )
                 self.replies_sent += 1
                 await self._record_group_activity(group_id)
+                await self._update_account_state(sender_name, text)
                 try:
                     await self.store.add(
                         self.account.id,

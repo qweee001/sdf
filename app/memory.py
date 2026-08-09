@@ -413,6 +413,11 @@ class MemoryStore:
                 "UPDATE accounts SET adult_text_mode = "
                 "CASE WHEN adult_text_enabled = 1 THEN 'general' ELSE 'strict' END"
             )
+        if "account_state" not in columns:
+            await db.execute(
+                "ALTER TABLE accounts ADD COLUMN "
+                "account_state TEXT NOT NULL DEFAULT ''"
+            )
         valid_modes = tuple(ADULT_TEXT_MODES)
         placeholders = ", ".join("?" for _ in valid_modes)
         await db.execute(
@@ -706,6 +711,7 @@ class MemoryStore:
             media_settings=media_settings,
             adult_text_enabled=bool(row["adult_text_enabled"]),
             adult_text_mode=str(row["adult_text_mode"]),
+            account_state=str(row["account_state"] or ""),
         )
 
     @staticmethod
@@ -765,7 +771,7 @@ class MemoryStore:
                     proactive_max_interval_minutes, max_proactive_per_day,
                     all_groups, group_ids, revision, created_at, updated_at,
                     blocked_terms, blocked_topics, media_settings,
-                    adult_text_enabled, adult_text_mode
+                    adult_text_enabled, adult_text_mode, account_state
                 ) VALUES (
                     {", ".join("?" for _ in self._account_values(record))}
                 )
@@ -837,6 +843,7 @@ class MemoryStore:
             ),
             int(record.adult_text_enabled),
             record.adult_text_mode,
+            record.account_state,
         )
 
     async def update_account(
@@ -865,7 +872,8 @@ class MemoryStore:
                     proactive_max_interval_minutes=?, max_proactive_per_day=?,
                     all_groups=?, group_ids=?, revision=?, created_at=?,
                     updated_at=?, blocked_terms=?, blocked_topics=?,
-                    media_settings=?, adult_text_enabled=?, adult_text_mode=?
+                    media_settings=?, adult_text_enabled=?, adult_text_mode=?,
+                    account_state=?
                 WHERE id=? AND revision=?
                 """,
                 (
@@ -880,6 +888,25 @@ class MemoryStore:
             await self._audit_locked(updated.id, "account_updated", changed_fields)
             await db.commit()
         return updated
+
+    async def update_account_state(
+        self,
+        account_id: str,
+        state: dict[str, object],
+    ) -> None:
+        """持久化账号人格状态（偏好/记忆/情绪），不触发 revision 冲突。"""
+        async with self._lock:
+            db = self._connection()
+            cursor = await db.execute(
+                "UPDATE accounts SET account_state = ?, updated_at = ? WHERE id = ?",
+                (
+                    json.dumps(state, ensure_ascii=False, separators=(",", ":")),
+                    int(time.time()),
+                    account_id,
+                ),
+            )
+            await db.commit()
+            await cursor.close()
 
     async def clear_account_api_keys(self) -> int:
         """Remove legacy per-account provider keys without ever decrypting them."""

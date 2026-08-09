@@ -826,6 +826,10 @@ DASHBOARD_HTML = """<!doctype html>
                 <textarea id="editStyle" maxlength="500"></textarea>
                 <span class="hint">可手動修改；「隨機生成」會先填入完整設定草稿，按儲存後才生效。</span>
               </label>
+              <label class="field full">人格偏好（JSON）
+                <textarea id="editPreferences" maxlength="2000" spellcheck="false" placeholder='{"preferences": {"likes": ["怕冷", "愛吃辣"], "dislikes": ["下雨", "吵鬧"], "opinions": {"天氣": "討厭下雨天"}}}'></textarea>
+                <span class="hint">穩定喜好/立場/觀點，讓回覆有主見。格式：{"preferences": {...}}，可含 likes/dislikes/opinions。</span>
+              </label>
               <label class="field full">任務名稱
                 <input id="editTaskName" required maxlength="120">
               </label>
@@ -1636,6 +1640,7 @@ function fillEditor(account) {
   $("editGender").value = account.gender;
   $("editStage").value = account.stage;
   $("editStyle").value = account.style || "";
+  $("editPreferences").value = account.account_state || "";
   $("editTaskName").value = account.task_name || "";
   $("editTaskInfo").value = account.task_info || "";
   $("editBlockedTerms").value = Array.isArray(account.blocked_terms)
@@ -2552,6 +2557,7 @@ $("settingsForm").addEventListener("submit", async (event) => {
         gender: $("editGender").value,
         stage: $("editStage").value,
         style: $("editStyle").value,
+        account_state: $("editPreferences").value,
         task_name: $("editTaskName").value,
         task_info: $("editTaskInfo").value,
         blocked_terms: parseBlockedTerms($("editBlockedTerms").value),

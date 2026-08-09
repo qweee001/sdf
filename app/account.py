@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from dataclasses import dataclass, field, replace
@@ -58,6 +59,8 @@ class AccountRecord:
     )
     adult_text_enabled: bool | None = None
     adult_text_mode: str = ""
+    # 账号人格状态（JSON）：{"preferences": {...}, "memory": {...}, "mood": {...}}
+    account_state: str = ""
 
     def __post_init__(self) -> None:
         if self.adult_text_mode:
@@ -149,6 +152,22 @@ def clean_text(value: object, name: str, *, maximum: int, required: bool = False
         raise ValueError(f"{name} is required")
     if len(text) > maximum:
         raise ValueError(f"{name} must be at most {maximum} characters")
+    return text
+
+
+def clean_account_state(value: object) -> str:
+    """校验账号人格状态 JSON（偏好/记忆/情绪）。空值允许，非法 JSON 拒绝。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) > 4000:
+        raise ValueError("account_state must be at most 4000 characters")
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("account_state must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("account_state must be a JSON object")
     return text
 
 
