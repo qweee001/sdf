@@ -796,6 +796,8 @@ class AccountWorker:
         """回复后更新账号人格状态：情绪（mood）+ 关系记忆（memory）。
 
         情绪状态机：正向互动（讚美/感謝/熱情）→ 情緒上升；負向（抱怨/冷淡/爭執）→ 下降。
+        情绪衰减：超过 2 小时无互动，情绪向 0 回落（防止永久开心/低落）。
+        关系阶段：按互动次数推进 陌生→認識→熟絡。
         記憶：記錄最近互動對象與話題，供後續回覆延續。
         失敗靜默（不阻塞回覆流程）。
         """
@@ -808,10 +810,18 @@ class AccountWorker:
                         state = parsed
                 except (TypeError, ValueError, json.JSONDecodeError):
                     state = {}
+            now = int(time.time())
             mood = state.get("mood") or {}
             if not isinstance(mood, dict):
                 mood = {}
             current = int(mood.get("level", 0))
+            last_at = int(mood.get("updated_at", 0))
+            # P2 情绪衰减：距上次互动 > 2 小时，情绪向 0 回落
+            if last_at and now - last_at > 2 * 3600:
+                if current > 0:
+                    current = max(0, current - 1)
+                elif current < 0:
+                    current = min(0, current + 1)
             positive = any(
                 token in message for token in ("讚", "謝", "好棒", "喜歡", "愛", "開心", "哈哈", "笑")
             )
@@ -826,13 +836,22 @@ class AccountWorker:
             mood["label"] = {
                 -2: "低落", -1: "平淡", 0: "平穩", 1: "愉悅", 2: "開心",
             }.get(current, "平穩")
+            mood["updated_at"] = now
             state["mood"] = mood
             memory = state.get("memory") or {}
             if not isinstance(memory, dict):
                 memory = {}
             memory["last_peer"] = peer_name
             memory["last_topic"] = message[:60]
-            memory["interactions"] = int(memory.get("interactions", 0)) + 1
+            interactions = int(memory.get("interactions", 0)) + 1
+            memory["interactions"] = interactions
+            # P3 关系阶段：按互动次数推进
+            if interactions >= 20:
+                memory["relationship_stage"] = "熟絡"
+            elif interactions >= 5:
+                memory["relationship_stage"] = "認識"
+            else:
+                memory["relationship_stage"] = "陌生"
             state["memory"] = memory
             await self.store.update_account_state(self.account.id, state)
             self.account = self.account.with_updates(account_state=json.dumps(
