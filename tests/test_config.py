@@ -69,7 +69,10 @@ class MaxAccountsSettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.ai_api_key, "test-openrouter-key")
         self.assertTrue(settings.ai_uses_openrouter_key)
-        self.assertEqual(settings.ai_model, "x-ai/grok-4.20")
+        self.assertEqual(
+            settings.ai_model,
+            "cognitivecomputations/dolphin-mistral-24b-venice-edition",
+        )
         self.assertEqual(
             settings.openai_media_api_key,
             "test-openrouter-key",

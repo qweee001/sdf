@@ -213,8 +213,11 @@ def load_settings() -> Settings:
         legacy_session_string=os.getenv("TG_SESSION_STRING", "").strip(),
         ai_api_key=ai_api_key,
         ai_base_url=ai_base_url,
-        ai_model=os.getenv("AI_MODEL", "x-ai/grok-4.20").strip()
-        or "x-ai/grok-4.20",
+        ai_model=os.getenv(
+            "AI_MODEL",
+            "cognitivecomputations/dolphin-mistral-24b-venice-edition",
+        ).strip()
+        or "cognitivecomputations/dolphin-mistral-24b-venice-edition",
         account_encryption_key=_required("ACCOUNT_ENCRYPTION_KEY"),
         memory_ttl_hours=_integer("MEMORY_TTL_HOURS", 24, 1),
         memory_history_limit=_integer("MEMORY_HISTORY_LIMIT", 20, 1),
