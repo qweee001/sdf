@@ -774,6 +774,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <button id="controlButton" class="btn primary">切換啟用狀態</button>
                 <button id="restartButton" class="btn">重新啟動</button>
                 <button id="modelTestButton" class="btn">測試模型</button>
+                <button id="logoutAccountButton" class="btn danger">退出 Telegram</button>
               </div>
             </div>
             <div class="status-line">
@@ -2644,6 +2645,32 @@ $("restartButton").addEventListener("click", async () => {
   });
 });
 
+$("logoutAccountButton").addEventListener("click", async () => {
+  const account = selectedAccount();
+  if (!account) return;
+  if (!account.session_configured) {
+    setNotice("accountNotice", "此帳號尚未登入 Telegram", "error");
+    return;
+  }
+  if (!window.confirm(`確定要讓「${account.label}」完全退出 Telegram 嗎？\n此操作會清除已保存的登入憑證，之後需要重新以手機號碼或 Session 登入。`)) {
+    return;
+  }
+  const revision = editorRevisionFor(account);
+  await runButton($("logoutAccountButton"), async () => {
+    try {
+      await api(`/api/accounts/${encodeURIComponent(account.id)}/logout`, {
+        method: "POST",
+        body: JSON.stringify({revision}),
+      });
+      formDirty = false;
+      await refresh();
+      setNotice("accountNotice", "帳號已退出 Telegram，登入憑證已清除", "success");
+    } catch (error) {
+      setNotice("accountNotice", error.message, "error");
+    }
+  });
+});
+
 $("randomProfileButton").addEventListener("click", async () => {
   const account = selectedAccount();
   if (!account) return;
@@ -3758,6 +3785,19 @@ class DashboardServer:
             return JSONResponse(
                 self._without_api_key_fields(
                     await self.manager.set_enabled(account_id, enabled, revision)
+                )
+            )
+
+        @web.post("/api/accounts/{account_id}/logout")
+        async def logout_account(account_id: str, request: Request) -> JSONResponse:
+            _, blocked = self._require_action(request)
+            if blocked is not None:
+                return blocked
+            payload = await self._read_payload(request)
+            revision = self._revision(payload)
+            return JSONResponse(
+                self._without_api_key_fields(
+                    await self.manager.logout_account(account_id, revision)
                 )
             )
 

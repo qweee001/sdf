@@ -888,6 +888,35 @@ class AccountManager:
             await self.start_account(account_id)
         return await self.account_status(account_id)
 
+    async def logout_account(
+        self,
+        account_id: str,
+        revision: int,
+    ) -> dict[str, object]:
+        """完全退出：停止 worker 並清除 Telegram session，帳號記錄保留可重新登入。"""
+        revision = clean_int(revision, "revision", minimum=1, maximum=2_000_000_000)
+        current = await self._require_account(account_id)
+        if revision != current.revision:
+            raise AccountConflictError("設定已被其他操作更新，請重新整理")
+        async with self._account_operation_locks[account_id]:
+            try:
+                saved = await self.store.update_account(
+                    current.with_updates(
+                        session_ciphertext="",
+                        session_fingerprint="",
+                        telegram_user_id=0,
+                        telegram_name="",
+                        enabled=False,
+                    ),
+                    expected_revision=current.revision,
+                    changed_fields=["session"],
+                )
+            except RuntimeError as exc:
+                raise AccountConflictError(str(exc)) from exc
+        await self._refresh_managed_ids()
+        await self.stop_account(account_id, drain_messages=True)
+        return await self.account_status(account_id)
+
     async def set_enabled(
         self,
         account_id: str,
