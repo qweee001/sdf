@@ -148,9 +148,6 @@ DASHBOARD_HTML = """<!doctype html>
       25% { transform: translateX(-4px); }
       75% { transform: translateX(4px); }
     }
-    .login-session-hint {
-      margin: 0 0 16px; color: var(--muted); font-size: 14px; line-height: 1.5;
-    }
     .eyebrow {
       color: var(--accent);
       font-size: 12px;
@@ -634,11 +631,6 @@ DASHBOARD_HTML = """<!doctype html>
   <section id="login" class="login hidden">
     <div class="eyebrow">Private access</div>
     <h1>多帳號控制台</h1>
-    <div id="loginSession" class="hidden">
-      <p class="login-session-hint">目前已有管理員登入此瀏覽器。</p>
-      <button id="loginSessionLogout" class="btn primary">退出已登入帳號</button>
-      <div id="loginSessionNotice" class="notice"></div>
-    </div>
     <div id="loginForm">
       <label class="field full">管理員帳號<input id="loginUsername" autocomplete="username" value="admin"></label>
       <label class="field full">管理員密碼
@@ -2278,30 +2270,6 @@ $("loginPasswordToggle").addEventListener("click", () => {
   const show = input.type === "password";
   input.type = show ? "text" : "password";
   $("loginPasswordToggle").textContent = show ? "🙈" : "👁";
-});
-
-function showLoginSession() {
-  $("loginForm").classList.add("hidden");
-  $("loginSession").classList.remove("hidden");
-}
-
-function showLoginForm() {
-  $("loginSession").classList.add("hidden");
-  $("loginForm").classList.remove("hidden");
-}
-
-$("loginSessionLogout").addEventListener("click", async () => {
-  setNotice("loginSessionNotice", "");
-  await runButton($("loginSessionLogout"), async () => {
-    try {
-      await api("/api/logout", {method: "POST", body: "{}"});
-    } finally {
-      csrfToken = "";
-      resetDashboardClientState();
-      showLoginForm();
-      setNotice("loginSessionNotice", "已退出登入。", "success");
-    }
-  });
 });
 
 $("loginButton").addEventListener("click", async () => {

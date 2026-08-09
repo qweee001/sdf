@@ -971,6 +971,10 @@ class AccountManager:
         current = await self._require_account(account_id)
         if revision != current.revision:
             raise AccountConflictError("設定已被其他操作更新，請重新整理")
+        if enabled and not current.session_ciphertext:
+            raise ValueError(
+                "此帳號尚未登入 Telegram，請先點「重新登入 Telegram」完成登入再啟用"
+            )
         async with self._account_operation_locks[account_id]:
             try:
                 saved = await self.store.update_account(
