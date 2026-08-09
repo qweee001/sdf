@@ -2651,8 +2651,8 @@ $("restartButton").addEventListener("click", async () => {
 $("reloginAccountButton").addEventListener("click", async () => {
   const account = selectedAccount();
   if (!account || account.session_configured) return;
-  reloginAccountId = account.id;
   resetAddForm();
+  reloginAccountId = account.id;
   $("addPanel").classList.remove("hidden");
   setNotice("addNotice", `重新登入「${account.label}」：請輸入手機號碼，驗證碼會由 Telegram 傳送。`, "warning");
   $("addPhone").focus();
