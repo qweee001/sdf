@@ -134,7 +134,8 @@ class AccountWorker:
         self.ai = AsyncOpenAI(
             api_key=api_key,
             base_url=account.ai_base_url,
-            timeout=45,
+            # 本地 TAIDE 长 prompt（8192 ctx）推理可达 60s+，45s 会超时
+            timeout=120,
             max_retries=2,
         )
         # 露骨场景路由：主 client 用账号 base_url（如本地 TAIDE），
