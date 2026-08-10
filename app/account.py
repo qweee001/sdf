@@ -125,6 +125,7 @@ class AccountRecord:
             "media": self.media_settings.public_dict(),
             "adult_text_enabled": self.adult_text_enabled,
             "adult_text_mode": self.adult_text_mode,
+            "account_state": self.account_state,
             "revision": self.revision,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
