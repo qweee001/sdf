@@ -776,16 +776,18 @@ class AccountWorker:
             prompt = user_prompt if attempt == 0 else user_prompt + retry_instruction
             # 露骨场景路由：user_prompt 含露骨性话题关键词 → 走 Venice 无审查模型
             explicit = self._is_explicit_prompt(prompt)
-            candidate = self._compact_auto_reply_layout(
-                await self._completion(
-                    [
-                        {
-                            "role": "system",
-                            "content": system_prompt(self.account),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    explicit=explicit,
+            candidate = self._trim_reply_length(
+                self._compact_auto_reply_layout(
+                    await self._completion(
+                        [
+                            {
+                                "role": "system",
+                                "content": system_prompt(self.account),
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        explicit=explicit,
+                    )
                 )
             )
             lexical = self.content_guard.screen(candidate)
@@ -968,6 +970,25 @@ class AccountWorker:
             compacted,
         )
         return compacted.strip()
+
+    # 群聊回复硬性长度上限：TAIDE 无视提示词软约束（1-3 句/4-18 字），
+    # 超长回复观感差，这里截断到最后一个完整句子边界。
+    MAX_REPLY_CHARS = 60
+
+    @classmethod
+    def _trim_reply_length(cls, text: str) -> str:
+        text = text.strip()
+        if len(text) <= cls.MAX_REPLY_CHARS:
+            return text
+        # 找最后一个句子边界（。！？…），保留其后的完整句
+        cut = -1
+        for i in range(cls.MAX_REPLY_CHARS - 1, -1, -1):
+            if text[i] in "。！？…":
+                cut = i + 1
+                break
+        if cut >= 20:  # 至少保留 20 字，避免截得太碎
+            return text[:cut]
+        return text[: cls.MAX_REPLY_CHARS]
 
     def _reply_history_limit(self) -> int:
         configured = int(getattr(self.settings, "memory_history_limit", 20))
