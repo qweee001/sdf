@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, field, replace
@@ -274,21 +275,20 @@ def clean_string_list(
 def validate_provider_url(value: object) -> str:
     url = clean_text(value, "ai_base_url", maximum=500, required=True).rstrip("/")
     parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+    if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("AI Base URL must be an HTTPS URL without embedded credentials")
     if parsed.query or parsed.fragment:
         raise ValueError("AI Base URL cannot contain a query string or fragment")
     host = parsed.hostname.lower().rstrip(".")
-    if (
+    is_local = (
         host == "localhost"
         or host.endswith((".local", ".localhost", ".internal", ".lan", ".home"))
-    ):
-        raise ValueError("Local AI Base URLs are not allowed")
+    )
     try:
         address = ip_address(host)
     except ValueError:
-        return url
-    if (
+        address = None
+    if address is not None and (
         address.is_private
         or address.is_loopback
         or address.is_link_local
@@ -296,5 +296,11 @@ def validate_provider_url(value: object) -> str:
         or address.is_reserved
         or address.is_unspecified
     ):
-        raise ValueError("Private or reserved AI Base URLs are not allowed")
+        is_local = True
+    if is_local:
+        if os.getenv("ALLOW_LOCAL_AI_URL", "").strip().lower() in ("1", "true", "yes"):
+            return url
+        raise ValueError("Local AI Base URLs are not allowed")
+    if parsed.scheme != "https":
+        raise ValueError("AI Base URL must be an HTTPS URL without embedded credentials")
     return url

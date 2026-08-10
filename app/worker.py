@@ -119,6 +119,7 @@ class AccountWorker:
         ).lower()
         if (
             settings.ai_uses_openrouter_key
+            and not settings.allow_local_ai_url
             and provider_host != "openrouter.ai"
             and not provider_host.endswith(".openrouter.ai")
         ):
@@ -139,8 +140,14 @@ class AccountWorker:
         # 露骨场景路由：主 client 用账号 base_url（如本地 TAIDE），
         # explicit client 用全局 OpenRouter 配置（Venice 无审查模型）。
         self.ai_explicit = AsyncOpenAI(
-            api_key=settings.ai_api_key,
-            base_url=settings.ai_base_url,
+            api_key=(
+                settings.explicit_ai_api_key
+                or settings.ai_api_key
+            ),
+            base_url=(
+                settings.explicit_ai_base_url
+                or settings.ai_base_url
+            ),
             timeout=45,
             max_retries=2,
         )

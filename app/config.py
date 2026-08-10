@@ -156,6 +156,12 @@ class Settings:
     media_moderation_model: str = "x-ai/grok-4.20"
     ai_uses_openrouter_key: bool = False
     migrate_existing_accounts_to_grok_adult: bool = False
+    # 本地部署：explicit client（Venice 露骨/审计）独立 key，默认回退 ai_api_key
+    explicit_ai_api_key: str = ""
+    # 本地部署：explicit client 独立 base_url（Venice/OpenRouter），默认回退 ai_base_url
+    explicit_ai_base_url: str = ""
+    # 本地部署：放行 localhost/私有 IP 的 AI Base URL（本地 TAIDE 无认证）
+    allow_local_ai_url: bool = False
 
     @property
     def media_provider_readiness(self) -> dict[str, bool]:
@@ -274,4 +280,14 @@ def load_settings() -> Settings:
             "MIGRATE_EXISTING_ACCOUNTS_TO_GROK_ADULT",
             False,
         ),
+        explicit_ai_api_key=(
+            os.getenv("EXPLICIT_AI_API_KEY", "").strip()
+            or os.getenv("VENICE_API_KEY", "").strip()
+        ),
+        explicit_ai_base_url=(
+            os.getenv("EXPLICIT_AI_BASE_URL", "").strip()
+            or os.getenv("OPENROUTER_BASE_URL", "").strip()
+            or "https://openrouter.ai/api/v1"
+        ),
+        allow_local_ai_url=_boolean("ALLOW_LOCAL_AI_URL", False),
     )

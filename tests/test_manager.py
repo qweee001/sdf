@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -1081,6 +1082,8 @@ class ManagerTests(unittest.TestCase):
     def test_provider_url_rejects_private_targets(self) -> None:
         from app.account import validate_provider_url
 
+        # 隔离：.env 可能设置 ALLOW_LOCAL_AI_URL（本地部署），测试必须不受影响
+        os.environ.pop("ALLOW_LOCAL_AI_URL", None)
         for url in (
             "http://api.example.com/v1",
             "https://localhost/v1",
