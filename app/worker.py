@@ -42,6 +42,7 @@ from .content_guard import (
 )
 from .crypto import SecretBox
 from .memory import GroupActivityProfile, MemoryStore
+from .simplified_chars import MAINLAND_TERMS, SIMPLIFIED_CHARS
 from .media import (
     MEDIA_INTENT_INSTRUCTIONS,
     MediaIntent,
@@ -760,6 +761,10 @@ class AccountWorker:
             if lexical.blocked:
                 self.policy_rejections += 1
                 continue
+            # 繁体中文硬拦截：含简体字或大陆用语 → 重试
+            if self._has_simplified(candidate):
+                self.style_rejections = getattr(self, "style_rejections", 0) + 1
+                continue
             # A stock discourse particle or laugh at the very start is the
             # strongest recurring signal that multiple replies are templated.
             # It may still appear naturally later in the sentence.
@@ -791,6 +796,16 @@ class AccountWorker:
         )
 
     _weather_cache: tuple[float, str] | None = None
+
+    def _has_simplified(self, text: str) -> bool:
+        """检测回复是否含简体字或大陆用语（繁体中文硬拦截）。
+
+        简体独有字来自 OpenCC 官方 STCharacters.txt（4012 字），
+        天然只含简体独有字，不会误杀繁体文本。
+        """
+        if any(ch in SIMPLIFIED_CHARS for ch in text):
+            return True
+        return any(term in text for term in MAINLAND_TERMS)
 
     async def _update_account_state(self, peer_name: str, message: str) -> None:
         """回复后更新账号人格状态：情绪（mood）+ 关系记忆（memory）。
