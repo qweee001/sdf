@@ -136,6 +136,14 @@ class AccountWorker:
             timeout=45,
             max_retries=2,
         )
+        # 露骨场景路由：主 client 用账号 base_url（如本地 TAIDE），
+        # explicit client 用全局 OpenRouter 配置（Venice 无审查模型）。
+        self.ai_explicit = AsyncOpenAI(
+            api_key=settings.ai_api_key,
+            base_url=settings.ai_base_url,
+            timeout=45,
+            max_retries=2,
+        )
         self.content_guard = ContentGuard(
             FIXED_ADULT_TEXT_BLOCKED_TERMS + account.blocked_terms,
             FIXED_ADULT_TEXT_BLOCKED_TOPICS + account.blocked_topics,
@@ -427,10 +435,16 @@ class AccountWorker:
     async def _completion(
         self,
         messages: list[dict[str, str]],
+        *,
+        explicit: bool = False,
     ) -> str:
+        client = self.ai_explicit if explicit else self.ai
+        model = (
+            self.settings.ai_model if explicit else self.account.ai_model
+        )
         for _ in range(COMPLETION_MAX_ATTEMPTS):
             request: dict[str, object] = {
-                "model": self.account.ai_model,
+                "model": model,
                 "messages": messages,
                 # 提高采样随机性：默认 temperature 偏低导致模板化/复读，
                 # 0.9 让回复更多样、更少"机器人感"（配合提示词防重复约束）。
@@ -439,16 +453,16 @@ class AccountWorker:
             }
             if (
                 self._uses_openrouter()
-                and self.account.ai_model not in OPENROUTER_AUTO_MODELS
+                and model not in OPENROUTER_AUTO_MODELS
             ):
                 request["extra_body"] = {
                     "models": [
-                        model
-                        for model in OPENROUTER_TEXT_FALLBACK_MODELS
-                        if model != self.account.ai_model
+                        m
+                        for m in OPENROUTER_TEXT_FALLBACK_MODELS
+                        if m != model
                     ]
                 }
-            result = await self.ai.chat.completions.create(**request)
+            result = await client.chat.completions.create(**request)
             content = self._completion_content(result)
             if content is not None:
                 return content[:4000]
@@ -746,6 +760,8 @@ class AccountWorker:
         )
         for attempt in range(2):
             prompt = user_prompt if attempt == 0 else user_prompt + retry_instruction
+            # 露骨场景路由：user_prompt 含露骨性话题关键词 → 走 Venice 无审查模型
+            explicit = self._is_explicit_prompt(prompt)
             candidate = self._compact_auto_reply_layout(
                 await self._completion(
                     [
@@ -754,7 +770,8 @@ class AccountWorker:
                             "content": system_prompt(self.account),
                         },
                         {"role": "user", "content": prompt},
-                    ]
+                    ],
+                    explicit=explicit,
                 )
             )
             lexical = self.content_guard.screen(candidate)
@@ -796,6 +813,19 @@ class AccountWorker:
         )
 
     _weather_cache: tuple[float, str] | None = None
+
+    # 露骨性话题关键词：命中 → 路由到 Venice 无审查模型（TAIDE 对齐会拒）
+    _EXPLICIT_PROMPT_MARKERS = (
+        "姿勢", "體位", "做愛", "性交", "口交", "陰道", "陰莖", "乳頭",
+        "高潮", "射精", "自慰", "打手槍", "舔", "插入", "抽插", "內射",
+        "勃起", "濕了", "硬了", "脫光", "裸體", "上床", "一夜情", "炮友",
+        "sex", "fuck", "dick", "pussy", "blowjob", "nipple", "orgasm",
+    )
+
+    def _is_explicit_prompt(self, text: str) -> bool:
+        """检测 user_prompt 是否含露骨性话题（→ 路由 Venice 无审查模型）。"""
+        lowered = text.lower()
+        return any(m in lowered for m in self._EXPLICIT_PROMPT_MARKERS)
 
     def _has_simplified(self, text: str) -> bool:
         """检测回复是否含简体字或大陆用语（繁体中文硬拦截）。
