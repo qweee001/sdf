@@ -1533,6 +1533,7 @@ class AccountManager:
     def _validate_ai_provider(self, base_url: str) -> None:
         if (
             self.settings.ai_uses_openrouter_key
+            and not self.settings.allow_local_ai_url
             and not self._is_openrouter_provider(base_url)
         ):
             raise ValueError(
