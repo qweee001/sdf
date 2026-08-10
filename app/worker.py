@@ -448,7 +448,12 @@ class AccountWorker:
     ) -> str:
         client = self.ai_explicit if explicit else self.ai
         model = (
-            self.settings.ai_model if explicit else self.account.ai_model
+            (
+                self.settings.explicit_ai_model
+                or self.settings.ai_model
+            )
+            if explicit
+            else self.account.ai_model
         )
         for _ in range(COMPLETION_MAX_ATTEMPTS):
             request: dict[str, object] = {

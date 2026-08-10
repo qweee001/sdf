@@ -160,6 +160,8 @@ class Settings:
     explicit_ai_api_key: str = ""
     # 本地部署：explicit client 独立 base_url（Venice/OpenRouter），默认回退 ai_base_url
     explicit_ai_base_url: str = ""
+    # 本地部署：explicit client 独立模型（Venice 无审查），默认回退 ai_model
+    explicit_ai_model: str = ""
     # 本地部署：放行 localhost/私有 IP 的 AI Base URL（本地 TAIDE 无认证）
     allow_local_ai_url: bool = False
 
@@ -288,6 +290,10 @@ def load_settings() -> Settings:
             os.getenv("EXPLICIT_AI_BASE_URL", "").strip()
             or os.getenv("OPENROUTER_BASE_URL", "").strip()
             or "https://openrouter.ai/api/v1"
+        ),
+        explicit_ai_model=(
+            os.getenv("EXPLICIT_AI_MODEL", "").strip()
+            or os.getenv("AI_MODEL", "").strip()
         ),
         allow_local_ai_url=_boolean("ALLOW_LOCAL_AI_URL", False),
     )

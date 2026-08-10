@@ -69,6 +69,7 @@ class WorkerGuardTests(unittest.TestCase):
         )
         worker.settings = SimpleNamespace(
             ai_model="test-model",
+            explicit_ai_model="",
         )
         worker.policy_rejections = 0
         worker.style_rejections = 0
