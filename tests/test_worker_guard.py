@@ -67,6 +67,9 @@ class WorkerGuardTests(unittest.TestCase):
             FIXED_ADULT_TEXT_BLOCKED_TERMS + blocked_terms,
             FIXED_ADULT_TEXT_BLOCKED_TOPICS + blocked_topics,
         )
+        worker.settings = SimpleNamespace(
+            ai_model="test-model",
+        )
         worker.policy_rejections = 0
         worker.style_rejections = 0
         return worker
@@ -332,6 +335,9 @@ class WorkerGuardTests(unittest.TestCase):
     ) -> FakeCompletionEndpoint:
         endpoint = FakeCompletionEndpoint(*results)
         worker.ai = SimpleNamespace(
+            chat=SimpleNamespace(completions=endpoint)
+        )
+        worker.ai_explicit = SimpleNamespace(
             chat=SimpleNamespace(completions=endpoint)
         )
         return endpoint

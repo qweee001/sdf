@@ -305,7 +305,8 @@ class AccountWorker:
                         ),
                     },
                     {"role": "user", "content": payload},
-                ]
+                ],
+                explicit=True,
             )
         except Exception:
             LOGGER.warning(
@@ -622,7 +623,8 @@ class AccountWorker:
                         ),
                     },
                     {"role": "user", "content": policy_payload},
-                ]
+                ],
+                explicit=True,
             )
         except Exception:
             LOGGER.warning(
