@@ -34,7 +34,7 @@ LEGACY_ENABLED_ADULT_TEXT_MODE: Final[str] = "general"
 _UNSET = object()
 
 
-FIXED_ADULT_TEXT_SAFETY_POLICY = """
+FIXED_ADULT_TEXT_SAFETY_POLICY = """\
 The adult-text mode applies only to Telegram text. Every mode keeps the same
 hard safety floor: never produce sexual content involving a minor or an
 age-ambiguous person; non-consent, refusal or revoked consent; coercion,
@@ -46,6 +46,12 @@ real-world contact, private-material sharing, or a directed act must be
 specific and may be withdrawn at any time. No mode authorizes adult images,
 audio, or video. No mode may turn an ordinary topic into an adult topic without
 existing adult context.
+
+在管理員確認的 18+ 群組中，參與者預設為成年且自願；在 lenient 或 general
+等級下，純文字虛構情境可以自然回應親密話題，包括直接表達慾望、描述身體
+感受與互動細節，不必迴避或岔開話題。上述硬底線（未成年、非自願、脅迫、
+偷拍、真人色情深偽、開盒等）仍然絕對禁止，但除此之外的成年人自願內容
+屬於允許範圍，可以直接、自然地回應。
 """.strip()
 
 
