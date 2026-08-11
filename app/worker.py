@@ -815,7 +815,7 @@ class AccountWorker:
             "不得換幾個同義詞後重複近期自己已說過的相同意思；必須提出新的"
             "觀點、細節或互動方向。若沒有真正的新內容，寧可不要發言。"
         )
-        for attempt in range(2):
+        for attempt in range(3):
             prompt = user_prompt if attempt == 0 else user_prompt + retry_instruction
             # 露骨场景路由：user_prompt 含露骨性话题关键词 → 走 Venice 无审查模型
             explicit = self._is_explicit_prompt(prompt)
@@ -841,25 +841,28 @@ class AccountWorker:
             if self._has_simplified(candidate):
                 self.style_rejections = getattr(self, "style_rejections", 0) + 1
                 continue
-            # 模型腔硬拦截：虽然但是/建议式/翻案句/制式关心/称呼模板 → 重试
-            if self._has_model_isms(candidate):
-                self.style_rejections = getattr(self, "style_rejections", 0) + 1
-                continue
-            # A stock discourse particle or laugh at the very start is the
-            # strongest recurring signal that multiple replies are templated.
-            # It may still appear naturally later in the sentence.
-            if self._opening_family(candidate):
-                self.style_rejections = getattr(self, "style_rejections", 0) + 1
-                continue
-            if self._repeats_recent_opening(candidate, safety_context):
-                self.style_rejections = getattr(self, "style_rejections", 0) + 1
-                continue
-            if self._lexically_repeats_recent_reply(
-                candidate,
-                safety_context,
-            ):
-                self.style_rejections = getattr(self, "style_rejections", 0) + 1
-                continue
+            # 修 S1: 最后一次尝试(attempt==2)只保留安全拦截(content_guard+policy),
+            # 放宽风格拦截(模型腔/开场/重复)——避免"宁可不发"退化成"经常不发"。
+            if attempt < 2:
+                # 模型腔硬拦截：虽然但是/建议式/翻案句/制式关心/称呼模板 → 重试
+                if self._has_model_isms(candidate):
+                    self.style_rejections = getattr(self, "style_rejections", 0) + 1
+                    continue
+                # A stock discourse particle or laugh at the very start is the
+                # strongest recurring signal that multiple replies are templated.
+                # It may still appear naturally later in the sentence.
+                if self._opening_family(candidate):
+                    self.style_rejections = getattr(self, "style_rejections", 0) + 1
+                    continue
+                if self._repeats_recent_opening(candidate, safety_context):
+                    self.style_rejections = getattr(self, "style_rejections", 0) + 1
+                    continue
+                if self._lexically_repeats_recent_reply(
+                    candidate,
+                    safety_context,
+                ):
+                    self.style_rejections = getattr(self, "style_rejections", 0) + 1
+                    continue
             if not await self._output_policy_allows(
                 candidate,
                 adult_text_context=True,
@@ -902,25 +905,34 @@ class AccountWorker:
 
     # 模型腔硬拦截：提示词软约束对 Venice 约束力不足（实测部署后仍违规），
     # 这里做代码层硬拦截——命中任一模式即重试。
+    # 修 S1: 单字词(不是/但是/不過/其實/最後/首先/其次)是中文高频常用词,
+    # 直接拦截会大面积误杀自然回复(如"我不是說過了嗎""其實還好啦")。
+    # 改为句式级正则: 只拦真正的模型腔句式, 不拦日常用词。
     _MODEL_ISM_PATTERNS = (
-        # 虽然但是/转折评价式
-        "雖然", "但是", "不過", "其實",
+        # 翻案句式: "不是…而是…"
+        r"不是[^，。！？]{1,12}而是",
+        # 转折评价式: "雖然…但是…"
+        r"雖然[^。]{1,20}但是",
         # 建议式收尾
-        "可以試試", "建議", "不妨", "記得要", "還是要",
-        # 翻案句/总结腔
-        "不是", "而是", "重點是", "關鍵在於", "值得注意的是",
-        "總而言之", "綜上所述", "首先", "其次", "最後",
+        r"建議(你|妳|大家|可以)",
+        r"不妨(試試|考慮|試著)",
+        r"記得要",
+        r"還是要",
+        # 总结腔(句首)
+        r"^(重點是|關鍵在於|值得注意的是|總而言之|綜上所述)",
+        r"^(首先|其次|最後)[，,、]",
         # 制式关心
         "別著涼", "多穿點", "記得保暖", "早點休息", "多喝水", "照顧好自己",
     )
 
     def _has_model_isms(self, text: str) -> bool:
         """检测回复是否含模型腔（虽然但是/建议式/翻案句/制式关心）。
+        句式级正则匹配——只拦真正的模型腔句式，不拦日常高频用词。
 
         注意：称呼（妹妹/哥哥）不在此硬拦截——群友原话可能含称呼，
         复述语境合法（技能记录过误杀案例）。称呼靠提示词软约束。
         """
-        return any(p in text for p in self._MODEL_ISM_PATTERNS)
+        return any(re.search(p, text) for p in self._MODEL_ISM_PATTERNS)
 
     async def _update_account_state(self, peer_name: str, message: str) -> None:
         """回复后更新账号人格状态：情绪（mood）+ 关系记忆（memory）。
@@ -1898,6 +1910,28 @@ class AccountWorker:
                             list(history)
                         ),
                     )
+                # 修 S2: 冷却 double-check —— 生成后、发送前再查一次。
+                # 之前用 through_id=trigger_row_id 的历史查询做冷却检查,
+                # SQL `AND id <= ?` 把兄弟账号的回复(id 更大)过滤掉了,
+                # 冷却形同虚设。这里用独立查询(不传 through_id)复查,
+                # 兄弟账号在生成期间发出的回复也能被看到。
+                # 注意: 外层 1872 行已持有 group_locks[group_id], asyncio.Lock
+                # 不可重入, 这里不能再 acquire 同一把锁(会死锁)。
+                cooldown_history = await self.store.recent_group(
+                    self.account.id,
+                    group_id,
+                    self._reply_history_limit(),
+                )
+                managed = self.managed_ids_provider()
+                now = int(time.time())
+                for item in cooldown_history:
+                    if (
+                        str(getattr(item, "role", "")) == "assistant"
+                        and int(getattr(item, "sender_id", 0)) in managed
+                        and int(getattr(item, "sender_id", 0)) != self.me_id
+                        and 0 <= now - int(getattr(item, "created_at", 0)) <= 60
+                    ):
+                        return
                 reply_text, sent = await self._send_verified(
                     reply,
                     lambda text, **kwargs: self.client.send_message(

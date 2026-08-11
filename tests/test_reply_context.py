@@ -123,9 +123,15 @@ class ReplyContextTests(unittest.TestCase):
 
             await worker._handle_message(event)
 
+            # The second call is the pre-send cooldown re-check, which must
+            # query without `through_id` so replies that sibling accounts sent
+            # while this reply was being generated are visible.
             self.assertEqual(
                 store.recent_calls,
-                [(account_id, group_id, 20, 100)],
+                [
+                    (account_id, group_id, 20, 100),
+                    (account_id, group_id, 20, None),
+                ],
             )
             prompt = worker.generate.await_args.args[0]
             self.assertEqual(prompt.count('"speaker":'), 20)

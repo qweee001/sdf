@@ -729,14 +729,15 @@ class WorkerGuardTests(unittest.TestCase):
                 side_effect=[
                     "這段包含兒童色情內容",
                     "再次包含兒童色情內容",
+                    "第三次仍包含兒童色情內容",
                 ]
             )
 
             with self.assertRaises(BlockedReplyError):
                 await worker.generate("請回覆")
 
-            self.assertEqual(worker._completion.await_count, 2)
-            self.assertEqual(worker.policy_rejections, 2)
+            self.assertEqual(worker._completion.await_count, 3)
+            self.assertEqual(worker.policy_rejections, 3)
 
         asyncio.run(scenario())
 
@@ -771,14 +772,15 @@ class WorkerGuardTests(unittest.TestCase):
                 side_effect=[
                     "這裡提到秘密計畫",
                     "再次提到秘密計畫",
+                    "第三次仍提到秘密計畫",
                 ]
             )
 
             with self.assertRaises(BlockedReplyError):
                 await worker.generate("請自然回覆")
 
-            self.assertEqual(worker.policy_rejections, 2)
-            self.assertEqual(worker._completion.await_count, 2)
+            self.assertEqual(worker.policy_rejections, 3)
+            self.assertEqual(worker._completion.await_count, 3)
 
         asyncio.run(scenario())
 
@@ -791,14 +793,16 @@ class WorkerGuardTests(unittest.TestCase):
                     "BLOCK",
                     "第二段仍是相關說明",
                     "BLOCK",
+                    "第三段仍是相關說明",
+                    "BLOCK",
                 ]
             )
 
             with self.assertRaises(BlockedReplyError):
                 await worker.generate("請自然回覆")
 
-            self.assertEqual(worker.policy_rejections, 2)
-            self.assertEqual(worker._completion.await_count, 4)
+            self.assertEqual(worker.policy_rejections, 3)
+            self.assertEqual(worker._completion.await_count, 6)
 
         asyncio.run(scenario())
 
@@ -814,14 +818,16 @@ class WorkerGuardTests(unittest.TestCase):
                     RuntimeError("classifier unavailable"),
                     "第二段待分類文字",
                     RuntimeError("malformed classifier response"),
+                    "第三段待分類文字",
+                    RuntimeError("classifier still unavailable"),
                 ]
             )
 
             with self.assertRaises(BlockedReplyError):
                 await worker.generate("請自然回覆")
 
-            self.assertEqual(worker.policy_rejections, 2)
-            self.assertEqual(worker._completion.await_count, 4)
+            self.assertEqual(worker.policy_rejections, 3)
+            self.assertEqual(worker._completion.await_count, 6)
 
         asyncio.run(scenario())
 
@@ -834,14 +840,16 @@ class WorkerGuardTests(unittest.TestCase):
                     "ALLOW because it looks fine",
                     "第二段待分類文字",
                     '{"verdict":"ALLOW"}',
+                    "第三段待分類文字",
+                    "MEMBER_ALLOW 但仍需人工確認",
                 ]
             )
 
             with self.assertRaises(BlockedReplyError):
                 await worker.generate("請自然回覆")
 
-            self.assertEqual(worker.policy_rejections, 2)
-            self.assertEqual(worker._completion.await_count, 4)
+            self.assertEqual(worker.policy_rejections, 3)
+            self.assertEqual(worker._completion.await_count, 6)
 
         asyncio.run(scenario())
 
@@ -917,6 +925,8 @@ class WorkerGuardTests(unittest.TestCase):
                     "BLOCK",
                     "請把資料傳給我，我會協助您完成驗證。",
                     "BLOCK",
+                    "我們客服團隊會為您安排後續流程。",
+                    "BLOCK",
                 ]
             )
             sender = AsyncMock()
@@ -926,7 +936,7 @@ class WorkerGuardTests(unittest.TestCase):
                 await worker._send_verified(reply, sender)
 
             sender.assert_not_awaited()
-            self.assertEqual(worker.policy_rejections, 2)
+            self.assertEqual(worker.policy_rejections, 3)
 
         asyncio.run(scenario())
 
@@ -942,13 +952,15 @@ class WorkerGuardTests(unittest.TestCase):
                     "ALLOW",
                     "第二段普通文字",
                     "MEMBER",
+                    "第三段普通文字",
+                    "ALLOW_MEMBER",
                 ]
             )
 
             with self.assertRaises(BlockedReplyError):
                 await worker.generate("請回覆")
 
-            self.assertEqual(worker.policy_rejections, 2)
+            self.assertEqual(worker.policy_rejections, 3)
 
         asyncio.run(scenario())
 
