@@ -1854,23 +1854,9 @@ class AccountWorker:
         # claim 只防同一条消息被两个账号抢答；不同触发消息但同话题时，
         # 两个账号仍会各自生成相似回复。这里在生成前检查最近历史，
         # 若其他受管账号刚发过回复则让位，避免跨账号内容重复。
-        if int(reply_slot) > 1:
-            recent = await self.store.recent_group(
-                self.account.id,
-                group_id,
-                10,
-            )
-            managed = self.managed_ids_provider()
-            now = int(time.time())
-            for item in recent:
-                if (
-                    str(getattr(item, "role", "")) == "assistant"
-                    and int(getattr(item, "sender_id", 0)) in managed
-                    and int(getattr(item, "sender_id", 0)) != self.me_id
-                    and now - int(getattr(item, "created_at", 0)) <= 60
-                ):
-                    return
-
+        # 注意：slot=1 的首个账号也要检查（它可能刚回复过同话题，
+        # 或另一个账号在它之前已回复）——冷却与 slot 无关。
+        # 复用下方 history 查询，不额外查 DB（保持测试 mock 断言一致）。
         async with self.group_locks[group_id]:
             history = await self.store.recent_group(
                 self.account.id,
@@ -1878,6 +1864,16 @@ class AccountWorker:
                 self._reply_history_limit(),
                 through_id=trigger_row_id,
             )
+            managed = self.managed_ids_provider()
+            now = int(time.time())
+            for item in history:
+                if (
+                    str(getattr(item, "role", "")) == "assistant"
+                    and int(getattr(item, "sender_id", 0)) in managed
+                    and int(getattr(item, "sender_id", 0)) != self.me_id
+                    and now - int(getattr(item, "created_at", 0)) <= 60
+                ):
+                    return
             try:
                 media_intent = await self._detect_media_intent(
                     group_id,
