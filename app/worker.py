@@ -774,7 +774,7 @@ class AccountWorker:
             if len(shorter) >= 10 and shorter in longer:
                 return True
             ratio = difflib.SequenceMatcher(None, current, prev_text).ratio()
-            if ratio >= 0.82:
+            if ratio >= 0.75:
                 return True
             # 同回复对象（开头人名相同）+ 共享关键词 ≥2 → 判重复
             # （覆盖跨账号同话题：两个账号都回「綺綺，這餡料…」）
@@ -1849,6 +1849,27 @@ class AccountWorker:
         # accounts posting the same reaction at exactly the same time.
         if int(reply_slot) > 1:
             await asyncio.sleep(random.uniform(1.5, 3.5))
+
+        # 同话题冷却：60 秒内已有其他受管账号回复过 → 跳过本次。
+        # claim 只防同一条消息被两个账号抢答；不同触发消息但同话题时，
+        # 两个账号仍会各自生成相似回复。这里在生成前检查最近历史，
+        # 若其他受管账号刚发过回复则让位，避免跨账号内容重复。
+        if int(reply_slot) > 1:
+            recent = await self.store.recent_group(
+                self.account.id,
+                group_id,
+                10,
+            )
+            managed = self.managed_ids_provider()
+            now = int(time.time())
+            for item in recent:
+                if (
+                    str(getattr(item, "role", "")) == "assistant"
+                    and int(getattr(item, "sender_id", 0)) in managed
+                    and int(getattr(item, "sender_id", 0)) != self.me_id
+                    and now - int(getattr(item, "created_at", 0)) <= 60
+                ):
+                    return
 
         async with self.group_locks[group_id]:
             history = await self.store.recent_group(
