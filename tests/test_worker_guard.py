@@ -131,7 +131,6 @@ class WorkerGuardTests(unittest.TestCase):
             worker._completion = AsyncMock(  # type: ignore[method-assign]
                 side_effect=[
                     "哈哈，這個真的有趣。",
-                    "這個真的蠻有趣。",
                     "MEMBER_ALLOW",
                 ]
             )
@@ -151,10 +150,13 @@ class WorkerGuardTests(unittest.TestCase):
                 safety_context=safety_context,
             )
 
-            self.assertEqual(reply.text, "這個真的蠻有趣。")
-            self.assertEqual(worker.style_rejections, 1)
+            # 修 M9: 哈哈开场不再被无条件拦截（与 prompts.py 台湾口语语助词
+            # 矛盾），只禁止连续重复。safety_context 无哈哈历史 → 直接通过。
+            # await_count=2: 1 次主调用 + 1 次 _output_policy_allows 内部审核
+            self.assertEqual(reply.text, "哈哈，這個真的有趣。")
+            self.assertEqual(worker.style_rejections, 0)
             self.assertEqual(worker.policy_rejections, 0)
-            self.assertEqual(worker._completion.await_count, 3)
+            self.assertEqual(worker._completion.await_count, 2)
 
         asyncio.run(scenario())
 

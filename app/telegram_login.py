@@ -271,8 +271,17 @@ class TelegramLoginService:
             )
             try:
                 try:
-                    await client.connect()
-                    sent = await client.send_code_request(phone)
+                    # 修 M13: 网络调用加 30s 超时——卡住的 Telegram 连接
+                    # 不能永久阻塞 _start_lock（其他账号登录全串行等待）
+                    await asyncio.wait_for(client.connect(), timeout=30)
+                    sent = await asyncio.wait_for(
+                        client.send_code_request(phone), timeout=30
+                    )
+                except asyncio.TimeoutError:
+                    await self._disconnect(client)
+                    raise TelegramLoginUnavailable(
+                        "Telegram 連線逾時，請稍後再試"
+                    ) from None
                 except FloodWaitError as exc:
                     await self._disconnect(client)
                     raise TelegramLoginRateLimit(

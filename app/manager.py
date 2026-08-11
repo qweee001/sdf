@@ -93,6 +93,9 @@ class AccountManager:
     def managed_ids(self) -> frozenset[int]:
         return self._managed_ids
 
+    def ignored_sender_ids(self) -> frozenset[int]:
+        return getattr(self, "_ignored_sender_ids", frozenset())
+
     def active_group_account_count(self, group_id: int) -> int:
         """Count running account workers that are eligible for this group."""
         return sum(
@@ -288,9 +291,13 @@ class AccountManager:
 
     async def _refresh_managed_ids(self) -> None:
         accounts = await self.store.list_accounts()
+        # 修 M7: 受管账号与忽略发送者拆成两个集合——
+        # IGNORE_SENDER_IDS 里的真人不该被当受管账号(原话写成 assistant + 触发冷却)
         self._managed_ids = frozenset(
             {account.telegram_user_id for account in accounts}
-            | set(self.settings.legacy_ignore_sender_ids)
+        )
+        self._ignored_sender_ids = frozenset(
+            self.settings.legacy_ignore_sender_ids
         )
 
     async def start_account(self, account_id: str) -> None:
@@ -316,6 +323,7 @@ class AccountManager:
                     self.managed_ids,
                     self.active_group_account_count,
                     self._record_identity,
+                    ignored_sender_ids_provider=self.ignored_sender_ids,
                 )
             except Exception as exc:
                 self.start_errors[account_id] = self._safe_error(exc)

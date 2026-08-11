@@ -95,11 +95,16 @@ class AccountWorker:
         managed_ids_provider: Callable[[], frozenset[int]],
         active_group_account_count_provider: Callable[[int], int],
         identity_callback: Callable[[str, int, str], Awaitable[None]],
+        ignored_sender_ids_provider: Callable[[], frozenset[int]] | None = None,
     ) -> None:
         self.settings = settings
         self.account = account
         self.store = store
         self.managed_ids_provider = managed_ids_provider
+        self.ignored_sender_ids_provider = (
+            ignored_sender_ids_provider
+            or (lambda: frozenset())
+        )
         self.active_group_account_count_provider = (
             active_group_account_count_provider
         )
@@ -745,9 +750,18 @@ class AccountWorker:
         m = re.match(r"^([\u3400-\u9fff]{1,4})[，,]", text)
         return m.group(1) if m else ""
 
+    # 高频虚词/口语词：n-gram 滑窗会把这些常见字组合算成"共享关键词"，
+    # 导致任意 3 字共同片段就产生 3 个共享项、阈值必然击穿。
+    _SHARED_STOPWORDS = frozenset(
+        "的了我你他她它我們你們他們這那很都也還是就才又再被把讓給跟對從在於有沒不"
+        "啊吧呢嗎喔哦嗯欸唉耶啦齁哈嘿哇唉呀嘛"
+    )
+
     @staticmethod
-    def _shared_keywords(a: str, b: str, exclude: str = "") -> int:
-        """统计两条回复的共享关键词数（≥2 字词，排除对象名）。"""
+    def _shared_keywords(a: str, b: str, exclude: str = "") -> tuple[int, bool]:
+        """统计两条回复的共享关键词数（≥2 字词，排除对象名）。
+        修 M8: 返回 (共享数, 是否有≥3字长词) —— 剔除高频虚词组合，
+        防任意 3 字共同片段(2 bigram+1 trigram=3 项)击穿阈值。"""
         def words(text: str) -> set[str]:
             text = str(text or "")
             # 去掉对象名和标点，按 2-4 字滑窗取词
@@ -756,14 +770,19 @@ class AccountWorker:
             result: set[str] = set()
             for n in (2, 3, 4):
                 for i in range(len(text) - n + 1):
-                    result.add(text[i : i + n])
+                    w = text[i : i + n]
+                    # 剔除含高频虚词的组合（"我們""這餡"这类不算共享特征）
+                    if any(ch in AccountWorker._SHARED_STOPWORDS for ch in w):
+                        continue
+                    result.add(w)
             return result
 
         wa, wb = words(a), words(b)
         shared = wa & wb
         if exclude:
             shared = {w for w in shared if exclude not in w}
-        return len(shared)
+        has_long = any(len(w) >= 3 for w in shared)
+        return len(shared), has_long
 
     @classmethod
     def _lexically_repeats_recent_reply(
@@ -801,12 +820,18 @@ class AccountWorker:
             if current_target and current_target == cls._reply_target_name(
                 entry.get("content")
             ):
-                shared = cls._shared_keywords(
+                shared, has_long = cls._shared_keywords(
                     candidate,
                     str(entry.get("content") or ""),
                     exclude=current_target,
                 )
-                if shared >= 2:
+                # 修 M8: 归一化阈值——共享数按较短回复长度归一化 >0.35，
+                # 且要求至少一个 ≥3 字共享词（防虚词组合击穿）
+                shorter_len = min(
+                    len(cls._reply_similarity_text(candidate)),
+                    len(cls._reply_similarity_text(entry.get("content"))),
+                )
+                if has_long and shorter_len > 0 and shared / shorter_len > 0.35:
                     return True
         return False
 
@@ -868,12 +893,10 @@ class AccountWorker:
                 if self._has_model_isms(candidate):
                     self.style_rejections = getattr(self, "style_rejections", 0) + 1
                     continue
-                # A stock discourse particle or laugh at the very start is the
-                # strongest recurring signal that multiple replies are templated.
-                # It may still appear naturally later in the sentence.
-                if self._opening_family(candidate):
-                    self.style_rejections = getattr(self, "style_rejections", 0) + 1
-                    continue
+                # 修 M9: 删除 _opening_family 无条件拦截——它与 prompts.py
+                # 「可以自然使用欸、耶、啦、喔、齁等台湾口语语助词」矛盾，
+                # 且让 _repeats_recent_opening 变成死代码(走到时 family 必空)。
+                # 只保留历史比对：允许偶尔用语助词开场，禁止连续重复。
                 if self._repeats_recent_opening(candidate, safety_context):
                     self.style_rejections = getattr(self, "style_rejections", 0) + 1
                     continue
@@ -1816,6 +1839,10 @@ class AccountWorker:
             return
 
         sender_id = int(event.sender_id or 0)
+        # 修 M7: IGNORE_SENDER_IDS 里的真人不入库、不触发冷却（不是受管账号）
+        ignored_provider = getattr(self, "ignored_sender_ids_provider", None)
+        if ignored_provider is not None and sender_id in ignored_provider():
+            return
         if sender_id in self.managed_ids_provider():
             # A sibling managed account is another automated speaker, not a
             # human prompt. Keeping that distinction in each account's local
