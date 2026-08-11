@@ -799,6 +799,10 @@ class AccountWorker:
             if self._has_simplified(candidate):
                 self.style_rejections = getattr(self, "style_rejections", 0) + 1
                 continue
+            # 模型腔硬拦截：虽然但是/建议式/翻案句/制式关心/称呼模板 → 重试
+            if self._has_model_isms(candidate):
+                self.style_rejections = getattr(self, "style_rejections", 0) + 1
+                continue
             # A stock discourse particle or laugh at the very start is the
             # strongest recurring signal that multiple replies are templated.
             # It may still appear naturally later in the sentence.
@@ -853,6 +857,28 @@ class AccountWorker:
         if any(ch in SIMPLIFIED_CHARS for ch in text):
             return True
         return any(term in text for term in MAINLAND_TERMS)
+
+    # 模型腔硬拦截：提示词软约束对 Venice 约束力不足（实测部署后仍违规），
+    # 这里做代码层硬拦截——命中任一模式即重试。
+    _MODEL_ISM_PATTERNS = (
+        # 虽然但是/转折评价式
+        "雖然", "但是", "不過", "其實",
+        # 建议式收尾
+        "可以試試", "建議", "不妨", "記得要", "還是要",
+        # 翻案句/总结腔
+        "不是", "而是", "重點是", "關鍵在於", "值得注意的是",
+        "總而言之", "綜上所述", "首先", "其次", "最後",
+        # 制式关心
+        "別著涼", "多穿點", "記得保暖", "早點休息", "多喝水", "照顧好自己",
+    )
+
+    def _has_model_isms(self, text: str) -> bool:
+        """检测回复是否含模型腔（虽然但是/建议式/翻案句/制式关心）。
+
+        注意：称呼（妹妹/哥哥）不在此硬拦截——群友原话可能含称呼，
+        复述语境合法（技能记录过误杀案例）。称呼靠提示词软约束。
+        """
+        return any(p in text for p in self._MODEL_ISM_PATTERNS)
 
     async def _update_account_state(self, peer_name: str, message: str) -> None:
         """回复后更新账号人格状态：情绪（mood）+ 关系记忆（memory）。
