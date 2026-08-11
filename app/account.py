@@ -297,6 +297,33 @@ def validate_provider_url(value: object) -> str:
         or address.is_unspecified
     ):
         is_local = True
+    # 修 M2: 域名也要做 DNS 解析后校验（防 0x7f000001/2130706433 数字主机名、
+    # 防 A 记录指向 169.254.169.254/10.x/192.168.x 的 DNS rebinding）。
+    # 校验时刻与请求时刻分离的 rebinding 无法完全消除，但可挡住静态恶意解析。
+    if not is_local and address is None:
+        try:
+            import socket
+            infos = socket.getaddrinfo(host, None)
+            for info in infos:
+                try:
+                    addr = ip_address(info[4][0])
+                except ValueError:
+                    continue
+                if (
+                    addr.is_private
+                    or addr.is_loopback
+                    or addr.is_link_local
+                    or addr.is_multicast
+                    or addr.is_reserved
+                    or addr.is_unspecified
+                ):
+                    is_local = True
+                    break
+        except OSError:
+            # DNS 解析失败（如测试域名/内网不可达）：无法确认地址，
+            # 保持 is_local=False 放行——字符串校验已挡住明显恶意，
+            # 数字主机名(0x7f000001)会走 getaddrinfo 解析成 127.0.0.1 被拦。
+            pass
     if is_local:
         if os.getenv("ALLOW_LOCAL_AI_URL", "").strip().lower() in ("1", "true", "yes"):
             return url

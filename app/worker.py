@@ -105,9 +105,13 @@ class AccountWorker:
         )
         self.identity_callback = identity_callback
         session = secrets.decrypt(account.session_ciphertext)
-        self._private_sender_hmac_key = settings.account_encryption_key.encode(
-            "utf-8"
-        )
+        # 修 M12: Fernet 加密密钥不能直接复用为 HMAC 密钥（密钥用途分离）。
+        # 用 blake2b 派生子密钥，HMAC 侧泄漏不会波及会话解密密钥。
+        self._private_sender_hmac_key = hashlib.blake2b(
+            settings.account_encryption_key.encode("utf-8"),
+            digest_size=32,
+            person=b"private-alert",
+        ).digest()
         api_key = settings.ai_api_key
         if not api_key:
             raise ValueError(
@@ -140,18 +144,34 @@ class AccountWorker:
         )
         # 露骨场景路由：主 client 用账号 base_url（如本地 TAIDE），
         # explicit client 用全局 OpenRouter 配置（Venice 无审查模型）。
-        self.ai_explicit = AsyncOpenAI(
-            api_key=(
-                settings.explicit_ai_api_key
-                or settings.ai_api_key
-            ),
-            base_url=(
-                settings.explicit_ai_base_url
-                or settings.ai_base_url
-            ),
-            timeout=45,
-            max_retries=2,
-        )
+        # 修 M1: explicit 通道同样要防 OpenRouter key 外泄——
+        # 1) explicit_ai_base_url 必须通过 validate_provider_url（防 SSRF/明文 http）
+        # 2) 用 OpenRouter key 时 host 必须匹配 openrouter.ai
+        # 3) EXPLICIT_AI_API_KEY 缺失时不回退到主 key（防误发第三方）
+        explicit_key = settings.explicit_ai_api_key
+        explicit_base = settings.explicit_ai_base_url
+        if explicit_key and explicit_base:
+            from .account import validate_provider_url
+            validate_provider_url(explicit_base)
+            explicit_host = (urlparse(explicit_base).hostname or "").lower()
+            if (
+                settings.ai_uses_openrouter_key
+                and not settings.allow_local_ai_url
+                and explicit_host != "openrouter.ai"
+                and not explicit_host.endswith(".openrouter.ai")
+            ):
+                raise ValueError(
+                    "OPENROUTER_API_KEY cannot be sent to a non-OpenRouter host (explicit)"
+                )
+            self.ai_explicit = AsyncOpenAI(
+                api_key=explicit_key,
+                base_url=explicit_base,
+                timeout=45,
+                max_retries=2,
+            )
+        else:
+            # 无 explicit 配置 → 禁用 explicit 路由，降级到主 client
+            self.ai_explicit = None
         self.content_guard = ContentGuard(
             FIXED_ADULT_TEXT_BLOCKED_TERMS + account.blocked_terms,
             FIXED_ADULT_TEXT_BLOCKED_TOPICS + account.blocked_topics,
@@ -447,7 +467,7 @@ class AccountWorker:
         *,
         explicit: bool = False,
     ) -> str:
-        client = self.ai_explicit if explicit else self.ai
+        client = self.ai_explicit if (explicit and self.ai_explicit is not None) else self.ai
         model = (
             (
                 self.settings.explicit_ai_model
@@ -2338,7 +2358,13 @@ class AccountWorker:
             await asyncio.gather(*pending, return_exceptions=True)
         if self.media_service is not None:
             await self.media_service.close()
-        await self.ai.close()
+        # 修 M3: ai_explicit 也要关（否则 supervisor 反复 stop/start 泄漏连接池）
+        explicit_client = getattr(self, "ai_explicit", None)
+        await asyncio.gather(
+            self.ai.close(),
+            explicit_client.close() if explicit_client is not None else asyncio.sleep(0),
+            return_exceptions=True,
+        )
         if self.client.is_connected():
             await self.client.disconnect()
         if self.state != "error":

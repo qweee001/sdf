@@ -1087,8 +1087,9 @@ class AccountManager:
         group_id: int,
         text: str,
     ) -> dict[str, object]:
+        # 修 M6: 先校验账号再取锁（defaultdict 锁任意 key 会永久创建条目 → 无界内存）
+        account = await self._require_account(account_id)
         async with self._account_operation_locks[account_id]:
-            account = await self._require_account(account_id)
             worker = self.workers.get(account.id)
             if (
                 not account.enabled
@@ -1142,8 +1143,9 @@ class AccountManager:
             minimum=1,
             maximum=2_000_000_000,
         )
+        # 修 M6: 先校验账号再取锁（defaultdict 锁任意 key 会永久创建条目 → 无界内存）
+        current = await self._require_account(account_id)
         async with self._account_operation_locks[account_id]:
-            current = await self._require_account(account_id)
             if revision != current.revision:
                 raise AccountConflictError("設定已被其他操作更新，請重新整理")
             async with self._persona_mutation_lock:
@@ -1232,8 +1234,9 @@ class AccountManager:
             minimum=1,
             maximum=2_000_000_000,
         )
+        # 修 M6: 先校验账号再取锁（defaultdict 锁任意 key 会永久创建条目 → 无界内存）
+        current = await self._require_account(account_id)
         async with self._account_operation_locks[account_id]:
-            current = await self._require_account(account_id)
             if revision != current.revision:
                 raise AccountConflictError("設定已被其他操作更新，請重新整理")
             try:

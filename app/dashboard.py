@@ -3030,6 +3030,7 @@ class DashboardServer:
         self.manager = manager
         self.sessions: dict[str, DashboardSession] = {}
         self.login_limiter = LoginRateLimiter()
+        self._prune_tasks: set[asyncio.Task[object]] = set()
         self.app = self._build_app()
         self.server: uvicorn.Server | None = None
         self.task: asyncio.Task[None] | None = None
@@ -3053,9 +3054,13 @@ class DashboardServer:
                 self.sessions.pop(token, None)
                 expired_owner_ids.append(session.session_id)
         for owner_id in expired_owner_ids:
-            asyncio.create_task(
+            # 修 M11: 裸 create_task 不保存引用可能被 GC → 登录流程残留。
+            # 存入实例级 set + done_callback 自动清理。
+            task = asyncio.create_task(
                 self.manager.cancel_phone_logins_for_owner(owner_id)
             )
+            self._prune_tasks.add(task)
+            task.add_done_callback(self._prune_tasks.discard)
 
     def _get_session(self, request: Request) -> DashboardSession | None:
         self._prune_sessions()
@@ -3095,9 +3100,16 @@ class DashboardServer:
             except ValueError as exc:
                 if str(exc) == "request body is too large":
                     raise
-        body = await request.body()
-        if len(body) > MAX_REQUEST_BYTES:
-            raise ValueError("request body is too large")
+        # 修 M5: chunked 请求(无 Content-Length)不能先全量读内存再判长度——
+        # 攻击者发无限 chunked body 会耗尽内存。改为流式累加，超限立即中断。
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > MAX_REQUEST_BYTES:
+                raise ValueError("request body is too large")
+            chunks.append(chunk)
+        body = b"".join(chunks)
         try:
             payload = json.loads(body or b"{}")
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -3476,7 +3488,10 @@ class DashboardServer:
             request: Request,
             exc: ValueError,
         ) -> JSONResponse:
-            return JSONResponse({"detail": str(exc)}, status_code=400)
+            # 修 M4: 原样回显异常会泄漏 secret/文件路径/SQL/上游 API 报错。
+            # safe_error 脱敏（secret 模式替换 + 截断 240 字）后返回。
+            from .security import safe_error
+            return JSONResponse({"detail": safe_error(exc)}, status_code=400)
 
         @web.get("/", response_class=HTMLResponse)
         async def index() -> HTMLResponse:
@@ -3519,11 +3534,15 @@ class DashboardServer:
                 expires_at=time.time() + SESSION_TTL_SECONDS,
             )
             response = JSONResponse({"ok": True, "csrf_token": csrf_token})
+            # 修 L1: secure=True 硬编码导致本地 HTTP 部署浏览器不存 cookie。
+            # 按 X-Forwarded-Proto 判断（Railway 边缘 HTTPS → secure；本地 http → 不设）。
+            forwarded_proto = request.headers.get("x-forwarded-proto", "").lower()
+            is_secure = forwarded_proto == "https" or request.url.scheme == "https"
             response.set_cookie(
                 COOKIE_NAME,
                 session_token,
                 httponly=True,
-                secure=True,
+                secure=is_secure,
                 samesite="strict",
                 max_age=SESSION_TTL_SECONDS,
                 path="/",
