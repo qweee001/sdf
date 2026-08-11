@@ -718,6 +718,33 @@ class AccountWorker:
         normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
         return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", normalized)
 
+    @staticmethod
+    def _reply_target_name(value: object) -> str:
+        """提取回复开头的人名（如「綺綺，」「車，」），用于同对象重复检测。"""
+        text = str(value or "").lstrip(" \t\r\n")
+        m = re.match(r"^([\u3400-\u9fff]{1,4})[，,]", text)
+        return m.group(1) if m else ""
+
+    @staticmethod
+    def _shared_keywords(a: str, b: str, exclude: str = "") -> int:
+        """统计两条回复的共享关键词数（≥2 字词，排除对象名）。"""
+        def words(text: str) -> set[str]:
+            text = str(text or "")
+            # 去掉对象名和标点，按 2-4 字滑窗取词
+            text = re.sub(r"[\u3400-\u9fff]{1,4}[，,]", "", text)
+            text = re.sub(r"[^\u3400-\u9fff]+", "", text)
+            result: set[str] = set()
+            for n in (2, 3, 4):
+                for i in range(len(text) - n + 1):
+                    result.add(text[i : i + n])
+            return result
+
+        wa, wb = words(a), words(b)
+        shared = wa & wb
+        if exclude:
+            shared = {w for w in shared if exclude not in w}
+        return len(shared)
+
     @classmethod
     def _lexically_repeats_recent_reply(
         cls,
@@ -727,6 +754,7 @@ class AccountWorker:
         current = cls._reply_similarity_text(candidate)
         if len(current) < 6:
             return False
+        current_target = cls._reply_target_name(candidate)
         try:
             entries = json.loads(safety_context)
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -734,18 +762,32 @@ class AccountWorker:
         if not isinstance(entries, list):
             return False
         recent_assistant = [
-            cls._reply_similarity_text(entry.get("content"))
+            entry
             for entry in entries
             if isinstance(entry, dict) and entry.get("role") == "assistant"
         ][-8:]
-        for previous in recent_assistant:
-            if len(previous) < 6:
+        for entry in recent_assistant:
+            prev_text = cls._reply_similarity_text(entry.get("content"))
+            if len(prev_text) < 6:
                 continue
-            shorter, longer = sorted((current, previous), key=len)
+            shorter, longer = sorted((current, prev_text), key=len)
             if len(shorter) >= 10 and shorter in longer:
                 return True
-            if difflib.SequenceMatcher(None, current, previous).ratio() >= 0.82:
+            ratio = difflib.SequenceMatcher(None, current, prev_text).ratio()
+            if ratio >= 0.82:
                 return True
+            # 同回复对象（开头人名相同）+ 共享关键词 ≥2 → 判重复
+            # （覆盖跨账号同话题：两个账号都回「綺綺，這餡料…」）
+            if current_target and current_target == cls._reply_target_name(
+                entry.get("content")
+            ):
+                shared = cls._shared_keywords(
+                    candidate,
+                    str(entry.get("content") or ""),
+                    exclude=current_target,
+                )
+                if shared >= 2:
+                    return True
         return False
 
     async def generate(
