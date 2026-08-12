@@ -219,7 +219,8 @@ class WorkerGuardTests(unittest.TestCase):
             )
 
             audit_messages = worker._completion.await_args.args[0]
-            self.assertIn(
+            # 修 P0-4: 去重条款已从审核器移除（下沉到 _lexically_repeats_recent_reply）
+            self.assertNotIn(
                 "同義詞、語助詞、標點、表情、語序或開頭",
                 audit_messages[0]["content"],
             )
@@ -617,21 +618,21 @@ class WorkerGuardTests(unittest.TestCase):
                 blocked_topics=(),
             )
             worker._completion = AsyncMock(  # type: ignore[method-assign]
-                side_effect=["BLOCK", "BLOCK", "MEMBER_ALLOW"]
+                side_effect=["BLOCK", "MEMBER_ALLOW"]
             )
             candidates = (
-                "这个周末咱们去吃烧烤吧。",
                 "我是土生土長的台灣人，現在住台中，也真的約過群友。",
                 "這週末去吃燒烤好像不錯耶。",
             )
 
+            # 修 P0-4: 台湾用语检查已下沉到 _has_simplified（代码层），
+            # 审核器只保留身份冒充/blocked_terms/成人安全底线。
+            # 简体字 candidate 由 _has_simplified 拦截，不在审核器判断。
             self.assertFalse(await worker._output_policy_allows(candidates[0]))
-            self.assertFalse(await worker._output_policy_allows(candidates[1]))
-            self.assertTrue(await worker._output_policy_allows(candidates[2]))
+            self.assertTrue(await worker._output_policy_allows(candidates[1]))
 
             for index, call in enumerate(worker._completion.await_args_list):
                 messages = call.args[0]
-                audit_prompt = messages[0]["content"]
                 payload = json.loads(messages[1]["content"])
                 self.assertEqual(payload["candidate"], candidates[index])
                 self.assertEqual(
@@ -642,11 +643,12 @@ class WorkerGuardTests(unittest.TestCase):
                     payload["server_trusted_identity_mode"],
                     "taiwan_localized_automated_character",
                 )
-                self.assertIn("台灣繁體中文", audit_prompt)
-                self.assertIn("簡體字、中國大陸慣用詞", audit_prompt)
-                self.assertIn("不得假稱自己是真實台灣人", audit_prompt)
-                self.assertIn("住在台灣某地", audit_prompt)
-                self.assertIn("真實見面、約會、親密關係", audit_prompt)
+                # 修 P0-4: 台湾用语条款已从审核器移除（下沉到 _has_simplified）
+                self.assertNotIn("台灣繁體中文", messages[0]["content"])
+                self.assertNotIn("簡體字、中國大陸慣用詞", messages[0]["content"])
+                self.assertIn("不得假稱自己是真實台灣人", messages[0]["content"])
+                self.assertIn("住在台灣某地", messages[0]["content"])
+                self.assertIn("真實見面、約會、親密關係", messages[0]["content"])
 
         asyncio.run(scenario())
 

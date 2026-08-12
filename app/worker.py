@@ -471,6 +471,7 @@ class AccountWorker:
         messages: list[dict[str, str]],
         *,
         explicit: bool = False,
+        temperature: float = 0.9,
     ) -> str:
         client = self.ai_explicit if (explicit and self.ai_explicit is not None) else self.ai
         model = (
@@ -487,7 +488,8 @@ class AccountWorker:
                 "messages": messages,
                 # 提高采样随机性：默认 temperature 偏低导致模板化/复读，
                 # 0.9 让回复更多样、更少"机器人感"（配合提示词防重复约束）。
-                "temperature": 0.9,
+                # 修 P0-3: 审核器传 temperature=0.0（判定不需要随机性，降误杀）。
+                "temperature": temperature,
                 "top_p": 0.95,
             }
             if (
@@ -603,20 +605,16 @@ class AccountWorker:
                             "或業務；不得代辦或說明加入、付費、方案、驗證、群規，"
                             "不得代表社群邀請、承諾、導流或索取資料。普通群友說"
                             "「我也不確定，問群主比較準」屬於一般成員口吻。第二，"
-                            "candidate 必須使用台灣繁體中文、台灣常用詞與自然的"
-                            "台灣群組聊天語序；若主體是中文，使用簡體字、中國大陸"
-                            "慣用詞、翻譯腔、書面官腔或非台灣用語時一律 BLOCK。"
-                            "必要的專有名詞、網址或原文名稱不因此單獨被攔截。第三，"
                             "帳號只是採台灣語境的自動互動角色，不是真人會員；"
                             "candidate 不得假稱自己是真實台灣人、擁有台灣國籍或"
                             "戶籍、住在台灣某地或某地址，也不得把虛構內容、他人"
                             "經歷或模型內容說成自己的真實見面、約會、親密關係或"
                             "成功案例。一般討論台灣地點或群友的經歷不算身分冒充；"
                             "若被詢問是否為 AI、機器人或自動化帳號，必須如實揭露"
-                            "是自動互動角色。第四，"
+                            "是自動互動角色。第三，"
                             "candidate 不得直接或間接出現、定義、解釋、翻譯、引用、"
                             "拼讀、暗示、近義改寫或委婉描述任一 blocked_terms 或"
-                            "blocked_topics。第五，candidate 必須符合"
+                            "blocked_topics。第四，candidate 必須符合"
                             " fixed_adult_safety_policy。adult_text_mode 與"
                             " adult_text_policy 是可信四級尺度；四級值固定為 strict、restricted、general、lenient；必須逐項遵守"
                             " adult_vocabulary_level、reply_detail_level 與"
@@ -627,7 +625,10 @@ class AccountWorker:
                             "成年、自願且已有成人上下文時使用直接成人詞彙與中等"
                             "細節，最多延展一步；lenient(3/3/5) 可在相同前提下使用"
                             "更直接詞彙與較高細節，最多自然延展五步。所有模式都"
-                            "不得把普通話題突然升級為成人話題；任何等級都不得突破 fixed_adult_safety_policy，且只適用 Telegram 純文字；adult_text_enabled"
+                            "不得把普通話題突然升級為成人話題；但在 "
+                            "server_trusted_allowed_groups_are_18_plus 為 true 且 "
+                            "safety_context 已有成人玩笑、性暗示或雙關時，接住該"
+                            "雙關並在同層級回應不算升級，不得因此 BLOCK。任何等級都不得突破 fixed_adult_safety_policy，且只適用 Telegram 純文字；adult_text_enabled"
                             " 是相容衍生欄位，false 時按 strict。當 "
                             "server_trusted_allowed_groups_are_18_plus 為 true 且沒有"
                             "明確相反證據時，應將哥哥、姐姐、妹妹、弟弟、學長、"
@@ -641,11 +642,8 @@ class AccountWorker:
                             " candidate 一起判斷年齡與同意，但不得從模糊暗示自行"
                             "推定。若近期內容明確確認所有人物成年、自願且沒有撤回"
                             "同意，candidate 不必逐句重複年齡與同意。"
-                            "第六，candidate 不得與 safety_context 中這個帳號近期"
-                            "任何 role=assistant 回覆具有相同或高度近似的主要意思；"
-                            "即使只替換同義詞、語助詞、標點、表情、語序或開頭，仍"
-                            "視為重複並一律 BLOCK。自然承接同一話題可以，但必須"
-                            "補充新的觀點、資訊或互動方向，不能反覆表達同一結論。"
+                            "（台灣用語與近期重複已有獨立的確定性代碼檢查，"
+                            "本審核不重複判斷這兩項。）"
                             "上述成年群組確認絕不覆蓋明確相反證據。無論開關為何，"
                             "只要 candidate 或 safety_context 明確指出未滿 18 歲、"
                             "兒童、未成年、非自願、拒絕、撤回同意或"
@@ -663,6 +661,7 @@ class AccountWorker:
                     {"role": "user", "content": policy_payload},
                 ],
                 explicit=True,
+                temperature=0.0,  # 修 P0-3: 判定器不需要随机性，降误杀
             )
         except Exception:
             LOGGER.warning(
@@ -670,7 +669,16 @@ class AccountWorker:
                 self.account.id,
             )
             return False
-        return parse_policy_verdict(verdict, "MEMBER_ALLOW") is True
+        parsed = parse_policy_verdict(verdict, "MEMBER_ALLOW")
+        if parsed is None:
+            # 修 P0-3: 未解析的判词单独计数（看得见误杀，与真 BLOCK 分开）
+            self.audit_unparsed = getattr(self, "audit_unparsed", 0) + 1
+            LOGGER.warning(
+                "Account %s audit verdict unparsed: %r",
+                self.account.id,
+                str(verdict)[:80],
+            )
+        return parsed is True
 
     @staticmethod
     def _bounded_policy_context(history: list[object]) -> str:
@@ -841,7 +849,11 @@ class AccountWorker:
         *,
         safety_context: str = "",
     ) -> SafeReply:
-        weather_note = await self._weather_note()
+        # 修 P0-2: 天气注入改条件触发——只有群友真的在聊天气才注入，
+        # 否则天气 note 会诱导模型转天气话题（硬禁令 1 永远输给自己）。
+        weather_note = ""
+        if self._recent_mentions_weather(user_prompt):
+            weather_note = await self._weather_note()
         if weather_note:
             user_prompt = f"{user_prompt}\n\n{weather_note}"
         retry_instruction = (
@@ -929,6 +941,12 @@ class AccountWorker:
         "高潮", "射精", "自慰", "打手槍", "舔", "插入", "抽插", "內射",
         "勃起", "濕了", "硬了", "脫光", "裸體", "上床", "一夜情", "炮友",
         "sex", "fuck", "dick", "pussy", "blowjob", "nipple", "orgasm",
+        # 修 P0-1: 群友荤段子高频词（2026-08-12 测试窗口实锤漏路由）
+        # 注意: 单字"奶/幹/操"是日常高频词(奶茶/牛奶/幹嘛/操場), 用组合词避免误路由
+        "睾丸", "雞雞", "雞巴", "精液", "奶子", "奶挺", "吃雞雞", "肉棒",
+        "鮑魚", "陰唇", "陰蒂", "龜頭", "口爆", "顏射", "雙關", "打炮",
+        "約炮", "舔陰", "吹簫", "乳交", "奶頭", "奶罩", "奶大", "奶好大",
+        "幹你", "幹我", "操你", "操我", "肏你", "肏我", "幹死", "操死",
     )
 
     def _is_explicit_prompt(self, text: str) -> bool:
@@ -1044,6 +1062,13 @@ class AccountWorker:
             ))
         except Exception:
             pass
+
+    _WEATHER_KEYWORDS = ("天氣", "下雨", "雨", "濕熱", "悶熱", "涼", "冷", "熱", "颱風", "氣溫", "溫度", "太陽", "陰天", "晴天")
+
+    @staticmethod
+    def _recent_mentions_weather(text: str) -> bool:
+        """检测群友是否真的在聊天气（→ 才注入天气 note）。"""
+        return any(k in (text or "") for k in AccountWorker._WEATHER_KEYWORDS)
 
     async def _weather_note(self) -> str:
         """桃園即時天氣（30 分鐘緩存）。失敗靜默返回空字串，不阻塞回覆。"""
