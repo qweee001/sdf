@@ -763,6 +763,7 @@ class AccountWorker:
     _SHARED_STOPWORDS = frozenset(
         "的了我你他她它我們你們他們這那很都也還是就才又再被把讓給跟對從在於有沒不"
         "啊吧呢嗎喔哦嗯欸唉耶啦齁哈嘿哇唉呀嘛"
+        "確實"  # 確實/確定/確認 高频口语词，话题特征价值低
     )
 
     @staticmethod
@@ -791,6 +792,57 @@ class AccountWorker:
             shared = {w for w in shared if exclude not in w}
         has_long = any(len(w) >= 3 for w in shared)
         return len(shared), has_long
+
+    @staticmethod
+    def _is_off_topic(candidate: str, safety_context: str) -> bool:
+        """修 P1-8: 离题检测器（bigram 重合度，无 LLM 成本）。
+        取最近 3 条群友消息的字符 bigram 集合，与候选回复求交集；
+        共享 bigram 为 0 → 判离题（如群友聊荤段子，回复却聊水果/天气）。
+        注意: 这是重试信号不是封禁——attempt==2 会跳过风格拦截直接发，
+        所以阈值可以激进（共享≥1 即算接住），误杀代价低。"""
+        try:
+            entries = json.loads(safety_context)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if not isinstance(entries, list):
+            return False
+        recent_user = [
+            str(entry.get("content", ""))
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("role") == "user"
+        ][-3:]
+        if not recent_user:
+            return False
+
+        def topic_chars(text: str) -> set[str]:
+            """单字集合（过滤高频虚词）——中文短句 bigram 太敏感
+            （"越像"≠"好像"会误杀），单字交集更稳。"""
+            cleaned = re.sub(r"[^\u3400-\u9fff0-9a-z]+", "", str(text or "").casefold())
+            return {
+                ch
+                for ch in cleaned
+                if ch not in AccountWorker._SHARED_STOPWORDS
+            }
+
+        cand_chars = topic_chars(candidate)
+        if len(cand_chars) < 3:
+            return False  # 太短无法判断
+        # 纯语气开场（"哈哈""呵呵"）没有话题特征，跳过离题检测——
+        # 开场重复由 _opening_family/_repeats_recent_opening 管
+        stripped = re.sub(
+            r"^(哈哈|呵呵|嘻嘻|嘿嘿|喔|哦|噢|嗯|欸|唉|耶|啦|齁|哈)[，,、\s]*",
+            "",
+            str(candidate or ""),
+        )
+        if len(topic_chars(stripped)) < 3:
+            return False
+        ctx_chars = set().union(*(topic_chars(t) for t in recent_user))
+        # 群友消息太短（如"你覺得呢？"只有 2 个实义字）→ 跳过检测，
+        # 避免把自然回复误判离题
+        if len(ctx_chars) < 3:
+            return False
+        # 共享单字为 0 → 明显离题（完全换话题）
+        return not (cand_chars & ctx_chars)
 
     @classmethod
     def _lexically_repeats_recent_reply(
@@ -916,6 +968,11 @@ class AccountWorker:
                     candidate,
                     safety_context,
                 ):
+                    self.style_rejections = getattr(self, "style_rejections", 0) + 1
+                    continue
+                # 修 P1-8: 离题检测（bigram 重合度）——群友聊荤段子时
+                # 回复却聊水果/天气 → 重试
+                if self._is_off_topic(candidate, safety_context):
                     self.style_rejections = getattr(self, "style_rejections", 0) + 1
                     continue
             if not await self._output_policy_allows(

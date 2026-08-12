@@ -120,6 +120,9 @@ class WorkerReplyCanonicalizationTests(unittest.TestCase):
             worker._output_policy_allows = AsyncMock(  # type: ignore[method-assign]
                 return_value=True
             )
+            # 本测试目标是"哈哈开场历史比对"，占位符消息与任何回复都无
+            # bigram 交集，会误触离题检测——mock 掉（离题检测另有专测）
+            worker._is_off_topic = lambda *a, **k: False  # type: ignore[method-assign]
 
             reply = await worker.generate(
                 "請自然回覆",
