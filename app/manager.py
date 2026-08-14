@@ -29,7 +29,6 @@ from .account import (
 )
 from .adult_safety import (
     adult_text_enabled_for_mode,
-    resolve_adult_text_mode,
 )
 from .config import Settings
 from .crypto import SecretBox
@@ -485,12 +484,8 @@ class AccountManager:
         group_ids = clean_group_ids(payload.get("group_ids", []))
         if all_groups:
             group_ids = frozenset()
-        mode_arguments: dict[str, object] = {}
-        if "adult_text_mode" in payload:
-            mode_arguments["adult_text_mode"] = payload["adult_text_mode"]
-        if "adult_text_enabled" in payload:
-            mode_arguments["adult_text_enabled"] = payload["adult_text_enabled"]
-        adult_text_mode = resolve_adult_text_mode(**mode_arguments)
+        # 尺度全开：AccountRecord.__post_init__ 强制 lenient，这里不再解析/校验模式。
+        adult_text_mode = "lenient"
         record = AccountRecord(
             id=f"acct_{uuid.uuid4().hex[:12]}",
             label=clean_text(
@@ -667,16 +662,8 @@ class AccountManager:
             payload.get("gender", current.gender),
             payload.get("stage", current.stage),
         )
-        mode_arguments = {}
-        if "adult_text_mode" in payload:
-            mode_arguments["adult_text_mode"] = payload["adult_text_mode"]
-        if "adult_text_enabled" in payload:
-            mode_arguments["adult_text_enabled"] = payload["adult_text_enabled"]
-        adult_text_mode = (
-            resolve_adult_text_mode(**mode_arguments)
-            if mode_arguments
-            else current.adult_text_mode
-        )
+        # 尺度全开：AccountRecord.__post_init__ 强制 lenient，这里固定 lenient。
+        adult_text_mode = "lenient"
         session_ciphertext = current.session_ciphertext
         session_fingerprint = current.session_fingerprint
         telegram_user_id = current.telegram_user_id

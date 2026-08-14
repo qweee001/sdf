@@ -29,7 +29,7 @@ ADULT_TEXT_MODE_LABELS: Final[dict[str, str]] = {
     "restricted": "限制",
     "strict": "嚴格",
 }
-DEFAULT_ADULT_TEXT_MODE: Final[str] = "strict"
+DEFAULT_ADULT_TEXT_MODE: Final[str] = "lenient"
 LEGACY_ENABLED_ADULT_TEXT_MODE: Final[str] = "general"
 _UNSET = object()
 

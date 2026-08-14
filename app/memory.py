@@ -1021,7 +1021,7 @@ class MemoryStore:
                     WHERE ai_base_url <> ?
                        OR ai_model <> ?
                        OR adult_text_enabled <> 1
-                       OR adult_text_mode <> 'general'
+                       OR adult_text_mode <> 'lenient'
                     ORDER BY id
                     """,
                     (target_base_url, target_model),
@@ -1040,14 +1040,14 @@ class MemoryStore:
                         changed_fields.append("ai_model")
                     if int(row["adult_text_enabled"]) != 1:
                         changed_fields.append("adult_text_enabled")
-                    if str(row["adult_text_mode"]) != "general":
+                    if str(row["adult_text_mode"]) != "lenient":
                         changed_fields.append("adult_text_mode")
 
                     cursor = await db.execute(
                         """
                         UPDATE accounts
                         SET ai_base_url=?, ai_model=?, adult_text_enabled=1,
-                            adult_text_mode='general',
+                            adult_text_mode='lenient',
                             revision=revision+1, updated_at=?
                         WHERE id=?
                         """,

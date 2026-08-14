@@ -126,7 +126,14 @@ class AccountWorker:
         provider_host = (
             urlparse(account.ai_base_url).hostname or ""
         ).lower()
-        if (
+        # RunPod 放行：账号 base_url 指向 *.runpod.net 时改用 RunPod 专用 key，
+        # 并跳过 OpenRouter host 检查（RunPod key 不是 OpenRouter key）。
+        self._is_runpod_provider = (
+            provider_host == "runpod.net" or provider_host.endswith(".runpod.net")
+        )
+        if self._is_runpod_provider:
+            api_key = settings.runpod_ai_api_key or api_key
+        elif (
             settings.ai_uses_openrouter_key
             and not settings.allow_local_ai_url
             and provider_host != "openrouter.ai"
@@ -480,7 +487,11 @@ class AccountWorker:
                 or self.settings.ai_model
             )
             if explicit
-            else self.account.ai_model
+            else (
+                self.settings.runpod_ai_model or self.account.ai_model
+                if getattr(self, "_is_runpod_provider", False)
+                else self.account.ai_model
+            )
         )
         for _ in range(COMPLETION_MAX_ATTEMPTS):
             request: dict[str, object] = {

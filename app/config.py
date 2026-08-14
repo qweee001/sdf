@@ -164,6 +164,10 @@ class Settings:
     explicit_ai_model: str = ""
     # 本地部署：放行 localhost/私有 IP 的 AI Base URL（本地 TAIDE 无认证）
     allow_local_ai_url: bool = False
+    # RunPod 自托管无审查模型：账号 base_url 指向 *.runpod.net 时使用这套 key/base/model
+    runpod_ai_api_key: str = ""
+    runpod_ai_base_url: str = ""
+    runpod_ai_model: str = ""
 
     @property
     def media_provider_readiness(self) -> dict[str, bool]:
@@ -296,4 +300,7 @@ def load_settings() -> Settings:
             or os.getenv("AI_MODEL", "").strip()
         ),
         allow_local_ai_url=_boolean("ALLOW_LOCAL_AI_URL", False),
+        runpod_ai_api_key=os.getenv("RUNPOD_AI_API_KEY", "").strip(),
+        runpod_ai_base_url=os.getenv("RUNPOD_AI_BASE_URL", "").strip().rstrip("/"),
+        runpod_ai_model=os.getenv("RUNPOD_AI_MODEL", "").strip(),
     )

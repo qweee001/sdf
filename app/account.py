@@ -10,9 +10,6 @@ from urllib.parse import urlparse
 
 from .adult_safety import (
     adult_text_enabled_for_mode,
-    adult_text_mode_from_legacy,
-    clean_adult_text_mode,
-    resolve_adult_text_mode,
 )
 from .media_types import AccountMediaSettings
 
@@ -64,19 +61,10 @@ class AccountRecord:
     account_state: str = ""
 
     def __post_init__(self) -> None:
-        if self.adult_text_mode:
-            mode = resolve_adult_text_mode(
-                self.adult_text_mode,
-                **(
-                    {"adult_text_enabled": self.adult_text_enabled}
-                    if self.adult_text_enabled is not None
-                    else {}
-                ),
-            )
-        elif self.adult_text_enabled is not None:
-            mode = adult_text_mode_from_legacy(self.adult_text_enabled)
-        else:
-            mode = "strict"
+        # 成人话题尺度全开：无论 dashboard 配置为何，一律按最宽松档（lenient）处理。
+        # 硬红线（未成年/非自愿/违法/偷拍/真人深伪/开盒）仍由 content_guard 与
+        # _output_policy_allows 的审核器保留，不受此影响。
+        mode = "lenient"
         object.__setattr__(self, "adult_text_mode", mode)
         object.__setattr__(
             self,
@@ -133,18 +121,8 @@ class AccountRecord:
         }
 
     def with_updates(self, **changes: object) -> AccountRecord:
-        if "adult_text_mode" in changes and "adult_text_enabled" in changes:
-            resolve_adult_text_mode(
-                changes["adult_text_mode"],
-                adult_text_enabled=changes["adult_text_enabled"],
-            )
-        elif "adult_text_mode" in changes:
-            mode = clean_adult_text_mode(changes["adult_text_mode"])
-            changes["adult_text_enabled"] = adult_text_enabled_for_mode(mode)
-        elif "adult_text_enabled" in changes:
-            changes["adult_text_mode"] = adult_text_mode_from_legacy(
-                changes["adult_text_enabled"]
-            )
+        # 尺度全开：adult_text_mode/enabled 的特殊校验已移除，
+        # __post_init__ 统一强制 lenient，不再按输入规范化或校验冲突。
         return replace(self, **changes)
 
 

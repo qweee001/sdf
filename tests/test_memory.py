@@ -557,20 +557,21 @@ class MemoryStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
-    def test_account_record_canonicalizes_mode_and_legacy_bool(self) -> None:
+    def test_account_record_forces_lenient_regardless_of_input(self) -> None:
+        # 尺度全开：无论 legacy bool 或 mode 输入，一律强制 lenient
         legacy_enabled = account_record().with_updates(adult_text_enabled=True)
-        self.assertEqual(legacy_enabled.adult_text_mode, "general")
+        self.assertEqual(legacy_enabled.adult_text_mode, "lenient")
         self.assertTrue(legacy_enabled.adult_text_enabled)
 
         restricted = legacy_enabled.with_updates(adult_text_mode="restricted")
-        self.assertEqual(restricted.adult_text_mode, "restricted")
+        self.assertEqual(restricted.adult_text_mode, "lenient")
         self.assertTrue(restricted.adult_text_enabled)
-        self.assertEqual(restricted.public_dict()["adult_text_mode"], "restricted")
+        self.assertEqual(restricted.public_dict()["adult_text_mode"], "lenient")
         self.assertTrue(restricted.public_dict()["adult_text_enabled"])
 
         strict = restricted.with_updates(adult_text_enabled=False)
-        self.assertEqual(strict.adult_text_mode, "strict")
-        self.assertFalse(strict.adult_text_enabled)
+        self.assertEqual(strict.adult_text_mode, "lenient")
+        self.assertTrue(strict.adult_text_enabled)
 
     def test_adult_text_mode_round_trips_and_synchronizes_legacy_column(self) -> None:
         async def scenario(path: str) -> None:
@@ -588,7 +589,8 @@ class MemoryStoreTests(unittest.TestCase):
                 expected_revision=loaded.revision,
                 changed_fields=["adult_text_mode", "adult_text_enabled"],
             )
-            self.assertEqual(saved.adult_text_mode, "restricted")
+            # 尺度全开：无论传 restricted，仍强制 lenient
+            self.assertEqual(saved.adult_text_mode, "lenient")
             self.assertTrue(saved.adult_text_enabled)
             await store.close()
 
@@ -598,7 +600,7 @@ class MemoryStoreTests(unittest.TestCase):
                 "WHERE id = 'alpha'"
             ).fetchone()
             db.close()
-            self.assertEqual(raw, ("restricted", 1))
+            self.assertEqual(raw, ("lenient", 1))
 
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
@@ -618,15 +620,16 @@ class MemoryStoreTests(unittest.TestCase):
             )
             await store.close()
 
-        async def verify_legacy(path: str, beta_mode: str = "strict") -> None:
+        async def verify_legacy(path: str) -> None:
             store = MemoryStore(path, ttl_hours=24)
             await store.open()
             alpha = await store.get_account("alpha")
             beta = await store.get_account("beta")
-            self.assertEqual(alpha.adult_text_mode, "general")
+            # 尺度全开：legacy bool 迁移后仍强制 lenient
+            self.assertEqual(alpha.adult_text_mode, "lenient")
             self.assertTrue(alpha.adult_text_enabled)
-            self.assertEqual(beta.adult_text_mode, beta_mode)
-            self.assertEqual(beta.adult_text_enabled, beta_mode != "strict")
+            self.assertEqual(beta.adult_text_mode, "lenient")
+            self.assertTrue(beta.adult_text_enabled)
             await store.close()
 
         with tempfile.TemporaryDirectory() as directory:
@@ -648,7 +651,7 @@ class MemoryStoreTests(unittest.TestCase):
             )
             db.commit()
             db.close()
-            asyncio.run(verify_legacy(path, "general"))
+            asyncio.run(verify_legacy(path))
 
     def test_account_policy_round_trips_through_create_update_and_public_data(self) -> None:
         async def scenario(path: str) -> None:
@@ -696,7 +699,7 @@ class MemoryStoreTests(unittest.TestCase):
             reloaded = await store.get_account("alpha")
             self.assertEqual(reloaded.blocked_terms, ("投資群",))
             self.assertEqual(reloaded.blocked_topics, ("借貸", "個資交換"))
-            self.assertFalse(reloaded.adult_text_enabled)
+            self.assertTrue(reloaded.adult_text_enabled)
             await store.close()
 
             db = sqlite3.connect(path)
@@ -707,7 +710,7 @@ class MemoryStoreTests(unittest.TestCase):
             db.close()
             self.assertEqual(json.loads(raw[0]), ["投資群"])
             self.assertEqual(json.loads(raw[1]), ["借貸", "個資交換"])
-            self.assertEqual(raw[2], 0)
+            self.assertEqual(raw[2], 1)
 
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
@@ -870,7 +873,7 @@ class MemoryStoreTests(unittest.TestCase):
             audit_rows = await cursor.fetchall()
             await cursor.close()
 
-            self.assertEqual(migrated, 2)
+            self.assertEqual(migrated, 1)
             self.assertEqual(migrated_again, 0)
             self.assertEqual(
                 first_alpha.ai_base_url,
@@ -884,10 +887,10 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(first_beta.ai_model, "x-ai/grok-4.20")
             self.assertTrue(first_alpha.adult_text_enabled)
             self.assertTrue(first_beta.adult_text_enabled)
-            self.assertEqual(first_alpha.adult_text_mode, "general")
-            self.assertEqual(first_beta.adult_text_mode, "general")
+            self.assertEqual(first_alpha.adult_text_mode, "lenient")
+            self.assertEqual(first_beta.adult_text_mode, "lenient")
             self.assertEqual(first_alpha.revision, 4)
-            self.assertEqual(first_beta.revision, 9)
+            self.assertEqual(first_beta.revision, 8)
             self.assertEqual(first_gamma.revision, 11)
             self.assertGreaterEqual(first_alpha.updated_at, first_alpha.created_at)
             self.assertGreaterEqual(first_beta.updated_at, first_beta.created_at)
@@ -899,13 +902,12 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(second_gamma.updated_at, first_gamma.updated_at)
             self.assertEqual(
                 [str(row["account_id"]) for row in audit_rows],
-                ["alpha", "beta"],
+                ["alpha"],
             )
             self.assertEqual(
                 [json.loads(row["fields"]) for row in audit_rows],
                 [
-                    ["adult_text_enabled", "adult_text_mode", "ai_base_url", "ai_model"],
-                    ["adult_text_enabled", "adult_text_mode"],
+                    ["ai_base_url", "ai_model"],
                 ],
             )
             await store.close()
@@ -962,8 +964,8 @@ class MemoryStoreTests(unittest.TestCase):
             self.assertEqual(beta.ai_base_url, "https://api.example.com/v1")
             self.assertEqual(alpha.ai_model, "model-a")
             self.assertEqual(beta.ai_model, "model-a")
-            self.assertFalse(alpha.adult_text_enabled)
-            self.assertFalse(beta.adult_text_enabled)
+            self.assertTrue(alpha.adult_text_enabled)
+            self.assertTrue(beta.adult_text_enabled)
             self.assertEqual(alpha.revision, 3)
             self.assertEqual(beta.revision, 8)
             self.assertEqual(int(audit_row["total"]), 0)
@@ -1282,7 +1284,7 @@ class MemoryStoreTests(unittest.TestCase):
                         loaded.media_settings,
                         AccountMediaSettings(),
                     )
-                    self.assertFalse(loaded.adult_text_enabled)
+                    self.assertTrue(loaded.adult_text_enabled)
                     await store.close()
 
             asyncio.run(migrate_twice())

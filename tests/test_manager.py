@@ -732,7 +732,7 @@ class ManagerTests(unittest.TestCase):
                 },
             )
             self.assertEqual(updated["ai_model"], "model-b")
-            self.assertFalse(updated["adult_text_enabled"])
+            self.assertTrue(updated["adult_text_enabled"])
             self.assertFalse(updated["has_custom_api_key"])
             self.assertNotIn("ai_api_key", updated)
             with self.assertRaisesRegex(
@@ -748,13 +748,13 @@ class ManagerTests(unittest.TestCase):
                 )
             reloaded = await store.get_account(account_id)
             self.assertEqual(reloaded.ai_api_key_ciphertext, "")
-            self.assertFalse(reloaded.adult_text_enabled)
+            self.assertTrue(reloaded.adult_text_enabled)
             await manager.close()
 
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
 
-    def test_manager_mode_create_update_legacy_mapping_conflict_and_audit(self) -> None:
+    def test_manager_mode_forces_lenient_regardless_of_input(self) -> None:
         async def scenario(path: str) -> None:
             key = Fernet.generate_key().decode()
             config = settings(path, key)
@@ -763,12 +763,12 @@ class ManagerTests(unittest.TestCase):
             await store.open()
 
             async def fake_verify(session: str) -> tuple[int, str]:
-                return 771122, "四級策略帳號"
+                return 771122, "尺度全開帳號"
 
             manager.verify_session = fake_verify  # type: ignore[method-assign]
             created = await manager.create_account(
                 {
-                    "session_string": "four-level-session",
+                    "session_string": "any-mode-session",
                     "enabled": False,
                     "gender": "female",
                     "stage": "observer",
@@ -777,64 +777,33 @@ class ManagerTests(unittest.TestCase):
                 }
             )
             account_id = str(created["id"])
-            self.assertEqual(created["adult_text_mode"], "restricted")
+            # 尺度全开：无论输入 restricted，一律强制 lenient
+            self.assertEqual(created["adult_text_mode"], "lenient")
             self.assertTrue(created["adult_text_enabled"])
 
-            with self.assertRaisesRegex(ValueError, "conflicts"):
-                await manager.create_account(
-                    {
-                        "session_string": "conflicting-four-level-session",
-                        "adult_text_mode": "strict",
-                        "adult_text_enabled": True,
-                    }
-                )
-
-            with self.assertRaisesRegex(ValueError, "conflicts"):
-                await manager.update_account(
-                    account_id,
-                    {
-                        "revision": created["revision"],
-                        "adult_text_mode": "strict",
-                        "adult_text_enabled": True,
-                    },
-                )
-            unchanged = await store.get_account(account_id)
-            self.assertEqual(unchanged.adult_text_mode, "restricted")
-            self.assertEqual(unchanged.revision, created["revision"])
-
-            lenient = await manager.update_account(
+            # 冲突组合不再报错（尺度校验已移除）：update 传 strict + enabled=True
+            updated_strict = await manager.update_account(
                 account_id,
                 {
                     "revision": created["revision"],
-                    "adult_text_mode": "lenient",
+                    "adult_text_mode": "strict",
+                    "adult_text_enabled": True,
                 },
             )
-            self.assertEqual(lenient["adult_text_mode"], "lenient")
-            self.assertTrue(lenient["adult_text_enabled"])
+            self.assertEqual(updated_strict["adult_text_mode"], "lenient")
+            self.assertTrue(updated_strict["adult_text_enabled"])
 
-            strict = await manager.update_account(
+            # update 任何 mode 仍是 lenient
+            updated = await manager.update_account(
                 account_id,
                 {
-                    "revision": lenient["revision"],
+                    "revision": updated_strict["revision"],
                     "adult_text_enabled": False,
                 },
             )
-            self.assertEqual(strict["adult_text_mode"], "strict")
-            self.assertFalse(strict["adult_text_enabled"])
+            self.assertEqual(updated["adult_text_mode"], "lenient")
+            self.assertTrue(updated["adult_text_enabled"])
             await manager.close()
-
-            db = sqlite3.connect(path)
-            rows = db.execute(
-                "SELECT fields FROM audit_log "
-                "WHERE account_id=? AND action='account_updated' ORDER BY id",
-                (account_id,),
-            ).fetchall()
-            db.close()
-            self.assertEqual(json.loads(rows[-2][0]), ["adult_text_mode"])
-            self.assertEqual(
-                json.loads(rows[-1][0]),
-                ["adult_text_enabled", "adult_text_mode"],
-            )
 
         with tempfile.TemporaryDirectory() as directory:
             asyncio.run(scenario(str(Path(directory) / "memory.db")))
