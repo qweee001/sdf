@@ -174,143 +174,121 @@ DASHBOARD_HTML = """<!doctype html>
     .topbar h1 { margin-bottom: 0; }
     .summary {
       display: grid;
-      grid-template-columns: repeat(5, minmax(100px, 1fr));
-      gap: 10px;
-      width: min(760px, 100%);
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 12px;
+      width: min(860px, 100%);
     }
     .summary-item, .panel {
       border: 1px solid var(--line);
       background: rgba(26, 29, 23, .94);
       border-radius: 17px;
     }
-    .summary-item { padding: 13px 15px; }
+    .summary-item {
+      padding: 16px 18px;
+      transition: transform .15s ease, box-shadow .15s ease;
+    }
+    .summary-item:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, .3);
+    }
     .summary-item span { display: block; color: var(--muted); font-size: 12px; }
-    .summary-item strong { display: block; margin-top: 4px; font-size: 21px; }
+    .summary-item strong { display: block; margin-top: 6px; font-size: 24px; }
     .workspace {
       display: grid;
       grid-template-columns: 340px minmax(0, 1fr);
       gap: 14px;
       align-items: start;
     }
-    .sidebar { padding: 14px; position: sticky; top: 14px; }
-    .sidebar-controls { margin-bottom: 8px; }
-    .sidebar-controls-title {
-      font-size: 11px;
+    .sidebar {
+      padding: 16px;
+      position: sticky;
+      top: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .sidebar-head h2 {
+      font-size: 16px;
       font-weight: 800;
-      letter-spacing: .12em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 6px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
+      margin: 0;
     }
-    .sidebar-controls-title::before {
-      content: '';
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--warning);
-      box-shadow: 0 0 8px rgba(255, 208, 120, .6);
-    }
-    .sidebar-controls .actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
+    .sidebar-controls {
+      margin-bottom: 0;
     }
     .sidebar-controls .btn {
-      flex: 1 1 calc(50% - 2px);
+      flex: 1 1 100%;
       min-width: 0;
-      font-size: 12px;
-      padding: 5px 6px;
+      font-size: 11px;
+      padding: 6px 4px;
       text-align: center;
       white-space: normal;
-      line-height: 1.2;
+      line-height: 1.25;
       height: auto;
-    }
-    .sidebar-controls .btn:disabled {
-      opacity: .35;
-      cursor: not-allowed;
-    }
-    .sidebar-controls .btn:hover:not(:disabled) {
-      border-color: var(--accent);
+      border-radius: 8px;
     }
     .sidebar-controls .btn:active:not(:disabled) {
-      transform: scale(.97);
-    }
-    .sidebar-controls .btn.pause-btn {
-      border-color: #553b35;
-      color: var(--danger);
-    }
-    .sidebar-controls .btn.resume-btn {
-      border-color: #3a5535;
-      color: var(--accent);
-    }
-    .sidebar-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 12px;
+      transform: scale(.96);
     }
     .account-list { display: grid; gap: 9px; }
     .account-card {
       min-width: 0;
-      padding: 6px;
-      border: 1px solid var(--line);
-      border-radius: 13px;
-      background: #151711;
+      padding: 4px;
+      border: 0;
+      border-radius: 14px;
+      background: transparent;
     }
     .account-item {
       width: 100%;
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
+      grid-template-columns: auto minmax(0, 1fr) auto;
       gap: 10px;
       align-items: center;
-      padding: 11px;
+      padding: 12px 14px;
       text-align: left;
       color: inherit;
-      border: 1px solid transparent;
+      border: 1px solid var(--line);
       border-radius: 12px;
-      background: transparent;
+      background: var(--panel);
       cursor: pointer;
-      transition: background .15s, border-color .15s;
+      transition: background .15s, border-color .15s, transform .1s ease;
+    }
+    .account-item:hover {
+      background: var(--panel-2);
+      border-color: #4a5040;
+    }
+    .account-item:active {
+      transform: scale(.99);
+    }
+    .account-item.active {
+      background: var(--panel-2);
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(184, 244, 109, .12);
     }
     .account-item.paused {
-      background: #1a1714;
-      border-color: #3a3528;
+      background: #1a1d17;
+      border-color: #3a3d34;
     }
     .account-item.paused .account-title-row strong::after {
       content: ' ⏸';
       font-size: 11px;
       opacity: .7;
     }
-    .account-item.paused:hover,
-    .account-item.paused.active {
-      background: #241f17;
-      border-color: #554528;
-    }
     .account-item.paused .dot {
       background: var(--warning);
-      box-shadow: 0 0 10px rgba(255, 208, 120, .5);
+      box-shadow: 0 0 12px rgba(255, 208, 120, .4);
+    }
+    .account-item:not(.paused) .dot {
+      background: var(--accent);
+      box-shadow: 0 0 14px rgba(184, 244, 109, .65);
     }
     .account-item.paused .status-badge {
       display: inline-block;
-      padding: 1px 6px;
+      padding: 2px 7px;
       border-radius: 6px;
       font-size: 10px;
       font-weight: 700;
       background: rgba(255, 208, 120, .15);
       color: var(--warning);
-    }
-    .account-item:not(.paused):hover, .account-item.active {
-      border-color: var(--line);
-      background: var(--panel-2);
-    }
-    .account-item:not(.paused) .dot {
-      background: var(--accent);
-      box-shadow: 0 0 14px rgba(184, 244, 109, .65);
     }
     .manual-send-row {
       display: grid;
@@ -500,13 +478,22 @@ DASHBOARD_HTML = """<!doctype html>
     .btn:disabled { opacity: .5; cursor: wait; }
     .status-line {
       display: grid;
-      grid-template-columns: repeat(7, minmax(0, 1fr));
-      gap: 7px;
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+      gap: 8px;
       margin-top: 12px;
     }
-    .metric { padding: 9px; border: 1px solid var(--line); border-radius: 12px; background: #151711; }
-    .metric span { display: block; color: var(--muted); font-size: 12px; }
-    .metric strong { display: block; margin-top: 4px; font-size: 17px; overflow-wrap: anywhere; }
+    .metric {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #151711;
+      transition: transform .1s ease;
+    }
+    .metric:hover {
+      transform: translateY(-1px);
+    }
+    .metric span { display: block; color: var(--muted); font-size: 11px; }
+    .metric strong { display: block; margin-top: 4px; font-size: 18px; overflow-wrap: anywhere; }
     .section-title { margin-bottom: 12px; }
     .form-grid {
       display: grid;
