@@ -62,7 +62,7 @@ class AccountRecord:
 
     def __post_init__(self) -> None:
         # 成人话题尺度全开：无论 dashboard 配置为何，一律按最宽松档（lenient）处理。
-        mode = "lenient"
+        mode = "auto"
         object.__setattr__(self, "adult_text_mode", mode)
         object.__setattr__(
             self,

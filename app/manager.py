@@ -485,7 +485,7 @@ class AccountManager:
         if all_groups:
             group_ids = frozenset()
         # 尺度全开：AccountRecord.__post_init__ 强制 lenient，这里不再解析/校验模式。
-        adult_text_mode = "lenient"
+        adult_text_mode = "auto"
         record = AccountRecord(
             id=f"acct_{uuid.uuid4().hex[:12]}",
             label=clean_text(
@@ -663,7 +663,7 @@ class AccountManager:
             payload.get("stage", current.stage),
         )
         # 尺度全开：AccountRecord.__post_init__ 强制 lenient，这里固定 lenient。
-        adult_text_mode = "lenient"
+        adult_text_mode = "auto"
         session_ciphertext = current.session_ciphertext
         session_fingerprint = current.session_fingerprint
         telegram_user_id = current.telegram_user_id

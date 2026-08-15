@@ -853,7 +853,7 @@ DASHBOARD_HTML = """<!doctype html>
               <input id="addModel" maxlength="200" placeholder="模型名稱">
             </label>
             <label class="field full">成人純文字策略
-              <select id="addAdultTextMode"><option value="strict">嚴格</option><option value="restricted">限制</option><option value="general">一般</option><option value="lenient">寬鬆</option></select>
+              <select id="addAdultTextMode"><option value="auto">全開真人</option></select>
               <span class="hint">寬鬆：既有成年自願文字情境可用較直接詞彙與較高細節；一般：中等細節、最多延展一步；限制：僅輕度曖昧並被動短承接；嚴格：只談非露骨的交友、感情、界線與安全。所有等級都不會從普通話題突然升級。選擇「限制」、「一般」或「寬鬆」即代表管理員確認此帳號的允許群組只限 18+；「嚴格」不做此確認。</span>
             </label>
             <div class="hint field full">四級策略只套用 Telegram 純文字。未成年人、非自願、撤回同意、脅迫、剝削、性暴力、騷擾勒索、偷拍、未經同意私密內容、可識別真人色情／性深偽、跟蹤開盒、個資與非法活動固定攔截；圖片、語音、影片不隨等級放寬。</div>
@@ -960,7 +960,7 @@ DASHBOARD_HTML = """<!doctype html>
                 <button id="refreshTextModelsButton" class="btn small" type="button">重新整理可用模型</button>
               </label>
               <label class="field full">成人純文字策略
-                <select id="editAdultTextMode"><option value="strict">嚴格</option><option value="restricted">限制</option><option value="general">一般</option><option value="lenient">寬鬆</option></select>
+                <select id="editAdultTextMode"><option value="auto">全開真人</option></select>
                 <span class="hint">寬鬆：既有成年自願文字情境可用較直接詞彙與較高細節；一般：中等細節、最多延展一步；限制：僅輕度曖昧並被動短承接；嚴格：只談非露骨的交友、感情、界線與安全。所有等級都不會從普通話題突然升級。選擇「限制」、「一般」或「寬鬆」即代表管理員確認此帳號的允許群組只限 18+；「嚴格」不做此確認。</span>
               </label>
               <div class="hint field full">只套用 Telegram 純文字；四級共用固定硬安全底線，媒體政策不會因此放寬。</div>
@@ -1284,7 +1284,7 @@ function roleName(account) {
 function normalizedAdultTextMode(account) {
   const mode = String(account?.adult_text_mode || "").trim().toLowerCase();
   if (Object.prototype.hasOwnProperty.call(adultTextModeLabels, mode)) return mode;
-  return account?.adult_text_enabled ? "general" : "strict";
+  return "auto";
 }
 
 function stateName(account) {
@@ -2541,7 +2541,7 @@ async function cancelTelegramAuth() {
   reloginAccountId = "";
   $("addForm").reset();
   $("addTaskName").value = "一般群聊互動";
-  $("addAdultTextMode").value = "strict";
+  $("addAdultTextMode").value = "auto";
   $("addEnabled").checked = false;
   $("addLoginMode").value = "phone";
   updateAddLoginMode();

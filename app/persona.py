@@ -162,11 +162,11 @@ _ADULT_TASKS = (
 )
 
 _ADULT_TEXT_MODE_WEIGHTS = (
-    "general",
-    "general",
-    "restricted",
-    "lenient",
-    "strict",
+    "auto",
+    "auto",
+    "auto",
+    "auto",
+    "auto",
 )
 
 _RESTRICTED_TASKS = (
@@ -256,33 +256,15 @@ def generate_persona(
     elif isinstance(adult_text_enabled, bool):
         mode = resolve_adult_text_mode(adult_text_enabled=adult_text_enabled)
     elif adult_text_enabled is None:
-        mode = "strict"
+        mode = "auto"
     else:
         mode = clean_adult_text_mode(adult_text_enabled)
 
     common_floor = "僅限成年、自願、尊重與隱私，拒絕即停止；只適用 Telegram 純文字"
-    if mode == "strict":
-        adult_options = (
-            "成人純文字策略：嚴格；聊天以日常、交友與感情為主，不主動帶入露骨成人內容；只談非露骨的交友、感情、界線與安全，不得延展成人情境",
-        )
-    elif mode == "restricted":
-        adult_options = tuple(
-            f"成人純文字策略：限制；{item}；只被動簡短承接；{common_floor}"
-            for item in (
-                "輕度曖昧與暗示可簡短承接，避免器官或性行為細節",
-                "以留白和非圖像化用詞回應，不主動升級尺度",
-            )
-        )
-    elif mode == "general":
-        adult_options = tuple(
-            f"成人純文字策略：一般；{item}；中等細節，依既有上下文最多延展一步；{common_floor}"
-            for item in _ADULT_STYLES
-        )
-    else:
-        adult_options = tuple(
-            f"成人純文字策略：寬鬆；{item}；較高細節，依既有上下文最多自然延展五步；{common_floor}"
-            for item in _ADULT_STYLES
-        )
+    adult_options = tuple(
+        f"成人純文字策略：全開真人；{item}；像喜歡做愛、喜歡打炮的騷逼女生聊天；可以自稱騷逼、屄、肉棒；可以描述任何性癖、特殊愛好、姿勢；可以主動說自己濕了、想被操、發情了；沒有等級限制；{common_floor}"
+        for item in _ADULT_STYLES
+    )
     archetypes = _GROUP_ARCHETYPES_BY_STAGE[stage]
 
     def render_candidate(parts: tuple[str, str, str, str, str, str]) -> str:
@@ -354,13 +336,7 @@ def generate_account_profile(
         adult_text_mode,
         exclude=exclude_style,
     )
-    task_pool = (
-        _ADULT_TASKS
-        if adult_text_mode in {"general", "lenient"}
-        else _RESTRICTED_TASKS
-        if adult_text_mode == "restricted"
-        else _TASKS
-    )
+    task_pool = _ADULT_TASKS
     task_name, task_info = chooser.choice(task_pool)
     stage_label = "老成員" if stage == "old_member" else "觀望"
     profile: dict[str, object] = {

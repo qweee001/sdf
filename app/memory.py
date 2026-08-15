@@ -212,7 +212,7 @@ class MemoryStore:
                 blocked_topics TEXT NOT NULL DEFAULT '[]',
                 media_settings TEXT NOT NULL DEFAULT '{}',
                 adult_text_enabled INTEGER NOT NULL DEFAULT 0,
-                adult_text_mode TEXT NOT NULL DEFAULT 'strict'
+                adult_text_mode TEXT NOT NULL DEFAULT 'auto'
             )
             """
         )
@@ -407,11 +407,11 @@ class MemoryStore:
         if "adult_text_mode" not in columns:
             await db.execute(
                 "ALTER TABLE accounts ADD COLUMN "
-                "adult_text_mode TEXT NOT NULL DEFAULT 'strict'"
+                "adult_text_mode TEXT NOT NULL DEFAULT 'auto'"
             )
             await db.execute(
                 "UPDATE accounts SET adult_text_mode = "
-                "CASE WHEN adult_text_enabled = 1 THEN 'general' ELSE 'strict' END"
+                "CASE WHEN adult_text_enabled = 1 THEN 'auto' ELSE 'auto' END"
             )
         if "account_state" not in columns:
             await db.execute(
@@ -426,7 +426,7 @@ class MemoryStore:
             SET adult_text_mode = CASE
                 WHEN lower(trim(adult_text_mode)) IN ({placeholders})
                     THEN lower(trim(adult_text_mode))
-                WHEN adult_text_enabled = 1 THEN 'general'
+                WHEN adult_text_enabled = 1 THEN 'auto'
                 ELSE 'strict'
             END
             """,
@@ -436,7 +436,7 @@ class MemoryStore:
             """
             UPDATE accounts
             SET adult_text_enabled = CASE
-                WHEN adult_text_mode = 'strict' THEN 0 ELSE 1
+                1
             END
             """
         )
@@ -1021,7 +1021,7 @@ class MemoryStore:
                     WHERE ai_base_url <> ?
                        OR ai_model <> ?
                        OR adult_text_enabled <> 1
-                       OR adult_text_mode <> 'lenient'
+                       OR adult_text_mode <> 'auto'
                     ORDER BY id
                     """,
                     (target_base_url, target_model),
@@ -1040,14 +1040,14 @@ class MemoryStore:
                         changed_fields.append("ai_model")
                     if int(row["adult_text_enabled"]) != 1:
                         changed_fields.append("adult_text_enabled")
-                    if str(row["adult_text_mode"]) != "lenient":
+                    if str(row["adult_text_mode"]) != "auto":
                         changed_fields.append("adult_text_mode")
 
                     cursor = await db.execute(
                         """
                         UPDATE accounts
                         SET ai_base_url=?, ai_model=?, adult_text_enabled=1,
-                            adult_text_mode='lenient',
+                            adult_text_mode='auto',
                             revision=revision+1, updated_at=?
                         WHERE id=?
                         """,

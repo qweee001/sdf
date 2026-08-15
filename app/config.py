@@ -67,7 +67,7 @@ def _media_base_url() -> str:
         os.getenv("OPENROUTER_MEDIA_BASE_URL", "").strip()
         or os.getenv("OPENROUTER_BASE_URL", "").strip()
         or os.getenv("OPENAI_MEDIA_BASE_URL", "").strip()
-        or "https://openrouter.ai/api/v1"
+        or _default_media_base_url()
     ).rstrip("/")
     parsed = urlparse(value)
     if (
@@ -101,6 +101,10 @@ def _media_base_url() -> str:
     ):
         raise ValueError("OPENROUTER_MEDIA_BASE_URL cannot target a private address")
     return value
+
+
+def _default_media_base_url() -> str:
+    return "https://9ghyzu98lbv2mf-8000.proxy.runpod.net/v1"
 
 
 def _azure_speech_region() -> str:
@@ -147,7 +151,7 @@ class Settings:
     legacy_proactive_max_interval_minutes: int
     legacy_max_proactive_per_day: int
     openai_media_api_key: str = ""
-    openai_media_base_url: str = "https://openrouter.ai/api/v1"
+    openai_media_base_url: str = "https://9ghyzu98lbv2mf-8000.proxy.runpod.net/v1"
     azure_speech_key: str = ""
     azure_speech_region: str = ""
     media_image_model: str = "x-ai/grok-imagine-image-quality"
@@ -217,7 +221,7 @@ def load_settings() -> Settings:
     ai_base_url = (
         os.getenv("AI_BASE_URL", "").strip()
         or os.getenv("OPENROUTER_BASE_URL", "").strip()
-        or "https://openrouter.ai/api/v1"
+        or "https://9ghyzu98lbv2mf-8000.proxy.runpod.net/v1"
     ).rstrip("/")
 
     return Settings(
@@ -228,9 +232,9 @@ def load_settings() -> Settings:
         ai_base_url=ai_base_url,
         ai_model=os.getenv(
             "AI_MODEL",
-            "cognitivecomputations/dolphin-mistral-24b-venice-edition",
+            "HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q8_K_P",
         ).strip()
-        or "cognitivecomputations/dolphin-mistral-24b-venice-edition",
+        or "HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q8_K_P",
         account_encryption_key=_required("ACCOUNT_ENCRYPTION_KEY"),
         memory_ttl_hours=_integer("MEMORY_TTL_HOURS", 24, 1),
         memory_history_limit=_integer("MEMORY_HISTORY_LIMIT", 20, 1),
@@ -294,7 +298,7 @@ def load_settings() -> Settings:
         explicit_ai_base_url=(
             os.getenv("EXPLICIT_AI_BASE_URL", "").strip()
             or os.getenv("OPENROUTER_BASE_URL", "").strip()
-            or "https://openrouter.ai/api/v1"
+            or "https://9ghyzu98lbv2mf-8000.proxy.runpod.net/v1"
         ),
         explicit_ai_model=(
             os.getenv("EXPLICIT_AI_MODEL", "").strip()

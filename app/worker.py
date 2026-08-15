@@ -574,7 +574,7 @@ class AccountWorker:
             configured_adult_text_mode
         )
         adult_text_mode = (
-            configured_adult_text_mode if adult_text_context else "strict"
+            configured_adult_text_mode if adult_text_context else "auto"
         )
         adult_text_enabled = adult_text_enabled_for_mode(adult_text_mode)
         adult_text_policy = adult_text_mode_policy(adult_text_mode)
