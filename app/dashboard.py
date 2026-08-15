@@ -193,6 +193,60 @@ DASHBOARD_HTML = """<!doctype html>
       align-items: start;
     }
     .sidebar { padding: 14px; position: sticky; top: 14px; }
+    .sidebar-controls { margin-bottom: 8px; }
+    .sidebar-controls-title {
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .sidebar-controls-title::before {
+      content: '';
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--warning);
+      box-shadow: 0 0 8px rgba(255, 208, 120, .6);
+    }
+    .sidebar-controls .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .sidebar-controls .btn {
+      flex: 1 1 calc(50% - 2px);
+      min-width: 0;
+      font-size: 12px;
+      padding: 5px 6px;
+      text-align: center;
+      white-space: normal;
+      line-height: 1.2;
+      height: auto;
+    }
+    .sidebar-controls .btn:disabled {
+      opacity: .35;
+      cursor: not-allowed;
+    }
+    .sidebar-controls .btn:hover:not(:disabled) {
+      border-color: var(--accent);
+    }
+    .sidebar-controls .btn:active:not(:disabled) {
+      transform: scale(.97);
+    }
+    .sidebar-controls .btn.pause-btn {
+      border-color: #553b35;
+      color: var(--danger);
+    }
+    .sidebar-controls .btn.resume-btn {
+      border-color: #3a5535;
+      color: var(--accent);
+    }
     .sidebar-head {
       display: flex;
       align-items: center;
@@ -220,10 +274,43 @@ DASHBOARD_HTML = """<!doctype html>
       border: 1px solid transparent;
       border-radius: 12px;
       background: transparent;
+      cursor: pointer;
+      transition: background .15s, border-color .15s;
     }
-    .account-item:hover, .account-item.active {
+    .account-item.paused {
+      background: #1a1714;
+      border-color: #3a3528;
+    }
+    .account-item.paused .account-title-row strong::after {
+      content: ' ⏸';
+      font-size: 11px;
+      opacity: .7;
+    }
+    .account-item.paused:hover,
+    .account-item.paused.active {
+      background: #241f17;
+      border-color: #554528;
+    }
+    .account-item.paused .dot {
+      background: var(--warning);
+      box-shadow: 0 0 10px rgba(255, 208, 120, .5);
+    }
+    .account-item.paused .status-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 6px;
+      font-size: 10px;
+      font-weight: 700;
+      background: rgba(255, 208, 120, .15);
+      color: var(--warning);
+    }
+    .account-item:not(.paused):hover, .account-item.active {
       border-color: var(--line);
       background: var(--panel-2);
+    }
+    .account-item:not(.paused) .dot {
+      background: var(--accent);
+      box-shadow: 0 0 14px rgba(184, 244, 109, .65);
     }
     .manual-send-row {
       display: grid;
@@ -288,6 +375,27 @@ DASHBOARD_HTML = """<!doctype html>
       white-space: nowrap;
     }
     .account-item small { margin-top: 3px; color: var(--muted); }
+    .account-item-actions {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+    }
+    .account-item-actions .btn {
+      min-height: 26px;
+      padding: 3px 8px;
+      font-size: 11px;
+      border-radius: 8px;
+    }
+    .account-item-actions .btn.pause-card-btn {
+      border-color: #553b35;
+      color: var(--danger);
+      background: transparent;
+    }
+    .account-item-actions .btn.resume-card-btn {
+      border-color: #3a5535;
+      color: var(--accent);
+      background: transparent;
+    }
     .account-title-row {
       min-width: 0;
       display: flex;
@@ -653,9 +761,9 @@ DASHBOARD_HTML = """<!doctype html>
       <section class="summary" aria-label="帳號摘要">
         <div class="summary-item"><span>帳號總數</span><strong id="summaryTotal">0</strong></div>
         <div class="summary-item"><span>已啟用</span><strong id="summaryEnabled">0</strong></div>
+        <div class="summary-item"><span>已暫停</span><strong id="summaryPaused">0</strong></div>
         <div class="summary-item"><span>已連線</span><strong id="summaryConnected">0</strong></div>
         <div class="summary-item"><span>私聊未讀</span><strong id="summaryPrivateUnread">0</strong></div>
-        <div class="summary-item"><span>記憶時間</span><strong id="summaryMemory">24h</strong></div>
       </section>
     </header>
 
@@ -666,6 +774,16 @@ DASHBOARD_HTML = """<!doctype html>
           <button id="showAddButton" class="btn small primary">新增</button>
         </div>
         <div id="accountList" class="account-list"></div>
+        <div class="divider"></div>
+        <div class="sidebar-controls">
+          <div class="sidebar-controls-title">全域控制</div>
+          <div class="actions sidebar-actions">
+            <button id="pauseAllButton" class="btn small" title="暫停所有帳號">⏸ 全部暫停</button>
+            <button id="resumeAllButton" class="btn small" title="恢復所有帳號">▶ 全部恢復</button>
+            <button id="pauseSelectedButton" class="btn small" title="暫停選中帳號">⏸ 暫停選取</button>
+            <button id="resumeSelectedButton" class="btn small" title="恢復選中帳號">▶ 恢復選取</button>
+          </div>
+        </div>
         <div class="divider"></div>
         <div class="actions">
           <button id="refreshButton" class="btn small">重新整理</button>
@@ -1510,10 +1628,12 @@ function createAccountItem(account) {
   card.className = "account-card";
   const button = document.createElement("button");
   button.type = "button";
-  button.className = `account-item${account.id === selectedAccountId ? " active" : ""}`;
+  const isPaused = !account.enabled;
+  const pausedClass = isPaused ? " paused" : "";
+  button.className = `account-item${pausedClass}${account.id === selectedAccountId ? " active" : ""}`;
   button.setAttribute("aria-pressed", String(account.id === selectedAccountId));
   const dot = document.createElement("span");
-  dot.className = `dot${account.connected ? " online" : account.state === "error" ? " error" : ""}`;
+  dot.className = `dot${isPaused ? "" : account.connected ? " online" : account.state === "error" ? " error" : ""}`;
   const copy = document.createElement("span");
   const titleRow = document.createElement("span");
   titleRow.className = "account-title-row";
@@ -2129,6 +2249,7 @@ function renderSelected(account) {
   $("selectedLabel").textContent = account.label;
   $("selectedIdentity").textContent = `${account.telegram_name || "Telegram 帳號"} · ${roleName(account)} · ID ${account.telegram_user_id}`;
   $("controlButton").textContent = account.enabled ? "停用帳號" : "啟用帳號";
+  $("controlButton").className = account.enabled ? "btn danger" : "btn primary";
   $("reloginAccountButton").classList.toggle(
     "hidden",
     Boolean(account.session_configured),
@@ -2174,8 +2295,9 @@ function renderDashboard() {
   );
   $("summaryTotal").textContent = String(summary.total || 0);
   $("summaryEnabled").textContent = String(summary.enabled || 0);
+  $("summaryPaused").textContent = String((summary.total || 0) - (summary.enabled || 0));
   $("summaryConnected").textContent = String(summary.connected || 0);
-  $("summaryPrivateUnread").textContent = String(totalPrivateUnread);
+  $("summaryPrivateUnread").textContent = String(summary.private_unread_count || 0);
   $("summaryMemory").textContent = `${summary.memory_ttl_hours || 24}h`;
   document.title = totalPrivateUnread > 0
     ? `(${totalPrivateUnread}) Telegram AI 多帳號控制台`
@@ -2978,6 +3100,105 @@ $("refreshButton").addEventListener("click", async () => {
     await refresh();
   } catch (error) {
     if (error.message !== "unauthorized") setNotice("accountNotice", error.message, "error");
+  }
+});
+
+// Global pause/resume controls
+const selectedAccountIds = new Set();
+
+$("pauseAllButton").addEventListener("click", async () => {
+  const accounts = dashboardState?.accounts || [];
+  const enabled = accounts.filter(a => a.enabled);
+  if (!enabled.length) {
+    showNotice("accountNotice", "沒有已啟用的帳號可以暫停。", "warning");
+    return;
+  }
+  $("pauseAllButton").disabled = true;
+  $("pauseAllButton").textContent = "⏸ 暫停中...";
+  try {
+    const results = await Promise.all(
+      enabled.map(a => updateAccount(a.id, { enabled: false }))
+    );
+    const paused = results.filter(r => r.ok).length;
+    showNotice("accountNotice", `已暫停 ${paused}/${enabled.length} 個帳號。`, "success");
+    refreshDashboard();
+  } catch (err) {
+    showNotice("accountNotice", "暫停部分帳號失敗：" + err.message, "error");
+  } finally {
+    $("pauseAllButton").disabled = false;
+    $("pauseAllButton").textContent = "⏸ 全部暫停";
+  }
+});
+
+$("resumeAllButton").addEventListener("click", async () => {
+  const accounts = dashboardState?.accounts || [];
+  const paused = accounts.filter(a => !a.enabled);
+  if (!paused.length) {
+    showNotice("accountNotice", "沒有已暫停的帳號可以恢復。", "warning");
+    return;
+  }
+  $("resumeAllButton").disabled = true;
+  $("resumeAllButton").textContent = "▶ 恢復中...";
+  try {
+    const results = await Promise.all(
+      paused.map(a => updateAccount(a.id, { enabled: true }))
+    );
+    const resumed = results.filter(r => r.ok).length;
+    showNotice("accountNotice", `已恢復 ${resumed}/${paused.length} 個帳號。`, "success");
+    refreshDashboard();
+  } catch (err) {
+    showNotice("accountNotice", "恢復部分帳號失敗：" + err.message, "error");
+  } finally {
+    $("resumeAllButton").disabled = false;
+    $("resumeAllButton").textContent = "▶ 全部恢復";
+  }
+});
+
+$("pauseSelectedButton").addEventListener("click", async () => {
+  if (!selectedAccountId) {
+    showNotice("accountNotice", "請先選擇一個帳號。", "warning");
+    return;
+  }
+  const account = dashboardState?.accounts.find(a => a.id === selectedAccountId);
+  if (!account || !account.enabled) {
+    showNotice("accountNotice", "選中的帳號已處於暫停狀態。", "warning");
+    return;
+  }
+  $("pauseSelectedButton").disabled = true;
+  try {
+    const result = await updateAccount(selectedAccountId, { enabled: false });
+    if (result.ok) {
+      showNotice("accountNotice", "已暫停選中帳號。", "success");
+      refreshDashboard();
+    }
+  } catch (err) {
+    showNotice("accountNotice", "暫停帳號失敗：" + err.message, "error");
+  } finally {
+    $("pauseSelectedButton").disabled = false;
+  }
+});
+
+$("resumeSelectedButton").addEventListener("click", async () => {
+  if (!selectedAccountId) {
+    showNotice("accountNotice", "請先選擇一個帳號。", "warning");
+    return;
+  }
+  const account = dashboardState?.accounts.find(a => a.id === selectedAccountId);
+  if (!account || account.enabled) {
+    showNotice("accountNotice", "選中的帳號已處於啟用狀態。", "warning");
+    return;
+  }
+  $("resumeSelectedButton").disabled = true;
+  try {
+    const result = await updateAccount(selectedAccountId, { enabled: true });
+    if (result.ok) {
+      showNotice("accountNotice", "已恢復選中帳號。", "success");
+      refreshDashboard();
+    }
+  } catch (err) {
+    showNotice("accountNotice", "恢復帳號失敗：" + err.message, "error");
+  } finally {
+    $("resumeSelectedButton").disabled = false;
   }
 });
 

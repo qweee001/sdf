@@ -2411,7 +2411,20 @@ class AccountWorker:
                 self.account.role_key,
                 self.account.ai_model,
             )
-            await self.client.run_until_disconnected()
+            while not self._closed:
+                try:
+                    await self.client.run_until_disconnected()
+                    break  # 正常斷線
+                except Exception as exc:
+                    err_str = str(exc)
+                    if "two different IP" in err_str:
+                        LOGGER.warning(
+                            "Account %s IP conflict detected, reconnecting in 5s...",
+                            self.account.id,
+                        )
+                        await asyncio.sleep(5)
+                        continue
+                    raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:
