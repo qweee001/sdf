@@ -1694,7 +1694,7 @@ function createAccountItem(account) {
     }
   });
   actions.appendChild(pauseBtn);
-  card.append(button, actions);
+  card.append(button, actions, createManualSendRow(account));
   return card;
 }
 
