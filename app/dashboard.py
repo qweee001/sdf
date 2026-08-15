@@ -764,7 +764,8 @@ DASHBOARD_HTML = """<!doctype html>
         <div class="summary-item"><span>已暫停</span><strong id="summaryPaused">0</strong></div>
         <div class="summary-item"><span>已連線</span><strong id="summaryConnected">0</strong></div>
         <div class="summary-item"><span>私聊未讀</span><strong id="summaryPrivateUnread">0</strong></div>
-      </section>
+        <div class="summary-item"><span>記憶 TTL</span><strong id="summaryMemory">24h</strong></div>
+        </section>
     </header>
 
     <div class="workspace">
@@ -1231,8 +1232,25 @@ function resetDashboardClientState() {
 
 function setNotice(id, message, kind = "") {
   const node = $(id);
+  if (!node) return;
   node.textContent = message || "";
   node.className = `notice${kind ? ` ${kind}` : ""}`;
+}
+
+function showNotice(id, message, kind) {
+  setNotice(id, message, kind);
+}
+
+async function updateAccount(accountId, payload) {
+  const result = await api(`/api/accounts/${encodeURIComponent(accountId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  return { ok: result.ok === true, account: result };
+}
+
+function refreshDashboard() {
+  return refresh();
 }
 
 async function api(path, options = {}) {
@@ -1652,13 +1670,31 @@ function createAccountItem(account) {
   meta.textContent = `${stateName(account)} · ${roleName(account)}`;
   copy.append(titleRow, meta);
   button.append(dot, copy);
-  button.addEventListener("click", () => {
-    selectedAccountId = account.id;
-    formDirty = false;
-    groupsDirty = false;
-    renderDashboard();
+  const actions = document.createElement("span");
+  actions.className = "account-item-actions";
+  const pauseBtn = document.createElement("button");
+  pauseBtn.type = "button";
+  pauseBtn.className = isPaused ? "btn resume-card-btn" : "btn pause-card-btn";
+  pauseBtn.textContent = isPaused ? "▶" : "⏸";
+  pauseBtn.title = isPaused ? "恢復帳號" : "暫停帳號";
+  pauseBtn.setAttribute("aria-label", isPaused ? `恢復 ${String(account.label || "")}` : `暫停 ${String(account.label || "")}`);
+  pauseBtn.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    pauseBtn.disabled = true;
+    try {
+      const result = await updateAccount(account.id, { enabled: !isPaused });
+      if (result.ok) {
+        setNotice("accountNotice", isPaused ? "已恢復帳號" : "已暫停帳號", "success");
+        await refresh();
+      }
+    } catch (err) {
+      setNotice("accountNotice", (isPaused ? "恢復" : "暫停") + "帳號失敗：" + err.message, "error");
+    } finally {
+      pauseBtn.disabled = false;
+    }
   });
-  card.append(button, createManualSendRow(account));
+  actions.appendChild(pauseBtn);
+  card.append(button, actions);
   return card;
 }
 
