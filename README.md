@@ -64,6 +64,12 @@ OPENROUTER_API_KEY=
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 AI_MODEL=x-ai/grok-4.20
 
+# 可選：RunPod 無審查模型。當帳號 Base URL 指向 *.runpod.ai / *.runpod.net /
+# *.proxy.runpod.net 時請設定：
+RUNPOD_AI_API_KEY=
+RUNPOD_AI_BASE_URL=
+RUNPOD_AI_MODEL=
+
 # 一次性既有帳號遷移；平常保持 false
 MIGRATE_EXISTING_ACCOUNTS_TO_GROK_ADULT=false
 
@@ -164,8 +170,11 @@ Session String 與 API Key 都不會由任何 GET API、HTML、狀態或日誌�
 所有帳號共用 Railway Variables 內的 `OPENROUTER_API_KEY`；舊環境的
 `AI_API_KEY` 仍可作為相容備援。控制台不接受或保存 Key。
 控制台提供小型「測試模型」請求，測試失敗不會自動改寫其他帳號。
-當 `OPENROUTER_API_KEY` 已設定時，系統只允許把該 Key 傳往
-`https://openrouter.ai/api/v1`，避免誤把 OpenRouter 憑證送到其他供應商。
+當 `OPENROUTER_API_KEY` 已設定時，系統預設只允許把該 Key 傳往
+`https://openrouter.ai/api/v1`；若帳號 `AI Base URL` 指向
+`https://api.runpod.ai/v2/<endpoint>/openai/v1`（`*.runpod.ai`）、`*.runpod.net`
+或 `*.proxy.runpod.net`，
+系統改用 `RUNPOD_AI_API_KEY` 與 `RUNPOD_AI_MODEL`，可避免誤發送憑證。
 
 預設文字模型是 `x-ai/grok-4.20`，適合嚴格遵循角色與輸出規則的長對話；若偏好
 更高品質可在帳號設定改成 `x-ai/grok-4.5`，也可使用

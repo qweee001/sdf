@@ -1528,15 +1528,28 @@ class AccountManager:
         host = (urlparse(base_url).hostname or "").lower()
         return host == "openrouter.ai" or host.endswith(".openrouter.ai")
 
+    @staticmethod
+    def _is_runpod_provider(base_url: str) -> bool:
+        host = (urlparse(base_url).hostname or "").lower()
+        return (
+            host == "runpod.net"
+            or host.endswith(".runpod.net")
+            or host == "runpod.ai"
+            or host.endswith(".runpod.ai")
+            or host == "proxy.runpod.net"
+            or host.endswith(".proxy.runpod.net")
+        )
+
     def _validate_ai_provider(self, base_url: str) -> None:
         if (
             self.settings.ai_uses_openrouter_key
             and not self.settings.allow_local_ai_url
             and not self._is_openrouter_provider(base_url)
+            and not self._is_runpod_provider(base_url)
         ):
             raise ValueError(
                 "使用 OPENROUTER_API_KEY 時，AI Base URL 必須是 "
-                "https://openrouter.ai/api/v1"
+                "openrouter.ai 或 *.runpod.ai / *.runpod.net / *.proxy.runpod.net"
             )
 
     def _validate_media_settings(

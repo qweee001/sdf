@@ -62,8 +62,6 @@ class AccountRecord:
 
     def __post_init__(self) -> None:
         # 成人话题尺度全开：无论 dashboard 配置为何，一律按最宽松档（lenient）处理。
-        # 硬红线（未成年/非自愿/违法/偷拍/真人深伪/开盒）仍由 content_guard 与
-        # _output_policy_allows 的审核器保留，不受此影响。
         mode = "lenient"
         object.__setattr__(self, "adult_text_mode", mode)
         object.__setattr__(

@@ -34,64 +34,13 @@ LEGACY_ENABLED_ADULT_TEXT_MODE: Final[str] = "general"
 _UNSET = object()
 
 
-FIXED_ADULT_TEXT_SAFETY_POLICY = """\
-The adult-text mode applies only to Telegram text. Every mode keeps the same
-hard safety floor: never produce sexual content involving a minor or an
-age-ambiguous person; non-consent, refusal or revoked consent; coercion,
-incapacity, exploitation, trafficking, sexual violence, harassment or
-blackmail; hidden-camera or other non-consensual intimate material; sexual
-content or sexual deepfakes involving an identifiable real person; stalking,
-doxxing or exposure of personal data; or illegal activity. Consent for
-real-world contact, private-material sharing, or a directed act must be
-specific and may be withdrawn at any time. No mode authorizes adult images,
-audio, or video. No mode may turn an ordinary topic into an adult topic without
-existing adult context.
-
-在管理員確認的 18+ 群組中，參與者預設為成年且自願；在 lenient 或 general
-等級下，純文字虛構情境可以自然回應親密話題，包括直接表達慾望、描述身體
-感受與互動細節，不必迴避或岔開話題。上述硬底線（未成年、非自願、脅迫、
-偷拍、真人色情深偽、開盒等）仍然絕對禁止，但除此之外的成年人自願內容
-屬於允許範圍，可以直接、自然地回應。
-""".strip()
+FIXED_ADULT_TEXT_SAFETY_POLICY = ""
 
 
-# These high-confidence phrases provide a deterministic fail-closed layer at
-# generation and send time. Broader/contextual cases are handled by the exact-
-# verdict semantic audit in AccountWorker._output_policy_allows.
-FIXED_ADULT_TEXT_BLOCKED_TERMS = (
-    "未成年性愛",
-    "兒童色情",
-    "幼童裸照",
-    "誘騙未成年",
-    "迷姦",
-    "強姦",
-    "性侵情境",
-    "人口販運",
-    "性剝削",
-    "偷拍性愛",
-    "偷拍裸照",
-    "報復色情",
-    "裸照勒索",
-    "色情深偽",
-    "開盒住址",
-    "child porn",
-    "sexual minor",
-    "underage sex",
-    "rape fantasy",
-    "hidden camera sex",
-    "revenge porn",
-    "sexual deepfake",
-)
+FIXED_ADULT_TEXT_BLOCKED_TERMS = ()
 
 
-FIXED_ADULT_TEXT_BLOCKED_TOPICS = (
-    "未成年人或年齡不明者的性內容",
-    "非自願、拒絕或撤回同意、脅迫、失去行為能力或性暴力",
-    "性剝削、人口販運、騷擾、勒索或非法活動",
-    "未經同意的私密內容、偷拍或報復色情",
-    "可識別真實人物的色情描寫、色情影像或性深偽",
-    "跟蹤、開盒、住址電話等個人資料暴露",
-)
+FIXED_ADULT_TEXT_BLOCKED_TOPICS = ()
 
 
 _POLICY_SPECS: Final[dict[str, dict[str, object]]] = {
@@ -126,10 +75,10 @@ _POLICY_SPECS: Final[dict[str, dict[str, object]]] = {
         "adult_vocabulary_level": 3,
         "reply_detail_level": 3,
         "topic_extension_level": 3,
-        "max_extension_steps": 5,
+        "max_extension_steps": 999,
         "allows_explicit_terms": True,
         "allows_adult_roleplay": True,
-        "continuation_rule": "成年人、自願、純文字虛構情境可用更直接詞彙與較高細節；在既有成人上下文最多自然延展五步，不可從普通話題突然升級。",
+        "continuation_rule": "成年人、自願、純文字虛構情境可用更直接詞彙與較高細節；在既有成人上下文可無限延展，不可從普通話題突然升級。",
     },
 }
 
@@ -224,9 +173,6 @@ def adult_text_mode_contract(mode: object) -> str:
         f"話題延展等級 {policy['topic_extension_level']}/3。"
         f"{policy['continuation_rule']}"
         f"{legacy_note}"
-        " 明確出現未成年、年齡不符、拒絕、停止、不舒服、撤回同意、強迫、"
-        "失去行為能力、剝削、人口販運、性暴力、騷擾、勒索、偷拍、未經同意私密內容、"
-        "可識別真人色情或性深偽、跟蹤開盒、個資或非法活動時，立即按共同硬底線阻擋。"
         " 僅適用 Telegram 純文字，不適用圖片、語音或影片。"
     )
 

@@ -164,7 +164,8 @@ class Settings:
     explicit_ai_model: str = ""
     # 本地部署：放行 localhost/私有 IP 的 AI Base URL（本地 TAIDE 无认证）
     allow_local_ai_url: bool = False
-    # RunPod 自托管无审查模型：账号 base_url 指向 *.runpod.net 时使用这套 key/base/model
+    # RunPod 自托管无审查模型：账号 base_url 指向 *.runpod.ai/ *.runpod.net/ *.proxy.runpod.net
+    # 时使用这套 key/base/model
     runpod_ai_api_key: str = ""
     runpod_ai_base_url: str = ""
     runpod_ai_model: str = ""

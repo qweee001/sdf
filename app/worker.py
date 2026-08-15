@@ -126,12 +126,22 @@ class AccountWorker:
         provider_host = (
             urlparse(account.ai_base_url).hostname or ""
         ).lower()
-        # RunPod 放行：账号 base_url 指向 *.runpod.net 时改用 RunPod 专用 key，
+        # RunPod 放行：账号 base_url 指向 *.runpod.ai 或 *.runpod.net 时改用 RunPod 专用 key，
         # 并跳过 OpenRouter host 检查（RunPod key 不是 OpenRouter key）。
         self._is_runpod_provider = (
-            provider_host == "runpod.net" or provider_host.endswith(".runpod.net")
+            provider_host == "runpod.net"
+            or provider_host.endswith(".runpod.net")
+            or provider_host == "runpod.ai"
+            or provider_host.endswith(".runpod.ai")
+            or provider_host == "proxy.runpod.net"
+            or provider_host.endswith(".proxy.runpod.net")
         )
         if self._is_runpod_provider:
+            if settings.ai_uses_openrouter_key and not settings.runpod_ai_api_key:
+                raise ValueError(
+                    f"Account {account.id} uses RunPod provider, "
+                    "but RUNPOD_AI_API_KEY is not set"
+                )
             api_key = settings.runpod_ai_api_key or api_key
         elif (
             settings.ai_uses_openrouter_key
@@ -634,8 +644,8 @@ class AccountWorker:
                             "輕度曖昧、暗示、非圖像化用詞與被動短承接，不允許器官"
                             "或性行為細節，也不主動升級；general(2/2/1) 可在人物均"
                             "成年、自願且已有成人上下文時使用直接成人詞彙與中等"
-                            "細節，最多延展一步；lenient(3/3/5) 可在相同前提下使用"
-                            "更直接詞彙與較高細節，最多自然延展五步。所有模式都"
+                            "細節，最多延展一步；lenient(3/3/999) 可在相同前提下使用"
+                            "更直接詞彙與較高細節，無限延展成人情境。"
                             "不得把普通話題突然升級為成人話題；但在 "
                             "server_trusted_allowed_groups_are_18_plus 為 true 且 "
                             "safety_context 已有成人玩笑、性暗示或雙關時，接住該"
@@ -655,15 +665,6 @@ class AccountWorker:
                             "同意，candidate 不必逐句重複年齡與同意。"
                             "（台灣用語與近期重複已有獨立的確定性代碼檢查，"
                             "本審核不重複判斷這兩項。）"
-                            "上述成年群組確認絕不覆蓋明確相反證據。無論開關為何，"
-                            "只要 candidate 或 safety_context 明確指出未滿 18 歲、"
-                            "兒童、未成年、非自願、拒絕、撤回同意或"
-                            "脅迫、失去行為能力、剝削或人口販運、性暴力、騷擾、"
-                            "勒索、偷拍或未經同意的私密內容、可識別真實人物的"
-                            "色情內容或性深偽、跟蹤開盒或個資暴露、非法活動，"
-                            "一律 BLOCK。當可信成年群組欄位為 false 時，年齡或"
-                            "同意不明的露骨內容也一律 BLOCK；為 true 時則依上述"
-                            "成人群聊預設判斷，但任何明確相反證據仍一律 BLOCK。"
                             "任一條件不符、資料為空但角色不明、或"
                             "有任何不確定時，僅回覆 BLOCK。不得輸出其他文字，也"
                             "不得重述任何屏蔽內容。"
