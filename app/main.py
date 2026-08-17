@@ -59,10 +59,8 @@ async def async_main() -> None:
         except (NotImplementedError, RuntimeError):
             pass
 
-    # 启动 manager
-    await manager.start()
-
-    # 启动 dashboard (port 8000) – dashboard 自带 /health
+    # 1) 先启动 dashboard（port 8000），让 /health 立即可用
+    dashboard_task: asyncio.Task | None = None
     if settings.dashboard_enabled:
         dashboard = DashboardServer(
             username=settings.dashboard_username,
@@ -70,8 +68,22 @@ async def async_main() -> None:
             port=8000,
             manager=manager,
         )
-        await dashboard.start()
-        LOGGER.info("Multi-account dashboard listening on port 8000")
+        dashboard_task = asyncio.create_task(dashboard.start())
+        # 等待 dashboard 启动
+        for _ in range(20):
+            try:
+                import urllib.request
+                urllib.request.urlopen("http://127.0.0.1:8000/health")
+                LOGGER.info("Dashboard started on port 8000")
+                break
+            except Exception:
+                pass
+            await asyncio.sleep(0.1)
+        else:
+            LOGGER.warning("Dashboard health check failed, continuing anyway")
+
+    # 2) 启动 manager（可能在后台，不影响 /health）
+    await manager.start()
 
     summary = await manager.status()
     LOGGER.info(
@@ -86,7 +98,12 @@ async def async_main() -> None:
 
     # shutdown
     if dashboard is not None:
-        await dashboard.close()
+        dashboard.server.should_exit = True
+        if dashboard_task is not None:
+            try:
+                await asyncio.wait_for(dashboard_task, timeout=5)
+            except (asyncio.TimeoutError, Exception):
+                pass
     await manager.close()
 
 
