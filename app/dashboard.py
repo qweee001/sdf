@@ -1,6 +1,7 @@
 """精简版 Telegram 多账号控制台 - 单文件 HTML + FastAPI"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import time
@@ -128,7 +129,13 @@ class DashboardServer:
         import uvicorn
         config = uvicorn.Config(self.app, host="0.0.0.0", port=self.port, log_level="warning")
         self.server = uvicorn.Server(config)
-        await self.server.serve()
+        server_task = asyncio.create_task(self.server.serve())
+        # 等待 uvicorn 完全启动（监听端口）
+        while not self.server.started:
+            await asyncio.sleep(0.05)
+        # 确保服务器完全就绪
+        await asyncio.sleep(0.5)
+        await server_task
 
     async def close(self) -> None:
         """停止 FastAPI 服务"""
