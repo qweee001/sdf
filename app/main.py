@@ -70,42 +70,32 @@ async def async_main() -> None:
         except (NotImplementedError, RuntimeError):
             pass
 
-    # 启动健康检查服务器（供 Railway 使用）
-    import uvicorn
-    health_config = uvicorn.Config(
-        health_app,
-        host="0.0.0.0",
-        port=8000,
-        log_level="warning",
-    )
-    health_server = uvicorn.Server(health_config)
-    await health_server.serve()
-
-    try:
-        await manager.start()
-        if settings.dashboard_enabled:
-            dashboard = DashboardServer(
-                username=settings.dashboard_username,
-                password=settings.dashboard_password,
-                port=8001,
-                manager=manager,
-            )
-            await dashboard.start()
-            LOGGER.info("Multi-account dashboard listening on port 8001")
-        status = await manager.status()
-        LOGGER.info(
-            "Multi-account manager started: total=%s enabled=%s connected=%s memory_ttl=%sh",
-            status["summary"]["total"],
-            status["summary"]["enabled"],
-            status["summary"]["connected"],
-            settings.memory_ttl_hours,
+    # 先启动 dashboard 监听 PORT（默认 8000）
+    dashboard: DashboardServer | None = None
+    await manager.start()
+    if settings.dashboard_enabled:
+        dashboard = DashboardServer(
+            username=settings.dashboard_username,
+            password=settings.dashboard_password,
+            port=settings.dashboard_port,
+            manager=manager,
         )
-        await stop_event.wait()
-    finally:
-        if dashboard is not None:
-            await dashboard.close()
-        health_server.should_exit = True
-        await manager.close()
+        await dashboard.start()
+        LOGGER.info("Multi-account dashboard listening on port %s", settings.dashboard_port)
+
+    status: dict = await manager.status()
+    LOGGER.info(
+        "Multi-account manager started: total=%s enabled=%s connected=%s memory_ttl=%sh",
+        status["summary"]["total"],
+        status["summary"]["enabled"],
+        status["summary"]["connected"],
+        settings.memory_ttl_hours,
+    )
+
+    await stop_event.wait()
+    if dashboard is not None:
+        await dashboard.close()
+    await manager.close()
 
 
 def main() -> None:
