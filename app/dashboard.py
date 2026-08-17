@@ -123,6 +123,18 @@ class DashboardServer:
             await self.manager.stop_account(account_id)
             return JSONResponse({"ok": True})
 
+    async def start(self) -> None:
+        """启动 FastAPI 服务"""
+        import uvicorn
+        config = uvicorn.Config(self.app, host="0.0.0.0", port=self.port, log_level="warning")
+        self.server = uvicorn.Server(config)
+        await self.server.serve()
+
+    async def close(self) -> None:
+        """停止 FastAPI 服务"""
+        if hasattr(self, "server"):
+            self.server.should_exit = True
+
 
 async def _security_middleware(request: Request, call_next):
     """添加安全响应头"""
