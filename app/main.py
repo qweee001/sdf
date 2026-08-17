@@ -5,6 +5,8 @@ import logging
 import signal
 import sys
 
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from .config import load_settings
 from .crypto import SecretBox
 from .dashboard import DashboardServer
@@ -40,6 +42,15 @@ def configure_logging(level: int) -> None:
     root.addHandler(error_output)
 
 
+# 主健康检查端点（独立于 manager/dashboard）
+health_app = FastAPI()
+
+
+@health_app.get("/health")
+async def health() -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
+
 async def async_main() -> None:
     settings = load_settings()
     configure_logging(
@@ -59,17 +70,28 @@ async def async_main() -> None:
         except (NotImplementedError, RuntimeError):
             pass
 
+    # 启动健康检查服务器（供 Railway 使用）
+    import uvicorn
+    health_config = uvicorn.Config(
+        health_app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="warning",
+    )
+    health_server = uvicorn.Server(health_config)
+    await health_server.serve()
+
     try:
         await manager.start()
         if settings.dashboard_enabled:
             dashboard = DashboardServer(
                 username=settings.dashboard_username,
                 password=settings.dashboard_password,
-                port=settings.dashboard_port,
+                port=8001,
                 manager=manager,
             )
             await dashboard.start()
-            LOGGER.info("Multi-account dashboard listening on port %s", settings.dashboard_port)
+            LOGGER.info("Multi-account dashboard listening on port 8001")
         status = await manager.status()
         LOGGER.info(
             "Multi-account manager started: total=%s enabled=%s connected=%s memory_ttl=%sh",
@@ -82,6 +104,7 @@ async def async_main() -> None:
     finally:
         if dashboard is not None:
             await dashboard.close()
+        health_server.should_exit = True
         await manager.close()
 
 
