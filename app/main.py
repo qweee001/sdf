@@ -5,11 +5,6 @@ import logging
 import signal
 import sys
 
-from asyncio import CancelledError
-from typing import Any
-
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from .config import load_settings
 from .crypto import SecretBox
 from .dashboard import DashboardServer
@@ -45,16 +40,6 @@ def configure_logging(level: int) -> None:
     root.addHandler(error_output)
 
 
-# ── Railway health-check endpoint ──────────────────────────
-_health_app = FastAPI()
-
-
-@_health_app.get("/health")
-async def health() -> JSONResponse:
-    return JSONResponse({"status": "ok"})
-
-
-# ── main ───────────────────────────────────────────────────
 async def async_main() -> None:
     settings = load_settings()
     configure_logging(
@@ -74,38 +59,26 @@ async def async_main() -> None:
         except (NotImplementedError, RuntimeError):
             pass
 
-    # 1) 启动 health server (port 8000 – Railway checks /health here)
-    import uvicorn
-
-    health_config = uvicorn.Config(
-        _health_app,
-        host="0.0.0.0",
-        port=8000,
-        log_level="warning",
-    )
-    health_server = uvicorn.Server(health_config)
-    health_task = asyncio.create_task(health_server.serve())
-
-    # 2) 启动 manager
+    # 启动 manager
     await manager.start()
 
-    # 3) 启动 dashboard (port 8001)
+    # 启动 dashboard (port 8000) – dashboard 自带 /health
     if settings.dashboard_enabled:
         dashboard = DashboardServer(
             username=settings.dashboard_username,
             password=settings.dashboard_password,
-            port=8001,
+            port=8000,
             manager=manager,
         )
         await dashboard.start()
-        LOGGER.info("Multi-account dashboard listening on port 8001")
+        LOGGER.info("Multi-account dashboard listening on port 8000")
 
-    status: dict[str, Any] = await manager.status()
+    summary = await manager.status()
     LOGGER.info(
         "Multi-account manager started: total=%s enabled=%s connected=%s memory_ttl=%sh",
-        int(status["summary"]["total"]),
-        int(status["summary"]["enabled"]),
-        int(status["summary"]["connected"]),
+        summary.get("summary", {}).get("total", 0),
+        summary.get("summary", {}).get("enabled", 0),
+        summary.get("summary", {}).get("connected", 0),
         settings.memory_ttl_hours,
     )
 
@@ -114,11 +87,6 @@ async def async_main() -> None:
     # shutdown
     if dashboard is not None:
         await dashboard.close()
-    health_server.should_exit = True
-    try:
-        await asyncio.wait_for(health_task, timeout=3)
-    except (asyncio.TimeoutError, CancelledError):
-        pass
     await manager.close()
 
 
