@@ -436,7 +436,8 @@ class MemoryStore:
             """
             UPDATE accounts
             SET adult_text_enabled = CASE
-                1
+                WHEN adult_text_enabled = 1 THEN 1
+                ELSE 0
             END
             """
         )
