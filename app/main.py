@@ -41,11 +41,14 @@ def configure_logging(level: int) -> None:
 
 
 async def async_main() -> None:
+    print("async_main: loading settings", flush=True)
     settings = load_settings()
+    print("async_main: settings loaded, configuring logging", flush=True)
     configure_logging(
         getattr(logging, settings.log_level, logging.INFO)
     )
 
+    print("async_main: creating store and manager", flush=True)
     secrets = SecretBox(settings.account_encryption_key)
     store = MemoryStore(settings.memory_db_path, settings.memory_ttl_hours)
     manager = AccountManager(settings, store, secrets)
@@ -59,6 +62,7 @@ async def async_main() -> None:
         except (NotImplementedError, RuntimeError):
             pass
 
+    print("async_main: starting dashboard", flush=True)
     # 1) 先启动 dashboard（port 8000），让 /health 立即可用
     dashboard_task: asyncio.Task | None = None
     if settings.dashboard_enabled:
@@ -73,9 +77,12 @@ async def async_main() -> None:
         for _ in range(10):
             await asyncio.sleep(0.1)
         LOGGER.info("Dashboard started on port 8000")
+        print("async_main: dashboard task created", flush=True)
 
     # 2) 启动 manager（可能在后台，不影响 /health）
+    print("async_main: starting manager", flush=True)
     await manager.start()
+    print("async_main: manager started", flush=True)
 
     summary = await manager.status()
     LOGGER.info(
