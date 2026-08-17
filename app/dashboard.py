@@ -127,6 +127,7 @@ class DashboardServer:
     async def start(self) -> None:
         """启动 FastAPI 服务（在独立线程中运行 uvicorn）"""
         import threading
+        import urllib.request
         import uvicorn
         
         config = uvicorn.Config(self.app, host="0.0.0.0", port=self.port, log_level="warning")
@@ -140,13 +141,11 @@ class DashboardServer:
         thread = threading.Thread(target=run_uvicorn, daemon=True)
         thread.start()
         
-        # 等待 uvicorn 启动（轮询）
-        import urllib.request
-        for _ in range(30):
+        # 等待 uvicorn 启动（使用 asyncio.to_thread 避免阻塞事件循环）
+        for _ in range(50):
             try:
-                resp = urllib.request.urlopen("http://127.0.0.1:%d/health" % self.port)
-                if resp.status == 200:
-                    return
+                await asyncio.to_thread(urllib.request.urlopen, f"http://127.0.0.1:{self.port}/health")
+                return
             except Exception:
                 pass
             await asyncio.sleep(0.1)
