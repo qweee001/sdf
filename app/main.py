@@ -69,18 +69,10 @@ async def async_main() -> None:
             manager=manager,
         )
         dashboard_task = asyncio.create_task(dashboard.start())
-        # 等待 dashboard 启动
-        for _ in range(20):
-            try:
-                import urllib.request
-                urllib.request.urlopen("http://127.0.0.1:8000/health")
-                LOGGER.info("Dashboard started on port 8000")
-                break
-            except Exception:
-                pass
+        # 等待 dashboard 启动（简单 sleep，避免同步阻塞事件循环）
+        for _ in range(10):
             await asyncio.sleep(0.1)
-        else:
-            LOGGER.warning("Dashboard health check failed, continuing anyway")
+        LOGGER.info("Dashboard started on port 8000")
 
     # 2) 启动 manager（可能在后台，不影响 /health）
     await manager.start()
