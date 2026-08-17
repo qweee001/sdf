@@ -125,17 +125,37 @@ class DashboardServer:
             return JSONResponse({"ok": True})
 
     async def start(self) -> None:
-        """启动 FastAPI 服务"""
+        """启动 FastAPI 服务（在独立线程中运行 uvicorn）"""
+        import threading
         import uvicorn
+        
         config = uvicorn.Config(self.app, host="0.0.0.0", port=self.port, log_level="warning")
         self.server = uvicorn.Server(config)
-        server_task = asyncio.create_task(self.server.serve())
-        # 等待 uvicorn 完全启动（监听端口）
-        while not self.server.started:
-            await asyncio.sleep(0.05)
-        # 确保服务器完全就绪
-        await asyncio.sleep(0.5)
-        await server_task
+        
+        # 在独立线程中运行 uvicorn
+        def run_uvicorn():
+            import asyncio
+            asyncio.run(self._run_server())
+        
+        thread = threading.Thread(target=run_uvicorn, daemon=True)
+        thread.start()
+        
+        # 等待 uvicorn 启动（轮询）
+        import urllib.request
+        for _ in range(30):
+            try:
+                resp = urllib.request.urlopen("http://127.0.0.1:%d/health" % self.port)
+                if resp.status == 200:
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.1)
+        
+        raise RuntimeError(f"Dashboard failed to start on port {self.port}")
+    
+    async def _run_server(self) -> None:
+        """内部方法：运行 uvicorn server"""
+        await self.server.serve()
 
     async def close(self) -> None:
         """停止 FastAPI 服务"""
