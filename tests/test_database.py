@@ -56,6 +56,68 @@ def test_crud_full_cycle():
         loop.close()
 
 
+def test_groups_column_roundtrip():
+    """指定群組：groups 欄位可存讀（JSON list of int）"""
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    async def main():
+        db = Database(DB)
+        await db.connect()
+        await db.create_account("g1", "群組帳號", "ciphertext")
+        acc = await db.get_account("g1")
+        # 預設空（自動所有群）
+        assert acc.get("groups") in (None, "", "[]", "null")
+        await db.update_account("g1", groups='[-100123, -100456]')
+        acc2 = await db.get_account("g1")
+        import json
+        assert json.loads(acc2["groups"]) == [-100123, -100456]
+        # list_accounts 也回傳 groups
+        lst = await db.list_accounts()
+        assert lst[0]["groups"] == '[-100123, -100456]'
+        await db.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
+def test_groups_migration_on_existing_db():
+    """舊庫升級：原本沒有 groups 欄位的 DB，連線時自動補欄位"""
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    async def main():
+        import aiosqlite
+        # 手動建一個「舊版」accounts（無 groups 欄位）
+        conn = await aiosqlite.connect(DB)
+        await conn.execute("DROP TABLE IF EXISTS accounts")
+        await conn.execute(
+            "CREATE TABLE accounts (id TEXT PRIMARY KEY, name TEXT, "
+            "session_key TEXT, tg_user_id INTEGER, tg_username TEXT, "
+            "persona TEXT, enabled INTEGER DEFAULT 0, created_at REAL, updated_at REAL)"
+        )
+        await conn.commit()
+        await conn.close()
+        # 重新連線應自動補上 groups 欄位
+        db2 = Database(DB)
+        await db2.connect()
+        await db2.create_account("old", "舊帳號", "x")
+        g = await db2.get_account("old")
+        assert "groups" in g  # 欄位已補上
+        await db2.update_account("old", groups="[123]")
+        assert await db2.get_account("old")
+        await db2.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
 def test_memory_cap_200():
     if os.path.exists(DB):
         os.remove(DB)

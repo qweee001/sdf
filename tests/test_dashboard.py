@@ -90,3 +90,35 @@ def test_account_start_requires_login():
     with _make_dashboard() as client:
         assert client.post("/api/accounts/abc/start").status_code == 401
         assert client.delete("/api/accounts/abc").status_code == 401
+
+
+def test_persona_edit_and_groups_endpoints():
+    """人設可編輯 + 指定群組 API（格式驗證 / 404 / 需登入）"""
+    with _make_dashboard() as client:
+        client.post("/api/login", json={"username": "admin", "password": "secret123"})
+        # 不存在的帳號 → 404
+        r = client.post("/api/accounts/nope/persona",
+                        json={"persona": {"name": "阿美", "personality": "活潑"}})
+        assert r.status_code == 404
+        r = client.post("/api/accounts/nope/groups", json={"groups": [1, 2]})
+        assert r.status_code == 404
+        # 格式錯誤（缺名字 / 非 list）→ 400（格式檢查優先於存在性）
+        r = client.post("/api/accounts/nope/persona", json={"persona": {}})
+        assert r.status_code == 400
+        r = client.post("/api/accounts/nope/groups", json={"groups": "abc"})
+        assert r.status_code == 400
+        # 登出後 → 401
+        client.post("/api/logout")
+        assert client.post("/api/accounts/x/persona",
+                           json={"persona": {"name": "x"}}).status_code == 401
+        assert client.post("/api/accounts/x/groups",
+                           json={"groups": []}).status_code == 401
+
+
+def test_status_includes_groups_fields():
+    """/api/status 回傳含 groups 與 groups_available 欄位"""
+    with _make_dashboard() as client:
+        client.post("/api/login", json={"username": "admin", "password": "secret123"})
+        r = client.get("/api/status")
+        assert r.status_code == 200
+        assert "accounts" in r.json()

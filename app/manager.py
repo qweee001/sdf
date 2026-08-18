@@ -52,6 +52,14 @@ class AccountManager:
                 persona = json.loads(acc["persona"])
             except Exception:
                 persona = None
+        selected_groups = []
+        if acc.get("groups"):
+            try:
+                raw = json.loads(acc["groups"])
+                if isinstance(raw, list):
+                    selected_groups = [int(g) for g in raw]
+            except Exception:
+                selected_groups = []
         worker = AccountWorker(
             account_id=account_id,
             session_key=session_key,
@@ -63,6 +71,7 @@ class AccountManager:
             managed_ids=self.managed_ids,
             on_status_change=self._on_status_change,
             persona=persona,
+            selected_groups=selected_groups,
         )
         self.workers[account_id] = worker
         await worker.start()
@@ -136,15 +145,53 @@ class AccountManager:
             worker.name = persona["name"]
         return persona
 
+    async def update_persona(self, account_id: str, persona: dict) -> dict | None:
+        """手動修改人設（含性格），儲存並套用至運行中的 worker"""
+        acc = await self.db.get_account(account_id)
+        if not acc:
+            return None
+        await self.db.update_account(
+            account_id, persona=json.dumps(persona, ensure_ascii=False)
+        )
+        worker = self.workers.get(account_id)
+        if worker:
+            worker.persona = persona
+            worker.name = persona.get("name", worker.name)
+        return persona
+
+    async def save_groups(self, account_id: str, group_ids: list[int]) -> str:
+        """指定群組：儲存至 DB，並套用至運行中的 worker（熱更新）"""
+        acc = await self.db.get_account(account_id)
+        if not acc:
+            return "帳號不存在"
+        ids = sorted({int(g) for g in group_ids})
+        await self.db.update_account(
+            account_id, groups=json.dumps(ids, ensure_ascii=False)
+        )
+        worker = self.workers.get(account_id)
+        if worker:
+            worker.selected_groups = set(ids)
+        return ""
+
     async def status(self) -> dict:
         accounts = []
         for acc in await self.db.list_accounts():
             worker = self.workers.get(acc["id"])
             st = self._status.get(acc["id"], {"state": "stopped", "detail": ""})
+            # 指定群組（已儲存）+ 該帳號所在的群組清單（供勾選）
+            sel_groups = []
+            if acc.get("groups"):
+                try:
+                    sel_groups = json.loads(acc["groups"])
+                except Exception:
+                    sel_groups = []
+            groups_available = worker.group_list() if worker else []
             accounts.append({
                 "id": acc["id"],
                 "name": acc["name"],
                 "persona": acc.get("persona"),
+                "groups": sel_groups,
+                "groups_available": groups_available,
                 "enabled": bool(acc.get("enabled")),
                 "is_running": worker.is_running if worker else False,
                 "state": st["state"],

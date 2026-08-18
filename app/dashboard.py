@@ -154,6 +154,48 @@ class Dashboard:
                 return JSONResponse({"error": "帳號不存在"}, status_code=404)
             return JSONResponse({"ok": True, "persona": persona})
 
+        @app.post("/api/accounts/{account_id}/persona")
+        async def update_persona(account_id: str, request: Request):
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            data = await request.json()
+            persona = data.get("persona") if isinstance(data, dict) else None
+            if not isinstance(persona, dict) or not str(persona.get("name", "")).strip():
+                return JSONResponse({"error": "人設格式錯誤（缺少名字）"}, status_code=400)
+            # 只保留允許的欄位，避免注入未知欄位
+            allowed = {
+                "name", "gender", "age", "city", "district", "industry",
+                "university", "personality", "hobbies", "looking_for",
+                "meetups_done", "schedule",
+            }
+            clean = {k: v for k, v in persona.items() if k in allowed}
+            clean["name"] = str(clean["name"]).strip()
+            if not isinstance(clean.get("hobbies"), list):
+                clean["hobbies"] = []
+            saved = await self.manager.update_persona(account_id, clean)
+            if saved is None:
+                return JSONResponse({"error": "帳號不存在"}, status_code=404)
+            return JSONResponse({"ok": True, "persona": saved})
+
+        @app.post("/api/accounts/{account_id}/groups")
+        async def save_groups(account_id: str, request: Request):
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            data = await request.json()
+            raw = data.get("groups") if isinstance(data, dict) else None
+            if raw is None:
+                raw = []
+            if not isinstance(raw, list):
+                return JSONResponse({"error": "群組格式錯誤"}, status_code=400)
+            try:
+                ids = [int(g) for g in raw]
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "群組格式錯誤"}, status_code=400)
+            err = await self.manager.save_groups(account_id, ids)
+            if err:
+                return JSONResponse({"error": err}, status_code=404)
+            return JSONResponse({"ok": True, "groups": ids})
+
         @app.get("/api/accounts/{account_id}/privates")
         async def private_messages(account_id: str, request: Request):
             if not self._check_session(request):
@@ -334,13 +376,44 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
     </div>
 </div>
 
-<!-- 人設 -->
+<!-- 人設（可編輯，含性格） -->
 <div class="modal" id="personaModal">
-    <div class="modal-box">
-        <h3>人設設定</h3>
-        <pre id="personaText" style="white-space:pre-wrap;font-size:0.85rem;color:#cbd5e1;background:#0f172a;padding:1rem;border-radius:8px"></pre>
+    <div class="modal-box" style="max-width:560px">
+        <h3>人設設定（可直接修改）</h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem 1rem">
+            <label class="meta">名字<input id="pf_name" type="text"></label>
+            <label class="meta">性別
+                <select id="pf_gender"><option>女</option><option>男</option></select>
+            </label>
+            <label class="meta">年齡<input id="pf_age" type="number" min="18" max="60"></label>
+            <label class="meta">城市<input id="pf_city" type="text" placeholder="台北"></label>
+            <label class="meta">地區<input id="pf_district" type="text" placeholder="大安"></label>
+            <label class="meta">行業<input id="pf_industry" type="text" placeholder="科技業"></label>
+            <label class="meta">學歷<input id="pf_university" type="text" placeholder="政大"></label>
+            <label class="meta">作息
+                <select id="pf_schedule"><option>正常</option><option>夜貓</option><option>早起</option></select>
+            </label>
+            <label class="meta" style="grid-column:1 / span 2">性格（可自由輸入）<input id="pf_personality" type="text" placeholder="活潑開朗、愛交朋友"></label>
+            <label class="meta" style="grid-column:1 / span 2">興趣愛好（用、分隔）<input id="pf_hobbies" type="text" placeholder="看電影、吃美食"></label>
+            <label class="meta" style="grid-column:1 / span 2">想找什麼（求偶目標）<input id="pf_looking" type="text"></label>
+            <label class="meta">約炮成約次數（社會證明）<input id="pf_meetups" type="number" min="0" max="99"></label>
+        </div>
         <div style="margin-top:1rem">
-            <button class="btn btn-secondary" onclick="regenPersona()">重新生成人設</button>
+            <button class="btn btn-primary" onclick="savePersona()">儲存人設</button>
+            <button class="btn btn-secondary" onclick="regenPersona()">重新生成（換一個）</button>
+            <button class="btn btn-secondary" onclick="closeModals()">關閉</button>
+        </div>
+    </div>
+</div>
+
+<!-- 指定群組 -->
+<div class="modal" id="groupsModal">
+    <div class="modal-box" style="max-width:520px">
+        <h3>指定群組（只讓此水軍在勾選的群活動）</h3>
+        <p class="meta" style="margin-bottom:0.8rem">不勾任何群 = 自動在所有群活動。需帳號已連線才會列出它所在的群。</p>
+        <div id="groupsList" style="max-height:45vh;overflow-y:auto"></div>
+        <div style="margin-top:1rem">
+            <button class="btn btn-primary" onclick="saveGroups()">儲存指定群組</button>
             <button class="btn btn-secondary" onclick="closeModals()">關閉</button>
         </div>
     </div>
@@ -360,6 +433,7 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 <script>
 let tgAuthId = '';
 let currentPersonaId = '';
+let currentGroupsId = '';
 
 function toast(msg) {
     const t = document.getElementById('toast');
@@ -428,12 +502,11 @@ async function loadStatus() {
                     </div>
                 </div>
                 <div>
-                    ${acc.is_running
-                        ? '<button class="btn btn-danger" onclick="stopAccount(\\'' + acc.id + '\\')">停止</button>'
-                        : '<button class="btn btn-primary" onclick="startAccount(\\'' + acc.id + '\\')">啟動</button>'}
-                    <button class="btn btn-secondary" onclick="showPersona(\\'' + acc.id + '\\')">人設</button>
-                    <button class="btn btn-secondary" onclick="showPrivates(\\'' + acc.id + '\\')">私訊</button>
-                    <button class="btn btn-danger" onclick="deleteAccount(\\'' + acc.id + '\\')">刪除</button>
+                    <button class="btn ${acc.is_running ? 'btn-danger' : 'btn-primary'}" data-act="${acc.is_running ? 'stop' : 'start'}" data-id="${esc(acc.id)}">${acc.is_running ? '停止' : '啟動'}</button>
+                    <button class="btn btn-secondary" data-act="persona" data-id="${esc(acc.id)}">人設</button>
+                    <button class="btn btn-secondary" data-act="groups" data-id="${esc(acc.id)}">群組${(acc.groups && acc.groups.length) ? '·' + acc.groups.length : ''}</button>
+                    <button class="btn btn-secondary" data-act="privates" data-id="${esc(acc.id)}">私訊</button>
+                    <button class="btn btn-danger" data-act="delete" data-id="${esc(acc.id)}">刪除</button>
                 </div>
             </div>
         </div>`;
@@ -514,12 +587,76 @@ async function showPersona(id) {
     currentPersonaId = id;
     const r = await api('/api/accounts/' + id + '/persona');
     if (!r.ok) return;
-    document.getElementById('personaText').textContent = JSON.stringify(r.data.persona, null, 2);
+    fillPersonaForm(r.data.persona || {});
     document.getElementById('personaModal').classList.add('active');
+}
+function fillPersonaForm(p) {
+    const v = (id, key) => { const el = document.getElementById(id); if (el) el.value = (p[key] !== undefined && p[key] !== null) ? p[key] : ''; };
+    v('pf_name', 'name'); v('pf_city', 'city'); v('pf_district', 'district');
+    v('pf_industry', 'industry'); v('pf_university', 'university');
+    v('pf_personality', 'personality'); v('pf_looking', 'looking_for');
+    v('pf_age', 'age'); v('pf_meetups', 'meetups_done');
+    const g = document.getElementById('pf_gender'); if (g) g.value = p.gender || '女';
+    const s = document.getElementById('pf_schedule'); if (s) s.value = p.schedule || '正常';
+    const h = document.getElementById('pf_hobbies'); if (h) h.value = (p.hobbies || []).join('、');
+}
+function readPersonaForm() {
+    const g = id => document.getElementById(id).value.trim();
+    return {
+        name: g('pf_name'),
+        gender: g('pf_gender'),
+        age: parseInt(g('pf_age') || '0', 10),
+        city: g('pf_city'),
+        district: g('pf_district'),
+        industry: g('pf_industry'),
+        university: g('pf_university'),
+        personality: g('pf_personality'),
+        hobbies: g('pf_hobbies').split(/[,，、]/).map(x => x.trim()).filter(Boolean),
+        looking_for: g('pf_looking'),
+        meetups_done: parseInt(g('pf_meetups') || '0', 10),
+        schedule: g('pf_schedule'),
+    };
+}
+async function savePersona() {
+    const persona = readPersonaForm();
+    if (!persona.name) { toast('名字不能為空'); return; }
+    const r = await api('/api/accounts/' + currentPersonaId + '/persona', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ persona }),
+    });
+    if (r.ok) { toast('人設已儲存'); closeModals(); loadStatus(); }
+    else toast(r.data.error || '儲存失敗');
 }
 async function regenPersona() {
     const r = await api('/api/accounts/' + currentPersonaId + '/persona/regenerate', { method: 'POST' });
-    if (r.ok) document.getElementById('personaText').textContent = JSON.stringify(r.data.persona, null, 2);
+    if (r.ok) fillPersonaForm(r.data.persona);
+}
+
+async function showGroups(id) {
+    currentGroupsId = id;
+    const r = await api('/api/status');
+    if (!r.ok) return;
+    const acc = (r.data.accounts || []).find(a => a.id === id);
+    if (!acc) return;
+    const selected = new Set(acc.groups || []);
+    const avail = acc.groups_available || [];
+    document.getElementById('groupsList').innerHTML = avail.length
+        ? avail.map(g => `
+            <label style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0;font-size:0.9rem">
+                <input type="checkbox" class="grp-cb" value="${g.id}" ${selected.has(g.id) ? 'checked' : ''}>
+                <span>${esc(g.title)}</span> <span class="meta">（${g.id}）</span>
+            </label>`).join('')
+        : '<div class="meta">此帳號尚未連線，看不到它所在的群。先啟動帳號，再回來勾選。</div>';
+    document.getElementById('groupsModal').classList.add('active');
+}
+async function saveGroups() {
+    const ids = [...document.querySelectorAll('#groupsList .grp-cb:checked')].map(c => Number(c.value));
+    const r = await api('/api/accounts/' + currentGroupsId + '/groups', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ groups: ids }),
+    });
+    if (r.ok) { closeModals(); toast('指定群組已儲存'); loadStatus(); }
+    else toast(r.data.error || '儲存失敗');
 }
 
 async function showPrivates(id) {
@@ -541,6 +678,18 @@ async function showPrivates(id) {
         document.getElementById('loginBox').style.display = 'none';
         document.getElementById('mainBox').style.display = 'block';
         document.getElementById('logoutBtn').style.display = 'block';
+        // 帳號卡片按鈕（事件委託，免手動綁定）
+        document.getElementById('accounts').addEventListener('click', (e) => {
+            const b = e.target.closest('button[data-act]');
+            if (!b) return;
+            const act = b.dataset.act, id = b.dataset.id;
+            if (act === 'start') startAccount(id);
+            else if (act === 'stop') stopAccount(id);
+            else if (act === 'persona') showPersona(id);
+            else if (act === 'groups') showGroups(id);
+            else if (act === 'privates') showPrivates(id);
+            else if (act === 'delete') deleteAccount(id);
+        });
         loadStatus();
         setInterval(() => { if (document.getElementById('mainBox').style.display !== 'none') loadStatus(); }, 15000);
     }

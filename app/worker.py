@@ -32,7 +32,8 @@ class AccountWorker:
                  tg_api_id: int, tg_api_hash: str,
                  ai_client: AsyncOpenAI, db, config,
                  managed_ids: set, on_status_change,
-                 persona: dict | None = None):
+                 persona: dict | None = None,
+                 selected_groups: list[int] | None = None):
         self.account_id = account_id
         self.session_key = session_key
         self.tg_api_id = tg_api_id
@@ -42,6 +43,8 @@ class AccountWorker:
         self.config = config
         self.managed_ids = managed_ids  # 所有水軍 TG user id（互認）
         self.on_status_change = on_status_change
+        # 指定群組：空 list = 自動所有群；非空 = 只在這幾個群活動
+        self.selected_groups: set[int] = set(selected_groups or [])
 
         self.persona = persona or generate_persona()
         self.name = self.persona["name"]
@@ -57,6 +60,7 @@ class AccountWorker:
         self._cleanup_task: asyncio.Task | None = None
         self._last_activity: dict[int, float] = {}  # group_id -> ts
         self._known_groups: set[int] = set()  # 這個帳號知道的所有群（冷啟動 fallback）
+        self._dialogs: dict[int, str] = {}  # group_id -> 群名稱（供控制台勾選）
         self._proactive_today = 0
         self._proactive_day = 0
 
@@ -83,6 +87,7 @@ class AccountWorker:
                 async for d in self.tg_client.iter_dialogs():
                     if d.is_group:
                         self._known_groups.add(d.id)
+                        self._dialogs[d.id] = get_display_name(d) or f"群組 {d.id}"
             except Exception:
                 pass
 
@@ -130,6 +135,13 @@ class AccountWorker:
         h = (time.time() / 3600 + self._schedule_offset) % 24
         return 9 <= h < 17
 
+    def group_list(self) -> list[dict]:
+        """這個帳號所在的群組（供控制台勾選指定群組）"""
+        items = [
+            {"id": gid, "title": title} for gid, title in self._dialogs.items()
+        ]
+        return items
+
     # ---------- 事件處理 ----------
 
     async def on_message(self, event):
@@ -142,6 +154,8 @@ class AccountWorker:
             if not event.is_group or event.chat_id is None:
                 return
             group_id = int(event.chat_id)
+            if self.selected_groups and group_id not in self.selected_groups:
+                return  # 非指定群組：忽略（不回覆、不記錄）
             self._known_groups.add(group_id)
             self._last_activity[group_id] = time.time()
             await self.db.add_message(
@@ -170,6 +184,8 @@ class AccountWorker:
             if not event.is_group or event.chat_id is None:
                 return
             group_id = int(event.chat_id)
+            if self.selected_groups and group_id not in self.selected_groups:
+                return  # 非指定群組：不歡迎新人
             self._known_groups.add(group_id)
             new_user = await event.get_user()
             if new_user is None:
@@ -362,6 +378,9 @@ class AccountWorker:
                 ]
                 if not groups:
                     groups = list(self._known_groups)
+                # 指定群組：只在勾選的群裡發言
+                if self.selected_groups:
+                    groups = [gid for gid in groups if gid in self.selected_groups]
                 if not groups:
                     continue
                 group_id = random.choice(groups)

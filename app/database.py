@@ -37,11 +37,17 @@ class Database:
                 tg_user_id INTEGER UNIQUE,
                 tg_username TEXT,
                 persona TEXT,
+                groups TEXT,
                 enabled INTEGER DEFAULT 0,
                 created_at REAL DEFAULT 0,
                 updated_at REAL DEFAULT 0
             )
         """)
+        # 舊庫升級：補 groups 欄位（指定群組，JSON；空 = 自動所有群）
+        cols = await db.execute("PRAGMA table_info(accounts)")
+        col_names = {r[1] for r in await cols.fetchall()}
+        if "groups" not in col_names:
+            await db.execute("ALTER TABLE accounts ADD COLUMN groups TEXT")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,7 +105,7 @@ class Database:
 
     async def list_accounts(self) -> list[dict]:
         cursor = await self._c.execute(
-            "SELECT id, name, session_key, tg_user_id, tg_username, persona, enabled "
+            "SELECT id, name, session_key, tg_user_id, tg_username, persona, groups, enabled "
             "FROM accounts ORDER BY created_at"
         )
         rows = await cursor.fetchall()
