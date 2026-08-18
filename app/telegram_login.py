@@ -1,12 +1,15 @@
+"""
+Telegram 登入流程 - 電話 + 驗證碼 +（可選）2FA 密碼
+控制台新增水軍帳號時，水軍帳號需要重新登入取得 session。
+"""
+
 from __future__ import annotations
 
 import asyncio
 import re
 import secrets
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from telethon import TelegramClient
 from telethon.errors import (
@@ -23,97 +26,58 @@ from telethon.errors import (
 from telethon.sessions import StringSession
 from telethon.utils import get_display_name
 
-from .crypto import SecretBox
 
-
-FLOW_TTL_SECONDS = 10 * 60
-AUTHORIZED_TTL_SECONDS = 5 * 60
-START_COOLDOWN_SECONDS = 60
-MAX_CODE_ATTEMPTS = 5
-MAX_PASSWORD_ATTEMPTS = 3
-
-
-class TelegramLoginExpired(ValueError):
+class LoginExpired(ValueError):
     pass
 
 
-class TelegramLoginConflict(RuntimeError):
+class LoginConflict(RuntimeError):
     pass
 
 
-class TelegramLoginUnavailable(RuntimeError):
-    pass
-
-
-class TelegramLoginRateLimit(RuntimeError):
-    def __init__(self, message: str, retry_after: int) -> None:
+class LoginRateLimit(RuntimeError):
+    def __init__(self, message: str, retry_after: int = 0):
         super().__init__(message)
         self.retry_after = max(int(retry_after), 1)
 
 
-@dataclass(frozen=True, slots=True)
-class VerifiedTelegramSession:
-    session_ciphertext: str
-    session_fingerprint: str
-    telegram_user_id: int
-    telegram_name: str
+FLOW_TTL = 10 * 60
+AUTHORIZED_TTL = 5 * 60
+START_COOLDOWN = 60
+MAX_CODE_ATTEMPTS = 5
+MAX_PASSWORD_ATTEMPTS = 3
 
 
-@dataclass(slots=True)
-class PendingTelegramLogin:
+@dataclass
+class VerifiedSession:
+    session_string: str
+    tg_user_id: int
+    tg_name: str
+
+
+@dataclass
+class PendingLogin:
     auth_id: str
-    owner_id: str
     phone: str
     phone_hint: str
     phone_code_hash: str
-    client: Any
+    client: TelegramClient
     created_at: float
     expires_at: float
     state: str = "code_required"
     code_attempts: int = 0
     password_attempts: int = 0
-    verified: VerifiedTelegramSession | None = None
+    verified: VerifiedSession | None = None
     claimed: bool = False
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class TelegramLoginService:
-    def __init__(
-        self,
-        api_id: int,
-        api_hash: str,
-        secret_box: SecretBox,
-        *,
-        max_flows: int = 10,
-        client_factory: Callable[..., Any] = TelegramClient,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
+    def __init__(self, api_id: int, api_hash: str):
         self.api_id = api_id
         self.api_hash = api_hash
-        self.secret_box = secret_box
-        self.max_flows = max(1, min(max_flows, 20))
-        self.client_factory = client_factory
-        self.clock = clock
-        self.pending: dict[str, PendingTelegramLogin] = {}
-        self.last_start: dict[str, float] = {}
-        self.last_phone_start: dict[str, float] = {}
-        self.owner_generation: dict[str, int] = {}
-        self._dict_lock = asyncio.Lock()
-        self._start_lock = asyncio.Lock()
-
-    @staticmethod
-    def _clean_owner(owner_id: str) -> str:
-        owner = str(owner_id or "").strip()
-        if not owner or len(owner) > 200:
-            raise TelegramLoginExpired("登入流程不存在或已過期")
-        return owner
-
-    @staticmethod
-    def _clean_auth_id(auth_id: object) -> str:
-        value = str(auth_id or "").strip()
-        if not value or len(value) > 200:
-            raise TelegramLoginExpired("登入流程不存在或已過期")
-        return value
+        self.pending: dict[str, PendingLogin] = {}
+        self._last_start: dict[str, float] = {}
+        self._lock = asyncio.Lock()
 
     @staticmethod
     def _clean_phone(value: object) -> str:
@@ -124,9 +88,7 @@ class TelegramLoginService:
 
     @staticmethod
     def _mask_phone(phone: str) -> str:
-        if len(phone) <= 7:
-            return f"{phone[:2]}•••{phone[-2:]}"
-        return f"{phone[:4]}•••••{phone[-3:]}"
+        return f"{phone[:4]}•••••{phone[-3:]}" if len(phone) > 7 else phone
 
     @staticmethod
     def _clean_code(value: object) -> str:
@@ -135,406 +97,179 @@ class TelegramLoginService:
             raise ValueError("請輸入 Telegram 傳送的數字驗證碼")
         return code
 
-    @staticmethod
-    def _clean_password(value: object) -> str:
-        password = str(value or "")
-        if not password or len(password) > 512:
-            raise ValueError("請輸入 Telegram 兩步驗證密碼")
-        return password
-
-    def _public(self, pending: PendingTelegramLogin) -> dict[str, object]:
+    def _public(self, p: PendingLogin) -> dict:
         return {
-            "auth_id": pending.auth_id,
-            "status": pending.state,
-            "phone_hint": pending.phone_hint,
-            "expires_in": max(int(pending.expires_at - self.clock()), 0),
-            "resend_after": START_COOLDOWN_SECONDS,
+            "auth_id": p.auth_id,
+            "status": p.state,
+            "phone_hint": p.phone_hint,
+            "expires_in": max(int(p.expires_at - time.time()), 0),
         }
 
-    async def _disconnect(self, client: Any) -> None:
+    async def _disconnect(self, client: TelegramClient):
         try:
-            if client is not None and client.is_connected():
+            if client.is_connected():
                 await client.disconnect()
         except Exception:
             pass
 
-    async def _remove(
-        self,
-        auth_id: str,
-        expected: PendingTelegramLogin | None = None,
-    ) -> PendingTelegramLogin | None:
-        async with self._dict_lock:
-            pending = self.pending.get(auth_id)
-            if pending is None or (expected is not None and pending is not expected):
-                return None
-            self.pending.pop(auth_id, None)
-        await self._disconnect(pending.client)
-        pending.client = None
-        pending.phone = ""
-        pending.phone_code_hash = ""
-        pending.verified = None
-        pending.state = "closed"
-        return pending
+    async def _remove(self, auth_id: str) -> None:
+        p = self.pending.pop(auth_id, None)
+        if p:
+            await self._disconnect(p.client)
 
-    async def prune_expired(self) -> int:
-        now = self.clock()
-        async with self._dict_lock:
-            candidates = [
-                (auth_id, pending)
-                for auth_id, pending in self.pending.items()
-                if pending.expires_at <= now
-            ]
-            self.last_start = {
-                owner_id: started_at
-                for owner_id, started_at in self.last_start.items()
-                if now - started_at < FLOW_TTL_SECONDS
-            }
-            self.last_phone_start = {
-                phone_key: started_at
-                for phone_key, started_at in self.last_phone_start.items()
-                if now - started_at < FLOW_TTL_SECONDS
-            }
-            active_owners = {
-                pending.owner_id for pending in self.pending.values()
-            } | set(self.last_start)
-            self.owner_generation = {
-                owner_id: generation
-                for owner_id, generation in self.owner_generation.items()
-                if owner_id in active_owners
-            }
-
-        removed = 0
-        for auth_id, pending in candidates:
-            async with pending.lock:
-                if pending.claimed:
-                    continue
-                async with self._dict_lock:
-                    is_expired = (
-                        self.pending.get(auth_id) is pending
-                        and pending.expires_at <= self.clock()
-                    )
-                if is_expired and await self._remove(auth_id, pending) is not None:
-                    removed += 1
-        return removed
-
-    async def cancel_owner(self, owner_id: str) -> int:
-        owner = self._clean_owner(owner_id)
-        async with self._dict_lock:
-            self.owner_generation[owner] = self.owner_generation.get(owner, 0) + 1
-            matches = [
-                (auth_id, pending)
-                for auth_id, pending in self.pending.items()
-                if pending.owner_id == owner
-            ]
-        removed = 0
-        for auth_id, pending in matches:
-            async with pending.lock:
-                if pending.claimed:
-                    continue
-                if await self._remove(auth_id, pending) is not None:
-                    removed += 1
-        return removed
-
-    async def start(self, owner_id: str, phone_value: object) -> dict[str, object]:
-        owner = self._clean_owner(owner_id)
+    async def start(self, phone_value: object) -> dict:
         phone = self._clean_phone(phone_value)
-        phone_key = self.secret_box.fingerprint(phone)
-        async with self._start_lock:
-            await self.prune_expired()
-            now = self.clock()
-            previous_owner = self.last_start.get(owner)
-            previous_phone = self.last_phone_start.get(phone_key)
-            prior_starts = [
-                value
-                for value in (previous_owner, previous_phone)
-                if value is not None
-            ]
-            previous = max(prior_starts) if prior_starts else None
-            if previous is not None and now - previous < START_COOLDOWN_SECONDS:
-                retry_after = int(START_COOLDOWN_SECONDS - (now - previous)) + 1
-                raise TelegramLoginRateLimit(
-                    "驗證碼請求太頻繁，請稍後再試",
-                    retry_after,
+        now = time.time()
+        async with self._lock:
+            last = self._last_start.get(phone, 0)
+            if now - last < START_COOLDOWN:
+                raise LoginRateLimit(
+                    f"驗證碼請求太頻繁，請 {int(START_COOLDOWN - (now - last)) + 1} 秒後再試",
+                    int(START_COOLDOWN - (now - last)) + 1,
                 )
-            await self.cancel_owner(owner)
-            async with self._dict_lock:
-                if len(self.pending) >= self.max_flows:
-                    raise TelegramLoginConflict("目前登入流程已滿，請稍後再試")
-                generation = self.owner_generation.get(owner, 0)
-                self.last_start[owner] = now
-                self.last_phone_start[phone_key] = now
+            self._last_start[phone] = now
 
-            client = self.client_factory(
-                StringSession(),
-                self.api_id,
-                self.api_hash,
-            )
-            try:
-                try:
-                    # 修 M13: 网络调用加 30s 超时——卡住的 Telegram 连接
-                    # 不能永久阻塞 _start_lock（其他账号登录全串行等待）
-                    await asyncio.wait_for(client.connect(), timeout=30)
-                    sent = await asyncio.wait_for(
-                        client.send_code_request(phone), timeout=30
-                    )
-                except asyncio.TimeoutError:
-                    await self._disconnect(client)
-                    raise TelegramLoginUnavailable(
-                        "Telegram 連線逾時，請稍後再試"
-                    ) from None
-                except FloodWaitError as exc:
-                    await self._disconnect(client)
-                    raise TelegramLoginRateLimit(
-                        "Telegram 要求稍後再傳送驗證碼",
-                        int(exc.seconds),
-                    ) from None
-                except PhoneNumberFloodError:
-                    await self._disconnect(client)
-                    raise TelegramLoginRateLimit(
-                        "這個號碼的驗證要求過多，請稍後再試",
-                        START_COOLDOWN_SECONDS,
-                    ) from None
-                except PhoneNumberInvalidError:
-                    await self._disconnect(client)
-                    raise ValueError(
-                        "手機號碼格式無效，請確認國碼與號碼"
-                    ) from None
-                except PhoneNumberBannedError:
-                    await self._disconnect(client)
-                    raise ValueError(
-                        "這個 Telegram 手機號碼目前無法登入"
-                    ) from None
-                except Exception:
-                    await self._disconnect(client)
-                    raise TelegramLoginUnavailable(
-                        "Telegram 暫時無法傳送驗證碼，請稍後再試"
-                    ) from None
-
-                auth_id = secrets.token_urlsafe(32)
-                pending = PendingTelegramLogin(
-                    auth_id=auth_id,
-                    owner_id=owner,
-                    phone=phone,
-                    phone_hint=self._mask_phone(phone),
-                    phone_code_hash=str(sent.phone_code_hash),
-                    client=client,
-                    created_at=now,
-                    expires_at=now + FLOW_TTL_SECONDS,
-                )
-                async with self._dict_lock:
-                    cancelled = self.owner_generation.get(owner, 0) != generation
-                    at_capacity = len(self.pending) >= self.max_flows
-                    if not cancelled and not at_capacity:
-                        self.pending[auth_id] = pending
-                if cancelled:
-                    await self._disconnect(client)
-                    raise TelegramLoginExpired(
-                        "登入流程已取消，請重新取得驗證碼"
-                    )
-                if at_capacity:
-                    await self._disconnect(client)
-                    raise TelegramLoginConflict(
-                        "目前登入流程已滿，請稍後再試"
-                    )
-                return self._public(pending)
-            except asyncio.CancelledError:
-                await asyncio.shield(self._disconnect(client))
-                raise
-
-    async def _get(
-        self,
-        owner_id: str,
-        auth_id: object,
-    ) -> PendingTelegramLogin:
-        owner = self._clean_owner(owner_id)
-        cleaned_auth_id = self._clean_auth_id(auth_id)
-        async with self._dict_lock:
-            pending = self.pending.get(cleaned_auth_id)
-        if pending is None or pending.owner_id != owner:
-            raise TelegramLoginExpired("登入流程不存在或已過期")
-        return pending
-
-    async def _ensure_active_locked(
-        self,
-        pending: PendingTelegramLogin,
-    ) -> None:
-        async with self._dict_lock:
-            is_current = self.pending.get(pending.auth_id) is pending
-        if not is_current:
-            raise TelegramLoginExpired("登入流程不存在或已過期")
-        if pending.expires_at <= self.clock():
-            await self._remove(pending.auth_id, pending)
-            raise TelegramLoginExpired("登入流程已過期，請重新取得驗證碼")
-
-    async def _authorize(self, pending: PendingTelegramLogin) -> None:
-        me = await pending.client.get_me()
-        if me is None:
-            raise TelegramLoginUnavailable("無法取得 Telegram 帳號資料")
-        session_string = pending.client.session.save()
-        if not session_string:
-            raise TelegramLoginUnavailable("Telegram Session 建立失敗")
-        pending.verified = VerifiedTelegramSession(
-            session_ciphertext=self.secret_box.encrypt(session_string),
-            session_fingerprint=self.secret_box.fingerprint(session_string),
-            telegram_user_id=int(me.id),
-            telegram_name=get_display_name(me) or str(me.id),
-        )
-        pending.state = "authorized"
-        pending.phone = ""
-        pending.phone_code_hash = ""
-        pending.expires_at = min(
-            pending.created_at + FLOW_TTL_SECONDS,
-            self.clock() + AUTHORIZED_TTL_SECONDS,
-        )
-        await self._disconnect(pending.client)
-        pending.client = None
-
-    async def _finish_authorization(
-        self,
-        pending: PendingTelegramLogin,
-    ) -> None:
+        client = TelegramClient(StringSession(), self.api_id, self.api_hash)
         try:
-            await self._authorize(pending)
-        except asyncio.CancelledError:
-            await asyncio.shield(self._remove(pending.auth_id, pending))
-            raise
+            try:
+                await asyncio.wait_for(client.connect(), timeout=30)
+                sent = await asyncio.wait_for(
+                    client.send_code_request(phone), timeout=30
+                )
+            except asyncio.TimeoutError:
+                raise LoginRateLimit("Telegram 連線逾時，請稍後再試") from None
+            except FloodWaitError as e:
+                raise LoginRateLimit(
+                    "Telegram 要求稍後再傳送驗證碼", int(e.seconds)
+                ) from None
+            except PhoneNumberFloodError:
+                raise LoginRateLimit(
+                    "這個號碼的驗證要求過多，請稍後再試", START_COOLDOWN
+                ) from None
+            except PhoneNumberInvalidError:
+                raise ValueError("手機號碼格式無效，請確認國碼與號碼") from None
+            except PhoneNumberBannedError:
+                raise ValueError("這個 Telegram 手機號碼目前無法登入") from None
+            except Exception:
+                raise LoginRateLimit(
+                    "Telegram 暫時無法傳送驗證碼，請稍後再試"
+                ) from None
         except Exception:
-            await self._remove(pending.auth_id, pending)
-            raise TelegramLoginUnavailable(
-                "Telegram 登入已完成但 Session 建立失敗，請重新登入"
-            ) from None
+            await self._disconnect(client)
+            raise
 
-    async def submit_code(
-        self,
-        owner_id: str,
-        auth_id: object,
-        code_value: object,
-    ) -> dict[str, object]:
-        pending = await self._get(owner_id, auth_id)
+        auth_id = secrets.token_urlsafe(32)
+        p = PendingLogin(
+            auth_id=auth_id,
+            phone=phone,
+            phone_hint=self._mask_phone(phone),
+            phone_code_hash=str(sent.phone_code_hash),
+            client=client,
+            created_at=now,
+            expires_at=now + FLOW_TTL,
+        )
+        self.pending[auth_id] = p
+        return self._public(p)
+
+    async def _get(self, auth_id: object) -> PendingLogin:
+        aid = str(auth_id or "").strip()
+        p = self.pending.get(aid)
+        if p is None:
+            raise LoginExpired("登入流程不存在或已過期")
+        if time.time() > p.expires_at:
+            await self._remove(aid)
+            raise LoginExpired("登入流程已過期，請重新取得驗證碼")
+        return p
+
+    async def _authorize(self, p: PendingLogin) -> None:
+        me = await p.client.get_me()
+        if me is None:
+            raise LoginExpired("無法取得 Telegram 帳號資料")
+        session_string = p.client.session.save()
+        if not session_string:
+            raise LoginExpired("Telegram Session 建立失敗")
+        p.verified = VerifiedSession(
+            session_string=session_string,
+            tg_user_id=int(me.id),
+            tg_name=get_display_name(me) or str(me.id),
+        )
+        p.state = "authorized"
+        p.phone = ""
+        p.expires_at = min(p.created_at + FLOW_TTL, time.time() + AUTHORIZED_TTL)
+        await self._disconnect(p.client)
+
+    async def submit_code(self, auth_id: object, code_value: object) -> dict:
+        p = await self._get(auth_id)
         code = self._clean_code(code_value)
-        async with pending.lock:
-            await self._ensure_active_locked(pending)
-            if pending.state != "code_required":
-                raise TelegramLoginConflict("目前登入流程不接受驗證碼")
-            try:
-                await pending.client.sign_in(
-                    phone=pending.phone,
-                    code=code,
-                    phone_code_hash=pending.phone_code_hash,
-                )
-            except SessionPasswordNeededError:
-                pending.state = "password_required"
-                return self._public(pending)
-            except (PhoneCodeInvalidError, PhoneCodeEmptyError):
-                pending.code_attempts += 1
-                if pending.code_attempts >= MAX_CODE_ATTEMPTS:
-                    await self._remove(pending.auth_id, pending)
-                    raise TelegramLoginExpired(
-                        "驗證碼錯誤次數過多，請重新取得驗證碼"
-                    ) from None
-                raise ValueError("Telegram 驗證碼不正確") from None
-            except PhoneCodeExpiredError:
-                await self._remove(pending.auth_id, pending)
-                raise TelegramLoginExpired(
-                    "Telegram 驗證碼已過期，請重新取得"
-                ) from None
-            except FloodWaitError as exc:
-                raise TelegramLoginRateLimit(
-                    "驗證嘗試太頻繁，請稍後再試",
-                    int(exc.seconds),
-                ) from None
-            except Exception:
-                raise TelegramLoginUnavailable(
-                    "Telegram 驗證暫時失敗，請稍後再試"
-                ) from None
-            await self._finish_authorization(pending)
-            return self._public(pending)
-
-    async def submit_password(
-        self,
-        owner_id: str,
-        auth_id: object,
-        password_value: object,
-    ) -> dict[str, object]:
-        pending = await self._get(owner_id, auth_id)
-        password = self._clean_password(password_value)
-        async with pending.lock:
-            await self._ensure_active_locked(pending)
-            if pending.state != "password_required":
-                raise TelegramLoginConflict("目前登入流程不接受兩步驗證密碼")
-            try:
-                await pending.client.sign_in(password=password)
-            except PasswordHashInvalidError:
-                pending.password_attempts += 1
-                if pending.password_attempts >= MAX_PASSWORD_ATTEMPTS:
-                    await self._remove(pending.auth_id, pending)
-                    raise TelegramLoginExpired(
-                        "兩步驗證密碼錯誤次數過多，請重新登入"
-                    ) from None
-                raise ValueError("Telegram 兩步驗證密碼不正確") from None
-            except FloodWaitError as exc:
-                raise TelegramLoginRateLimit(
-                    "驗證嘗試太頻繁，請稍後再試",
-                    int(exc.seconds),
-                ) from None
-            except Exception:
-                raise TelegramLoginUnavailable(
-                    "Telegram 兩步驗證暫時失敗，請稍後再試"
-                ) from None
-            await self._finish_authorization(pending)
-            return self._public(pending)
-
-    async def claim_authorized(
-        self,
-        owner_id: str,
-        auth_id: object,
-    ) -> VerifiedTelegramSession:
-        pending = await self._get(owner_id, auth_id)
-        async with pending.lock:
-            await self._ensure_active_locked(pending)
-            if pending.state != "authorized" or pending.verified is None:
-                raise TelegramLoginConflict("請先完成 Telegram 驗證")
-            if pending.claimed:
-                raise TelegramLoginConflict("帳號正在建立中，請勿重複提交")
-            pending.claimed = True
-            return pending.verified
-
-    async def release_claim(self, owner_id: str, auth_id: object) -> None:
+        if p.state != "code_required":
+            raise LoginConflict("目前登入流程不接受驗證碼")
         try:
-            pending = await self._get(owner_id, auth_id)
-        except TelegramLoginExpired:
-            return
-        async with pending.lock:
-            if pending.state == "authorized":
-                pending.claimed = False
-                if pending.expires_at <= self.clock():
-                    await self._remove(pending.auth_id, pending)
+            await p.client.sign_in(
+                phone=p.phone, code=code, phone_code_hash=p.phone_code_hash
+            )
+        except SessionPasswordNeededError:
+            p.state = "password_required"
+            return self._public(p)
+        except (PhoneCodeInvalidError, PhoneCodeEmptyError):
+            p.code_attempts += 1
+            if p.code_attempts >= MAX_CODE_ATTEMPTS:
+                await self._remove(p.auth_id)
+                raise LoginExpired(
+                    "驗證碼錯誤次數過多，請重新取得驗證碼"
+                ) from None
+            raise ValueError("Telegram 驗證碼不正確") from None
+        except PhoneCodeExpiredError:
+            await self._remove(p.auth_id)
+            raise LoginExpired("驗證碼已過期，請重新取得") from None
+        except FloodWaitError as e:
+            raise LoginRateLimit(
+                "驗證嘗試太頻繁，請稍後再試", int(e.seconds)
+            ) from None
+        except Exception:
+            raise LoginRateLimit("Telegram 驗證暫時失敗，請稍後再試") from None
+        await self._authorize(p)
+        return self._public(p)
 
-    async def complete(self, owner_id: str, auth_id: object) -> None:
-        pending = await self._get(owner_id, auth_id)
-        async with pending.lock:
-            await self._remove(pending.auth_id, pending)
+    async def submit_password(self, auth_id: object, password_value: object) -> dict:
+        p = await self._get(auth_id)
+        password = str(password_value or "")
+        if not password or len(password) > 512:
+            raise ValueError("請輸入 Telegram 兩步驗證密碼")
+        if p.state != "password_required":
+            raise LoginConflict("目前登入流程不接受密碼")
+        try:
+            await p.client.sign_in(password=password)
+        except PasswordHashInvalidError:
+            p.password_attempts += 1
+            if p.password_attempts >= MAX_PASSWORD_ATTEMPTS:
+                await self._remove(p.auth_id)
+                raise LoginExpired(
+                    "兩步驗證密碼錯誤次數過多，請重新登入"
+                ) from None
+            raise ValueError("兩步驗證密碼不正確") from None
+        except FloodWaitError as e:
+            raise LoginRateLimit(
+                "驗證嘗試太頻繁，請稍後再試", int(e.seconds)
+            ) from None
+        except Exception:
+            raise LoginRateLimit("Telegram 驗證暫時失敗，請稍後再試") from None
+        await self._authorize(p)
+        return self._public(p)
 
-    async def cancel(self, owner_id: str, auth_id: object) -> None:
-        pending = await self._get(owner_id, auth_id)
-        async with pending.lock:
-            await self._ensure_active_locked(pending)
-            if pending.claimed:
-                raise TelegramLoginConflict("帳號正在建立中，無法取消")
-            await self._remove(pending.auth_id, pending)
+    async def claim(self, auth_id: object) -> VerifiedSession:
+        p = await self._get(auth_id)
+        if p.state != "authorized" or p.verified is None:
+            raise LoginConflict("請先完成 Telegram 驗證")
+        if p.claimed:
+            raise LoginConflict("帳號正在建立中，請勿重複提交")
+        p.claimed = True
+        return p.verified
 
-    async def close(self) -> None:
-        async with self._dict_lock:
-            pending = list(self.pending.values())
-            self.pending.clear()
-            self.last_start.clear()
-            self.last_phone_start.clear()
-            self.owner_generation.clear()
-        for item in pending:
-            async with item.lock:
-                await self._disconnect(item.client)
-                item.client = None
-                item.phone = ""
-                item.phone_code_hash = ""
-                item.verified = None
-                item.state = "closed"
+    async def cancel(self, auth_id: object) -> None:
+        await self._remove(str(auth_id or "").strip())
+
+    async def prune_expired(self) -> None:
+        now = time.time()
+        expired = [aid for aid, p in self.pending.items() if now > p.expires_at]
+        for aid in expired:
+            await self._remove(aid)

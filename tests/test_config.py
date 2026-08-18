@@ -1,90 +1,32 @@
-from __future__ import annotations
-
-import os
-import unittest
-from unittest.mock import patch
+import pytest
 
 from app.config import load_settings
 
 
-class MaxAccountsSettingsTests(unittest.TestCase):
-    def _environment(self, **overrides: str) -> dict[str, str]:
-        values = {
-            "TG_API_ID": "12345",
-            "TG_API_HASH": "test-api-hash",
-            "ACCOUNT_ENCRYPTION_KEY": "test-encryption-key",
-            "DASHBOARD_PASSWORD": "test-password-123",
-        }
-        values.update(overrides)
-        return values
-
-    def test_max_accounts_defaults_to_twenty(self) -> None:
-        with patch.dict(os.environ, self._environment(), clear=True):
-            settings = load_settings()
-            self.assertEqual(settings.max_accounts, 20)
-            self.assertFalse(settings.migrate_existing_accounts_to_grok_adult)
-
-    def test_grok_adult_migration_requires_explicit_true(self) -> None:
-        with patch.dict(
-            os.environ,
-            self._environment(
-                MIGRATE_EXISTING_ACCOUNTS_TO_GROK_ADULT="true",
-            ),
-            clear=True,
-        ):
-            self.assertTrue(
-                load_settings().migrate_existing_accounts_to_grok_adult
-            )
-
-    def test_max_accounts_can_be_overridden_by_railway_variable(self) -> None:
-        with patch.dict(
-            os.environ,
-            self._environment(MAX_ACCOUNTS="7"),
-            clear=True,
-        ):
-            self.assertEqual(load_settings().max_accounts, 7)
-
-    def test_max_accounts_cannot_exceed_console_limit(self) -> None:
-        with patch.dict(
-            os.environ,
-            self._environment(MAX_ACCOUNTS="21"),
-            clear=True,
-        ):
-            with self.assertRaisesRegex(ValueError, "at most 20"):
-                load_settings()
-
-    def test_openrouter_text_and_media_defaults_can_be_overridden(self) -> None:
-        with patch.dict(
-            os.environ,
-            self._environment(
-                OPENROUTER_API_KEY="test-openrouter-key",
-                MEDIA_IMAGE_MODEL="vendor/image-model",
-                MEDIA_TTS_MODEL="vendor/tts-model",
-                MEDIA_VIDEO_MODEL="vendor/video-model",
-                MEDIA_MODERATION_MODEL="vendor/review-model",
-            ),
-            clear=True,
-        ):
-            settings = load_settings()
-
-        self.assertEqual(settings.ai_api_key, "test-openrouter-key")
-        self.assertTrue(settings.ai_uses_openrouter_key)
-        self.assertEqual(
-            settings.ai_model,
-            "cognitivecomputations/dolphin-mistral-24b-venice-edition",
-        )
-        self.assertEqual(
-            settings.openai_media_api_key,
-            "test-openrouter-key",
-        )
-        self.assertEqual(settings.media_image_model, "vendor/image-model")
-        self.assertEqual(settings.media_tts_model, "vendor/tts-model")
-        self.assertEqual(settings.media_video_model, "vendor/video-model")
-        self.assertEqual(
-            settings.media_moderation_model,
-            "vendor/review-model",
-        )
+def test_load_settings_full():
+    s = load_settings()
+    assert s.tg_api_id == 30279608
+    assert s.tg_api_hash == "test_hash"
+    assert s.dashboard_port == 8000
+    assert s.ai_model == "test-model"
+    assert 0 < s.base_reply_probability < 1
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_missing_required_var_raises():
+    import os
+
+    old = os.environ.pop("TG_API_ID")
+    try:
+        with pytest.raises(ValueError, match="TG_API_ID"):
+            load_settings()
+    finally:
+        os.environ["TG_API_ID"] = old
+
+
+def test_defaults_present():
+    s = load_settings()
+    assert s.memory_max_messages == 30
+    assert s.memory_ttl_hours == 24
+    assert s.min_typing_delay < s.max_typing_delay
+    assert s.proactive_max_per_day >= 1
+    assert s.water_cross_talk_probability > 0
