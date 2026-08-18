@@ -56,6 +56,7 @@ class AccountWorker:
         self._proactive_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
         self._last_activity: dict[int, float] = {}  # group_id -> ts
+        self._known_groups: set[int] = set()  # 這個帳號知道的所有群（冷啟動 fallback）
         self._proactive_today = 0
         self._proactive_day = 0
 
@@ -76,6 +77,14 @@ class AccountWorker:
 
             self.tg_client.add_event_handler(self.on_message, events.NewMessage())
             self.tg_client.add_event_handler(self.on_chat_action, events.ChatAction())
+
+            # 冷啟動：先把這個帳號在的所有群記下來（就算沒人講話，群也不會死）
+            try:
+                async for d in self.tg_client.iter_dialogs():
+                    if d.is_group:
+                        self._known_groups.add(d.id)
+            except Exception:
+                pass
 
             self.is_running = True
             self._proactive_day = self._today_index()
@@ -133,6 +142,7 @@ class AccountWorker:
             if not event.is_group or event.chat_id is None:
                 return
             group_id = int(event.chat_id)
+            self._known_groups.add(group_id)
             self._last_activity[group_id] = time.time()
             await self.db.add_message(
                 self.account_id, group_id,
@@ -160,6 +170,7 @@ class AccountWorker:
             if not event.is_group or event.chat_id is None:
                 return
             group_id = int(event.chat_id)
+            self._known_groups.add(group_id)
             new_user = await event.get_user()
             if new_user is None:
                 return
@@ -344,14 +355,16 @@ class AccountWorker:
                     continue
                 if self._is_busy_hour() and random.random() < 0.5:
                     continue
-                # 挑一個最近活躍的群組（6 小時內）
+                # 挑一個最近活躍的群組（6 小時內）；都沒有的話用已知群 fallback（群不能死）
                 groups = [
-                    (gid, ts) for gid, ts in self._last_activity.items()
+                    gid for gid, ts in self._last_activity.items()
                     if time.time() - ts < 6 * 3600
                 ]
                 if not groups:
+                    groups = list(self._known_groups)
+                if not groups:
                     continue
-                group_id, _ = random.choice(groups)
+                group_id = random.choice(groups)
                 # 每群冷卻
                 last = await self.db.last_activity(self.account_id, group_id, "proactive")
                 if time.time() - last < self.config.proactive_min_interval_minutes * 60:
