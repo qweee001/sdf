@@ -16,6 +16,7 @@ from telethon.sessions import StringSession
 from .config import Settings
 from .crypto import SecretBox
 from .database import Database
+from .media import OrcaMediaService
 from .persona import generate_persona
 from .worker import AccountWorker
 
@@ -27,20 +28,34 @@ class AccountManager:
         self.secret_box = secret_box
         self.workers: dict[str, AccountWorker] = {}
         self.managed_ids: set[int] = set()
+        self.active_ids: set[int] = set()
         self._status: dict[str, dict] = {}
         self._ai_client = AsyncOpenAI(
             base_url=config.ai_base_url,
             api_key=config.ai_api_key or "sk-placeholder",
             timeout=config.ai_timeout,
         )
+        self._media_service = OrcaMediaService(
+            client=self._ai_client,
+            db=db,
+            config=config,
+        )
 
     async def _on_status_change(self, account_id: str, state: str,
                                 tg_user_id: int | None, detail: str):
         self._status[account_id] = {"state": state, "detail": detail}
 
+    async def _refresh_managed_ids(self) -> list[dict]:
+        accounts = await self.db.list_accounts()
+        for acc in accounts:
+            tg_user_id = int(acc.get("tg_user_id") or 0)
+            if tg_user_id:
+                self.managed_ids.add(tg_user_id)
+        return accounts
+
     async def start_all(self):
         """部署重啟後恢復所有 enabled 帳號"""
-        for acc in await self.db.list_accounts():
+        for acc in await self._refresh_managed_ids():
             if acc.get("enabled"):
                 await self._start_account(acc)
 
@@ -75,6 +90,8 @@ class AccountManager:
             on_status_change=self._on_status_change,
             persona=persona,
             selected_groups=selected_groups,
+            media_service=self._media_service,
+            active_ids=self.active_ids,
         )
         self.workers[account_id] = worker
         await worker.start()
@@ -118,6 +135,7 @@ class AccountManager:
         if account_id in self.workers:
             return "已在運行"
         await self.db.update_account(account_id, enabled=1)
+        await self._refresh_managed_ids()
         await self._start_account(acc)
         return "" if account_id in self.workers else "啟動失敗：session 無效或 Telegram 拒登"
 
@@ -261,6 +279,8 @@ class AccountManager:
             "accounts": accounts,
             "total": len(accounts),
             "running": sum(1 for a in accounts if a["is_running"]),
+            "media_spend_usd": round(await self.db.media_spend_total(), 6),
+            "media_budget_usd": self.config.media_daily_budget_usd,
         }
 
     async def close_all(self):
@@ -271,6 +291,10 @@ class AccountManager:
     async def aclose(self):
         """關閉所有資源（worker + AI client）"""
         await self.close_all()
+        try:
+            await self._media_service.aclose()
+        except Exception:
+            pass
         try:
             await self._ai_client.close()
         except Exception:

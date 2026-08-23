@@ -32,14 +32,33 @@ def test_crud_full_cycle():
         assert msgs[0]["content"] == "你好"
         assert msgs[1]["role"] == "assistant"
 
+        await db.create_account("a2", "第二帳號", "ciphertext2")
+        await db.add_message("a2", 111, 0, "第二帳號", "assistant", "不同說法")
+        recent_group_replies = await db.get_recent_group_replies(111, limit=10)
+        assert recent_group_replies == ["不同說法", "嗨～"]
+
+        assert await db.reserve_media_budget(
+            "a1", "image", 0.60, 1.00, day="2026-08-23"
+        ) is True
+        assert await db.reserve_media_budget(
+            "a2", "video", 0.50, 1.00, day="2026-08-23"
+        ) is False
+        assert await db.media_spend_total("2026-08-23") == 0.60
+
         await db.add_private_message("a1", 555, "阿明", "加個 LINE 嗎")
         priv = await db.get_private_messages("a1", unread_only=True)
         assert len(priv) == 1
         await db.mark_private_message_read(priv[0]["id"])
         assert len(await db.get_private_messages("a1", unread_only=True)) == 0
 
+        assert await db.claim_message_response(111, 9001, "a1") is True
+        assert await db.claim_message_response(111, 9001, "a2") is False
+        assert await db.claim_proactive_slot(222, 7, "a1", 60) is True
+        assert await db.claim_proactive_slot(222, 7, "a2", 60) is False
+
         await db.touch_activity("a1", 111, "proactive")
         assert await db.last_activity("a1", 111, "proactive") > 0
+        assert await db.last_group_activity(111, "proactive") > 0
 
         stats = await db.stats_for("a1")
         assert stats["sent"] == 1

@@ -31,6 +31,13 @@ def test_defaults_present():
     assert s.proactive_max_per_day >= 1
     assert s.water_cross_talk_probability > 0
     assert s.ai_disable_thinking is False
+    assert s.vision_model == "test-model"
+    assert s.image_model
+    assert s.speech_model
+    assert s.video_model
+    assert s.media_enabled is False
+    assert s.media_daily_budget_usd == 10.0
+    assert s.media_max_input_bytes == 8 * 1024 * 1024
 
 
 def test_ai_disable_thinking_from_env(monkeypatch):

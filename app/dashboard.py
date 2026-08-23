@@ -178,7 +178,7 @@ class Dashboard:
             allowed = {
                 "name", "gender", "age", "city", "district", "industry",
                 "university", "personality", "hobbies", "looking_for",
-                "meetups_done", "schedule",
+                "meetups_done", "schedule", "chat_style",
             }
             clean = {k: v for k, v in persona.items() if k in allowed}
             clean["name"] = str(clean["name"]).strip()

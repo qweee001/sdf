@@ -15,18 +15,24 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
+import hashlib
 import inspect
+import io
 import random
 import re
 import time
 import unicodedata
+from typing import Any
 
 from openai import AsyncOpenAI
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
+from telethon.tl.types import MessageMediaPhoto
 from telethon.utils import get_display_name
 
+from .media import MediaAsset, OrcaMediaService
 from .persona import generate_persona, generate_proactive_topic, get_system_prompt
 
 _MAX_REPLY_CHARS = 60
@@ -162,15 +168,19 @@ class AccountWorker:
                  ai_client: AsyncOpenAI, db, config,
                  managed_ids: set, on_status_change,
                  persona: dict | None = None,
-                 selected_groups: list[int] | None = None):
+                 selected_groups: list[int] | None = None,
+                 media_service: OrcaMediaService | None = None,
+                 active_ids: set | None = None):
         self.account_id = account_id
         self.session_key = session_key
         self.tg_api_id = tg_api_id
         self.tg_api_hash = tg_api_hash
         self.ai_client = ai_client
+        self.media_service = media_service
         self.db = db
         self.config = config
         self.managed_ids = managed_ids  # 所有水軍 TG user id（互認）
+        self.active_ids = active_ids if active_ids is not None else managed_ids
         self.on_status_change = on_status_change
         # 指定群組：空 list = 自動所有群；非空 = 只在這幾個群活動
         self.selected_groups: set[int] = set(selected_groups or [])
@@ -187,6 +197,8 @@ class AccountWorker:
 
         self._proactive_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._reply_tasks: set[asyncio.Task] = set()
+        self._send_lock = asyncio.Lock()
         self._last_activity: dict[int, float] = {}  # group_id -> ts
         self._known_groups: set[int] = set()  # 這個帳號知道的所有群（冷啟動 fallback）
         self._dialogs: dict[int, str] = {}  # group_id -> 群名稱（供控制台勾選）
@@ -217,6 +229,7 @@ class AccountWorker:
                 raise ValueError("無法獲取帳號資訊")
             self.tg_user_id = int(me.id)
             self.managed_ids.add(self.tg_user_id)
+            self.active_ids.add(self.tg_user_id)
 
             self.tg_client.add_event_handler(self.on_message, events.NewMessage())
             self.tg_client.add_event_handler(self.on_chat_action, events.ChatAction())
@@ -240,12 +253,25 @@ class AccountWorker:
             )
         except Exception as e:
             self.is_running = False
+            if self.tg_user_id:
+                self.active_ids.discard(int(self.tg_user_id))
             self.status_detail = str(e)
             await self._notify_status("disconnected", None, str(e))
 
     async def stop(self):
         self.is_running = False
+        if self.tg_user_id:
+            self.active_ids.discard(int(self.tg_user_id))
         await self._notify_status("stopping", None, "")
+        # 等待已開始的 Telegram RPC 與其 DB 記帳完整結束，再取消其餘任務。
+        async with self._send_lock:
+            pass
+        pending = list(self._reply_tasks)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._reply_tasks.clear()
         for task in (self._proactive_task, self._cleanup_task):
             if task:
                 task.cancel()
@@ -285,6 +311,11 @@ class AccountWorker:
 
     # ---------- 事件處理 ----------
 
+    def _schedule_reply(self, event, delay: float) -> None:
+        task = asyncio.create_task(self._reply_later(event, delay))
+        self._reply_tasks.add(task)
+        task.add_done_callback(self._reply_tasks.discard)
+
     async def on_message(self, event):
         if not self.is_running or not self.tg_client:
             return
@@ -310,7 +341,7 @@ class AccountWorker:
             # 人味延遲：被@/回覆 → 5-20 秒；普通 → 8-45 秒
             is_hot = event.mentioned or (event.is_reply and event.reply_to)
             delay = random.uniform(5, 20) if is_hot else random.uniform(8, 45)
-            asyncio.create_task(self._reply_later(event, delay))
+            self._schedule_reply(event, delay)
         except Exception as e:
             self.stats["errors"] += 1
             print(f"[{self.name}] on_message error: {e}", flush=True)
@@ -341,13 +372,13 @@ class AccountWorker:
             if not self.is_running:
                 return
             display = get_display_name(new_user) or "新朋友"
-            sent = await self._send_message(
-                group_id, self._welcome_text(display), short_delay=True
+            await self._send_text_recorded(
+                group_id,
+                self._welcome_text(display),
+                activity_kind="proactive",
+                stats_key="proactive_sent",
+                short_delay=True,
             )
-            if not sent:
-                return
-            self.stats["proactive_sent"] += 1
-            await self.db.touch_activity(self.account_id, group_id, "proactive")
         except Exception as e:
             print(f"[{self.name}] chat_action error: {e}", flush=True)
 
@@ -387,17 +418,42 @@ class AccountWorker:
 
     # ---------- 回覆決策 ----------
 
+    async def _is_directed_at_me(self, event) -> bool:
+        """只把 @我 或真正回覆我自己的訊息視為定向訊息。"""
+        if event.mentioned:
+            return True
+        if not (event.is_reply and event.reply_to):
+            return False
+        try:
+            replied = await event.get_reply_message()
+        except Exception:
+            return False
+        return int(getattr(replied, "sender_id", 0) or 0) == int(
+            self.tg_user_id or 0
+        )
+
+    async def _claim_reply(self, event) -> bool:
+        message_id = int(
+            getattr(event, "id", 0)
+            or getattr(getattr(event, "message", None), "id", 0)
+            or 0
+        )
+        return await self.db.claim_message_response(
+            int(event.chat_id or 0), message_id, self.account_id
+        )
+
     async def _should_reply(self, event) -> bool:
         sender_id = int(event.sender_id or 0)
         if sender_id == self.tg_user_id:
             return False
-        # 被@或回覆 → 必回（真人必接）
-        if event.mentioned or (event.is_reply and event.reply_to):
-            return True
-        # 水軍對水軍：15% 概率（群自己會活，但不出破綻）
+        # 水軍訊息絕不再觸發其他水軍，從根源阻斷級聯刷屏。
         if sender_id in self.managed_ids:
-            return random.random() < self.config.water_cross_talk_probability
-        # 真人 → 按概率（活躍群降頻）
+            return False
+        # 回覆別人或 @別人的訊息不插話；只有真正被指向的帳號可認領。
+        if event.is_reply or event.mentioned:
+            if not await self._is_directed_at_me(event):
+                return False
+            return await self._claim_reply(event)
         group_id = int(event.chat_id or 0)
         p = self.config.base_reply_probability
         if group_id in self._last_activity:
@@ -406,40 +462,197 @@ class AccountWorker:
                 p *= 0.4
             elif since < 300:
                 p *= 0.7
-        return random.random() < p
+        message_id = int(
+            getattr(event, "id", 0)
+            or getattr(getattr(event, "message", None), "id", 0)
+            or 0
+        )
+        if message_id <= 0:
+            return False
+        key = f"reply-probability:{group_id}:{message_id}".encode()
+        score = int.from_bytes(
+            hashlib.blake2b(key, digest_size=8).digest(), "big"
+        ) / float(2**64 - 1)
+        if score >= max(0.0, min(1.0, p)):
+            return False
+        return await self._claim_reply(event)
 
     async def _reply_later(self, event, delay: float):
         await asyncio.sleep(delay)
         if not self.is_running or not self.tg_client:
             return
         try:
+            media_kind = self._requested_media_kind(event.raw_text or "")
+            if media_kind and self.media_service:
+                asset = await self._generate_requested_media(event, media_kind)
+                if asset:
+                    marker = {
+                        "image": "[圖片]",
+                        "voice": "[語音]",
+                        "video": "[影片]",
+                    }[media_kind]
+                    if await self._send_media_recorded(
+                        int(event.chat_id), asset, marker
+                    ):
+                        return
             text = await self._generate_reply(event)
             if not text:
                 return
-            sent = await self._send_message(event.chat_id, text)
-            if not sent:
-                return
-            self.stats["replies_sent"] += 1
-            await self.db.add_message(
-                self.account_id, int(event.chat_id), self.tg_user_id or 0,
-                self.name, "assistant", text,
+            await self._send_text_recorded(
+                int(event.chat_id),
+                text,
+                activity_kind="reply",
+                stats_key="replies_sent",
             )
-            await self.db.touch_activity(self.account_id, int(event.chat_id), "reply")
         except Exception as e:
             self.stats["errors"] += 1
             print(f"[{self.name}] reply error: {e}", flush=True)
 
+    @staticmethod
+    def _requested_media_kind(text: str) -> str | None:
+        """只辨識明確的素材請求；視訊／直播仍不是可生成短片。"""
+        normalized = unicodedata.normalize("NFKC", text or "").casefold()
+        if not normalized or AccountWorker._mentions_video_topic(normalized):
+            return None
+        if re.search(r"(?:語音|语音|錄音|录音|用聲音|用声音|voice\s*(?:note|message)?)", normalized):
+            return "voice"
+        if re.search(r"(?:短片|影片|錄(?:個|一段)?(?:短)?片|录(?:个|一段)?(?:短)?片|拍(?:個|个|一段)?(?:短)?片)", normalized):
+            return "video"
+        if re.search(r"(?:傳|传|發|发|給|给|來|来|看).{0,8}(?:自拍|照片|相片|圖片|图片)", normalized):
+            return "image"
+        return None
+
+    async def _generate_requested_media(
+        self, event, kind: str
+    ) -> MediaAsset | None:
+        if not self.media_service or not getattr(self.config, "media_enabled", False):
+            return None
+        p = self.persona
+        request_text = str(event.raw_text or "").strip()
+        gender = str(p.get("gender") or "女")
+        subject = "成年男性" if gender == "男" else "成年女性"
+        identity = (
+            f"虛構台灣{subject}，{int(p.get('age') or 21)}歲，"
+            f"住在{p.get('city', '')}{p.get('district', '')}，"
+            f"個性：{p.get('personality', '')}。"
+        )
+        if kind == "voice":
+            text = await self._generate_reply(event)
+            if not text:
+                return None
+            voice = "onyx" if gender == "男" else "nova"
+            return await self.media_service.generate_voice(
+                self.account_id, text, voice=voice
+            )
+        prompt = f"{identity}使用手機自然拍攝。對方的要求：{request_text}"
+        if kind == "image":
+            return await self.media_service.generate_image(
+                self.account_id, prompt
+            )
+        if kind == "video":
+            return await self.media_service.generate_video(
+                self.account_id, prompt
+            )
+        return None
+
+    async def _incoming_image(self, event) -> tuple[bytes, str] | None:
+        if not isinstance(getattr(event, "media", None), MessageMediaPhoto):
+            return None
+        if not self.media_service or not getattr(self.config, "media_enabled", False):
+            return None
+        file_info = getattr(event, "file", None)
+        size = int(getattr(file_info, "size", 0) or 0)
+        max_bytes = int(getattr(self.config, "media_max_input_bytes", 0) or 0)
+        if max_bytes <= 0 or size <= 0 or size > max_bytes:
+            return None
+        try:
+            data = await asyncio.wait_for(
+                event.download_media(file=bytes), timeout=30
+            )
+        except Exception:
+            return None
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            return None
+        if len(data) > max_bytes:
+            return None
+        mime_type = str(getattr(file_info, "mime_type", "") or "image/jpeg")
+        return bytes(data), mime_type
+
+    async def _send_media_unlocked(
+        self, chat_id: int, asset: MediaAsset
+    ) -> bool:
+        client = self.tg_client
+        if not self.is_running or not client:
+            return False
+        file_obj = io.BytesIO(asset.data)
+        file_obj.name = asset.filename
+        kwargs: dict[str, Any] = {"parse_mode": None}
+        if asset.kind == "voice":
+            kwargs["voice_note"] = True
+        elif asset.kind == "video":
+            kwargs["supports_streaming"] = True
+        await client.send_file(chat_id, file_obj, **kwargs)
+        return True
+
+    async def _send_media(self, chat_id: int, asset: MediaAsset) -> bool:
+        async with self._send_lock:
+            return await self._send_media_unlocked(chat_id, asset)
+
+    async def _send_media_recorded(
+        self, chat_id: int, asset: MediaAsset, marker: str
+    ) -> bool:
+        async with self._send_lock:
+            if not await self._send_media_unlocked(chat_id, asset):
+                return False
+            self.stats["replies_sent"] += 1
+            await self.db.add_message(
+                self.account_id,
+                chat_id,
+                self.tg_user_id or 0,
+                self.name,
+                "assistant",
+                marker,
+            )
+            await self.db.touch_activity(
+                self.account_id, chat_id, "reply"
+            )
+            return True
+
     async def _generate_reply(self, event) -> str:
         group_id = int(event.chat_id or 0)
+        is_image = isinstance(getattr(event, "media", None), MessageMediaPhoto)
+        image = await self._incoming_image(event) if is_image else None
+        if is_image and image is None:
+            return ""
         history = await self.db.get_recent_messages(
             self.account_id, group_id, self.config.memory_max_messages
         )
+        recent_group_replies = await self.db.get_recent_group_replies(
+            group_id, limit=12
+        )
         system_prompt = get_system_prompt(self.persona)
         user_message = self._build_user_message(event, history)
-        reply = await self._call_ai(system_prompt, user_message)
+        if recent_group_replies:
+            examples = "\n".join(
+                f"- {text}" for text in recent_group_replies[:8]
+            )
+            user_message += (
+                "\n近期群內已發過以下文案，絕不能照抄、近似改寫或沿用相同開頭：\n"
+                f"{examples}\n請改用符合你個人人設的新角度。"
+            )
+
+        async def call_reply(message: str) -> str:
+            if image and self.media_service:
+                return await self.media_service.understand_image(
+                    self.account_id, image[0], image[1], system_prompt, message
+                )
+            return await self._call_ai(system_prompt, message)
+
+        reply = await call_reply(user_message)
         too_long = len(reply) > _MAX_REPLY_CHARS
         mentions_video = self._mentions_video_topic(reply)
-        if not too_long and not mentions_video:
+        repetitive = self._is_near_duplicate(reply, recent_group_replies)
+        if not too_long and not mentions_video and not repetitive:
             return reply
 
         # 不在發送層做逐詞替換，避免改壞語意和造成 Telegram / DB 記憶不一致。
@@ -450,14 +663,46 @@ class AccountWorker:
                 "不要提及或複述禁止話題，也不要解釋拒絕原因；"
                 "直接自然轉回文字聊天、交換聯絡方式或約出來見面。"
             )
+        if repetitive:
+            correction += (
+                "上一版與近期文案太像；必須換開頭、句型和語氣，"
+                "不要只替換同義詞。"
+            )
         retry_message = (
             f"{user_message}\n"
             f"{correction}"
         )
-        retry = await self._call_ai(system_prompt, retry_message)
-        if len(retry) > _MAX_REPLY_CHARS or self._mentions_video_topic(retry):
+        retry = await call_reply(retry_message)
+        if (
+            len(retry) > _MAX_REPLY_CHARS
+            or self._mentions_video_topic(retry)
+            or self._is_near_duplicate(retry, recent_group_replies)
+        ):
             return ""
         return retry
+
+    @staticmethod
+    def _normalized_reply(text: str) -> str:
+        normalized = unicodedata.normalize("NFKC", text or "").casefold()
+        return re.sub(r"[^\w\u3400-\u9fff]+", "", normalized)
+
+    @classmethod
+    def _is_near_duplicate(cls, text: str, recent: list[str]) -> bool:
+        candidate = cls._normalized_reply(text)
+        if len(candidate) < 6:
+            return candidate in {
+                cls._normalized_reply(item) for item in recent
+            }
+        for item in recent:
+            previous = cls._normalized_reply(item)
+            if not previous:
+                continue
+            if candidate == previous:
+                return True
+            ratio = difflib.SequenceMatcher(None, candidate, previous).ratio()
+            if ratio >= 0.74:
+                return True
+        return False
 
     @staticmethod
     def _mentions_video_topic(text: str) -> bool:
@@ -579,7 +824,7 @@ class AccountWorker:
 
     # ---------- 發送 ----------
 
-    async def _send_message(
+    async def _send_message_unlocked(
         self, chat_id, text: str, short_delay: bool = False
     ) -> bool:
         if len(text) > _MAX_REPLY_CHARS:
@@ -589,13 +834,52 @@ class AccountWorker:
             return False
         delay = (
             random.uniform(1.0, 3.0) if short_delay
-            else random.uniform(self.config.min_typing_delay, self.config.max_typing_delay)
+            else random.uniform(
+                self.config.min_typing_delay,
+                self.config.max_typing_delay,
+            )
         )
         await asyncio.sleep(delay)
         if not self.is_running or self.tg_client is not client:
             return False
         await client.send_message(chat_id, text)
         return True
+
+    async def _send_message(
+        self, chat_id, text: str, short_delay: bool = False
+    ) -> bool:
+        async with self._send_lock:
+            return await self._send_message_unlocked(
+                chat_id, text, short_delay=short_delay
+            )
+
+    async def _send_text_recorded(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        activity_kind: str,
+        stats_key: str,
+        short_delay: bool = False,
+    ) -> bool:
+        async with self._send_lock:
+            if not await self._send_message_unlocked(
+                chat_id, text, short_delay=short_delay
+            ):
+                return False
+            self.stats[stats_key] += 1
+            await self.db.add_message(
+                self.account_id,
+                chat_id,
+                self.tg_user_id or 0,
+                self.name,
+                "assistant",
+                text,
+            )
+            await self.db.touch_activity(
+                self.account_id, chat_id, activity_kind
+            )
+            return True
 
     # ---------- 主動發言 ----------
 
@@ -625,21 +909,28 @@ class AccountWorker:
                 if not groups:
                     continue
                 group_id = random.choice(groups)
-                # 每群冷卻
-                last = await self.db.last_activity(self.account_id, group_id, "proactive")
-                if time.time() - last < self.config.proactive_min_interval_minutes * 60:
+                interval = max(
+                    60.0,
+                    self.config.proactive_min_interval_minutes * 60,
+                )
+                slot = int(time.time() // interval)
+                if not await self.db.claim_proactive_slot(
+                    group_id,
+                    slot,
+                    self.account_id,
+                    interval,
+                ):
                     continue
                 topic = generate_proactive_topic(self.persona)
-                sent = await self._send_message(group_id, topic)
+                sent = await self._send_text_recorded(
+                    group_id,
+                    topic,
+                    activity_kind="proactive",
+                    stats_key="proactive_sent",
+                )
                 if not sent:
                     continue
                 self._proactive_today += 1
-                self.stats["proactive_sent"] += 1
-                await self.db.add_message(
-                    self.account_id, group_id, self.tg_user_id or 0,
-                    self.name, "assistant", topic,
-                )
-                await self.db.touch_activity(self.account_id, group_id, "proactive")
                 # 每日重置
                 today = self._today_index()
                 if today != self._proactive_day:

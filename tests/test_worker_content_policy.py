@@ -10,9 +10,13 @@ class _FakeDB:
     def __init__(self):
         self.messages = []
         self.activities = []
+        self.recent_group_replies = []
 
     async def get_recent_messages(self, *_args):
         return []
+
+    async def get_recent_group_replies(self, *_args, **_kwargs):
+        return list(self.recent_group_replies)
 
     async def add_message(self, *args):
         self.messages.append(args)
@@ -451,5 +455,43 @@ def test_reply_later_does_not_save_when_client_stops_during_generation():
         assert worker.db.messages == []
         assert worker.db.activities == []
         assert worker.stats["replies_sent"] == 0
+
+    asyncio.run(main())
+
+
+def test_near_duplicate_reply_is_regenerated_with_recent_examples():
+    async def main():
+        worker = _worker()
+        worker.db.recent_group_replies = [
+            "幹，這人嘴巴真髒。管理員快把他丟出去啦。",
+            "笑死，你也太會講了吧？",
+        ]
+        worker._call_ai = AsyncMock(side_effect=[
+            "幹，這人嘴真髒，管理員快把他丟出去啦。",
+            "先別理他，我們聊點別的。",
+        ])
+
+        reply = await worker._generate_reply(_FakeEvent())
+
+        assert reply == "先別理他，我們聊點別的。"
+        assert worker._call_ai.await_count == 2
+        first_prompt = worker._call_ai.await_args_list[0].args[1]
+        retry_prompt = worker._call_ai.await_args_list[1].args[1]
+        assert "近期群內已發過" in first_prompt
+        assert "換開頭、句型和語氣" in retry_prompt
+
+    asyncio.run(main())
+
+
+def test_dissimilar_reply_is_accepted_without_retry():
+    async def main():
+        worker = _worker()
+        worker.db.recent_group_replies = ["笑死，你也太會講了吧？"]
+        worker._call_ai = AsyncMock(return_value="我剛下班，等等想去買杯咖啡。")
+
+        reply = await worker._generate_reply(_FakeEvent())
+
+        assert reply == "我剛下班，等等想去買杯咖啡。"
+        assert worker._call_ai.await_count == 1
 
     asyncio.run(main())

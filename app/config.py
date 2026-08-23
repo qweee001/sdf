@@ -49,6 +49,14 @@ class Settings:
     ai_max_tokens: int
     ai_timeout: float
     ai_disable_thinking: bool
+    vision_model: str
+    image_model: str
+    speech_model: str
+    video_model: str
+    media_enabled: bool
+    media_daily_budget_usd: float
+    media_max_input_bytes: int
+    media_generation_timeout: float
 
     # 控制台
     dashboard_user: str
@@ -77,6 +85,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
+    ai_model = os.getenv("AI_MODEL", "").strip()
     return Settings(
         tg_api_id=int(_required("TG_API_ID")),
         tg_api_hash=_required("TG_API_HASH"),
@@ -86,11 +95,32 @@ def load_settings() -> Settings:
             os.getenv("AI_BASE_URL", "").strip()
             or "https://9ghyzu98lbv2mf-8000.proxy.runpod.net/v1"
         ).rstrip("/"),
-        ai_model=os.getenv("AI_MODEL", "").strip(),
+        ai_model=ai_model,
         ai_temperature=_float("AI_TEMPERATURE", 0.85),
         ai_max_tokens=_int("AI_MAX_TOKENS", 200),
         ai_timeout=_float("AI_TIMEOUT", 60),
         ai_disable_thinking=_bool("AI_DISABLE_THINKING", False),
+        vision_model=os.getenv("VISION_MODEL", "").strip() or ai_model,
+        image_model=(
+            os.getenv("IMAGE_MODEL", "").strip()
+            or "google/imagen-4.0-fast-generate-001"
+        ),
+        speech_model=(
+            os.getenv("SPEECH_MODEL", "").strip()
+            or "openai/tts-1"
+        ),
+        video_model=(
+            os.getenv("VIDEO_MODEL", "").strip()
+            or "minimax/minimax-h3"
+        ),
+        media_enabled=_bool("MEDIA_ENABLED", False),
+        media_daily_budget_usd=_float("MEDIA_DAILY_BUDGET_USD", 10.0),
+        media_max_input_bytes=_int(
+            "MEDIA_MAX_INPUT_BYTES", 8 * 1024 * 1024
+        ),
+        media_generation_timeout=_float(
+            "MEDIA_GENERATION_TIMEOUT", 300
+        ),
         dashboard_user=os.getenv("DASHBOARD_USER", "admin").strip(),
         dashboard_pass=_required("DASHBOARD_PASS"),
         dashboard_port=_int("PORT", 8000),

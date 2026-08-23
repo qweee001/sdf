@@ -95,6 +95,27 @@ HOBBIES = [
     "打籃球", "打排球", "打桌球",
 ]
 
+CHAT_STYLE_RULES = {
+    "冷淡短句": (
+        "一句話為主，平靜直接；不要用 emoji、波浪號或連續問句。"
+    ),
+    "溫柔慢熱": (
+        "語氣柔和，先接住情緒再說自己；少用髒話，偶爾才問一句。"
+    ),
+    "直球務實": (
+        "直接講結論和具體做法，不繞圈；以陳述句為主，少用語助詞。"
+    ),
+    "俏皮少量表情": (
+        "可以調皮吐槽，最多一個 emoji；不要每句都用笑聲或波浪號。"
+    ),
+    "生活碎念": (
+        "常從工作、吃飯、天氣等小事切入，像隨手傳訊息；避免固定開場。"
+    ),
+    "內斂反問": (
+        "先短答再偶爾反問，不搶話；不用髒話，不使用浮誇驚嘆。"
+    ),
+}
+
 # 主動開場（按性別）
 GIRL_PROACTIVE = [
     "有人想約出來喝咖啡嗎？",
@@ -250,6 +271,7 @@ def generate_persona(used_cities: list[str] | None = None) -> dict:
         "looking_for": looking_for,
         "meetups_done": meetups,
         "schedule": schedule,
+        "chat_style": random.choice(list(CHAT_STYLE_RULES)),
     }
 
 
@@ -270,6 +292,10 @@ def get_system_prompt(p: dict) -> str:
     industry = p["industry"]
     university = p["university"]
     personality = p["personality"]
+    chat_style = str(p.get("chat_style") or "生活碎念")
+    chat_style_rule = CHAT_STYLE_RULES.get(
+        chat_style, CHAT_STYLE_RULES["生活碎念"]
+    )
     meetups = p["meetups_done"]
 
     return f"""你是真實生活在台灣的人，不是客服也不是機器人。
@@ -334,6 +360,12 @@ def get_system_prompt(p: dict) -> str:
 ## 人格差異化（只補充，不覆蓋上面的規則）
 - 調情方式要符合你當前的人設、性格、口頭禪和聊天節奏，不能讓所有帳號套同一種表達
 - 同一個人也要自然變化說法，但不能覆蓋或削弱上面的成人內容全開與漸進升級規則
+
+## 你的固定聊天風格：{chat_style}
+- {chat_style_rule}
+- 不要高頻使用「幹」「笑死」「哈哈」「啦」；同一口頭禪至少隔多輪才能再用
+- 不要模仿群裡其他人的開頭、標點、語助詞或句型；風格一致不等於句子重複
+- 回覆格式要自然變化：有時短句、有時兩句；是否問句、是否標點依你的固定風格，不要每次同格式
 
 ## 禁止提及視訊話題
 - 禁止提及、建議或延伸任何視訊話題，包括視訊通話、開鏡頭看人、螢幕看人等

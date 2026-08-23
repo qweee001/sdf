@@ -36,7 +36,7 @@ def test_persona_fields():
     p = generate_persona()
     for key in ("name", "gender", "age", "city", "district", "industry",
                 "university", "personality", "hobbies", "looking_for",
-                "meetups_done", "schedule"):
+                "meetups_done", "schedule", "chat_style"):
         assert key in p, f"missing {key}"
     assert p["gender"] in ("男", "女")
     assert 21 <= p["age"] <= 34
@@ -66,6 +66,16 @@ def test_system_prompt_content():
     assert p["name"] in sp
     assert "每次回覆最多 60 個字元" in sp
     assert "標點、空格也算" in sp
+    assert "你的固定聊天風格" in sp
+    assert p["chat_style"] in sp
+
+
+def test_chat_style_changes_hard_tone_rules():
+    p = generate_persona()
+    p["chat_style"] = "冷淡短句"
+    sp = get_system_prompt(p)
+    assert "不要用 emoji、波浪號或連續問句" in sp
+    assert "不要高頻使用「幹」「笑死」「哈哈」" in sp
 
 
 def test_system_prompt_preserves_adult_policy_after_approved_language_cleanup():

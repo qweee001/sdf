@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import time
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
@@ -12,6 +14,8 @@ class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._db: aiosqlite.Connection | None = None
+        self._media_budget_lock = asyncio.Lock()
+        self._claim_lock = asyncio.Lock()
 
     @property
     def _c(self) -> aiosqlite.Connection:
@@ -88,6 +92,27 @@ class Database:
                 kind TEXT NOT NULL,
                 at REAL NOT NULL,
                 PRIMARY KEY (account_id, group_id, kind)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS media_spend (
+                reservation_id TEXT PRIMARY KEY,
+                day TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                reserved_usd REAL NOT NULL,
+                created_at REAL NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_media_spend_day
+            ON media_spend (day)
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS outbound_claims (
+                claim_key TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                claimed_at REAL NOT NULL
             )
         """)
         await db.commit()
@@ -172,6 +197,71 @@ class Database:
         rows = list(await cursor.fetchall())
         return [dict(r) for r in reversed(rows)]
 
+    async def get_recent_group_replies(
+        self, group_id: int, limit: int = 20
+    ) -> list[str]:
+        """跨所有帳號讀取群內近期實際送出的文案，供全群去重。"""
+        cursor = await self._c.execute(
+            "SELECT content FROM messages "
+            "WHERE group_id = ? AND role = 'assistant' "
+            "ORDER BY timestamp DESC, id DESC LIMIT ?",
+            (group_id, limit),
+        )
+        return [str(row["content"]) for row in await cursor.fetchall()]
+
+    @staticmethod
+    def _billing_day() -> str:
+        hkt = timezone(timedelta(hours=8))
+        return datetime.now(hkt).date().isoformat()
+
+    async def media_spend_total(self, day: str | None = None) -> float:
+        billing_day = day or self._billing_day()
+        cursor = await self._c.execute(
+            "SELECT COALESCE(SUM(reserved_usd), 0) AS total "
+            "FROM media_spend WHERE day = ?",
+            (billing_day,),
+        )
+        row = await cursor.fetchone()
+        return float(row["total"] if row else 0)
+
+    async def reserve_media_budget(
+        self,
+        account_id: str,
+        kind: str,
+        estimated_usd: float,
+        daily_cap_usd: float,
+        *,
+        day: str | None = None,
+    ) -> bool:
+        """在任何付費生成前原子預約額度；四帳號共用每日上限。"""
+        amount = round(float(estimated_usd), 6)
+        cap = round(float(daily_cap_usd), 6)
+        if amount <= 0 or cap <= 0 or amount > cap:
+            return False
+        billing_day = day or self._billing_day()
+        async with self._media_budget_lock:
+            total = await self.media_spend_total(billing_day)
+            if total + amount > cap + 1e-9:
+                return False
+            reservation_id = (
+                f"{billing_day}:{time.time_ns()}:{account_id}:{kind}"
+            )
+            await self._c.execute(
+                "INSERT INTO media_spend "
+                "(reservation_id, day, account_id, kind, reserved_usd, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    reservation_id,
+                    billing_day,
+                    account_id,
+                    kind,
+                    amount,
+                    time.time(),
+                ),
+            )
+            await self._c.commit()
+            return True
+
     # ---------- 私訊 ----------
 
     async def add_private_message(self, account_id: str, sender_id: int,
@@ -224,6 +314,54 @@ class Database:
         )
         row = await cursor.fetchone()
         return row["at"] if row else 0.0
+
+    async def last_group_activity(self, group_id: int, kind: str) -> float:
+        cursor = await self._c.execute(
+            "SELECT COALESCE(MAX(at), 0) AS at FROM activity "
+            "WHERE group_id = ? AND kind = ?",
+            (group_id, kind),
+        )
+        row = await cursor.fetchone()
+        return float(row["at"] if row else 0.0)
+
+    async def claim_message_response(
+        self, group_id: int, message_id: int, account_id: str
+    ) -> bool:
+        if not group_id or message_id <= 0:
+            return False
+        key = f"reply:{group_id}:{message_id}"
+        async with self._claim_lock:
+            cursor = await self._c.execute(
+                "INSERT OR IGNORE INTO outbound_claims "
+                "(claim_key, account_id, claimed_at) VALUES (?, ?, ?)",
+                (key, account_id, time.time()),
+            )
+            await self._c.commit()
+            return cursor.rowcount == 1
+
+    async def claim_proactive_slot(
+        self,
+        group_id: int,
+        slot: int,
+        account_id: str,
+        min_interval_seconds: float,
+    ) -> bool:
+        if not group_id or slot < 0:
+            return False
+        now = time.time()
+        key = f"proactive:{group_id}:{slot}"
+        cutoff = now - max(0.0, float(min_interval_seconds))
+        async with self._claim_lock:
+            cursor = await self._c.execute(
+                "INSERT OR IGNORE INTO outbound_claims "
+                "(claim_key, account_id, claimed_at) "
+                "SELECT ?, ?, ? WHERE NOT EXISTS ("
+                "SELECT 1 FROM activity WHERE group_id = ? "
+                "AND kind = 'proactive' AND at > ?)",
+                (key, account_id, now, group_id, cutoff),
+            )
+            await self._c.commit()
+            return cursor.rowcount == 1
 
     async def stats_for(self, account_id: str) -> dict:
         cursor = await self._c.execute(
