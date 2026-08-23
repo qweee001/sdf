@@ -30,3 +30,9 @@ def test_defaults_present():
     assert s.min_typing_delay < s.max_typing_delay
     assert s.proactive_max_per_day >= 1
     assert s.water_cross_talk_probability > 0
+    assert s.ai_disable_thinking is False
+
+
+def test_ai_disable_thinking_from_env(monkeypatch):
+    monkeypatch.setenv("AI_DISABLE_THINKING", "true")
+    assert load_settings().ai_disable_thinking is True

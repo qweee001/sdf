@@ -550,16 +550,21 @@ class AccountWorker:
             return ""
         for attempt in range(2):
             try:
-                resp = await self.ai_client.chat.completions.create(
-                    model=self.config.ai_model,
-                    messages=[
+                request_kwargs = {
+                    "model": self.config.ai_model,
+                    "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_message},
                     ],
-                    temperature=self.config.ai_temperature,
-                    max_tokens=self.config.ai_max_tokens,
-                    timeout=self.config.ai_timeout,
-                )
+                    "temperature": self.config.ai_temperature,
+                    "max_tokens": self.config.ai_max_tokens,
+                    "timeout": self.config.ai_timeout,
+                }
+                if self.config.ai_disable_thinking:
+                    request_kwargs["extra_body"] = {
+                        "chat_template_kwargs": {"enable_thinking": False}
+                    }
+                resp = await self.ai_client.chat.completions.create(**request_kwargs)
                 content = resp.choices[0].message.content
                 if content:
                     return content.strip()

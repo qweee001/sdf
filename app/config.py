@@ -48,6 +48,7 @@ class Settings:
     ai_temperature: float
     ai_max_tokens: int
     ai_timeout: float
+    ai_disable_thinking: bool
 
     # 控制台
     dashboard_user: str
@@ -89,6 +90,7 @@ def load_settings() -> Settings:
         ai_temperature=_float("AI_TEMPERATURE", 0.85),
         ai_max_tokens=_int("AI_MAX_TOKENS", 200),
         ai_timeout=_float("AI_TIMEOUT", 60),
+        ai_disable_thinking=_bool("AI_DISABLE_THINKING", False),
         dashboard_user=os.getenv("DASHBOARD_USER", "admin").strip(),
         dashboard_pass=_required("DASHBOARD_PASS"),
         dashboard_port=_int("PORT", 8000),
