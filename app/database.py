@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import math
 import os
+import re
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
@@ -236,31 +240,55 @@ class Database:
         """在任何付費生成前原子預約額度；四帳號共用每日上限。"""
         amount = round(float(estimated_usd), 6)
         cap = round(float(daily_cap_usd), 6)
-        if amount <= 0 or cap <= 0 or amount > cap:
+        if (
+            not math.isfinite(amount)
+            or not math.isfinite(cap)
+            or amount <= 0
+            or cap <= 0
+            or amount > cap
+        ):
             return False
         billing_day = day or self._billing_day()
         async with self._media_budget_lock:
-            total = await self.media_spend_total(billing_day)
-            if total + amount > cap + 1e-9:
-                return False
-            reservation_id = (
-                f"{billing_day}:{time.time_ns()}:{account_id}:{kind}"
-            )
-            await self._c.execute(
-                "INSERT INTO media_spend "
-                "(reservation_id, day, account_id, kind, reserved_usd, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    reservation_id,
-                    billing_day,
-                    account_id,
-                    kind,
-                    amount,
-                    time.time(),
-                ),
-            )
-            await self._c.commit()
-            return True
+            # 使用專用連線，避免其他訊息寫入的 commit 提前提交預算事務。
+            async with aiosqlite.connect(
+                self.db_path, timeout=30
+            ) as budget_db:
+                budget_db.row_factory = aiosqlite.Row
+                try:
+                    # SQLite write lock serializes the cap check across processes.
+                    await budget_db.execute("BEGIN IMMEDIATE")
+                    cursor = await budget_db.execute(
+                        "SELECT COALESCE(SUM(reserved_usd), 0) AS total "
+                        "FROM media_spend WHERE day = ?",
+                        (billing_day,),
+                    )
+                    row = await cursor.fetchone()
+                    total = float(row["total"] if row else 0)
+                    if total + amount > cap + 1e-9:
+                        await budget_db.rollback()
+                        return False
+                    reservation_id = (
+                        f"{billing_day}:{time.time_ns()}:{account_id}:{kind}"
+                    )
+                    await budget_db.execute(
+                        "INSERT INTO media_spend "
+                        "(reservation_id, day, account_id, kind, reserved_usd, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            reservation_id,
+                            billing_day,
+                            account_id,
+                            kind,
+                            amount,
+                            time.time(),
+                        ),
+                    )
+                    await budget_db.commit()
+                    return True
+                except BaseException:
+                    await budget_db.rollback()
+                    raise
 
     # ---------- 私訊 ----------
 
@@ -335,6 +363,38 @@ class Database:
                 "INSERT OR IGNORE INTO outbound_claims "
                 "(claim_key, account_id, claimed_at) VALUES (?, ?, ?)",
                 (key, account_id, time.time()),
+            )
+            await self._c.commit()
+            return cursor.rowcount == 1
+
+    @staticmethod
+    def _normalize_outbound_text(text: str) -> str:
+        normalized = unicodedata.normalize("NFKC", str(text)).casefold()
+        return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
+
+    async def claim_group_text(
+        self,
+        group_id: int,
+        text: str,
+        account_id: str,
+        window_seconds: float = 3600,
+    ) -> bool:
+        """跨帳號原子認領群組文案，阻止並發重複發送。"""
+        normalized = self._normalize_outbound_text(text)
+        if not group_id or not normalized or window_seconds <= 0:
+            return False
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        key = f"text:{group_id}:{digest}"
+        now = time.time()
+        cutoff = now - float(window_seconds)
+        async with self._claim_lock:
+            cursor = await self._c.execute(
+                "INSERT INTO outbound_claims (claim_key, account_id, claimed_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(claim_key) DO UPDATE SET "
+                "account_id = excluded.account_id, claimed_at = excluded.claimed_at "
+                "WHERE outbound_claims.claimed_at < ?",
+                (key, account_id, now, cutoff),
             )
             await self._c.commit()
             return cursor.rowcount == 1

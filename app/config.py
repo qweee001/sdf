@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -13,7 +14,8 @@ def _required(name: str) -> str:
 
 def _float(name: str, default: float) -> float:
     try:
-        return float(os.getenv(name, "").strip() or default)
+        value = float(os.getenv(name, "").strip() or default)
+        return value if math.isfinite(value) else float(default)
     except ValueError:
         return default
 
@@ -30,6 +32,19 @@ def _bool(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw not in ("0", "false", "no", "off")
+
+
+def _hosts(name: str, default: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "").strip() or default
+    return tuple(
+        sorted(
+            {
+                item.strip().lower().rstrip(".")
+                for item in raw.split(",")
+                if item.strip()
+            }
+        )
+    )
 
 
 @dataclass
@@ -57,6 +72,7 @@ class Settings:
     media_daily_budget_usd: float
     media_max_input_bytes: int
     media_generation_timeout: float
+    media_download_hosts: tuple[str, ...]
 
     # 控制台
     dashboard_user: str
@@ -120,6 +136,10 @@ def load_settings() -> Settings:
         ),
         media_generation_timeout=_float(
             "MEDIA_GENERATION_TIMEOUT", 300
+        ),
+        media_download_hosts=_hosts(
+            "MEDIA_DOWNLOAD_HOSTS",
+            "cdn.hailuoai.com,*.hailuoai.com,*.minimax.io,*.minimax.chat",
         ),
         dashboard_user=os.getenv("DASHBOARD_USER", "admin").strip(),
         dashboard_pass=_required("DASHBOARD_PASS"),

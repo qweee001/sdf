@@ -182,7 +182,7 @@ class AccountWorker:
         self.managed_ids = managed_ids  # 所有水軍 TG user id（互認）
         self.active_ids = active_ids if active_ids is not None else managed_ids
         self.on_status_change = on_status_change
-        # 指定群組：空 list = 自動所有群；非空 = 只在這幾個群活動
+        # 指定群組：空集合 = 全部禁止；非空 = 只在這幾個群活動。
         self.selected_groups: set[int] = set(selected_groups or [])
 
         self.persona = persona or generate_persona()
@@ -326,7 +326,7 @@ class AccountWorker:
             if not event.is_group or event.chat_id is None:
                 return
             group_id = int(event.chat_id)
-            if self.selected_groups and group_id not in self.selected_groups:
+            if group_id not in self.selected_groups:
                 return  # 非指定群組：忽略（不回覆、不記錄）
             self._known_groups.add(group_id)
             self._last_activity[group_id] = time.time()
@@ -356,7 +356,7 @@ class AccountWorker:
             if not event.is_group or event.chat_id is None:
                 return
             group_id = int(event.chat_id)
-            if self.selected_groups and group_id not in self.selected_groups:
+            if group_id not in self.selected_groups:
                 return  # 非指定群組：不歡迎新人
             self._known_groups.add(group_id)
             new_user = await event.get_user()
@@ -582,7 +582,11 @@ class AccountWorker:
         self, chat_id: int, asset: MediaAsset
     ) -> bool:
         client = self.tg_client
-        if not self.is_running or not client:
+        if (
+            not self.is_running
+            or not client
+            or int(chat_id) not in self.selected_groups
+        ):
             return False
         file_obj = io.BytesIO(asset.data)
         file_obj.name = asset.filename
@@ -825,7 +829,11 @@ class AccountWorker:
     # ---------- 發送 ----------
 
     async def _send_message_unlocked(
-        self, chat_id, text: str, short_delay: bool = False
+        self,
+        chat_id,
+        text: str,
+        short_delay: bool = False,
+        claim_text: bool = False,
     ) -> bool:
         if len(text) > _MAX_REPLY_CHARS:
             return False
@@ -840,7 +848,15 @@ class AccountWorker:
             )
         )
         await asyncio.sleep(delay)
-        if not self.is_running or self.tg_client is not client:
+        if (
+            not self.is_running
+            or self.tg_client is not client
+            or int(chat_id) not in self.selected_groups
+        ):
+            return False
+        if claim_text and not await self.db.claim_group_text(
+            int(chat_id), text, self.account_id
+        ):
             return False
         await client.send_message(chat_id, text)
         return True
@@ -864,7 +880,10 @@ class AccountWorker:
     ) -> bool:
         async with self._send_lock:
             if not await self._send_message_unlocked(
-                chat_id, text, short_delay=short_delay
+                chat_id,
+                text,
+                short_delay=short_delay,
+                claim_text=True,
             ):
                 return False
             self.stats[stats_key] += 1
@@ -904,8 +923,7 @@ class AccountWorker:
                 if not groups:
                     groups = list(self._known_groups)
                 # 指定群組：只在勾選的群裡發言
-                if self.selected_groups:
-                    groups = [gid for gid in groups if gid in self.selected_groups]
+                groups = [gid for gid in groups if gid in self.selected_groups]
                 if not groups:
                     continue
                 group_id = random.choice(groups)

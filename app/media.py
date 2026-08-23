@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
+import socket
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
@@ -49,6 +51,7 @@ class OrcaMediaService:
         db: Any,
         config: Any,
         http_client: Any | None = None,
+        resolve_host: Callable[[str, int], Awaitable[list[str]]] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ):
         self.client = client
@@ -58,6 +61,7 @@ class OrcaMediaService:
         self.http = http_client or httpx.AsyncClient(
             timeout=float(config.media_generation_timeout)
         )
+        self._resolve_host = resolve_host or self._system_resolve_host
         self._sleep = sleep
 
     async def aclose(self) -> None:
@@ -77,6 +81,69 @@ class OrcaMediaService:
             reserve_usd,
             float(self.config.media_daily_budget_usd),
         )
+
+    def _host_allowed(self, host: str) -> bool:
+        host = host.lower().rstrip(".")
+        for pattern in getattr(self.config, "media_download_hosts", ()):
+            pattern = str(pattern).lower().rstrip(".")
+            if pattern.startswith("*."):
+                suffix = pattern[1:]
+                if host.endswith(suffix) and host != suffix[1:]:
+                    return True
+            elif host == pattern:
+                return True
+        return False
+
+    def _validate_download_url(self, url: str) -> str:
+        parsed = urlparse(url)
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("媒體下載網址不安全") from exc
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if (
+            parsed.scheme != "https"
+            or not host
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+            or not self._host_allowed(host)
+        ):
+            raise ValueError("媒體下載網址不安全")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None and not address.is_global:
+            raise ValueError("媒體下載網址不安全")
+        return url
+
+    @staticmethod
+    async def _system_resolve_host(host: str, port: int) -> list[str]:
+        infos = await asyncio.to_thread(
+            socket.getaddrinfo,
+            host,
+            port,
+            type=socket.SOCK_STREAM,
+        )
+        return sorted({str(info[4][0]) for info in infos if info[4]})
+
+    async def _validate_resolved_host(self, url: str) -> None:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        try:
+            addresses = await self._resolve_host(host, parsed.port or 443)
+        except (OSError, ValueError) as exc:
+            raise ValueError("媒體下載網址不安全") from exc
+        if not addresses:
+            raise ValueError("媒體下載網址不安全")
+        for raw_address in addresses:
+            try:
+                address = ipaddress.ip_address(raw_address)
+            except ValueError as exc:
+                raise ValueError("媒體下載網址不安全") from exc
+            if not address.is_global:
+                raise ValueError("媒體下載網址不安全")
 
     async def understand_image(
         self,
@@ -121,9 +188,8 @@ class OrcaMediaService:
         return str(content or "").strip()
 
     async def _download(self, url: str) -> bytes:
-        parsed = urlparse(url)
-        if parsed.scheme != "https" or not parsed.netloc:
-            raise ValueError("媒體下載網址不安全")
+        url = self._validate_download_url(url)
+        await self._validate_resolved_host(url)
         chunks: list[bytes] = []
         total = 0
         async with self.http.stream("GET", url) as response:

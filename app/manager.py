@@ -27,6 +27,7 @@ class AccountManager:
         self.db = db
         self.secret_box = secret_box
         self.workers: dict[str, AccountWorker] = {}
+        self._lifecycle_locks: dict[str, asyncio.Lock] = {}
         self.managed_ids: set[int] = set()
         self.active_ids: set[int] = set()
         self._status: dict[str, dict] = {}
@@ -40,6 +41,23 @@ class AccountManager:
             db=db,
             config=config,
         )
+
+    def _lifecycle_lock(self, account_id: str) -> asyncio.Lock:
+        """Serialize lifecycle mutations for one account."""
+        return self._lifecycle_locks.setdefault(account_id, asyncio.Lock())
+
+    @staticmethod
+    def _parse_groups(raw_groups: object) -> list[int]:
+        """Return a non-empty validated group list, otherwise deny all."""
+        if not isinstance(raw_groups, str) or not raw_groups.strip():
+            return []
+        try:
+            raw = json.loads(raw_groups)
+            if not isinstance(raw, list):
+                return []
+            return sorted({int(group_id) for group_id in raw if int(group_id) != 0})
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
 
     async def _on_status_change(self, account_id: str, state: str,
                                 tg_user_id: int | None, detail: str):
@@ -70,14 +88,12 @@ class AccountManager:
                 persona = json.loads(acc["persona"])
             except Exception:
                 persona = None
-        selected_groups = []
-        if acc.get("groups"):
-            try:
-                raw = json.loads(acc["groups"])
-                if isinstance(raw, list):
-                    selected_groups = [int(g) for g in raw]
-            except Exception:
-                selected_groups = []
+        selected_groups = self._parse_groups(acc.get("groups"))
+        if not selected_groups:
+            await self.db.update_account(
+                account_id, enabled=0, setup_complete=0
+            )
+            return
         worker = AccountWorker(
             account_id=account_id,
             session_key=session_key,
@@ -127,37 +143,53 @@ class AccountManager:
         return await self.db.get_account(account_id)
 
     async def start(self, account_id: str) -> str:
-        acc = await self.db.get_account(account_id)
-        if not acc:
-            return "帳號不存在"
-        if not int(acc.get("setup_complete") or 0):
-            return "請先設定群組範圍，再啟動帳號"
-        if account_id in self.workers:
-            return "已在運行"
-        await self.db.update_account(account_id, enabled=1)
-        await self._refresh_managed_ids()
-        await self._start_account(acc)
-        return "" if account_id in self.workers else "啟動失敗：session 無效或 Telegram 拒登"
+        async with self._lifecycle_lock(account_id):
+            acc = await self.db.get_account(account_id)
+            if not acc:
+                return "帳號不存在"
+            if not int(acc.get("setup_complete") or 0):
+                return "請先設定群組範圍，再啟動帳號"
+            if not self._parse_groups(acc.get("groups")):
+                await self.db.update_account(
+                    account_id, enabled=0, setup_complete=0
+                )
+                return "請至少選擇一個有效群組，再啟動帳號"
+            if account_id in self.workers:
+                return "已在運行"
+            await self.db.update_account(account_id, enabled=1)
+            await self._refresh_managed_ids()
+            acc = await self.db.get_account(account_id)
+            if not acc:
+                return "帳號不存在"
+            await self._start_account(acc)
+            if account_id in self.workers:
+                return ""
+            await self.db.update_account(account_id, enabled=0)
+            return "啟動失敗：session 無效或 Telegram 拒登"
 
     async def stop(self, account_id: str) -> str:
-        acc = await self.db.get_account(account_id)
-        if not acc:
-            return "帳號不存在"
-        worker = self.workers.pop(account_id, None)
-        if worker:
-            await worker.stop()
-        await self.db.update_account(account_id, enabled=0)
-        return ""
+        async with self._lifecycle_lock(account_id):
+            acc = await self.db.get_account(account_id)
+            if not acc:
+                return "帳號不存在"
+            # 先持久化停用意圖，再等待舊 worker 完整關閉。
+            await self.db.update_account(account_id, enabled=0)
+            worker = self.workers.pop(account_id, None)
+            if worker:
+                await worker.stop()
+            return ""
 
     async def delete(self, account_id: str) -> str:
-        acc = await self.db.get_account(account_id)
-        if not acc:
-            return "帳號不存在"
-        worker = self.workers.pop(account_id, None)
-        if worker:
-            await worker.stop()
-        await self.db.delete_account(account_id)
-        return ""
+        async with self._lifecycle_lock(account_id):
+            acc = await self.db.get_account(account_id)
+            if not acc:
+                return "帳號不存在"
+            await self.db.update_account(account_id, enabled=0)
+            worker = self.workers.pop(account_id, None)
+            if worker:
+                await worker.stop()
+            await self.db.delete_account(account_id)
+            return ""
 
     async def regen_persona(self, account_id: str) -> dict | None:
         """重新生成人設（換一個城市的真人）"""
@@ -232,20 +264,36 @@ class AccountManager:
                     print(f"[{account_id}] Telegram 群組探索連線關閉失敗", flush=True)
 
     async def save_groups(self, account_id: str, group_ids: list[int]) -> str:
-        """指定群組：儲存至 DB，並套用至運行中的 worker（熱更新）"""
-        acc = await self.db.get_account(account_id)
-        if not acc:
-            return "帳號不存在"
-        ids = sorted({int(g) for g in group_ids})
-        await self.db.update_account(
-            account_id,
-            groups=json.dumps(ids, ensure_ascii=False),
-            setup_complete=1,
-        )
-        worker = self.workers.get(account_id)
-        if worker:
-            worker.selected_groups = set(ids)
-        return ""
+        """指定群組；空白名單立即停用帳號，絕不退回所有群組。"""
+        async with self._lifecycle_lock(account_id):
+            acc = await self.db.get_account(account_id)
+            if not acc:
+                return "帳號不存在"
+            ids = sorted({int(g) for g in group_ids if int(g) != 0})
+            worker = self.workers.get(account_id)
+            if not ids:
+                if worker:
+                    # 先收緊記憶體白名單，阻止已排隊工作進入發送邊界。
+                    worker.selected_groups = set()
+                await self.db.update_account(
+                    account_id,
+                    groups="[]",
+                    setup_complete=0,
+                    enabled=0,
+                )
+                worker = self.workers.pop(account_id, None)
+                if worker:
+                    await worker.stop()
+                return ""
+
+            await self.db.update_account(
+                account_id,
+                groups=json.dumps(ids, ensure_ascii=False),
+                setup_complete=1,
+            )
+            if worker:
+                worker.selected_groups = set(ids)
+            return ""
 
     async def status(self) -> dict:
         accounts = []

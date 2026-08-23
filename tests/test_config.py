@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from app.config import load_settings
@@ -43,3 +45,10 @@ def test_defaults_present():
 def test_ai_disable_thinking_from_env(monkeypatch):
     monkeypatch.setenv("AI_DISABLE_THINKING", "true")
     assert load_settings().ai_disable_thinking is True
+
+
+def test_non_finite_media_budget_falls_back_to_finite_default(monkeypatch):
+    monkeypatch.setenv("MEDIA_DAILY_BUDGET_USD", "NaN")
+    budget = load_settings().media_daily_budget_usd
+    assert math.isfinite(budget)
+    assert budget == 10.0

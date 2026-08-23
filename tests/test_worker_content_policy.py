@@ -18,6 +18,9 @@ class _FakeDB:
     async def get_recent_group_replies(self, *_args, **_kwargs):
         return list(self.recent_group_replies)
 
+    async def claim_group_text(self, *_args, **_kwargs):
+        return True
+
     async def add_message(self, *args):
         self.messages.append(args)
 
@@ -57,6 +60,7 @@ def _worker():
         config=config,
         managed_ids=set(),
         on_status_change=lambda *_args, **_kwargs: None,
+        selected_groups=[-1001],
     )
 
 

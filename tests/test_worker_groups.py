@@ -74,8 +74,8 @@ def test_worker_selected_groups_gates_messages():
         loop.close()
 
 
-def test_worker_no_selected_groups_means_all():
-    """沒指定群組（空）→ 任何群都處理（向下相容）"""
+def test_worker_no_selected_groups_denies_all():
+    """沒指定群組（空）必須 fail-closed，不處理任何群消息。"""
     if os.path.exists(DB):
         os.remove(DB)
 
@@ -84,7 +84,7 @@ def test_worker_no_selected_groups_means_all():
         await db.connect()
         worker = _make_worker(db, "w2", [])
         await worker.on_message(_FakeEvent(-9999))
-        assert len(await db.get_recent_messages("w2", -9999)) >= 1
+        assert len(await db.get_recent_messages("w2", -9999)) == 0
         await db.close()
 
     loop = asyncio.new_event_loop()
@@ -128,6 +128,13 @@ def test_manager_update_persona_and_save_groups():
             persona = {"name": "預設"}
             name = "預設"
             selected_groups = set()
+
+            def __init__(self):
+                self.stopped = False
+
+            async def stop(self):
+                self.stopped = True
+                self.is_running = False
         fw = FakeWorker()
         manager.workers["m1"] = fw
 
@@ -147,6 +154,17 @@ def test_manager_update_persona_and_save_groups():
         acc2 = await db.get_account("m1")
         assert json.loads(acc2["groups"]) == [-1002, -1001]  # 內部排序
         assert fw.selected_groups == {-1001, -1002}  # 熱更新
+
+        # 清空白名單必須立即停用，不能退回「所有群組」。
+        assert await manager.save_groups("m1", []) == ""
+        acc3 = await db.get_account("m1")
+        assert json.loads(acc3["groups"]) == []
+        assert acc3["setup_complete"] == 0
+        assert acc3["enabled"] == 0
+        assert fw.selected_groups == set()
+        assert fw.stopped is True
+        assert "m1" not in manager.workers
+
         # 不存在的帳號
         assert await manager.save_groups("nope", [1]) == "帳號不存在"
         await db.close()
@@ -255,6 +273,21 @@ def test_manager_requires_group_setup_before_start(monkeypatch):
         account = await db.get_account("setup-needed")
         assert account["enabled"] == 0
 
+        await db.create_account(
+            "bad-groups",
+            "群組資料損壞",
+            box.encrypt("session"),
+            '{"name":"美玲","personality":"活潑"}',
+        )
+        await db.update_account(
+            "bad-groups", groups="null", setup_complete=1, enabled=0
+        )
+        err = await manager.start("bad-groups")
+        assert err == "請至少選擇一個有效群組，再啟動帳號"
+        assert start_calls == []
+        bad = await db.get_account("bad-groups")
+        assert bad["enabled"] == 0
+
         await manager.aclose()
         await db.close()
 
@@ -324,3 +357,73 @@ def test_worker_notify_status_accepts_sync_and_async_callbacks():
 
     assert calls[0][0] == "sync"
     assert calls[1][0] == "async"
+
+
+def test_manager_concurrent_stop_and_start_leave_consistent_state():
+    """同帳號 stop/start 交錯後，DB enabled 與受管理 worker 必須一致。"""
+
+    class FakeDB:
+        def __init__(self):
+            self.account = {
+                "id": "race",
+                "name": "競態帳號",
+                "session_key": "unused",
+                "setup_complete": 1,
+                "groups": "[-5428680940]",
+                "enabled": 1,
+            }
+
+        async def get_account(self, account_id):
+            return dict(self.account) if account_id == "race" else None
+
+        async def update_account(self, account_id, **fields):
+            assert account_id == "race"
+            self.account.update(fields)
+            await asyncio.sleep(0)
+
+        async def list_accounts(self):
+            return [dict(self.account)]
+
+    class FakeWorker:
+        def __init__(self, stop_started=None, allow_stop=None):
+            self.is_running = True
+            self._stop_started = stop_started
+            self._allow_stop = allow_stop
+
+        async def stop(self):
+            if self._stop_started:
+                self._stop_started.set()
+            if self._allow_stop:
+                await self._allow_stop.wait()
+            self.is_running = False
+
+    async def main():
+        cfg = _config()
+        db = FakeDB()
+        manager = AccountManager(cfg, db, SecretBox(cfg.account_encryption_key))
+        stop_started = asyncio.Event()
+        allow_stop = asyncio.Event()
+        manager.workers["race"] = FakeWorker(stop_started, allow_stop)
+
+        async def fake_start(account):
+            assert account["id"] == "race"
+            manager.workers["race"] = FakeWorker()
+
+        manager._start_account = fake_start
+
+        stop_task = asyncio.create_task(manager.stop("race"))
+        await stop_started.wait()
+        start_task = asyncio.create_task(manager.start("race"))
+        await asyncio.sleep(0)
+        allow_stop.set()
+        stop_result, start_result = await asyncio.gather(stop_task, start_task)
+
+        assert stop_result == ""
+        assert start_result == ""
+        assert ("race" in manager.workers) is bool(db.account["enabled"])
+        assert len(manager.workers) <= 1
+
+        manager.workers.clear()
+        await manager.aclose()
+
+    asyncio.run(main())

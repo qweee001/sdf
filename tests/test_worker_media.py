@@ -49,6 +49,7 @@ def _worker(media_service=None):
         config=cfg,
         managed_ids=set(),
         on_status_change=None,
+        selected_groups=[-1001],
         media_service=media_service,
     )
 

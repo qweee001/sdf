@@ -12,6 +12,8 @@ MANAGED = {101, 202, 303, 404}
 class _ClaimDB:
     def __init__(self):
         self.claims = set()
+        self.text_claims = set()
+        self.text_claim_lock = asyncio.Lock()
         self.messages = []
         self.activities = []
 
@@ -23,6 +25,16 @@ class _ClaimDB:
             return False
         self.claims.add(key)
         return True
+
+    async def claim_group_text(
+        self, group_id: int, text: str, account_id: str, window_seconds=3600
+    ) -> bool:
+        async with self.text_claim_lock:
+            key = (group_id, "".join(text.split()).casefold())
+            if key in self.text_claims:
+                return False
+            self.text_claims.add(key)
+            return True
 
     async def add_message(self, *args):
         self.messages.append(args)
@@ -193,5 +205,81 @@ def test_stop_waits_for_inflight_send_and_database_record():
         assert len(db.activities) == 1
         assert worker.stats["replies_sent"] == 1
         assert worker.tg_client is None
+
+    asyncio.run(main())
+
+
+def test_send_rechecks_group_after_hot_whitelist_removal():
+    async def main():
+        worker = _worker(101, {101}, db=_ClaimDB())
+        client = SimpleNamespace(
+            send_message=AsyncMock(),
+            disconnect=AsyncMock(),
+        )
+        worker.tg_client = client
+        worker.is_running = True
+        typing_started = asyncio.Event()
+        allow_typing_finish = asyncio.Event()
+
+        async def controlled_sleep(_seconds):
+            typing_started.set()
+            await allow_typing_finish.wait()
+
+        with patch("app.worker.asyncio.sleep", side_effect=controlled_sleep):
+            send_task = asyncio.create_task(
+                worker._send_text_recorded(
+                    -5428680940,
+                    "測試訊息",
+                    activity_kind="reply",
+                    stats_key="replies_sent",
+                )
+            )
+            await typing_started.wait()
+            worker.selected_groups.clear()
+            allow_typing_finish.set()
+            assert await send_task is False
+
+        client.send_message.assert_not_awaited()
+        assert worker.stats["replies_sent"] == 0
+
+    asyncio.run(main())
+
+
+def test_concurrent_accounts_atomically_claim_identical_text():
+    async def main():
+        db = _ClaimDB()
+        first = _worker(101, {101, 202}, db=db)
+        second = _worker(202, {101, 202}, db=db)
+        first_client = SimpleNamespace(
+            send_message=AsyncMock(), disconnect=AsyncMock()
+        )
+        second_client = SimpleNamespace(
+            send_message=AsyncMock(), disconnect=AsyncMock()
+        )
+        first.tg_client = first_client
+        second.tg_client = second_client
+        first.is_running = True
+        second.is_running = True
+
+        results = await asyncio.gather(
+            first._send_text_recorded(
+                -5428680940,
+                "今晚要不要一起聊聊",
+                activity_kind="reply",
+                stats_key="replies_sent",
+            ),
+            second._send_text_recorded(
+                -5428680940,
+                "今晚要不要一起聊聊",
+                activity_kind="reply",
+                stats_key="replies_sent",
+            ),
+        )
+
+        assert results.count(True) == 1
+        assert (
+            first_client.send_message.await_count
+            + second_client.send_message.await_count
+        ) == 1
 
     asyncio.run(main())

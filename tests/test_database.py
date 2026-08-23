@@ -168,3 +168,78 @@ def test_memory_cap_200():
         loop.run_until_complete(main())
     finally:
         loop.close()
+
+
+def test_media_budget_rejects_nan_and_infinity():
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    async def main():
+        db = Database(DB)
+        await db.connect()
+        assert await db.reserve_media_budget(
+            "a1", "image", 0.03, float("nan"), day="2026-08-23"
+        ) is False
+        assert await db.reserve_media_budget(
+            "a1", "image", float("inf"), 2.0, day="2026-08-23"
+        ) is False
+        assert await db.media_spend_total("2026-08-23") == 0.0
+        await db.close()
+
+    asyncio.run(main())
+
+
+def test_media_budget_is_atomic_across_database_connections():
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    async def main():
+        first = Database(DB)
+        second = Database(DB)
+        await first.connect()
+        await second.connect()
+        start = asyncio.Event()
+
+        async def reserve(db, account_id):
+            await start.wait()
+            return await db.reserve_media_budget(
+                account_id,
+                "video",
+                0.60,
+                1.00,
+                day="2026-08-23",
+            )
+
+        tasks = [
+            asyncio.create_task(reserve(first, "a1")),
+            asyncio.create_task(reserve(second, "a2")),
+        ]
+        start.set()
+        results = await asyncio.gather(*tasks)
+
+        assert results.count(True) == 1
+        assert await first.media_spend_total("2026-08-23") == 0.60
+        await first.close()
+        await second.close()
+
+    asyncio.run(main())
+
+
+def test_group_text_claim_is_atomic_across_database_connections():
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    async def main():
+        first = Database(DB)
+        second = Database(DB)
+        await first.connect()
+        await second.connect()
+        results = await asyncio.gather(
+            first.claim_group_text(111, "今晚 要不要聊聊？", "a1"),
+            second.claim_group_text(111, "今晚要不要聊聊", "a2"),
+        )
+        assert results.count(True) == 1
+        await first.close()
+        await second.close()
+
+    asyncio.run(main())

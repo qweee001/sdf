@@ -75,7 +75,11 @@ class _HTTP:
         return _StreamContext(_HTTPResponse(content=b"mp4-bytes"))
 
 
-def _service(db=None, http=None):
+async def _public_resolver(_host, _port):
+    return ["8.8.8.8"]
+
+
+def _service(db=None, http=None, resolver=None):
     image_response = SimpleNamespace(data=[SimpleNamespace(
         b64_json=base64.b64encode(b"png-bytes").decode(), url=None
     )])
@@ -97,6 +101,7 @@ def _service(db=None, http=None):
         video_model="minimax/minimax-h3",
         media_daily_budget_usd=10.0,
         media_generation_timeout=30.0,
+        media_download_hosts=("media.test",),
         ai_api_key="x",
         ai_base_url="https://api.orcarouter.ai/v1",
         ai_temperature=0.7,
@@ -108,6 +113,7 @@ def _service(db=None, http=None):
         db=db or _DB(),
         config=config,
         http_client=http or _HTTP(),
+        resolve_host=resolver or _public_resolver,
         sleep=lambda _seconds: asyncio.sleep(0),
     )
     return service, client
@@ -189,5 +195,30 @@ def test_video_generation_submits_once_polls_same_task_and_downloads():
         submitted = http.post.await_args.kwargs["json"]
         assert submitted["duration"] == 4
         assert "no nudity" in submitted["prompt"]
+
+    asyncio.run(main())
+
+
+def test_download_rejects_private_ip_before_http_request():
+    async def main():
+        http = _HTTP()
+        service, _client = _service(http=http)
+        with pytest.raises(ValueError, match="不安全"):
+            await service._download("https://127.0.0.1/internal")
+        assert http.stream_calls == []
+
+    asyncio.run(main())
+
+
+def test_download_rejects_allowed_host_resolving_to_private_ip():
+    async def private_resolver(_host, _port):
+        return ["127.0.0.1"]
+
+    async def main():
+        http = _HTTP()
+        service, _client = _service(http=http, resolver=private_resolver)
+        with pytest.raises(ValueError, match="不安全"):
+            await service._download("https://media.test/internal")
+        assert http.stream_calls == []
 
     asyncio.run(main())
