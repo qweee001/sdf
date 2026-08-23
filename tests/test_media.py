@@ -3,7 +3,9 @@ import base64
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+from openai import APITimeoutError
 
 from app.media import OrcaMediaService
 
@@ -24,6 +26,10 @@ class _Binary:
 
     async def aread(self):
         return self._data
+
+
+class _Upstream503(Exception):
+    status_code = 503
 
 
 class _HTTPResponse:
@@ -97,6 +103,7 @@ def _service(db=None, http=None, resolver=None):
     config = SimpleNamespace(
         vision_model="obsidian/Qwen3.8-27B",
         image_model="google/imagen-4.0-fast-generate-001",
+        image_fallback_model="google/imagen-4.0-generate-001",
         speech_model="openai/tts-1",
         video_model="minimax/minimax-h3",
         media_daily_budget_usd=10.0,
@@ -146,6 +153,79 @@ def test_image_generation_reserves_budget_and_forces_non_explicit_adult_boundary
         prompt = client.images.generate.await_args.kwargs["prompt"]
         assert "fictional adult age 21+" in prompt
         assert "no visible genitals" in prompt
+
+    asyncio.run(main())
+
+
+def test_image_generation_falls_back_once_on_upstream_503_with_separate_budget():
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+        success = SimpleNamespace(data=[SimpleNamespace(
+            b64_json=base64.b64encode(b"fallback-png").decode(), url=None
+        )])
+        client.images.generate.side_effect = [_Upstream503("down"), success]
+
+        asset = await service.generate_image("a1", "成熟自然自拍")
+
+        assert asset and asset.data == b"fallback-png"
+        assert [call.kwargs["model"] for call in client.images.generate.await_args_list] == [
+            "google/imagen-4.0-fast-generate-001",
+            "google/imagen-4.0-generate-001",
+        ]
+        assert [call[0][2] for call in db.calls] == [0.03, 0.04]
+
+    asyncio.run(main())
+
+
+def test_image_generation_does_not_fallback_on_non_transient_error():
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+        client.images.generate.side_effect = ValueError("bad request")
+
+        with pytest.raises(ValueError, match="bad request"):
+            await service.generate_image("a1", "成熟自然自拍")
+
+        assert client.images.generate.await_count == 1
+        assert [call[0][2] for call in db.calls] == [0.03]
+
+    asyncio.run(main())
+
+
+def test_image_generation_falls_back_on_http_timeout():
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+        success = SimpleNamespace(data=[SimpleNamespace(
+            b64_json=base64.b64encode(b"timeout-fallback").decode(), url=None
+        )])
+        client.images.generate.side_effect = [httpx.ReadTimeout("slow"), success]
+
+        asset = await service.generate_image("a1", "自然自拍")
+
+        assert asset and asset.data == b"timeout-fallback"
+        assert client.images.generate.await_count == 2
+
+    asyncio.run(main())
+
+
+def test_image_generation_falls_back_on_openai_sdk_timeout():
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+        success = SimpleNamespace(data=[SimpleNamespace(
+            b64_json=base64.b64encode(b"sdk-timeout-fallback").decode(), url=None
+        )])
+        timeout = APITimeoutError(
+            request=httpx.Request("POST", "https://example.test")
+        )
+        client.images.generate.side_effect = [timeout, success]
+
+        asset = await service.generate_image("a1", "自然自拍")
+
+        assert asset and asset.data == b"sdk-timeout-fallback"
+        assert client.images.generate.await_count == 2
 
     asyncio.run(main())
 

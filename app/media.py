@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 import httpx
+from openai import APIConnectionError
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,10 @@ class OrcaMediaService:
         ),
         "voice": ("speech_model", "openai/tts-1", 0.10),
         "video": ("video_model", "minimax/minimax-h3", 0.40),
+    }
+    _APPROVED_IMAGE_MODELS = {
+        "google/imagen-4.0-fast-generate-001": 0.03,
+        "google/imagen-4.0-generate-001": 0.04,
     }
     _MAX_OUTPUT_BYTES = 50 * 1024 * 1024
     _SUGGESTIVE_IMAGE_POLICY = (
@@ -81,6 +86,32 @@ class OrcaMediaService:
             reserve_usd,
             float(self.config.media_daily_budget_usd),
         )
+
+    async def _reserve_image_model(self, account_id: str, model: str) -> bool:
+        reserve_usd = self._APPROVED_IMAGE_MODELS.get(model)
+        if reserve_usd is None:
+            raise ValueError(f"未核准的 image 模型：{model or '<empty>'}")
+        return await self.db.reserve_media_budget(
+            account_id,
+            "image",
+            reserve_usd,
+            float(self.config.media_daily_budget_usd),
+        )
+
+    @staticmethod
+    def _is_transient_image_error(exc: Exception) -> bool:
+        if isinstance(
+            exc,
+            (
+                TimeoutError,
+                asyncio.TimeoutError,
+                httpx.TimeoutException,
+                APIConnectionError,
+            ),
+        ):
+            return True
+        status_code = getattr(exc, "status_code", None)
+        return isinstance(status_code, int) and status_code >= 500
 
     def _host_allowed(self, host: str) -> bool:
         host = host.lower().rstrip(".")
@@ -210,17 +241,36 @@ class OrcaMediaService:
     async def generate_image(
         self, account_id: str, prompt: str
     ) -> MediaAsset | None:
-        if not await self._reserve(account_id, "image"):
-            return None
-        response = await self.client.images.generate(
-            model=self.config.image_model,
-            prompt=self._SUGGESTIVE_IMAGE_POLICY + prompt,
-            n=1,
-            size="1024x1024",
-            quality="standard",
-            response_format="b64_json",
-            timeout=self.config.media_generation_timeout,
-        )
+        primary = str(self.config.image_model)
+        fallback = str(getattr(self.config, "image_fallback_model", ""))
+        models = [primary]
+        if fallback and fallback != primary:
+            models.append(fallback)
+        for model in models:
+            if model not in self._APPROVED_IMAGE_MODELS:
+                raise ValueError(f"未核准的 image 模型：{model or '<empty>'}")
+
+        response = None
+        for index, model in enumerate(models):
+            if not await self._reserve_image_model(account_id, model):
+                return None
+            try:
+                response = await self.client.images.generate(
+                    model=model,
+                    prompt=self._SUGGESTIVE_IMAGE_POLICY + prompt,
+                    n=1,
+                    size="1024x1024",
+                    quality="standard",
+                    response_format="b64_json",
+                    timeout=self.config.media_generation_timeout,
+                )
+                break
+            except Exception as exc:
+                has_fallback = index + 1 < len(models)
+                if not has_fallback or not self._is_transient_image_error(exc):
+                    raise
+        if response is None:
+            raise RuntimeError("圖片生成沒有可用模型")
         item = response.data[0]
         if getattr(item, "b64_json", None):
             data = base64.b64decode(item.b64_json, validate=True)

@@ -67,6 +67,7 @@ class Settings:
     ai_disable_thinking: bool
     vision_model: str
     image_model: str
+    image_fallback_model: str
     speech_model: str
     video_model: str
     media_enabled: bool
@@ -125,6 +126,10 @@ def load_settings() -> Settings:
         image_model=(
             os.getenv("IMAGE_MODEL", "").strip()
             or "google/imagen-4.0-fast-generate-001"
+        ),
+        image_fallback_model=(
+            os.getenv("IMAGE_FALLBACK_MODEL", "").strip()
+            or "google/imagen-4.0-generate-001"
         ),
         speech_model=(
             os.getenv("SPEECH_MODEL", "").strip()

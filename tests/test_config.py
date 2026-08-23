@@ -37,7 +37,8 @@ def test_defaults_present():
     assert s.acceptance_test_mode is False
     assert s.ai_disable_thinking is False
     assert s.vision_model == "test-model"
-    assert s.image_model
+    assert s.image_model == "google/imagen-4.0-fast-generate-001"
+    assert s.image_fallback_model == "google/imagen-4.0-generate-001"
     assert s.speech_model
     assert s.video_model
     assert s.media_enabled is False
