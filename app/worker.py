@@ -229,6 +229,10 @@ class AccountWorker:
             "human_claimed": 0,
             "human_fallbacks": 0,
             "human_sent": 0,
+            "images_seen": 0,
+            "images_understood": 0,
+            "image_understanding_errors": 0,
+            "voice_blocked": 0,
             "reply_drops": {},
         }
 
@@ -362,11 +366,14 @@ class AccountWorker:
             sender_id = int(event.sender_id or 0)
             if sender_id not in self.managed_ids:
                 self.last_human_activity[group_id] = time.time()
+            stored_content = str(event.raw_text or "").strip()
+            if isinstance(getattr(event, "media", None), MessageMediaPhoto):
+                stored_content = f"{stored_content} [圖片]".strip()
             await self.db.add_message(
                 self.account_id, group_id,
                 sender_id,
                 get_display_name(await event.get_sender()) or "",
-                "user", event.raw_text or "",
+                "user", stored_content,
             )
             if not await self._should_reply(event):
                 return
@@ -708,6 +715,9 @@ class AccountWorker:
                     "too_long",
                     "near_duplicate",
                     "image_unavailable",
+                    "image_understanding_empty",
+                    "image_understanding_error",
+                    "media_disabled",
                 }:
                     return
                 text = self._fallback_reply(
@@ -722,6 +732,9 @@ class AccountWorker:
                 text,
                 activity_kind="followup" if managed_followup else "reply",
                 stats_key="replies_sent",
+                require_media_enabled=isinstance(
+                    getattr(event, "media", None), MessageMediaPhoto
+                ),
             )
             if sent and is_human_reply:
                 self.stats["human_sent"] += 1
@@ -758,7 +771,13 @@ class AccountWorker:
     async def _generate_requested_media(
         self, event, kind: str
     ) -> MediaAsset | None:
-        if not self.media_service or not getattr(self.config, "media_enabled", False):
+        if kind == "voice":
+            if not bool(getattr(self.config, "voice_media_enabled", False)):
+                self.stats["voice_blocked"] += 1
+                return None
+        elif not bool(getattr(self.config, "media_enabled", False)):
+            return None
+        if not self.media_service:
             return None
         p = self.persona
         request_text = str(event.raw_text or "").strip()
@@ -822,6 +841,14 @@ class AccountWorker:
             or int(chat_id) not in self.selected_groups
         ):
             return False
+        if asset.kind == "voice" and not bool(
+            getattr(self.config, "voice_media_enabled", False)
+        ):
+            return False
+        if asset.kind in {"image", "video"} and not bool(
+            getattr(self.config, "media_enabled", False)
+        ):
+            return False
         file_obj = io.BytesIO(asset.data)
         file_obj.name = asset.filename
         kwargs: dict[str, Any] = {"parse_mode": None}
@@ -860,8 +887,14 @@ class AccountWorker:
         self._set_generation_reason(event, "generation_empty")
         group_id = int(event.chat_id or 0)
         is_image = isinstance(getattr(event, "media", None), MessageMediaPhoto)
+        if is_image:
+            self.stats["images_seen"] += 1
+            if not bool(getattr(self.config, "media_enabled", False)):
+                self._set_generation_reason(event, "media_disabled")
+                return ""
         image = await self._incoming_image(event) if is_image else None
         if is_image and image is None:
+            self.stats["image_understanding_errors"] += 1
             self._set_generation_reason(event, "image_unavailable")
             return ""
         history = await self.db.get_recent_messages(
@@ -883,19 +916,36 @@ class AccountWorker:
 
         async def call_reply(message: str) -> str:
             if image and self.media_service:
-                return await self.media_service.understand_image(
-                    self.account_id, image[0], image[1], system_prompt, message
-                )
+                try:
+                    return await self.media_service.understand_image(
+                        self.account_id, image[0], image[1], system_prompt, message
+                    )
+                except Exception as exc:
+                    self._set_generation_reason(event, "image_understanding_error")
+                    self.stats["image_understanding_errors"] += 1
+                    print(f"[{self.name}] vision error: {exc}", flush=True)
+                    return ""
             return await self._call_ai(system_prompt, message)
 
         reply = await call_reply(user_message)
+        if image and not bool(getattr(self.config, "media_enabled", False)):
+            self._set_generation_reason(event, "media_disabled")
+            return ""
         if not reply:
-            self._set_generation_reason(event, "ai_empty")
+            if image:
+                reason = self._generation_reasons.get(self._generation_key(event))
+                if reason != "image_understanding_error":
+                    self._set_generation_reason(event, "image_understanding_empty")
+                    self.stats["image_understanding_errors"] += 1
+            else:
+                self._set_generation_reason(event, "ai_empty")
             return ""
         too_long = len(reply) > _MAX_REPLY_CHARS
         mentions_video = self._mentions_video_topic(reply)
         repetitive = self._is_near_duplicate(reply, recent_group_replies)
         if not too_long and not mentions_video and not repetitive:
+            if image:
+                self.stats["images_understood"] += 1
             self._set_generation_reason(event, "ok")
             return reply
 
@@ -917,8 +967,17 @@ class AccountWorker:
             f"{correction}"
         )
         retry = await call_reply(retry_message)
+        if image and not bool(getattr(self.config, "media_enabled", False)):
+            self._set_generation_reason(event, "media_disabled")
+            return ""
         if not retry:
-            self._set_generation_reason(event, "ai_empty")
+            if image:
+                reason = self._generation_reasons.get(self._generation_key(event))
+                if reason != "image_understanding_error":
+                    self._set_generation_reason(event, "image_understanding_empty")
+                    self.stats["image_understanding_errors"] += 1
+            else:
+                self._set_generation_reason(event, "ai_empty")
             return ""
         retry_too_long = len(retry) > _MAX_REPLY_CHARS
         retry_video = self._mentions_video_topic(retry)
@@ -936,6 +995,8 @@ class AccountWorker:
             self._set_generation_reason(event, reason)
             return ""
         self._set_generation_reason(event, "ok")
+        if image:
+            self.stats["images_understood"] += 1
         return retry
 
     @staticmethod
@@ -1040,9 +1101,12 @@ class AccountWorker:
             pass
         is_water = (int(event.sender_id or 0) in self.managed_ids)
         water_hint = "（對方是群組裡另一位付費會員）" if is_water else ""
+        incoming = str(event.raw_text or "").strip()
+        if isinstance(getattr(event, "media", None), MessageMediaPhoto):
+            incoming = f"{incoming} [圖片]".strip()
         return (
             f"{context}"
-            f"最新消息：[{sender_name or '有人'}]{water_hint} {event.raw_text}\n"
+            f"最新消息：[{sender_name or '有人'}]{water_hint} {incoming}\n"
             "請根據上下文生成自然回覆（1-3 句，台灣繁體口語；"
             "最多 60 個字元，標點、空格也算）。"
         )
@@ -1087,6 +1151,7 @@ class AccountWorker:
         text: str,
         short_delay: bool = False,
         claim_text: bool = False,
+        require_media_enabled: bool = False,
     ) -> bool:
         if len(text) > _MAX_REPLY_CHARS:
             return False
@@ -1105,6 +1170,10 @@ class AccountWorker:
             not self.is_running
             or self.tg_client is not client
             or int(chat_id) not in self.selected_groups
+            or (
+                require_media_enabled
+                and not bool(getattr(self.config, "media_enabled", False))
+            )
         ):
             return False
         if claim_text and not await self.db.claim_group_text(
@@ -1131,6 +1200,7 @@ class AccountWorker:
         stats_key: str,
         short_delay: bool = False,
         managed_origin: bool = False,
+        require_media_enabled: bool = False,
     ) -> bool:
         async with self._send_lock:
             if not await self._send_message_unlocked(
@@ -1138,6 +1208,7 @@ class AccountWorker:
                 text,
                 short_delay=short_delay,
                 claim_text=True,
+                require_media_enabled=require_media_enabled,
             ):
                 return False
             if managed_origin and self.tg_user_id:

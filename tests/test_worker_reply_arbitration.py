@@ -159,6 +159,20 @@ def test_ordinary_human_message_has_at_most_one_responder():
     asyncio.run(main())
 
 
+def test_human_image_has_exactly_one_responder_across_four_accounts():
+    async def main():
+        event = _event(text="", message_id=780)
+        event.media = object()
+        db = _ClaimDB()
+        decisions = [
+            await _worker(uid, db=db)._should_reply(event)
+            for uid in sorted(MANAGED)
+        ]
+        assert decisions.count(True) == 1
+
+    asyncio.run(main())
+
+
 def test_unregistered_managed_message_never_triggers_other_accounts():
     async def main():
         event = _event(sender_id=101)

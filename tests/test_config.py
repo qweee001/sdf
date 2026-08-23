@@ -36,12 +36,13 @@ def test_defaults_present():
     assert s.proactive_loop_max_seconds == 720
     assert s.acceptance_test_mode is False
     assert s.ai_disable_thinking is False
-    assert s.vision_model == "test-model"
+    assert s.vision_model == "google/gemini-3.5-flash-lite"
     assert s.image_model == "google/imagen-4.0-fast-generate-001"
     assert s.image_fallback_model == "google/imagen-4.0-generate-001"
     assert s.speech_model
     assert s.video_model
-    assert s.media_enabled is False
+    assert s.media_enabled is True
+    assert s.voice_media_enabled is False
     assert s.media_daily_budget_usd == 10.0
     assert s.media_max_input_bytes == 8 * 1024 * 1024
 

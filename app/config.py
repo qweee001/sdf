@@ -71,6 +71,7 @@ class Settings:
     speech_model: str
     video_model: str
     media_enabled: bool
+    voice_media_enabled: bool
     media_daily_budget_usd: float
     media_max_input_bytes: int
     media_generation_timeout: float
@@ -122,7 +123,10 @@ def load_settings() -> Settings:
         ai_max_tokens=_int("AI_MAX_TOKENS", 200),
         ai_timeout=_float("AI_TIMEOUT", 60),
         ai_disable_thinking=_bool("AI_DISABLE_THINKING", False),
-        vision_model=os.getenv("VISION_MODEL", "").strip() or ai_model,
+        vision_model=(
+            os.getenv("VISION_MODEL", "").strip()
+            or "google/gemini-3.5-flash-lite"
+        ),
         image_model=(
             os.getenv("IMAGE_MODEL", "").strip()
             or "google/imagen-4.0-fast-generate-001"
@@ -139,7 +143,9 @@ def load_settings() -> Settings:
             os.getenv("VIDEO_MODEL", "").strip()
             or "minimax/minimax-h3"
         ),
-        media_enabled=_bool("MEDIA_ENABLED", False),
+        media_enabled=_bool("MEDIA_ENABLED", True),
+        # 語音目前只允許未來的本地克隆後端；OrcaRouter TTS 不得啟用。
+        voice_media_enabled=False,
         media_daily_budget_usd=_float("MEDIA_DAILY_BUDGET_USD", 10.0),
         media_max_input_bytes=_int(
             "MEDIA_MAX_INPUT_BYTES", 8 * 1024 * 1024

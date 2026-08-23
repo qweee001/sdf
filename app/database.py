@@ -20,6 +20,7 @@ class Database:
         self._db: aiosqlite.Connection | None = None
         self._media_budget_lock = asyncio.Lock()
         self._claim_lock = asyncio.Lock()
+        self._settings_lock = asyncio.Lock()
 
     @property
     def _c(self) -> aiosqlite.Connection:
@@ -119,12 +120,48 @@ class Database:
                 claimed_at REAL NOT NULL
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS runtime_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
         await db.commit()
 
     async def close(self):
         if self._db:
             await self._db.close()
             self._db = None
+
+    # ---------- 運行時設定 ----------
+
+    async def get_runtime_settings(self) -> dict[str, str]:
+        cursor = await self._c.execute(
+            "SELECT key, value FROM runtime_settings ORDER BY key"
+        )
+        return {str(row["key"]): str(row["value"]) for row in await cursor.fetchall()}
+
+    async def set_runtime_settings(self, values: dict[str, str]) -> None:
+        if not values:
+            return
+        now = time.time()
+        async with self._settings_lock:
+            async with aiosqlite.connect(self.db_path, timeout=30) as settings_db:
+                try:
+                    await settings_db.execute("BEGIN IMMEDIATE")
+                    for key, value in values.items():
+                        await settings_db.execute(
+                            "INSERT INTO runtime_settings (key, value, updated_at) "
+                            "VALUES (?, ?, ?) "
+                            "ON CONFLICT(key) DO UPDATE SET "
+                            "value = excluded.value, updated_at = excluded.updated_at",
+                            (str(key), str(value), now),
+                        )
+                    await settings_db.commit()
+                except BaseException:
+                    await settings_db.rollback()
+                    raise
 
     # ---------- 帳號 ----------
 

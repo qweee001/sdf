@@ -25,6 +25,7 @@ async def async_main() -> None:
     print("資料庫連線完成", flush=True)
 
     manager = AccountManager(settings, db, secret_box)
+    await manager.load_runtime_settings()
     login_service = TelegramLoginService(settings.tg_api_id, settings.tg_api_hash)
     dashboard = Dashboard(settings, manager, login_service)
     print("控制台初始化完成", flush=True)

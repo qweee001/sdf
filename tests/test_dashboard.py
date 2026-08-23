@@ -177,6 +177,45 @@ def test_status_includes_groups_fields():
         assert "accounts" in r.json()
 
 
+def test_feature_toggles_require_login_persist_and_apply_immediately():
+    with _make_dashboard() as client:
+        assert client.post(
+            "/api/features", json={"media_enabled": False, "voice_enabled": False}
+        ).status_code == 401
+        client.post("/api/login", json={"username": "admin", "password": "secret123"})
+
+        initial = client.get("/api/status").json()["features"]
+        assert initial["media_enabled"] is True
+        assert initial["voice_enabled"] is False
+        assert initial["voice_available"] is False
+
+        changed = client.post(
+            "/api/features", json={"media_enabled": False, "voice_enabled": False}
+        )
+        assert changed.status_code == 200
+        assert changed.json()["features"]["media_enabled"] is False
+        assert client.get("/api/status").json()["features"]["media_enabled"] is False
+
+
+def test_voice_toggle_refuses_enable_until_local_clone_is_ready():
+    with _make_dashboard() as client:
+        client.post("/api/login", json={"username": "admin", "password": "secret123"})
+        response = client.post(
+            "/api/features", json={"media_enabled": True, "voice_enabled": True}
+        )
+        assert response.status_code == 409
+        assert "本地克隆" in response.json()["error"]
+        assert client.get("/api/status").json()["features"]["voice_enabled"] is False
+
+
+def test_index_contains_media_and_voice_switches():
+    with _make_dashboard() as client:
+        page = client.get("/").text
+        assert 'id="mediaToggle"' in page
+        assert 'id="voiceToggle"' in page
+        assert "圖片理解預設開啟" in page
+
+
 def test_available_groups_endpoint_discovers_without_starting(monkeypatch):
     """停止中的帳號可用唯讀連線取得群組，無須先啟動互動 worker。"""
     async def fake_list(self, account_id):

@@ -28,6 +28,7 @@ class AccountManager:
         self.secret_box = secret_box
         self.workers: dict[str, AccountWorker] = {}
         self._lifecycle_locks: dict[str, asyncio.Lock] = {}
+        self._feature_lock = asyncio.Lock()
         self.managed_ids: set[int] = set()
         self.active_ids: set[int] = set()
         self.managed_origins: dict[tuple[int, int, str], float] = {}
@@ -49,6 +50,45 @@ class AccountManager:
     def _lifecycle_lock(self, account_id: str) -> asyncio.Lock:
         """Serialize lifecycle mutations for one account."""
         return self._lifecycle_locks.setdefault(account_id, asyncio.Lock())
+
+    @staticmethod
+    def _stored_bool(raw: str | None, default: bool) -> bool:
+        if raw is None:
+            return default
+        return str(raw).strip() == "1"
+
+    def feature_status(self) -> dict[str, bool]:
+        return {
+            "media_enabled": bool(self.config.media_enabled),
+            "voice_enabled": bool(self.config.voice_media_enabled),
+            # 本地克隆台灣腔尚未接入；不得回退 OrcaRouter TTS。
+            "voice_available": False,
+        }
+
+    async def load_runtime_settings(self) -> None:
+        stored = await self.db.get_runtime_settings()
+        self.config.media_enabled = self._stored_bool(
+            stored.get("media_enabled"), bool(self.config.media_enabled)
+        )
+        # 即使舊資料誤寫為 1，也要 fail-closed。
+        self.config.voice_media_enabled = False
+        if stored.get("voice_media_enabled") == "1":
+            await self.db.set_runtime_settings({"voice_media_enabled": "0"})
+
+    async def update_feature_flags(
+        self, *, media_enabled: bool, voice_enabled: bool
+    ) -> str:
+        if voice_enabled:
+            return "本地克隆台灣腔尚未就緒，語音功能不能開啟"
+        async with self._feature_lock:
+            await self.db.set_runtime_settings({
+                "media_enabled": "1" if media_enabled else "0",
+                "voice_media_enabled": "0",
+            })
+            # 所有 worker 共用同一 Settings 物件，更新後立即熱生效。
+            self.config.media_enabled = bool(media_enabled)
+            self.config.voice_media_enabled = False
+        return ""
 
     @staticmethod
     def _parse_groups(raw_groups: object) -> list[int]:
@@ -337,6 +377,7 @@ class AccountManager:
             "running": sum(1 for a in accounts if a["is_running"]),
             "media_spend_usd": round(await self.db.media_spend_total(), 6),
             "media_budget_usd": self.config.media_daily_budget_usd,
+            "features": self.feature_status(),
             "acceptance_test_mode": self.config.acceptance_test_mode,
             "water_cross_talk_probability": self.config.water_cross_talk_probability,
             "proactive_loop_seconds": [

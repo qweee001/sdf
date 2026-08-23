@@ -299,3 +299,28 @@ def test_managed_followup_two_phase_reservation_and_release():
         await second.close()
 
     asyncio.run(main())
+
+
+def test_runtime_feature_flags_persist_across_database_connections():
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    async def main():
+        first = Database(DB)
+        await first.connect()
+        assert await first.get_runtime_settings() == {}
+        await first.set_runtime_settings({
+            "media_enabled": "0",
+            "voice_media_enabled": "0",
+        })
+        await first.close()
+
+        second = Database(DB)
+        await second.connect()
+        assert await second.get_runtime_settings() == {
+            "media_enabled": "0",
+            "voice_media_enabled": "0",
+        }
+        await second.close()
+
+    asyncio.run(main())

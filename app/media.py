@@ -24,15 +24,16 @@ class OrcaMediaService:
     """OrcaRouter 多模態與媒體生成；付費生成先走共用預算闸門。"""
 
     _MODEL_BUDGETS = {
-        "vision": ("vision_model", "obsidian/Qwen3.8-27B", 0.10),
+        "vision": ("vision_model", "google/gemini-3.5-flash-lite", 0.10),
         "image": (
             "image_model",
             "google/imagen-4.0-fast-generate-001",
             0.03,
         ),
-        "voice": ("speech_model", "openai/tts-1", 0.10),
         "video": ("video_model", "minimax/minimax-h3", 0.40),
     }
+    _PRIMARY_IMAGE_MODEL = "google/imagen-4.0-fast-generate-001"
+    _FALLBACK_IMAGE_MODEL = "google/imagen-4.0-generate-001"
     _APPROVED_IMAGE_MODELS = {
         "google/imagen-4.0-fast-generate-001": 0.03,
         "google/imagen-4.0-generate-001": 0.04,
@@ -74,6 +75,8 @@ class OrcaMediaService:
             await self.http.aclose()
 
     async def _reserve(self, account_id: str, kind: str) -> bool:
+        if not bool(getattr(self.config, "media_enabled", False)):
+            return False
         field, expected_model, reserve_usd = self._MODEL_BUDGETS[kind]
         configured_model = str(getattr(self.config, field, ""))
         if configured_model != expected_model:
@@ -88,6 +91,8 @@ class OrcaMediaService:
         )
 
     async def _reserve_image_model(self, account_id: str, model: str) -> bool:
+        if not bool(getattr(self.config, "media_enabled", False)):
+            return False
         reserve_usd = self._APPROVED_IMAGE_MODELS.get(model)
         if reserve_usd is None:
             raise ValueError(f"未核准的 image 模型：{model or '<empty>'}")
@@ -243,12 +248,15 @@ class OrcaMediaService:
     ) -> MediaAsset | None:
         primary = str(self.config.image_model)
         fallback = str(getattr(self.config, "image_fallback_model", ""))
-        models = [primary]
-        if fallback and fallback != primary:
-            models.append(fallback)
-        for model in models:
+        for model in (primary, fallback):
             if model not in self._APPROVED_IMAGE_MODELS:
                 raise ValueError(f"未核准的 image 模型：{model or '<empty>'}")
+        if (
+            primary != self._PRIMARY_IMAGE_MODEL
+            or fallback != self._FALLBACK_IMAGE_MODEL
+        ):
+            raise ValueError("圖片主備模型角色錯誤")
+        models = [primary, fallback]
 
         response = None
         for index, model in enumerate(models):
@@ -285,20 +293,8 @@ class OrcaMediaService:
     async def generate_voice(
         self, account_id: str, text: str, *, voice: str = "nova"
     ) -> MediaAsset | None:
-        if not await self._reserve(account_id, "voice"):
-            return None
-        response = await self.client.audio.speech.create(
-            model=self.config.speech_model,
-            input=text[:500],
-            voice=voice,
-            response_format="opus",
-            speed=1.0,
-            timeout=self.config.media_generation_timeout,
-        )
-        data = bytes(await response.aread())
-        if not data or len(data) > self._MAX_OUTPUT_BYTES:
-            raise ValueError("生成語音大小不合規")
-        return MediaAsset("voice", data, "voice.ogg", "audio/ogg")
+        # 語音只允許未來的本地克隆台灣腔服務；禁止回退 OrcaRouter TTS。
+        return None
 
     async def generate_video(
         self, account_id: str, prompt: str

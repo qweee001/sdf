@@ -101,12 +101,14 @@ def _service(db=None, http=None, resolver=None):
         ),
     )
     config = SimpleNamespace(
-        vision_model="obsidian/Qwen3.8-27B",
+        vision_model="google/gemini-3.5-flash-lite",
         image_model="google/imagen-4.0-fast-generate-001",
         image_fallback_model="google/imagen-4.0-generate-001",
         speech_model="openai/tts-1",
         video_model="minimax/minimax-h3",
+        media_enabled=True,
         media_daily_budget_usd=10.0,
+        voice_media_enabled=False,
         media_generation_timeout=30.0,
         media_download_hosts=("media.test",),
         ai_api_key="x",
@@ -252,13 +254,31 @@ def test_unapproved_model_is_rejected_before_budget_or_api_call():
     asyncio.run(main())
 
 
-def test_voice_generation_returns_telegram_opus():
+def test_image_model_roles_cannot_be_reversed_or_duplicated():
     async def main():
-        service, _client = _service()
-        asset = await service.generate_voice("a1", "今晚想你陪我")
-        assert asset and asset.kind == "voice"
-        assert asset.filename.endswith(".ogg")
-        assert asset.data == b"opus-bytes"
+        for primary, fallback in [
+            ("google/imagen-4.0-generate-001", "google/imagen-4.0-fast-generate-001"),
+            ("google/imagen-4.0-fast-generate-001", "google/imagen-4.0-fast-generate-001"),
+        ]:
+            db = _DB()
+            service, client = _service(db=db)
+            service.config.image_model = primary
+            service.config.image_fallback_model = fallback
+            with pytest.raises(ValueError, match="主備模型角色錯誤"):
+                await service.generate_image("a1", "自拍")
+            assert db.calls == []
+            client.images.generate.assert_not_awaited()
+
+    asyncio.run(main())
+
+
+def test_voice_generation_is_hard_disabled():
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+        assert await service.generate_voice("a1", "今晚想你陪我") is None
+        assert db.calls == []
+        client.audio.speech.create.assert_not_awaited()
 
     asyncio.run(main())
 

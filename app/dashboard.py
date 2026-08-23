@@ -114,6 +114,28 @@ class Dashboard:
             await self.login_service.prune_expired()
             return JSONResponse(await self.manager.status())
 
+        @app.post("/api/features")
+        async def update_features(request: Request):
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            data = await request.json()
+            if not isinstance(data, dict):
+                return JSONResponse({"error": "功能設定格式錯誤"}, status_code=400)
+            media_enabled = data.get("media_enabled")
+            voice_enabled = data.get("voice_enabled")
+            if type(media_enabled) is not bool or type(voice_enabled) is not bool:
+                return JSONResponse({"error": "功能開關必須是布林值"}, status_code=400)
+            error = await self.manager.update_feature_flags(
+                media_enabled=media_enabled,
+                voice_enabled=voice_enabled,
+            )
+            if error:
+                return JSONResponse({"error": error}, status_code=409)
+            return JSONResponse({
+                "ok": True,
+                "features": self.manager.feature_status(),
+            })
+
         @app.post("/api/accounts/{account_id}/start")
         async def start_account(account_id: str, request: Request):
             if not self._check_session(request):
@@ -360,6 +382,10 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 .modal-box h3 { margin-bottom: 1rem; }
 .modal input { width: 100%; padding: 0.6rem; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; margin: 0.3rem 0; }
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #334155; padding: 0.6rem 1.2rem; border-radius: 8px; font-size: 0.85rem; display: none; z-index: 20; }
+.feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.8rem; }
+.feature-item { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 0.8rem; background: #0f172a; border-radius: 9px; }
+.switch { width: 44px; height: 24px; accent-color: #38bdf8; cursor: pointer; }
+.switch:disabled { cursor: not-allowed; opacity: 0.45; }
 </style>
 </head>
 <body>
@@ -378,6 +404,19 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 
     <div id="mainBox" style="display:none">
         <div class="stats" id="stats"></div>
+        <div class="card">
+            <h3>功能開關</h3>
+            <div class="feature-grid">
+                <div class="feature-item">
+                    <div><strong>媒體功能</strong><div class="meta">圖片理解預設開啟；控制圖片理解、圖片與影片生成</div></div>
+                    <input class="switch" id="mediaToggle" type="checkbox" onchange="saveFeatures()">
+                </div>
+                <div class="feature-item">
+                    <div><strong>語音功能</strong><div class="meta" id="voiceHint">本地克隆台灣腔尚未就緒</div></div>
+                    <input class="switch" id="voiceToggle" type="checkbox" onchange="saveFeatures()">
+                </div>
+            </div>
+        </div>
         <div style="margin-bottom:1rem">
             <button class="btn btn-primary" onclick="openAddModal()">＋ 新增水軍帳號</button>
         </div>
@@ -523,6 +562,16 @@ async function loadStatus() {
         <div class="stat-card"><div class="value">${data.total}</div><div class="label">總帳號數</div></div>
         <div class="stat-card"><div class="value">${data.running}</div><div class="label">運行中</div></div>
     `;
+    const features = data.features || {};
+    const mediaToggle = document.getElementById('mediaToggle');
+    const voiceToggle = document.getElementById('voiceToggle');
+    mediaToggle.checked = !!features.media_enabled;
+    mediaToggle.disabled = false;
+    voiceToggle.checked = !!features.voice_enabled;
+    voiceToggle.disabled = !features.voice_available;
+    document.getElementById('voiceHint').textContent = features.voice_available
+        ? '開啟後使用本地克隆台灣腔'
+        : '本地克隆台灣腔尚未就緒，已鎖定關閉';
     document.getElementById('accounts').innerHTML = data.accounts.map(acc => {
         const persona = safeParse(acc.persona);
         const city = persona.city || '未設定';
@@ -551,6 +600,24 @@ async function loadStatus() {
             </div>
         </div>`;
     }).join('') || '<div class="card meta">還沒有水軍帳號，先新增一個吧</div>';
+}
+
+async function saveFeatures() {
+    const mediaToggle = document.getElementById('mediaToggle');
+    const voiceToggle = document.getElementById('voiceToggle');
+    mediaToggle.disabled = true;
+    voiceToggle.disabled = true;
+    const r = await api('/api/features', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            media_enabled: mediaToggle.checked,
+            voice_enabled: voiceToggle.checked,
+        }),
+    });
+    if (!r.ok) toast(r.data.error || '功能設定失敗');
+    else toast('功能設定已立即生效');
+    await loadStatus();
 }
 
 function safeParse(s) { try { return JSON.parse(s) || {}; } catch (e) { return {}; } }
