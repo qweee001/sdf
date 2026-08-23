@@ -66,6 +66,8 @@ def test_groups_column_roundtrip():
         await db.connect()
         await db.create_account("g1", "群組帳號", "ciphertext")
         acc = await db.get_account("g1")
+        # 新帳號預設尚未完成群組設定
+        assert acc["setup_complete"] == 0
         # 預設空（自動所有群）
         assert acc.get("groups") in (None, "", "[]", "null")
         await db.update_account("g1", groups='[-100123, -100456]')
@@ -99,16 +101,25 @@ def test_groups_migration_on_existing_db():
             "session_key TEXT, tg_user_id INTEGER, tg_username TEXT, "
             "persona TEXT, enabled INTEGER DEFAULT 0, created_at REAL, updated_at REAL)"
         )
+        await conn.execute(
+            "INSERT INTO accounts (id, name, session_key, enabled) VALUES ('legacy', '既有帳號', 'x', 1)"
+        )
         await conn.commit()
         await conn.close()
-        # 重新連線應自動補上 groups 欄位
+        # 重新連線應補上欄位；既有帳號視為已設定，新帳號仍需設定
         db2 = Database(DB)
         await db2.connect()
-        await db2.create_account("old", "舊帳號", "x")
-        g = await db2.get_account("old")
-        assert "groups" in g  # 欄位已補上
-        await db2.update_account("old", groups="[123]")
-        assert await db2.get_account("old")
+        legacy = await db2.get_account("legacy")
+        assert "groups" in legacy
+        assert legacy["setup_complete"] == 1
+
+        await db2.create_account("new", "新帳號", "x")
+        new = await db2.get_account("new")
+        assert new["setup_complete"] == 0
+        await db2.update_account("new", groups="[123]", setup_complete=1)
+        updated = await db2.get_account("new")
+        assert updated["groups"] == "[123]"
+        assert updated["setup_complete"] == 1
         await db2.close()
 
     loop = asyncio.new_event_loop()

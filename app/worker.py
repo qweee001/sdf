@@ -15,8 +15,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import random
+import re
 import time
+import unicodedata
 
 from openai import AsyncOpenAI
 from telethon import TelegramClient, events
@@ -25,6 +28,132 @@ from telethon.sessions import StringSession
 from telethon.utils import get_display_name
 
 from .persona import generate_persona, generate_proactive_topic, get_system_prompt
+
+_MAX_REPLY_CHARS = 60
+
+_DIRECT_VIDEO_PATTERN = re.compile(
+    r"(?:視訊|视讯|視頻|视频|視屏|视屏|視像|视像|直播|實況|实况)|"
+    r"(?<![a-z0-9])video\s*(?:call|chat|meet(?:ing)?)(?![a-z0-9])|"
+    r"(?<![a-z0-9])live\s*stream(?:ing)?(?![a-z0-9])|"
+    r"(?:開|开|start)\s*(?:個|个)?\s*(?<![a-z0-9])live(?![a-z0-9])|"
+    r"(?<![a-z0-9])(?:let'?s\s+)?go\s+live(?![a-z0-9])"
+)
+_VIDEO_PLATFORM_PATTERN = re.compile(
+    r"(?<![a-z0-9])(?:face\s*time|skype|google\s*meet)"
+    r"(?![a-z0-9])"
+)
+_TEAMS_INTERACTION_PATTERN = re.compile(
+    r"(?:上|加入|進|进|join)\s*(?:(?<![a-z0-9])microsoft\s+)?"
+    r"(?<![a-z0-9])teams(?![a-z0-9])|"
+    r"(?<![a-z0-9])(?:microsoft\s+)?teams(?![a-z0-9]).{0,12}"
+    r"(?:聊|通話|通话|開會|开会|視訊|视讯|call|chat|meet)"
+)
+_ZOOM_PATTERN = re.compile(r"(?<![a-z0-9])zoom(?![a-z0-9])")
+_ZOOM_VIDEO_LEFT_PATTERN = re.compile(
+    r"(?:用|使用|上|開|开|加入|透過|通过|join|call\s+on|meet\s+on)\s*$"
+)
+_ZOOM_VIDEO_RIGHT_PATTERN = re.compile(
+    r"^\s*(?:上課|上课|聽課|听课|參加?講座|参加?讲座|講座|讲座|面試|面试|"
+    r"會議|会议|開會|开会|連線|连线|聊|通話|通话|"
+    r"(?<![a-z0-9])(?:call|chat|meeting|interview|class|lecture)(?![a-z0-9]))"
+)
+_ZOOM_SCHEDULE_RIGHT_PATTERN = re.compile(
+    r"^\s*(?:in\s+(?:(?:an?|one|\d+)\s*(?:hours?|minutes?)|"
+    r"(?:\d+|[一二三四五六七八九十]+)\s*(?:小時|小时|分鐘|分钟)後?)|"
+    r"\d{1,2}\s*(?::\s*\d{2}|點|点))"
+)
+_ZOOM_TECHNICAL_LEFT_PATTERN = re.compile(
+    r"(?:網頁|网页|圖片|图片|圖|图|照片|畫面|画面|地圖|地图|"
+    r"optical|pinch|css|滑鼠滾輪|鼠标滚轮|鏡頭的|镜头的)\s*$"
+)
+_ZOOM_TECHNICAL_RIGHT_PATTERN = re.compile(
+    r"^\s*(?:(?:in(?!\s+(?:(?:an?|one|\d+)\s*(?:hours?|minutes?)|"
+    r"(?:\d+|[一二三四五六七八九十]+)\s*(?:小時|小时|分鐘|分钟)後?))|out)"
+    r"(?![a-z0-9])|"
+    r"lens|range|property|gestures?|手勢|手势|"
+    r"(?:the\s+)?(?:webpage|page|image|picture|photo|map)(?![a-z0-9])|"
+    r"(?:到|to)?\s*\d+%|放大|縮小|缩小|"
+    r"大一點|大一点|近一點|近一点|遠一點|远一点|"
+    r"一下\s*(?:這張|这张)?\s*(?:圖|图|圖片|图片|地圖|地图))"
+)
+
+_CAMERA_DEVICE_PATTERN = re.compile(
+    r"(?:攝像頭|摄像头|相機|相机|"
+    r"(?<![a-z0-9])(?:webcam|camera|cam)(?![a-z0-9])|"
+    r"鏡頭(?!蓋)|镜头(?!盖))"
+)
+_CAMERA_ACTION_BEFORE_PATTERN = re.compile(
+    r"(?:不要|別|别|不想|要|想|先|再|就|可以|能|麻煩|麻烦|"
+    r"(?<![a-z0-9])(?:please|do\s+not|don'?t|let'?s)(?![a-z0-9]))?\s*"
+    r"(?:用|使用|開|开|打開|打开|關|关|關掉|关掉|關閉|关闭|啟動|启动|"
+    r"(?<![a-z0-9])(?:open|use|enable|turn\s+on|turn\s+off|switch\s+on|switch\s+off)"
+    r"(?![a-z0-9]))\s*"
+    r"(?:(?:一下|個|个|著|着|the|你(?:的)?|妳(?:的)?|我(?:的)?|手機|手机)\s*)*$"
+)
+_CAMERA_ACTION_AFTER_PATTERN = re.compile(
+    r"^\s*(?:給我看|给我看|讓我看|让我看)|"
+    r"^\s*(?:(?:呢|嗎|吗|吧|麻煩|麻烦|方便|可以|可不可以|能不能|"
+    r"有|有沒有|有没有|記得|记得|幫我|帮我|"
+    r"不要|別|别|先|再|都|給我|给我|"
+    r"一下|起來|起来|is|the|[?!？！])\s*)*"
+    r"(?:開|开|打開|打开|關|关|關掉|关掉|關閉|关闭|聊|通話|通话|"
+    r"(?<![a-z0-9])(?:open|enable|off|call|chat)(?![a-z0-9])|"
+    r"(?<![a-z0-9])on(?![a-z0-9]|\s+(?:this|that|my|the)\b))"
+)
+_CAMERA_SAFE_SUFFIX_PATTERN = re.compile(
+    r"(?:權限|权限|設定|設置|设置|規格|规格|店|電源|电源|"
+    r"電池|电池|鏡頭蓋|镜头盖|光圈|焦距|畫素|像素|開不了|开不了|"
+    r"拍(?:張|张)?照|拍攝|拍摄|攝影|摄影|夜間模式|夜间模式|掃|扫|qr|條碼|条码|on\s+this\s+phone|"
+    r"開箱|开箱|開賣|开卖|開機|开机|關係|关系|"
+    r"settings?|specs?|repair|broken|app|on\s+sale)"
+)
+_PERSON_INTERACTION_PATTERN = re.compile(
+    r"(?:看(?!起來|起来)|見|见|看到|見到|见到|瞧).{0,8}(?:你|妳|我)"
+    r"(?!對|对|應該|应该|會|会|一定|有空|很|要|不|"
+    r"的?(?:文字|訊息|消息|照片|相片))|"
+    r"(?<![a-z0-9])(?:see|show)\s+(?:you|me)(?![a-z0-9])"
+)
+_PHOTO_OR_EQUIPMENT_PATTERN = re.compile(
+    r"(?:拍照|拍攝|拍摄|攝影|摄影|照片|相片|鏡頭蓋|镜头盖|"
+    r"焦距|光圈|畫素|像素|設定|設置|设置|規格|规格|相機店|相机店|"
+    r"故障|維修|维修|修理|(?<![a-z0-9])(?:photo|lens|broken|repair|settings?|specs?)"
+    r"(?![a-z0-9]))"
+)
+_REMOTE_CALL_OR_CHAT_PATTERN = re.compile(
+    r"(?:聊|通話|通话)|(?<![a-z0-9])(?:call|chat)(?![a-z0-9])"
+)
+_CAMERA_PERSON_VIDEO_PATTERN = re.compile(
+    r"(?:看|見|见|看到|見到|见到|瞧).{0,10}"
+    r"(?:攝像頭|摄像头|相機|相机|鏡頭|镜头|webcam|camera|cam)"
+    r".{0,10}(?:你|妳|我|臉|脸)|"
+    r"(?:攝像頭|摄像头|相機|相机|鏡頭|镜头|webcam|camera|cam)"
+    r".{0,8}(?:裡|里|前|中).{0,8}(?:你|妳|我|臉|脸)|"
+    r"(?<![a-z0-9])(?:see|show)\s+(?:you|me|your\s+face).{0,12}"
+    r"(?:on|through)\s+(?:the\s+)?(?:webcam|camera|cam)(?![a-z0-9])|"
+    r"(?<![a-z0-9])(?:you|your\s+face|face).{0,12}"
+    r"(?:on|through)\s+(?:the\s+)?(?:webcam|camera|cam)(?![a-z0-9])"
+)
+_SCREEN_PATTERN = re.compile(r"(?:螢幕|屏幕)|(?<![a-z0-9])screen(?![a-z0-9])")
+_SCREEN_MEDIA_VIEW_PATTERN = re.compile(
+    r"(?:看|見|见|看到|見到|见到).{0,8}(?:你|妳|我).{0,8}"
+    r"(?:文字|訊息|消息|信息|內容|内容|字幕|文件|文章|照片|相片|頭像|头像|"
+    r"名字|留言|貼圖|贴图|動態|动态)|"
+    r"(?:螢幕|屏幕).{0,10}(?:有|有點|看到|看到|看見|在).{0,10}"
+    r"(?:你|妳|我).{0,10}(?:名字|留言|訊息|消息|頭像|照片|相片|文件|文章|內容|内容)|"
+    r"(?<![a-z0-9])(?:see|show).{0,8}(?:your|my).{0,5}"
+    r"(?:name|comment|message|photo|avatar|sticker|document|article)(?![a-z0-9])"
+)
+_SCREEN_PERSON_PATTERN = re.compile(
+    r"(?:螢幕|屏幕).{0,12}(?:看|見|见|看到|見到|见到).{0,6}(?:你|妳|我)|"
+    r"(?:看|見|见|看到|見到|见到).{0,12}(?:螢幕|屏幕).{0,8}(?:你|妳|我)|"
+    r"(?:螢幕|屏幕).{0,8}(?:上|裡|里|中).{0,8}(?:你的臉|你的脸|你本人|你本身)|"
+    r"(?:螢幕|屏幕).{0,12}(?:有|裡面有|在|裡|里|中).{0,12}(?:你|妳|我)(?!的(?:名字|留言|訊息|消息|頭像|照片|相片|文件|文章|內容|内容|貼圖|贴图))|"
+    r"(?:你|妳|我).{0,8}(?:出現|出现).{0,8}(?:螢幕|屏幕)|"
+    r"(?:出現|出现).{0,8}(?:在).{0,8}(?:螢幕|屏幕).{0,8}(?:看|看到)?(?:你|妳|我)|"
+    r"(?<![a-z0-9])(?:see|show).{0,8}(?:you|me).{0,12}(?:on|in)\s+(?:my\s+|the\s+)?screen(?![a-z0-9])|"
+    r"(?:you|your\s+face|face).{0,12}(?:on|in)\s+(?:my\s+|the\s+)?screen(?![a-z0-9])|"
+    r"(?<![a-z0-9])wish.{0,8}you.{0,12}(?:on|in)\s+(?:my\s+)?screen(?![a-z0-9])"
+)
 
 
 class AccountWorker:
@@ -66,10 +195,20 @@ class AccountWorker:
 
         self.stats = {"replies_sent": 0, "errors": 0, "proactive_sent": 0}
 
+    async def _notify_status(self, state: str, tg_user_id: int | None,
+                             detail: str) -> None:
+        cb = self.on_status_change
+        if not cb:
+            return
+        result = cb(self.account_id, state, tg_user_id, detail)
+        if inspect.isawaitable(result):
+            await result
+
     # ---------- 生命周期 ----------
 
     async def start(self):
         try:
+            await self._notify_status("connecting", None, "")
             session = StringSession(self.session_key)
             self.tg_client = TelegramClient(session, self.tg_api_id, self.tg_api_hash)
             await asyncio.wait_for(self.tg_client.connect(), timeout=30)
@@ -96,15 +235,17 @@ class AccountWorker:
             self._proactive_today = 0
             self._proactive_task = asyncio.create_task(self._proactive_loop())
             self._cleanup_task = asyncio.create_task(self._memory_cleanup_loop())
-            self.on_status_change(self.account_id, "connected", me.id,
-                                  get_display_name(me) or "")
+            await self._notify_status(
+                "connected", me.id, get_display_name(me) or ""
+            )
         except Exception as e:
             self.is_running = False
             self.status_detail = str(e)
-            self.on_status_change(self.account_id, "disconnected", None, str(e))
+            await self._notify_status("disconnected", None, str(e))
 
     async def stop(self):
         self.is_running = False
+        await self._notify_status("stopping", None, "")
         for task in (self._proactive_task, self._cleanup_task):
             if task:
                 task.cancel()
@@ -117,7 +258,7 @@ class AccountWorker:
         if self.tg_client:
             await self.tg_client.disconnect()
             self.tg_client = None
-        self.on_status_change(self.account_id, "stopped", None, "")
+        await self._notify_status("stopped", None, "")
 
     # ---------- 作息 ----------
 
@@ -200,7 +341,11 @@ class AccountWorker:
             if not self.is_running:
                 return
             display = get_display_name(new_user) or "新朋友"
-            await self._send_message(group_id, self._welcome_text(display), short_delay=True)
+            sent = await self._send_message(
+                group_id, self._welcome_text(display), short_delay=True
+            )
+            if not sent:
+                return
             self.stats["proactive_sent"] += 1
             await self.db.touch_activity(self.account_id, group_id, "proactive")
         except Exception as e:
@@ -271,7 +416,9 @@ class AccountWorker:
             text = await self._generate_reply(event)
             if not text:
                 return
-            await self._send_message(event.chat_id, text)
+            sent = await self._send_message(event.chat_id, text)
+            if not sent:
+                return
             self.stats["replies_sent"] += 1
             await self.db.add_message(
                 self.account_id, int(event.chat_id), self.tg_user_id or 0,
@@ -289,7 +436,92 @@ class AccountWorker:
         )
         system_prompt = get_system_prompt(self.persona)
         user_message = self._build_user_message(event, history)
-        return await self._call_ai(system_prompt, user_message)
+        reply = await self._call_ai(system_prompt, user_message)
+        too_long = len(reply) > _MAX_REPLY_CHARS
+        mentions_video = self._mentions_video_topic(reply)
+        if not too_long and not mentions_video:
+            return reply
+
+        # 不在發送層做逐詞替換，避免改壞語意和造成 Telegram / DB 記憶不一致。
+        # 長度或內容違規時共用一次重生；仍違規就不發送。
+        correction = "上一版不符合要求。回覆最多 60 個字元（標點、空格也算），絕不能超過。"
+        if mentions_video:
+            correction += (
+                "不要提及或複述禁止話題，也不要解釋拒絕原因；"
+                "直接自然轉回文字聊天、交換聯絡方式或約出來見面。"
+            )
+        retry_message = (
+            f"{user_message}\n"
+            f"{correction}"
+        )
+        retry = await self._call_ai(system_prompt, retry_message)
+        if len(retry) > _MAX_REPLY_CHARS or self._mentions_video_topic(retry):
+            return ""
+        return retry
+
+    @staticmethod
+    def _mentions_video_topic(text: str) -> bool:
+        normalized = unicodedata.normalize("NFKC", text or "").casefold()
+        normalized = re.sub(r"[‐‑‒–—−_/-]+", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        clauses = [
+            clause.strip()
+            for clause in re.split(r"[，,。；;\n]+", normalized)
+            if clause.strip()
+        ]
+
+        for clause in clauses:
+            if _DIRECT_VIDEO_PATTERN.search(clause):
+                return True
+            if _VIDEO_PLATFORM_PATTERN.search(clause):
+                return True
+            if _TEAMS_INTERACTION_PATTERN.search(clause):
+                return True
+            for zoom in _ZOOM_PATTERN.finditer(clause):
+                left = clause[max(0, zoom.start() - 24):zoom.start()]
+                right = clause[zoom.end():zoom.end() + 24]
+                if (
+                    _ZOOM_VIDEO_LEFT_PATTERN.search(left)
+                    or _ZOOM_VIDEO_RIGHT_PATTERN.search(right)
+                    or _ZOOM_SCHEDULE_RIGHT_PATTERN.search(right)
+                ):
+                    return True
+                if (
+                    _ZOOM_TECHNICAL_LEFT_PATTERN.search(left)
+                    or _ZOOM_TECHNICAL_RIGHT_PATTERN.search(right)
+                ):
+                    continue
+                return True
+
+            if _CAMERA_PERSON_VIDEO_PATTERN.search(clause):
+                return True
+            for device in _CAMERA_DEVICE_PATTERN.finditer(clause):
+                left = clause[max(0, device.start() - 36):device.start()]
+                right = clause[device.end():device.end() + 36]
+                # 問號／驚嘆號後通常是另一句，不能讓後句的「聊」污染
+                # 前面的器材語境；但 action_after 仍保留完整 right，以辨識
+                # 「你鏡頭呢？開一下吧」這種承接動作。
+                local_right = re.split(r"[?!？！]", right, maxsplit=1)[0]
+                remote_intent = (
+                    _REMOTE_CALL_OR_CHAT_PATTERN.search(local_right)
+                    or _PERSON_INTERACTION_PATTERN.search(local_right)
+                )
+                safe_suffix = _CAMERA_SAFE_SUFFIX_PATTERN.search(local_right)
+                action_before = _CAMERA_ACTION_BEFORE_PATTERN.search(left)
+                action_after = _CAMERA_ACTION_AFTER_PATTERN.search(right)
+                if (action_before or action_after) and safe_suffix and not remote_intent:
+                    continue
+                if action_before or action_after or remote_intent:
+                    return True
+
+            if _SCREEN_PATTERN.search(clause):
+                # 先移除「看你的訊息／照片／頭像」中的人稱，再檢查同句是否
+                # 還有真人意圖；這樣媒體內容不誤傷，也不會掩蓋後半句看人。
+                without_media_views = _SCREEN_MEDIA_VIEW_PATTERN.sub("看內容", clause)
+                if _SCREEN_PERSON_PATTERN.search(without_media_views):
+                    return True
+
+        return False
 
     def _build_user_message(self, event, history: list[dict]) -> str:
         recent = history[-10:] if history else []
@@ -309,7 +541,8 @@ class AccountWorker:
         return (
             f"{context}"
             f"最新消息：[{sender_name or '有人'}]{water_hint} {event.raw_text}\n"
-            "請根據上下文生成自然回覆（1-3 句，台灣繁體口語）。"
+            "請根據上下文生成自然回覆（1-3 句，台灣繁體口語；"
+            "最多 60 個字元，標點、空格也算）。"
         )
 
     async def _call_ai(self, system_prompt: str, user_message: str) -> str:
@@ -341,20 +574,23 @@ class AccountWorker:
 
     # ---------- 發送 ----------
 
-    async def _send_message(self, chat_id, text: str, short_delay: bool = False):
-        if not self.tg_client:
-            return
+    async def _send_message(
+        self, chat_id, text: str, short_delay: bool = False
+    ) -> bool:
+        if len(text) > _MAX_REPLY_CHARS:
+            return False
+        client = self.tg_client
+        if not client or not self.is_running:
+            return False
         delay = (
             random.uniform(1.0, 3.0) if short_delay
             else random.uniform(self.config.min_typing_delay, self.config.max_typing_delay)
         )
         await asyncio.sleep(delay)
-        max_len = 4096
-        if len(text) > max_len:
-            for i in range(0, len(text), max_len):
-                await self.tg_client.send_message(chat_id, text[i:i + max_len])
-        else:
-            await self.tg_client.send_message(chat_id, text)
+        if not self.is_running or self.tg_client is not client:
+            return False
+        await client.send_message(chat_id, text)
+        return True
 
     # ---------- 主動發言 ----------
 
@@ -389,7 +625,9 @@ class AccountWorker:
                 if time.time() - last < self.config.proactive_min_interval_minutes * 60:
                     continue
                 topic = generate_proactive_topic(self.persona)
-                await self._send_message(group_id, topic)
+                sent = await self._send_message(group_id, topic)
+                if not sent:
+                    continue
                 self._proactive_today += 1
                 self.stats["proactive_sent"] += 1
                 await self.db.add_message(

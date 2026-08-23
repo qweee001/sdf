@@ -38,16 +38,22 @@ class Database:
                 tg_username TEXT,
                 persona TEXT,
                 groups TEXT,
+                setup_complete INTEGER DEFAULT 0,
                 enabled INTEGER DEFAULT 0,
                 created_at REAL DEFAULT 0,
                 updated_at REAL DEFAULT 0
             )
         """)
-        # 舊庫升級：補 groups 欄位（指定群組，JSON；空 = 自動所有群）
+        # 舊庫升級：補 groups / setup_complete 欄位
         cols = await db.execute("PRAGMA table_info(accounts)")
         col_names = {r[1] for r in await cols.fetchall()}
         if "groups" not in col_names:
             await db.execute("ALTER TABLE accounts ADD COLUMN groups TEXT")
+        if "setup_complete" not in col_names:
+            # 舊帳號沿用既有行為，不因升級被突然禁止啟動。
+            await db.execute(
+                "ALTER TABLE accounts ADD COLUMN setup_complete INTEGER DEFAULT 1"
+            )
         await db.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,16 +103,17 @@ class Database:
                              persona: str = "") -> None:
         now = time.time()
         await self._c.execute(
-            "INSERT OR IGNORE INTO accounts (id, name, session_key, persona, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO accounts "
+            "(id, name, session_key, persona, setup_complete, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 0, ?, ?)",
             (account_id, name, session_key, persona, now, now),
         )
         await self._c.commit()
 
     async def list_accounts(self) -> list[dict]:
         cursor = await self._c.execute(
-            "SELECT id, name, session_key, tg_user_id, tg_username, persona, groups, enabled "
-            "FROM accounts ORDER BY created_at"
+            "SELECT id, name, session_key, tg_user_id, tg_username, persona, groups, "
+            "setup_complete, enabled FROM accounts ORDER BY created_at"
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
@@ -186,7 +193,16 @@ class Database:
         )
         return [dict(r) for r in await cursor.fetchall()]
 
-    async def mark_private_message_read(self, message_id: int) -> None:
+    async def mark_private_message_read(self,
+                                       message_id: int,
+                                       account_id: str | None = None) -> None:
+        if account_id is not None:
+            await self._c.execute(
+                "UPDATE private_messages SET read = 1 WHERE id = ? AND account_id = ?",
+                (message_id, account_id),
+            )
+            await self._c.commit()
+            return
         await self._c.execute(
             "UPDATE private_messages SET read = 1 WHERE id = ?", (message_id,)
         )

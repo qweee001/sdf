@@ -46,7 +46,13 @@ class Dashboard:
         return True
 
     def _ip(self, request: Request) -> str:
-        return request.client.host if request.client else "unknown"
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return (
+            request.headers.get("x-real-ip")
+            or (request.client.host if request.client else "unknown")
+        )
 
     def _rate_limited(self, key: str, max_n: int = 10, window: float = 300) -> bool:
         now = time.time()
@@ -114,6 +120,8 @@ class Dashboard:
                 return JSONResponse({"error": "未登入"}, status_code=401)
             err = await self.manager.start(account_id)
             if err:
+                if err == "帳號不存在":
+                    return JSONResponse({"ok": False, "error": err}, status_code=404)
                 return JSONResponse({"ok": False, "error": err}, status_code=400)
             return JSONResponse({"ok": True})
 
@@ -121,14 +129,18 @@ class Dashboard:
         async def stop_account(account_id: str, request: Request):
             if not self._check_session(request):
                 return JSONResponse({"error": "未登入"}, status_code=401)
-            await self.manager.stop(account_id)
+            err = await self.manager.stop(account_id)
+            if err == "帳號不存在":
+                return JSONResponse({"ok": False, "error": err}, status_code=404)
             return JSONResponse({"ok": True})
 
         @app.delete("/api/accounts/{account_id}")
         async def delete_account(account_id: str, request: Request):
             if not self._check_session(request):
                 return JSONResponse({"error": "未登入"}, status_code=401)
-            await self.manager.delete(account_id)
+            err = await self.manager.delete(account_id)
+            if err == "帳號不存在":
+                return JSONResponse({"ok": False, "error": err}, status_code=404)
             return JSONResponse({"ok": True})
 
         @app.get("/api/accounts/{account_id}/persona")
@@ -177,6 +189,16 @@ class Dashboard:
                 return JSONResponse({"error": "帳號不存在"}, status_code=404)
             return JSONResponse({"ok": True, "persona": saved})
 
+        @app.get("/api/accounts/{account_id}/groups/available")
+        async def available_groups(account_id: str, request: Request):
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            groups, err = await self.manager.list_available_groups(account_id)
+            if err:
+                status_code = 404 if err == "帳號不存在" else 400
+                return JSONResponse({"error": err}, status_code=status_code)
+            return JSONResponse({"groups": groups})
+
         @app.post("/api/accounts/{account_id}/groups")
         async def save_groups(account_id: str, request: Request):
             if not self._check_session(request):
@@ -200,6 +222,9 @@ class Dashboard:
         async def private_messages(account_id: str, request: Request):
             if not self._check_session(request):
                 return JSONResponse({"error": "未登入"}, status_code=401)
+            acc = await self.manager.db.get_account(account_id)
+            if not acc:
+                return JSONResponse({"error": "帳號不存在"}, status_code=404)
             msgs = await self.manager.db.get_private_messages(account_id, limit=50)
             return JSONResponse({"messages": msgs})
 
@@ -207,7 +232,10 @@ class Dashboard:
         async def mark_read(account_id: str, msg_id: int, request: Request):
             if not self._check_session(request):
                 return JSONResponse({"error": "未登入"}, status_code=401)
-            await self.manager.db.mark_private_message_read(msg_id)
+            acc = await self.manager.db.get_account(account_id)
+            if not acc:
+                return JSONResponse({"error": "帳號不存在"}, status_code=404)
+            await self.manager.db.mark_private_message_read(msg_id, account_id)
             return JSONResponse({"ok": True})
 
         # ---------- TG 登入流程（新增帳號） ----------
@@ -278,8 +306,17 @@ class Dashboard:
                 tg_username="",
                 enabled=0,
             )
-            err = await self.manager.start(account["id"])
-            return JSONResponse({"ok": not err, "account": account, "error": err})
+            return JSONResponse({
+                "ok": True,
+                "account": {
+                    "id": account["id"],
+                    "name": account["name"],
+                    "tg_user_id": verified.tg_user_id,
+                    "enabled": False,
+                    "setup_complete": False,
+                },
+                "started": False,
+            })
 
 
 PAGE = """<!DOCTYPE html>
@@ -312,6 +349,7 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 .status-badge.running { background: #16a34a; color: #fff; }
 .status-badge.stopped { background: #475569; color: #cbd5e1; }
 .status-badge.error { background: #dc2626; color: #fff; }
+.status-badge.connecting { background: #0ea5e9; color: #fff; }
 .btn { padding: 0.45rem 0.9rem; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem; margin-left: 0.4rem; }
 .btn-primary { background: #38bdf8; color: #0f172a; }
 .btn-danger { background: #dc2626; color: #fff; }
@@ -367,9 +405,9 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
             <button class="btn btn-primary" onclick="tgSubmitPassword()">確認密碼</button>
         </div>
         <div id="tgStep4" style="display:none">
-            <p class="meta">登入成功！設定帳號名稱（可留空用預設）</p>
+            <p class="meta">登入成功！設定帳號名稱（可留空用預設）。建立後會保持停止，請先設定人設與群組再手動啟動。</p>
             <input type="text" id="accName" placeholder="帳號名稱（例：台北-美玲）">
-            <button class="btn btn-primary" onclick="tgAddAccount()">建立帳號並啟動</button>
+            <button class="btn btn-primary" onclick="tgAddAccount()">建立帳號（暫不啟動）</button>
         </div>
         <div id="tgErr" class="meta" style="color:#f87171"></div>
         <button class="btn btn-secondary" style="margin-top:1rem" onclick="closeModals()">關閉</button>
@@ -410,7 +448,7 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 <div class="modal" id="groupsModal">
     <div class="modal-box" style="max-width:520px">
         <h3>指定群組（只讓此水軍在勾選的群活動）</h3>
-        <p class="meta" style="margin-bottom:0.8rem">不勾任何群 = 自動在所有群活動。需帳號已連線才會列出它所在的群。</p>
+        <p class="meta" style="margin-bottom:0.8rem">不勾任何群 = 自動在所有群活動。開啟此畫面時會短暫唯讀連線取得群組，不會啟動水軍互動。</p>
         <div id="groupsList" style="max-height:45vh;overflow-y:auto"></div>
         <div style="margin-top:1rem">
             <button class="btn btn-primary" onclick="saveGroups()">儲存指定群組</button>
@@ -488,8 +526,9 @@ async function loadStatus() {
     document.getElementById('accounts').innerHTML = data.accounts.map(acc => {
         const persona = safeParse(acc.persona);
         const city = persona.city || '未設定';
-        const stateCls = acc.is_running ? 'running' : (acc.state === 'disconnected' ? 'error' : 'stopped');
-        const stateTxt = acc.is_running ? '運行中' : (acc.state === 'disconnected' ? '連線失敗' : '已停止');
+        const st = statusDisplay(acc.state, acc.is_running, acc.setup_complete);
+        const stateCls = st.className;
+        const stateTxt = st.text;
         return `
         <div class="card">
             <div class="row">
@@ -499,10 +538,11 @@ async function loadStatus() {
                         ${persona.name || ''}・${persona.gender || '?'}生・${persona.age || '?'}歲・${city}（${persona.district || ''}）・${persona.industry || ''}
                         <br>回覆 ${acc.stats.replies_sent}｜主動 ${acc.stats.proactive_sent}｜錯誤 ${acc.stats.errors}
                         ${acc.detail ? '<br style="color:#f87171">' + esc(acc.detail) : ''}
+                        ${!acc.setup_complete ? '<br>請先檢查人設並設定群組範圍，之後才能啟動。' : ''}
                     </div>
                 </div>
                 <div>
-                    <button class="btn ${acc.is_running ? 'btn-danger' : 'btn-primary'}" data-act="${acc.is_running ? 'stop' : 'start'}" data-id="${esc(acc.id)}">${acc.is_running ? '停止' : '啟動'}</button>
+                    <button class="btn ${acc.is_running ? 'btn-danger' : 'btn-primary'}" data-act="${acc.is_running ? 'stop' : 'start'}" data-id="${esc(acc.id)}" data-state="${acc.state || ''}" ${!acc.is_running && !acc.setup_complete ? 'disabled title="請先設定群組範圍"' : ''}>${acc.is_running ? '停止' : '啟動'}</button>
                     <button class="btn btn-secondary" data-act="persona" data-id="${esc(acc.id)}">人設</button>
                     <button class="btn btn-secondary" data-act="groups" data-id="${esc(acc.id)}">群組${(acc.groups && acc.groups.length) ? '·' + acc.groups.length : ''}</button>
                     <button class="btn btn-secondary" data-act="privates" data-id="${esc(acc.id)}">私訊</button>
@@ -514,14 +554,61 @@ async function loadStatus() {
 }
 
 function safeParse(s) { try { return JSON.parse(s) || {}; } catch (e) { return {}; } }
+function statusDisplay(state, isRunning, setupComplete) {
+    if (!setupComplete && !isRunning) {
+        return { text: '待設定', className: 'connecting' };
+    }
+    if (isRunning) {
+        if (state === 'connecting' || state === 'stopping') {
+            return { text: state === 'connecting' ? '連線中' : '關閉中', className: 'connecting' };
+        }
+        return { text: '運行中', className: 'running' };
+    }
+    if (state === 'disconnected') {
+        return { text: '連線失敗', className: 'error' };
+    }
+    if (state === 'connecting') {
+        return { text: '連線中', className: 'connecting' };
+    }
+    if (state === 'stopping') {
+        return { text: '關閉中', className: 'connecting' };
+    }
+    return { text: '已停止', className: 'stopped' };
+}
 function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
 
-async function startAccount(id) {
+async function startAccount(button) {
+    if (!button) return;
+    const id = button.dataset.id;
+    const old = button.textContent;
+    button.disabled = true;
+    button.textContent = '啟動中';
     const r = await api('/api/accounts/' + id + '/start', { method: 'POST' });
-    if (!r.ok) toast(r.data.error || '啟動失敗');
-    loadStatus();
+    if (!r.ok) {
+        toast(r.data.error || '啟動失敗');
+    }
+    setTimeout(() => {
+        loadStatus();
+        button.disabled = false;
+        button.textContent = old;
+    }, 500);
 }
-async function stopAccount(id) { await api('/api/accounts/' + id + '/stop', { method: 'POST' }); loadStatus(); }
+async function stopAccount(button) {
+    if (!button) return;
+    const id = button.dataset.id;
+    const old = button.textContent;
+    button.disabled = true;
+    button.textContent = '停止中';
+    const r = await api('/api/accounts/' + id + '/stop', { method: 'POST' });
+    if (!r.ok) {
+        toast(r.data.error || '停止失敗');
+    }
+    setTimeout(() => {
+        loadStatus();
+        button.disabled = false;
+        button.textContent = old;
+    }, 500);
+}
 async function deleteAccount(id) {
     if (!confirm('確定刪除此帳號？（會一併刪除記憶資料）')) return;
     await api('/api/accounts/' + id, { method: 'DELETE' });
@@ -580,7 +667,7 @@ async function tgAddAccount() {
     if (!r.ok) { document.getElementById('tgErr').textContent = r.data.error || '建立失敗'; return; }
     closeModals();
     loadStatus();
-    toast('帳號已建立並啟動');
+    toast('帳號已建立，請先設定人設與群組再啟動');
 }
 
 async function showPersona(id) {
@@ -634,20 +721,29 @@ async function regenPersona() {
 
 async function showGroups(id) {
     currentGroupsId = id;
-    const r = await api('/api/status');
-    if (!r.ok) return;
-    const acc = (r.data.accounts || []).find(a => a.id === id);
+    document.getElementById('groupsList').innerHTML = '<div class="meta">正在取得群組清單…</div>';
+    document.getElementById('groupsModal').classList.add('active');
+
+    const [statusResult, groupsResult] = await Promise.all([
+        api('/api/status'),
+        api('/api/accounts/' + id + '/groups/available'),
+    ]);
+    if (!statusResult.ok || !groupsResult.ok) {
+        document.getElementById('groupsList').innerHTML = '<div class="meta">無法取得群組清單</div>';
+        toast(groupsResult.data.error || '取得群組失敗');
+        return;
+    }
+    const acc = (statusResult.data.accounts || []).find(a => a.id === id);
     if (!acc) return;
     const selected = new Set(acc.groups || []);
-    const avail = acc.groups_available || [];
+    const avail = groupsResult.data.groups || [];
     document.getElementById('groupsList').innerHTML = avail.length
         ? avail.map(g => `
             <label style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0;font-size:0.9rem">
                 <input type="checkbox" class="grp-cb" value="${g.id}" ${selected.has(g.id) ? 'checked' : ''}>
                 <span>${esc(g.title)}</span> <span class="meta">（${g.id}）</span>
             </label>`).join('')
-        : '<div class="meta">此帳號尚未連線，看不到它所在的群。先啟動帳號，再回來勾選。</div>';
-    document.getElementById('groupsModal').classList.add('active');
+        : '<div class="meta">此帳號目前沒有可選群組。</div>';
 }
 async function saveGroups() {
     const ids = [...document.querySelectorAll('#groupsList .grp-cb:checked')].map(c => Number(c.value));
@@ -683,8 +779,8 @@ async function showPrivates(id) {
             const b = e.target.closest('button[data-act]');
             if (!b) return;
             const act = b.dataset.act, id = b.dataset.id;
-            if (act === 'start') startAccount(id);
-            else if (act === 'stop') stopAccount(id);
+            if (act === 'start') startAccount(b);
+            else if (act === 'stop') stopAccount(b);
             else if (act === 'persona') showPersona(id);
             else if (act === 'groups') showGroups(id);
             else if (act === 'privates') showPrivates(id);

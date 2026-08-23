@@ -9,6 +9,9 @@ import json
 import secrets
 
 from openai import AsyncOpenAI
+from telethon import TelegramClient
+from telethon.errors import RPCError
+from telethon.sessions import StringSession
 
 from .config import Settings
 from .crypto import SecretBox
@@ -110,6 +113,8 @@ class AccountManager:
         acc = await self.db.get_account(account_id)
         if not acc:
             return "帳號不存在"
+        if not int(acc.get("setup_complete") or 0):
+            return "請先設定群組範圍，再啟動帳號"
         if account_id in self.workers:
             return "已在運行"
         await self.db.update_account(account_id, enabled=1)
@@ -117,6 +122,9 @@ class AccountManager:
         return "" if account_id in self.workers else "啟動失敗：session 無效或 Telegram 拒登"
 
     async def stop(self, account_id: str) -> str:
+        acc = await self.db.get_account(account_id)
+        if not acc:
+            return "帳號不存在"
         worker = self.workers.pop(account_id, None)
         if worker:
             await worker.stop()
@@ -124,6 +132,9 @@ class AccountManager:
         return ""
 
     async def delete(self, account_id: str) -> str:
+        acc = await self.db.get_account(account_id)
+        if not acc:
+            return "帳號不存在"
         worker = self.workers.pop(account_id, None)
         if worker:
             await worker.stop()
@@ -159,6 +170,49 @@ class AccountManager:
             worker.name = persona.get("name", worker.name)
         return persona
 
+    async def list_available_groups(self, account_id: str) -> tuple[list[dict], str]:
+        """用短暫唯讀連線列出帳號所在群組，不啟動任何互動任務。"""
+        acc = await self.db.get_account(account_id)
+        if not acc:
+            return [], "帳號不存在"
+
+        worker = self.workers.get(account_id)
+        if worker:
+            groups = worker.group_list()
+            if groups:
+                return groups, ""
+
+        client = None
+        try:
+            client = TelegramClient(
+                StringSession(self.secret_box.decrypt(acc["session_key"])),
+                self.config.tg_api_id,
+                self.config.tg_api_hash,
+            )
+            await asyncio.wait_for(client.connect(), timeout=30)
+            me = await asyncio.wait_for(client.get_me(), timeout=30)
+            if me is None:
+                return [], "Telegram session 已失效，請刪除後重新登入"
+
+            groups = []
+            async for dialog in client.iter_dialogs():
+                if not dialog.is_group:
+                    continue
+                title = str(getattr(dialog, "title", "") or f"群組 {dialog.id}")
+                groups.append({"id": int(dialog.id), "title": title})
+            groups.sort(key=lambda item: (item["title"], item["id"]))
+            return groups, ""
+        except asyncio.TimeoutError:
+            return [], "Telegram 連線逾時，請稍後再試"
+        except (OSError, RPCError, ValueError):
+            return [], "Telegram 暫時無法取得群組，請稍後再試"
+        finally:
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except (OSError, RPCError):
+                    print(f"[{account_id}] Telegram 群組探索連線關閉失敗", flush=True)
+
     async def save_groups(self, account_id: str, group_ids: list[int]) -> str:
         """指定群組：儲存至 DB，並套用至運行中的 worker（熱更新）"""
         acc = await self.db.get_account(account_id)
@@ -166,7 +220,9 @@ class AccountManager:
             return "帳號不存在"
         ids = sorted({int(g) for g in group_ids})
         await self.db.update_account(
-            account_id, groups=json.dumps(ids, ensure_ascii=False)
+            account_id,
+            groups=json.dumps(ids, ensure_ascii=False),
+            setup_complete=1,
         )
         worker = self.workers.get(account_id)
         if worker:
@@ -192,6 +248,7 @@ class AccountManager:
                 "persona": acc.get("persona"),
                 "groups": sel_groups,
                 "groups_available": groups_available,
+                "setup_complete": bool(acc.get("setup_complete")),
                 "enabled": bool(acc.get("enabled")),
                 "is_running": worker.is_running if worker else False,
                 "state": st["state"],

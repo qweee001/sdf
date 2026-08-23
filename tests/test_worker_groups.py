@@ -156,3 +156,171 @@ def test_manager_update_persona_and_save_groups():
         loop.run_until_complete(main())
     finally:
         loop.close()
+
+
+def test_manager_discovers_groups_without_starting_worker(monkeypatch):
+    """群組清單使用短暫唯讀 Telegram 連線，完成後斷線且不建立互動 worker。"""
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    clients = []
+
+    class FakeDialog:
+        def __init__(self, dialog_id, title, is_group=True):
+            self.id = dialog_id
+            self.title = title
+            self.is_group = is_group
+
+    class FakeClient:
+        def __init__(self, session, api_id, api_hash):
+            self.connected = False
+            self.disconnected = False
+            clients.append(self)
+
+        async def connect(self):
+            self.connected = True
+
+        async def get_me(self):
+            return object()
+
+        async def disconnect(self):
+            self.disconnected = True
+
+        async def iter_dialogs(self):
+            yield FakeDialog(-1001, "台北交友群")
+            yield FakeDialog(-1002, "台中聊天群")
+            yield FakeDialog(99, "公告頻道", is_group=False)
+
+    monkeypatch.setattr("app.manager.StringSession", lambda value: value, raising=False)
+    monkeypatch.setattr("app.manager.TelegramClient", FakeClient, raising=False)
+
+    async def main():
+        db = Database(DB)
+        await db.connect()
+        cfg = _config()
+        box = SecretBox(cfg.account_encryption_key)
+        manager = AccountManager(cfg, db, box)
+        await db.create_account("m2", "停止中的帳號", box.encrypt("session"))
+
+        groups, err = await manager.list_available_groups("m2")
+
+        assert err == ""
+        assert groups == [
+            {"id": -1002, "title": "台中聊天群"},
+            {"id": -1001, "title": "台北交友群"},
+        ]
+        assert manager.workers == {}
+        assert clients and clients[0].connected is True
+        assert clients[0].disconnected is True
+
+        await manager.aclose()
+        await db.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
+def test_manager_requires_group_setup_before_start(monkeypatch):
+    """新帳號未確認群組範圍前不得啟動，避免登入後直接在所有群互動。"""
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    start_calls = []
+
+    async def fake_start(self, account):
+        start_calls.append(account["id"])
+
+    monkeypatch.setattr(AccountManager, "_start_account", fake_start)
+
+    async def main():
+        db = Database(DB)
+        await db.connect()
+        cfg = _config()
+        box = SecretBox(cfg.account_encryption_key)
+        manager = AccountManager(cfg, db, box)
+        await db.create_account(
+            "setup-needed",
+            "待設定帳號",
+            box.encrypt("session"),
+            '{"name":"美玲","personality":"活潑"}',
+        )
+
+        err = await manager.start("setup-needed")
+
+        assert err == "請先設定群組範圍，再啟動帳號"
+        assert start_calls == []
+        account = await db.get_account("setup-needed")
+        assert account["enabled"] == 0
+
+        await manager.aclose()
+        await db.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
+def test_manager_nonexistent_account_returns_not_found():
+    """stop/delete 對不存在帳號回傳一致錯誤字串，避免假成功"""
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    async def main():
+        db = Database(DB)
+        await db.connect()
+        cfg = _config()
+        box = SecretBox(cfg.account_encryption_key)
+        manager = AccountManager(cfg, db, box)
+
+        assert await manager.stop("ghost") == "帳號不存在"
+        assert await manager.delete("ghost") == "帳號不存在"
+
+        await manager.aclose()
+        await db.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
+def test_worker_notify_status_accepts_sync_and_async_callbacks():
+    """_notify_status 應可處理同步和非同步 callback，避免 RuntimeWarning"""
+    cfg = _config()
+    calls = []
+
+    async def async_cb(*args):
+        calls.append(("async", args))
+
+    def sync_cb(*args):
+        calls.append(("sync", args))
+
+    worker = AccountWorker(
+        account_id="x1",
+        session_key="k",
+        tg_api_id=1,
+        tg_api_hash="h",
+        ai_client=None,
+        db=None,
+        config=cfg,
+        managed_ids=set(),
+        on_status_change=sync_cb,
+        selected_groups=[],
+    )
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(worker._notify_status("connected", 1, "ok"))
+        worker.on_status_change = async_cb
+        loop.run_until_complete(worker._notify_status("stopped", None, ""))
+    finally:
+        loop.close()
+
+    assert calls[0][0] == "sync"
+    assert calls[1][0] == "async"

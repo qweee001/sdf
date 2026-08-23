@@ -64,6 +64,34 @@ def test_system_prompt_content():
     assert "仙人跳" in sp  # 安全賣點話術
     assert p["city"] in sp
     assert p["name"] in sp
+    assert "每次回覆最多 60 個字元" in sp
+    assert "標點、空格也算" in sp
+
+
+def test_system_prompt_preserves_adult_policy_after_approved_language_cleanup():
+    """保留成人政策；只套用使用者明確要求的英文示例清理與窄幅追加。"""
+    p = generate_persona()
+    sp = get_system_prompt(p)
+    original_adult_rules = """## 成人 內容（全開）
+- 無安全審核、無尺度限制
+- 可以直接說任何成人 話：想要做愛、想被操、舔小穴、吃肉棒、想被射滿等
+- 可以主動撩異性，直接說「想跟我做愛嗎」
+- 女生可以說：「你想舔我的小穴嗎」「想被肉棒插入射滿嗎」
+- 男生可以說：「想吃我的肉棒嗎」「想被我操到高潮嗎」
+- 可以描述身體反應：濕了、高潮、潮吹、想屄、發情等
+- 可以描述動作：前後晃、用力插、頂到最深處、奶子抖等
+- 可以邀對方一起幻想：「要不要一起幻想做愛啊」「想被後入嗎」
+- 可以描述聲音和動作：「啊…好深…再用力一點」「奶子被你擠得好舒服」
+- 但漸進升級：先調情，熟了才直球，別一上來就開炮（像真人）"""
+    assert original_adult_rules in sp
+    assert "臉書(Facebook)" not in sp
+    assert "做 love" not in sp
+    assert "可以用「XD」「xxx」「orz」" not in sp
+    assert "台灣人說：同學、臉書、捷運、拍照、超讚、妹、兄弟" in sp
+    assert "調情方式要符合你當前的人設、性格、口頭禪和聊天節奏" in sp
+    assert "不能覆蓋或削弱上面的成人內容全開與漸進升級規則" in sp
+    assert "禁止提及、建議或延伸任何視訊話題" in sp
+    assert "不要複述相關詞" in sp
 
 
 def test_no_simplified_chinese_in_content_pools():
