@@ -32,6 +32,9 @@ def test_defaults_present():
     assert s.min_typing_delay < s.max_typing_delay
     assert s.proactive_max_per_day >= 1
     assert s.water_cross_talk_probability == 0.65
+    assert s.proactive_loop_min_seconds == 240
+    assert s.proactive_loop_max_seconds == 720
+    assert s.acceptance_test_mode is False
     assert s.ai_disable_thinking is False
     assert s.vision_model == "test-model"
     assert s.image_model
@@ -45,6 +48,16 @@ def test_defaults_present():
 def test_ai_disable_thinking_from_env(monkeypatch):
     monkeypatch.setenv("AI_DISABLE_THINKING", "true")
     assert load_settings().ai_disable_thinking is True
+
+
+def test_acceptance_mode_is_deterministic_and_bounded(monkeypatch):
+    monkeypatch.setenv("ACCEPTANCE_TEST_MODE", "true")
+    s = load_settings()
+    assert s.acceptance_test_mode is True
+    assert s.water_cross_talk_probability == 1.0
+    assert s.proactive_min_interval_minutes == 1.0
+    assert s.proactive_loop_min_seconds == 5.0
+    assert s.proactive_loop_max_seconds == 8.0
 
 
 def test_non_finite_media_budget_falls_back_to_finite_default(monkeypatch):

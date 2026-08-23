@@ -5,6 +5,7 @@ from app.persona import (
     CITY_SPOTS,
     DAILY_TOPICS,
     GIRL_PROACTIVE,
+    PERSONA_PROACTIVE,
     SAFETY_TOPICS,
     SHOW_OFF_FEMALE,
     SHOW_OFF_MALE,
@@ -28,8 +29,15 @@ SIMP_ONLY = {
 }
 
 # 所有寫死的「會講出口」的群組文字池
-CONTENT_POOLS = [DAILY_TOPICS, GIRL_PROACTIVE, BOY_PROACTIVE,
-                 SHOW_OFF_FEMALE, SHOW_OFF_MALE, SAFETY_TOPICS]
+CONTENT_POOLS = [
+    DAILY_TOPICS,
+    GIRL_PROACTIVE,
+    BOY_PROACTIVE,
+    SHOW_OFF_FEMALE,
+    SHOW_OFF_MALE,
+    SAFETY_TOPICS,
+    *PERSONA_PROACTIVE.values(),
+]
 
 
 def test_persona_fields():
@@ -134,3 +142,20 @@ def test_proactive_topic_not_empty():
     for _ in range(20):
         t = generate_proactive_topic(p)
         assert t and len(t) > 2
+
+
+def test_shy_persona_proactive_topic_does_not_drift_into_profanity(monkeypatch):
+    persona = {
+        "gender": "女",
+        "age": 21,
+        "personality": "害羞慢熟、容易緊張",
+        "chat_style": "溫柔慢熱",
+        "meetups_done": 0,
+    }
+    monkeypatch.setattr(random, "random", lambda: 0.0)
+    monkeypatch.setattr(random, "choice", lambda _items: "捷運又延誤了幹")
+
+    topic = generate_proactive_topic(persona)
+
+    assert isinstance(topic, str) and topic
+    assert "幹" not in topic

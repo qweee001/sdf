@@ -406,36 +406,141 @@ class Database:
         account_id: str,
         cooldown_seconds: float = 600,
     ) -> bool:
-        """原子認領一個主動發言事件與群級冷卻槽。"""
+        """舊介面：原子認領並立即完成；僅供相容既有呼叫。"""
+        reserved = await self.reserve_managed_followup(
+            group_id,
+            message_id,
+            account_id,
+            cooldown_seconds=cooldown_seconds,
+        )
+        if not reserved:
+            return False
+        return await self.complete_managed_followup(
+            group_id,
+            message_id,
+            account_id,
+            cooldown_seconds=cooldown_seconds,
+        )
+
+    async def reserve_managed_followup(
+        self,
+        group_id: int,
+        message_id: int,
+        account_id: str,
+        pending_seconds: float = 120,
+        cooldown_seconds: float = 600,
+    ) -> bool:
+        """先保留事件；生成或發送失敗可釋放，不提前消耗成功冷卻。"""
+        if (
+            not group_id
+            or message_id <= 0
+            or pending_seconds <= 0
+            or cooldown_seconds <= 0
+        ):
+            return False
+        now = time.time()
+        event_key = f"managed-followup-event:{group_id}:{message_id}"
+        pending_key = f"managed-followup-pending:{group_id}"
+        cooldown_key = f"managed-followup-cooldown:{group_id}"
+        async with self._claim_lock:
+            async with aiosqlite.connect(self.db_path, timeout=30) as claim_db:
+                try:
+                    await claim_db.execute("BEGIN IMMEDIATE")
+                    await claim_db.execute(
+                        "DELETE FROM outbound_claims WHERE claim_key = ? AND claimed_at < ?",
+                        (pending_key, now - float(pending_seconds)),
+                    )
+                    cursor = await claim_db.execute(
+                        "SELECT claim_key, claimed_at FROM outbound_claims "
+                        "WHERE claim_key IN (?, ?, ?)",
+                        (event_key, pending_key, cooldown_key),
+                    )
+                    rows = await cursor.fetchall()
+                    for claim_key, claimed_at in rows:
+                        if claim_key in (event_key, pending_key):
+                            await claim_db.rollback()
+                            return False
+                        if (
+                            claim_key == cooldown_key
+                            and float(claimed_at) >= now - float(cooldown_seconds)
+                        ):
+                            await claim_db.rollback()
+                            return False
+                    await claim_db.executemany(
+                        "INSERT INTO outbound_claims "
+                        "(claim_key, account_id, claimed_at) VALUES (?, ?, ?)",
+                        [
+                            (event_key, account_id, now),
+                            (pending_key, account_id, now),
+                        ],
+                    )
+                    await claim_db.commit()
+                    return True
+                except BaseException:
+                    await claim_db.rollback()
+                    raise
+
+    async def complete_managed_followup(
+        self,
+        group_id: int,
+        message_id: int,
+        account_id: str,
+        cooldown_seconds: float = 600,
+    ) -> bool:
+        """Telegram 真正送出後才提交群級冷卻。"""
         if not group_id or message_id <= 0 or cooldown_seconds <= 0:
             return False
         now = time.time()
-        slot = int(now // float(cooldown_seconds))
         event_key = f"managed-followup-event:{group_id}:{message_id}"
-        slot_key = f"managed-followup-slot:{group_id}:{slot}"
+        pending_key = f"managed-followup-pending:{group_id}"
+        cooldown_key = f"managed-followup-cooldown:{group_id}"
         async with self._claim_lock:
             async with aiosqlite.connect(self.db_path, timeout=30) as claim_db:
                 try:
                     await claim_db.execute("BEGIN IMMEDIATE")
                     cursor = await claim_db.execute(
                         "SELECT COUNT(*) FROM outbound_claims "
-                        "WHERE claim_key IN (?, ?)",
-                        (event_key, slot_key),
+                        "WHERE claim_key IN (?, ?) AND account_id = ?",
+                        (event_key, pending_key, account_id),
                     )
                     row = await cursor.fetchone()
-                    if int(row[0] if row else 0):
+                    if int(row[0] if row else 0) != 2:
                         await claim_db.rollback()
                         return False
-                    await claim_db.executemany(
+                    await claim_db.execute(
+                        "DELETE FROM outbound_claims "
+                        "WHERE claim_key = ? AND account_id = ?",
+                        (pending_key, account_id),
+                    )
+                    await claim_db.execute(
                         "INSERT INTO outbound_claims "
-                        "(claim_key, account_id, claimed_at) VALUES (?, ?, ?)",
-                        [
-                            (event_key, account_id, now),
-                            (slot_key, account_id, now),
-                        ],
+                        "(claim_key, account_id, claimed_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT(claim_key) DO UPDATE SET "
+                        "account_id = excluded.account_id, claimed_at = excluded.claimed_at",
+                        (cooldown_key, account_id, now),
                     )
                     await claim_db.commit()
                     return True
+                except BaseException:
+                    await claim_db.rollback()
+                    raise
+
+    async def release_managed_followup(
+        self, group_id: int, message_id: int, account_id: str
+    ) -> None:
+        """生成／發送失敗時釋放事件與暫存，不建立成功冷卻。"""
+        event_key = f"managed-followup-event:{group_id}:{message_id}"
+        pending_key = f"managed-followup-pending:{group_id}"
+        async with self._claim_lock:
+            async with aiosqlite.connect(self.db_path, timeout=30) as claim_db:
+                try:
+                    await claim_db.execute("BEGIN IMMEDIATE")
+                    await claim_db.execute(
+                        "DELETE FROM outbound_claims "
+                        "WHERE claim_key IN (?, ?) AND account_id = ?",
+                        (event_key, pending_key, account_id),
+                    )
+                    await claim_db.commit()
                 except BaseException:
                     await claim_db.rollback()
                     raise

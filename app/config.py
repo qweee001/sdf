@@ -49,6 +49,7 @@ def _hosts(name: str, default: str) -> tuple[str, ...]:
 
 @dataclass
 class Settings:
+    acceptance_test_mode: bool
     # Telegram
     tg_api_id: int
     tg_api_hash: str
@@ -94,6 +95,8 @@ class Settings:
     proactive_enabled: bool
     proactive_max_per_day: int
     proactive_min_interval_minutes: float
+    proactive_loop_min_seconds: float
+    proactive_loop_max_seconds: float
 
     # 打字延遲（秒）
     min_typing_delay: float
@@ -102,7 +105,9 @@ class Settings:
 
 def load_settings() -> Settings:
     ai_model = os.getenv("AI_MODEL", "").strip()
+    acceptance_test_mode = _bool("ACCEPTANCE_TEST_MODE", False)
     return Settings(
+        acceptance_test_mode=acceptance_test_mode,
         tg_api_id=int(_required("TG_API_ID")),
         tg_api_hash=_required("TG_API_HASH"),
         account_encryption_key=_required("ACCOUNT_ENCRYPTION_KEY"),
@@ -148,10 +153,28 @@ def load_settings() -> Settings:
         memory_max_messages=_int("MEMORY_MAX_MESSAGES", 30),
         memory_ttl_hours=_int("MEMORY_TTL_HOURS", 24),
         base_reply_probability=_float("BASE_REPLY_PROBABILITY", 0.35),
-        water_cross_talk_probability=_float("WATER_CROSS_TALK_PROBABILITY", 0.65),
+        water_cross_talk_probability=(
+            1.0
+            if acceptance_test_mode
+            else _float("WATER_CROSS_TALK_PROBABILITY", 0.65)
+        ),
         proactive_enabled=_bool("PROACTIVE_ENABLED", True),
         proactive_max_per_day=_int("PROACTIVE_MAX_PER_DAY", 4),
-        proactive_min_interval_minutes=_float("PROACTIVE_MIN_INTERVAL_MINUTES", 45),
+        proactive_min_interval_minutes=(
+            1.0
+            if acceptance_test_mode
+            else _float("PROACTIVE_MIN_INTERVAL_MINUTES", 45)
+        ),
+        proactive_loop_min_seconds=(
+            5.0
+            if acceptance_test_mode
+            else _float("PROACTIVE_LOOP_MIN_SECONDS", 240)
+        ),
+        proactive_loop_max_seconds=(
+            8.0
+            if acceptance_test_mode
+            else _float("PROACTIVE_LOOP_MAX_SECONDS", 720)
+        ),
         min_typing_delay=_float("MIN_TYPING_DELAY", 1.5),
         max_typing_delay=_float("MAX_TYPING_DELAY", 4.0),
     )

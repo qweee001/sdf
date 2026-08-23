@@ -31,6 +31,9 @@ class AccountManager:
         self.managed_ids: set[int] = set()
         self.active_ids: set[int] = set()
         self.managed_origins: dict[tuple[int, int, str], float] = {}
+        self.human_owners: dict[tuple[int, int], tuple[int, float]] = {}
+        self.recent_proactive_owners: dict[int, tuple[int, float]] = {}
+        self.last_human_activity: dict[int, float] = {}
         self._status: dict[str, dict] = {}
         self._ai_client = AsyncOpenAI(
             base_url=config.ai_base_url,
@@ -110,6 +113,9 @@ class AccountManager:
             media_service=self._media_service,
             active_ids=self.active_ids,
             managed_origins=self.managed_origins,
+            human_owners=self.human_owners,
+            recent_proactive_owners=self.recent_proactive_owners,
+            last_human_activity=self.last_human_activity,
         )
         self.workers[account_id] = worker
         await worker.start()
@@ -331,6 +337,12 @@ class AccountManager:
             "running": sum(1 for a in accounts if a["is_running"]),
             "media_spend_usd": round(await self.db.media_spend_total(), 6),
             "media_budget_usd": self.config.media_daily_budget_usd,
+            "acceptance_test_mode": self.config.acceptance_test_mode,
+            "water_cross_talk_probability": self.config.water_cross_talk_probability,
+            "proactive_loop_seconds": [
+                self.config.proactive_loop_min_seconds,
+                self.config.proactive_loop_max_seconds,
+            ],
         }
 
     async def close_all(self):

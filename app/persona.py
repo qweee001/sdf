@@ -116,6 +116,33 @@ CHAT_STYLE_RULES = {
     ),
 }
 
+PERSONA_PROACTIVE = {
+    "shy": [
+        "剛下課，有點想找人聊聊天",
+        "最近找到一家安靜的咖啡店",
+        "週末想去逛書店，有人也喜歡嗎？",
+        "今天心情不錯，想慢慢認識新朋友",
+    ],
+    "lively": [
+        "今晚有人要一起逛夜市嗎？",
+        "剛做完一組超好看的美甲",
+        "週末想唱歌，缺一個會接歌的人",
+        "今天超有精神，有人想出去晃晃嗎？",
+    ],
+    "flirty": [
+        "今天穿得很好看，缺一個懂欣賞的人",
+        "晚上想喝一杯，有人敢陪嗎？",
+        "聊得來比長得帥重要，你們覺得呢？",
+        "最近想認識一個有自信又乾淨的人",
+    ],
+    "direct": [
+        "想認識就直接聊，不用一直繞圈子",
+        "今晚有空，合得來可以約杯酒",
+        "成年人聊天直接一點比較省時間",
+        "附近有人嗎？先聊得來再決定要不要見",
+    ],
+}
+
 # 主動開場（按性別）
 GIRL_PROACTIVE = [
     "有人想約出來喝咖啡嗎？",
@@ -390,15 +417,36 @@ def get_system_prompt(p: dict) -> str:
 
 
 def generate_proactive_topic(p: dict) -> str:
-    """生成主動發言（設計比：日常 50% / 調情開場 25% / 曬成約 15% / 安全把關 10%）"""
-    r = random.random()
-    if r < 0.5:
-        return random.choice(DAILY_TOPICS)
-    elif r < 0.75:
-        templates = GIRL_PROACTIVE if p["gender"] == "女" else BOY_PROACTIVE
-        return random.choice(templates)
-    elif r < 0.9:
-        templates = SHOW_OFF_FEMALE if p["gender"] == "女" else SHOW_OFF_MALE
-        return random.choice(templates)
+    """按人設生成主動發言，保留低頻安全與社會證明話題。"""
+    personality = str(p.get("personality") or "")
+    style = str(p.get("chat_style") or "")
+    age = int(p.get("age") or 21)
+    if "害羞" in personality or "慢熟" in personality or "溫柔慢熱" in style:
+        profile = "shy"
+    elif "熱情" in personality or "活潑" in personality or "俏皮" in style:
+        profile = "lively"
+    elif "風騷" in personality or "會撩" in personality or "內斂反問" in style:
+        profile = "flirty"
+    elif "直球" in personality or "直球務實" in style:
+        profile = "direct"
     else:
-        return random.choice(SAFETY_TOPICS)
+        profile = "lively"
+
+    r = random.random()
+    if r < 0.6:
+        topic = random.choice(PERSONA_PROACTIVE[profile])
+    elif r < 0.82:
+        topic = random.choice(DAILY_TOPICS)
+    elif r < 0.92 and int(p.get("meetups_done") or 0) > 0 and profile != "shy":
+        templates = SHOW_OFF_FEMALE if p["gender"] == "女" else SHOW_OFF_MALE
+        topic = random.choice(templates)
+    else:
+        topic = random.choice(SAFETY_TOPICS)
+
+    # 慢熟／年輕人設不使用突兀髒話或過度老練的口吻。
+    if profile == "shy" or age <= 21:
+        topic = topic.replace("幹", "").replace("爽", "舒服")
+        topic = " ".join(topic.split())
+        if not topic:
+            topic = "今天想安靜聊聊天"
+    return topic

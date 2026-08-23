@@ -270,3 +270,32 @@ def test_managed_followup_claim_combines_event_and_group_cooldown():
         await second.close()
 
     asyncio.run(main())
+
+
+def test_managed_followup_two_phase_reservation_and_release():
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    async def main():
+        first = Database(DB)
+        second = Database(DB)
+        await first.connect()
+        await second.connect()
+
+        assert await first.reserve_managed_followup(111, 601, "a1") is True
+        assert await second.reserve_managed_followup(111, 601, "a2") is False
+        assert await second.reserve_managed_followup(111, 602, "a2") is False
+
+        await first.release_managed_followup(111, 601, "a1")
+        assert await second.reserve_managed_followup(111, 602, "a2") is True
+        assert await second.complete_managed_followup(111, 602, "a2") is True
+
+        # 成功發送後才建立群級冷卻；另一事件在冷卻內不能認領。
+        assert await first.reserve_managed_followup(111, 603, "a1") is False
+        # 其他群不受影響。
+        assert await first.reserve_managed_followup(222, 603, "a1") is True
+
+        await first.close()
+        await second.close()
+
+    asyncio.run(main())

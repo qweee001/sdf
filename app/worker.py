@@ -171,7 +171,10 @@ class AccountWorker:
                  selected_groups: list[int] | None = None,
                  media_service: OrcaMediaService | None = None,
                  active_ids: set | None = None,
-                 managed_origins: dict | None = None):
+                 managed_origins: dict | None = None,
+                 human_owners: dict | None = None,
+                 recent_proactive_owners: dict | None = None,
+                 last_human_activity: dict | None = None):
         self.account_id = account_id
         self.session_key = session_key
         self.tg_api_id = tg_api_id
@@ -183,6 +186,13 @@ class AccountWorker:
         self.managed_ids = managed_ids  # 所有水軍 TG user id（互認）
         self.active_ids = active_ids if active_ids is not None else managed_ids
         self.managed_origins = managed_origins if managed_origins is not None else {}
+        self.human_owners = human_owners if human_owners is not None else {}
+        self.recent_proactive_owners = (
+            recent_proactive_owners if recent_proactive_owners is not None else {}
+        )
+        self.last_human_activity = (
+            last_human_activity if last_human_activity is not None else {}
+        )
         self.on_status_change = on_status_change
         # 指定群組：空集合 = 全部禁止；非空 = 只在這幾個群活動。
         self.selected_groups: set[int] = set(selected_groups or [])
@@ -206,8 +216,21 @@ class AccountWorker:
         self._dialogs: dict[int, str] = {}  # group_id -> 群名稱（供控制台勾選）
         self._proactive_today = 0
         self._proactive_day = 0
+        self._generation_reasons: dict[tuple[int, int], str] = {}
 
-        self.stats = {"replies_sent": 0, "errors": 0, "proactive_sent": 0}
+        self.stats = {
+            "replies_sent": 0,
+            "errors": 0,
+            "proactive_sent": 0,
+            "managed_claimed": 0,
+            "managed_generated": 0,
+            "managed_fallbacks": 0,
+            "managed_sent": 0,
+            "human_claimed": 0,
+            "human_fallbacks": 0,
+            "human_sent": 0,
+            "reply_drops": {},
+        }
 
     async def _notify_status(self, state: str, tg_user_id: int | None,
                              detail: str) -> None:
@@ -336,9 +359,12 @@ class AccountWorker:
                 return  # 非指定群組：忽略（不回覆、不記錄）
             self._known_groups.add(group_id)
             self._last_activity[group_id] = time.time()
+            sender_id = int(event.sender_id or 0)
+            if sender_id not in self.managed_ids:
+                self.last_human_activity[group_id] = time.time()
             await self.db.add_message(
                 self.account_id, group_id,
-                int(event.sender_id or 0),
+                sender_id,
                 get_display_name(await event.get_sender()) or "",
                 "user", event.raw_text or "",
             )
@@ -452,6 +478,35 @@ class AccountWorker:
             int(event.chat_id or 0), message_id, self.account_id
         )
 
+    @staticmethod
+    def _is_meaningful_human_message(event) -> bool:
+        text = unicodedata.normalize("NFKC", str(event.raw_text or ""))
+        normalized = re.sub(r"[^\w\u3400-\u9fff]+", "", text)
+        return len(normalized) >= 2 or getattr(event, "media", None) is not None
+
+    def _active_owner(self, owner_record) -> int:
+        if not owner_record:
+            return 0
+        owner_id, expires_at = owner_record
+        if float(expires_at) < time.time() or int(owner_id) not in self.active_ids:
+            return 0
+        return int(owner_id)
+
+    async def _claim_human_reply(self, event, owner_id: int | None = None) -> bool:
+        if owner_id and int(self.tg_user_id or 0) != int(owner_id):
+            return False
+        claimed = await self._claim_reply(event)
+        if not claimed:
+            return False
+        group_id = int(event.chat_id or 0)
+        sender_id = int(event.sender_id or 0)
+        self.human_owners[(group_id, sender_id)] = (
+            int(self.tg_user_id or 0),
+            time.time() + 15 * 60,
+        )
+        self.stats["human_claimed"] += 1
+        return True
+
     async def _should_follow_managed_origin(self, event) -> bool:
         group_id = int(event.chat_id or 0)
         sender_id = int(event.sender_id or 0)
@@ -495,12 +550,17 @@ class AccountWorker:
         )
         if int(self.tg_user_id or 0) != winner:
             return False
-        claimed = await self.db.claim_managed_followup(
-            group_id, message_id, self.account_id, 600
+        claimed = await self.db.reserve_managed_followup(
+            group_id,
+            message_id,
+            self.account_id,
+            pending_seconds=120,
+            cooldown_seconds=600,
         )
         if claimed:
             # 只有原始主動發言可被接一次；接話本身不會成為新 origin。
             self.managed_origins.pop(key, None)
+            self.stats["managed_claimed"] += 1
         return claimed
 
     async def _should_reply(self, event) -> bool:
@@ -513,15 +573,21 @@ class AccountWorker:
         if event.is_reply or event.mentioned:
             if not await self._is_directed_at_me(event):
                 return False
-            return await self._claim_reply(event)
+            return await self._claim_human_reply(event, int(self.tg_user_id or 0))
         group_id = int(event.chat_id or 0)
-        p = self.config.base_reply_probability
-        if group_id in self._last_activity:
-            since = time.time() - self._last_activity[group_id]
-            if since < 60:
-                p *= 0.4
-            elif since < 300:
-                p *= 0.7
+        owner_key = (group_id, sender_id)
+        owner_id = self._active_owner(self.human_owners.get(owner_key))
+        if owner_id:
+            return await self._claim_human_reply(event, owner_id)
+
+        recent_owner = self._active_owner(
+            self.recent_proactive_owners.get(group_id)
+        )
+        if recent_owner:
+            return await self._claim_human_reply(event, recent_owner)
+
+        if not self._is_meaningful_human_message(event):
+            return False
         message_id = int(
             getattr(event, "id", 0)
             or getattr(getattr(event, "message", None), "id", 0)
@@ -529,20 +595,87 @@ class AccountWorker:
         )
         if message_id <= 0:
             return False
-        key = f"reply-probability:{group_id}:{message_id}".encode()
-        score = int.from_bytes(
-            hashlib.blake2b(key, digest_size=8).digest(), "big"
-        ) / float(2**64 - 1)
-        if score >= max(0.0, min(1.0, p)):
-            return False
-        return await self._claim_reply(event)
+        # 有意義的真人訊息必須被一個帳號接住；DB 原子認領阻止多人搶答。
+        return await self._claim_human_reply(event)
+
+    def _record_reply_drop(self, reason: str) -> None:
+        drops = self.stats.setdefault("reply_drops", {})
+        drops[reason] = int(drops.get(reason, 0)) + 1
+
+    @staticmethod
+    def _generation_key(event) -> tuple[int, int]:
+        return (
+            int(event.chat_id or 0),
+            int(
+                getattr(event, "id", 0)
+                or getattr(getattr(event, "message", None), "id", 0)
+                or id(event)
+            ),
+        )
+
+    def _set_generation_reason(self, event, reason: str) -> None:
+        self._generation_reasons[self._generation_key(event)] = reason
+
+    def _take_generation_reason(self, event) -> str:
+        return self._generation_reasons.pop(
+            self._generation_key(event), "generation_empty"
+        )
+
+    def _fallback_reply(self, event, *, managed_followup: bool) -> str:
+        """AI／內容檢查失敗時的最後短句兜底，避免已認領事件沉默。"""
+        incoming = unicodedata.normalize("NFKC", str(event.raw_text or ""))
+        personality = str(self.persona.get("personality") or "")
+        if "穿什麼" in incoming or "穿甚麼" in incoming:
+            return "今天穿得比較簡單，你喜歡哪種風格？"
+        if incoming.strip() in {"看看", "看一下", "給我看", "给我看"}:
+            return "你想看什麼啦，先講清楚一點"
+        if "捷運" in incoming:
+            return "真的很煩，我上次也被卡在月台好久"
+        if "衣服" in incoming or "穿" in incoming:
+            return "聽起來很好看欸，準備去哪裡走走？"
+        if "真誠" in incoming:
+            return "真誠很加分，聊起來舒服最重要"
+        if "害羞" in personality or "慢熟" in personality:
+            return "我有看到，只是比較慢熟，先聊聊呀"
+        if "風騷" in personality or "會撩" in personality:
+            return "這話題有意思，再多說一點啊"
+        if "直球" in personality:
+            return "有看到，想聊什麼就直接講"
+        if managed_followup:
+            return "我剛好也有同感，繼續說啊"
+        return "有看到啦，你想聊什麼？"
+
+    async def _finish_managed_reservation(self, event, sent: bool) -> None:
+        group_id = int(event.chat_id or 0)
+        message_id = int(
+            getattr(event, "id", 0)
+            or getattr(getattr(event, "message", None), "id", 0)
+            or 0
+        )
+        if sent:
+            completed = await self.db.complete_managed_followup(
+                group_id, message_id, self.account_id, 600
+            )
+            if completed:
+                self.stats["managed_sent"] += 1
+            else:
+                self.stats["errors"] += 1
+                self._record_reply_drop("cooldown_commit_failed")
+            return
+        await self.db.release_managed_followup(
+            group_id, message_id, self.account_id
+        )
 
     async def _reply_later(
         self, event, delay: float, *, managed_followup: bool = False
     ):
         await asyncio.sleep(delay)
         if not self.is_running or not self.tg_client:
+            if managed_followup:
+                await self._finish_managed_reservation(event, False)
             return
+        sent = False
+        is_human_reply = int(event.sender_id or 0) not in self.managed_ids
         try:
             media_kind = (
                 None
@@ -560,19 +693,53 @@ class AccountWorker:
                     if await self._send_media_recorded(
                         int(event.chat_id), asset, marker
                     ):
+                        if is_human_reply:
+                            self.stats["human_sent"] += 1
                         return
             text = await self._generate_reply(event)
-            if not text:
-                return
-            await self._send_text_recorded(
+            generation_reason = self._take_generation_reason(event)
+            if text:
+                if managed_followup:
+                    self.stats["managed_generated"] += 1
+            else:
+                self._record_reply_drop(generation_reason)
+                if generation_reason in {
+                    "blocked_video",
+                    "too_long",
+                    "near_duplicate",
+                    "image_unavailable",
+                }:
+                    return
+                text = self._fallback_reply(
+                    event, managed_followup=managed_followup
+                )
+                if managed_followup:
+                    self.stats["managed_fallbacks"] += 1
+                elif is_human_reply:
+                    self.stats["human_fallbacks"] += 1
+            sent = await self._send_text_recorded(
                 int(event.chat_id),
                 text,
                 activity_kind="followup" if managed_followup else "reply",
                 stats_key="replies_sent",
             )
+            if sent and is_human_reply:
+                self.stats["human_sent"] += 1
         except Exception as e:
             self.stats["errors"] += 1
+            self._record_reply_drop(type(e).__name__)
             print(f"[{self.name}] reply error: {e}", flush=True)
+        finally:
+            if managed_followup:
+                try:
+                    await self._finish_managed_reservation(event, sent)
+                except Exception as e:
+                    self.stats["errors"] += 1
+                    self._record_reply_drop("reservation_finalize_error")
+                    print(
+                        f"[{self.name}] followup reservation error: {e}",
+                        flush=True,
+                    )
 
     @staticmethod
     def _requested_media_kind(text: str) -> str | None:
@@ -604,6 +771,7 @@ class AccountWorker:
         )
         if kind == "voice":
             text = await self._generate_reply(event)
+            self._take_generation_reason(event)
             if not text:
                 return None
             voice = "onyx" if gender == "男" else "nova"
@@ -689,10 +857,12 @@ class AccountWorker:
             return True
 
     async def _generate_reply(self, event) -> str:
+        self._set_generation_reason(event, "generation_empty")
         group_id = int(event.chat_id or 0)
         is_image = isinstance(getattr(event, "media", None), MessageMediaPhoto)
         image = await self._incoming_image(event) if is_image else None
         if is_image and image is None:
+            self._set_generation_reason(event, "image_unavailable")
             return ""
         history = await self.db.get_recent_messages(
             self.account_id, group_id, self.config.memory_max_messages
@@ -719,10 +889,14 @@ class AccountWorker:
             return await self._call_ai(system_prompt, message)
 
         reply = await call_reply(user_message)
+        if not reply:
+            self._set_generation_reason(event, "ai_empty")
+            return ""
         too_long = len(reply) > _MAX_REPLY_CHARS
         mentions_video = self._mentions_video_topic(reply)
         repetitive = self._is_near_duplicate(reply, recent_group_replies)
         if not too_long and not mentions_video and not repetitive:
+            self._set_generation_reason(event, "ok")
             return reply
 
         # 不在發送層做逐詞替換，避免改壞語意和造成 Telegram / DB 記憶不一致。
@@ -743,12 +917,25 @@ class AccountWorker:
             f"{correction}"
         )
         retry = await call_reply(retry_message)
-        if (
-            len(retry) > _MAX_REPLY_CHARS
-            or self._mentions_video_topic(retry)
-            or self._is_near_duplicate(retry, recent_group_replies)
-        ):
+        if not retry:
+            self._set_generation_reason(event, "ai_empty")
             return ""
+        retry_too_long = len(retry) > _MAX_REPLY_CHARS
+        retry_video = self._mentions_video_topic(retry)
+        retry_repetitive = self._is_near_duplicate(
+            retry, recent_group_replies
+        )
+        if retry_too_long or retry_video or retry_repetitive:
+            reason = (
+                "blocked_video"
+                if retry_video
+                else "too_long"
+                if retry_too_long
+                else "near_duplicate"
+            )
+            self._set_generation_reason(event, reason)
+            return ""
+        self._set_generation_reason(event, "ok")
         return retry
 
     @staticmethod
@@ -960,6 +1147,10 @@ class AccountWorker:
                     self._normalized_reply(text),
                 )
                 self.managed_origins[origin_key] = time.time() + 180
+                self.recent_proactive_owners[int(chat_id)] = (
+                    int(self.tg_user_id),
+                    time.time() + 15 * 60,
+                )
             self.stats[stats_key] += 1
             await self.db.add_message(
                 self.account_id,
@@ -976,14 +1167,24 @@ class AccountWorker:
 
     # ---------- 主動發言 ----------
 
+    def _should_suppress_proactive(self, group_id: int) -> bool:
+        last_human = float(self.last_human_activity.get(int(group_id), 0) or 0)
+        return last_human > 0 and time.time() - last_human < 10 * 60
+
     async def _proactive_loop(self):
         while self.is_running:
             try:
                 # 隨機間隔 4-12 分鐘（錯峰）
-                await asyncio.sleep(random.uniform(240, 720))
+                loop_min = max(1.0, float(self.config.proactive_loop_min_seconds))
+                loop_max = max(
+                    loop_min, float(self.config.proactive_loop_max_seconds)
+                )
+                await asyncio.sleep(random.uniform(loop_min, loop_max))
                 if not self.is_running:
                     return
-                if self.config.proactive_enabled and self._is_sleeping():
+                if not self.config.proactive_enabled:
+                    continue
+                if self._is_sleeping():
                     continue
                 if self._proactive_today >= self.config.proactive_max_per_day:
                     continue
@@ -1001,6 +1202,8 @@ class AccountWorker:
                 if not groups:
                     continue
                 group_id = random.choice(groups)
+                if self._should_suppress_proactive(group_id):
+                    continue
                 interval = max(
                     60.0,
                     self.config.proactive_min_interval_minutes * 60,

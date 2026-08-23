@@ -15,6 +15,9 @@ class _ClaimDB:
         self.text_claims = set()
         self.text_claim_lock = asyncio.Lock()
         self.followup_claims = set()
+        self.followup_pending = {}
+        self.followup_completed = []
+        self.followup_released = []
         self.messages = []
         self.activities = []
 
@@ -46,6 +49,32 @@ class _ClaimDB:
         self.followup_claims.add(key)
         return True
 
+    async def reserve_managed_followup(
+        self, group_id, message_id, account_id,
+        pending_seconds=120, cooldown_seconds=600,
+    ):
+        key = (group_id, message_id)
+        if key in self.followup_claims or group_id in self.followup_pending:
+            return False
+        self.followup_claims.add(key)
+        self.followup_pending[group_id] = (message_id, account_id)
+        return True
+
+    async def complete_managed_followup(
+        self, group_id, message_id, account_id, cooldown_seconds=600,
+    ):
+        if self.followup_pending.get(group_id) != (message_id, account_id):
+            return False
+        self.followup_pending.pop(group_id, None)
+        self.followup_completed.append((group_id, message_id, account_id))
+        return True
+
+    async def release_managed_followup(self, group_id, message_id, account_id):
+        self.followup_claims.discard((group_id, message_id))
+        if self.followup_pending.get(group_id) == (message_id, account_id):
+            self.followup_pending.pop(group_id, None)
+        self.followup_released.append((group_id, message_id, account_id))
+
     async def add_message(self, *args):
         self.messages.append(args)
 
@@ -58,9 +87,13 @@ def _worker(
     active_ids: set[int] | None = None,
     db=None,
     managed_origins=None,
+    human_owners=None,
+    recent_proactive_owners=None,
+    last_human_activity=None,
+    base_reply_probability=1.0,
 ) -> AccountWorker:
     config = load_settings()
-    config.base_reply_probability = 1.0
+    config.base_reply_probability = base_reply_probability
     config.min_typing_delay = 0.0
     config.max_typing_delay = 0.0
     config.water_cross_talk_probability = 1.0
@@ -75,6 +108,13 @@ def _worker(
         managed_ids=set(MANAGED),
         active_ids=set(MANAGED) if active_ids is None else active_ids,
         managed_origins={} if managed_origins is None else managed_origins,
+        human_owners={} if human_owners is None else human_owners,
+        recent_proactive_owners=(
+            {} if recent_proactive_owners is None else recent_proactive_owners
+        ),
+        last_human_activity=(
+            {} if last_human_activity is None else last_human_activity
+        ),
         on_status_change=None,
         persona={
             "name": f"帳號{tg_user_id}", "gender": "女", "age": 25,
@@ -389,3 +429,108 @@ def test_on_message_schedules_one_managed_followup_mode():
         assert calls[0][1] is True
 
     asyncio.run(main())
+
+
+def test_managed_empty_generation_uses_fallback_and_commits_after_send():
+    async def main():
+        db = _ClaimDB()
+        worker = _worker(202, {101, 202}, db=db)
+        worker.tg_client = SimpleNamespace(
+            send_message=AsyncMock(), disconnect=AsyncMock()
+        )
+        worker.is_running = True
+        event = _event(sender_id=101, message_id=701, text="今天穿很好看的衣服")
+        await db.reserve_managed_followup(-5428680940, 701, worker.account_id)
+        worker._generate_reply = AsyncMock(return_value="")
+
+        await worker._reply_later(event, 0, managed_followup=True)
+
+        worker.tg_client.send_message.assert_awaited_once()
+        assert db.followup_completed == [(-5428680940, 701, "202")]
+        assert db.followup_released == []
+        assert worker.stats["managed_fallbacks"] == 1
+        assert worker.stats["managed_sent"] == 1
+
+    asyncio.run(main())
+
+
+def test_managed_send_failure_releases_without_committing_cooldown():
+    async def main():
+        db = _ClaimDB()
+        worker = _worker(202, {101, 202}, db=db)
+        worker.tg_client = SimpleNamespace(
+            send_message=AsyncMock(side_effect=RuntimeError("telegram down")),
+            disconnect=AsyncMock(),
+        )
+        worker.is_running = True
+        event = _event(sender_id=101, message_id=702)
+        await db.reserve_managed_followup(-5428680940, 702, worker.account_id)
+        worker._generate_reply = AsyncMock(return_value="我也還醒著")
+
+        await worker._reply_later(event, 0, managed_followup=True)
+
+        assert db.followup_completed == []
+        assert db.followup_released == [(-5428680940, 702, "202")]
+        assert worker.stats["managed_sent"] == 0
+
+    asyncio.run(main())
+
+
+def test_human_after_proactive_is_owned_by_original_account():
+    async def main():
+        db = _ClaimDB()
+        owners = {}
+        recent = {-5428680940: (101, float("inf"))}
+        workers = [
+            _worker(
+                uid,
+                set(MANAGED),
+                db=db,
+                human_owners=owners,
+                recent_proactive_owners=recent,
+            )
+            for uid in sorted(MANAGED)
+        ]
+        first = _event(sender_id=999, message_id=801, text="穿什麼衣服")
+
+        decisions = [await worker._should_reply(first) for worker in workers]
+
+        assert decisions == [True, False, False, False]
+        assert owners[(-5428680940, 999)][0] == 101
+
+        second = _event(sender_id=999, message_id=802, text="看看")
+        decisions = [await worker._should_reply(second) for worker in workers]
+        assert decisions == [True, False, False, False]
+
+    asyncio.run(main())
+
+
+def test_meaningful_ordinary_human_message_has_one_responder_even_if_base_zero():
+    async def main():
+        db = _ClaimDB()
+        owners = {}
+        event = _event(sender_id=999, message_id=901, text="有人在台北嗎")
+        workers = [
+            _worker(
+                uid,
+                set(MANAGED),
+                db=db,
+                human_owners=owners,
+                base_reply_probability=0.0,
+            )
+            for uid in sorted(MANAGED)
+        ]
+
+        decisions = [await worker._should_reply(event) for worker in workers]
+
+        assert decisions.count(True) == 1
+        owner_id, _expires_at = owners[(-5428680940, 999)]
+        assert owner_id in MANAGED
+
+    asyncio.run(main())
+
+
+def test_recent_human_activity_suppresses_proactive_message():
+    activity = {-5428680940: float("inf")}
+    worker = _worker(101, last_human_activity=activity)
+    assert worker._should_suppress_proactive(-5428680940) is True
