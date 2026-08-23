@@ -243,3 +243,30 @@ def test_group_text_claim_is_atomic_across_database_connections():
         await second.close()
 
     asyncio.run(main())
+
+
+def test_managed_followup_claim_combines_event_and_group_cooldown():
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    async def main():
+        first = Database(DB)
+        second = Database(DB)
+        await first.connect()
+        await second.connect()
+
+        same_event = await asyncio.gather(
+            first.claim_managed_followup(111, 501, "a1", 600),
+            second.claim_managed_followup(111, 501, "a2", 600),
+        )
+        assert same_event.count(True) == 1
+
+        # 同一冷卻槽內，即使是另一個主動消息也不能再接話。
+        assert await first.claim_managed_followup(111, 502, "a3", 600) is False
+        # 不同群組有獨立冷卻。
+        assert await second.claim_managed_followup(222, 502, "a3", 600) is True
+
+        await first.close()
+        await second.close()
+
+    asyncio.run(main())

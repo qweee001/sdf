@@ -148,7 +148,7 @@ def load_settings() -> Settings:
         memory_max_messages=_int("MEMORY_MAX_MESSAGES", 30),
         memory_ttl_hours=_int("MEMORY_TTL_HOURS", 24),
         base_reply_probability=_float("BASE_REPLY_PROBABILITY", 0.35),
-        water_cross_talk_probability=_float("WATER_CROSS_TALK_PROBABILITY", 0.15),
+        water_cross_talk_probability=_float("WATER_CROSS_TALK_PROBABILITY", 0.65),
         proactive_enabled=_bool("PROACTIVE_ENABLED", True),
         proactive_max_per_day=_int("PROACTIVE_MAX_PER_DAY", 4),
         proactive_min_interval_minutes=_float("PROACTIVE_MIN_INTERVAL_MINUTES", 45),

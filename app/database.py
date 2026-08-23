@@ -399,6 +399,47 @@ class Database:
             await self._c.commit()
             return cursor.rowcount == 1
 
+    async def claim_managed_followup(
+        self,
+        group_id: int,
+        message_id: int,
+        account_id: str,
+        cooldown_seconds: float = 600,
+    ) -> bool:
+        """原子認領一個主動發言事件與群級冷卻槽。"""
+        if not group_id or message_id <= 0 or cooldown_seconds <= 0:
+            return False
+        now = time.time()
+        slot = int(now // float(cooldown_seconds))
+        event_key = f"managed-followup-event:{group_id}:{message_id}"
+        slot_key = f"managed-followup-slot:{group_id}:{slot}"
+        async with self._claim_lock:
+            async with aiosqlite.connect(self.db_path, timeout=30) as claim_db:
+                try:
+                    await claim_db.execute("BEGIN IMMEDIATE")
+                    cursor = await claim_db.execute(
+                        "SELECT COUNT(*) FROM outbound_claims "
+                        "WHERE claim_key IN (?, ?)",
+                        (event_key, slot_key),
+                    )
+                    row = await cursor.fetchone()
+                    if int(row[0] if row else 0):
+                        await claim_db.rollback()
+                        return False
+                    await claim_db.executemany(
+                        "INSERT INTO outbound_claims "
+                        "(claim_key, account_id, claimed_at) VALUES (?, ?, ?)",
+                        [
+                            (event_key, account_id, now),
+                            (slot_key, account_id, now),
+                        ],
+                    )
+                    await claim_db.commit()
+                    return True
+                except BaseException:
+                    await claim_db.rollback()
+                    raise
+
     async def claim_proactive_slot(
         self,
         group_id: int,

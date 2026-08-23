@@ -30,6 +30,7 @@ class AccountManager:
         self._lifecycle_locks: dict[str, asyncio.Lock] = {}
         self.managed_ids: set[int] = set()
         self.active_ids: set[int] = set()
+        self.managed_origins: dict[tuple[int, int, str], float] = {}
         self._status: dict[str, dict] = {}
         self._ai_client = AsyncOpenAI(
             base_url=config.ai_base_url,
@@ -108,6 +109,7 @@ class AccountManager:
             selected_groups=selected_groups,
             media_service=self._media_service,
             active_ids=self.active_ids,
+            managed_origins=self.managed_origins,
         )
         self.workers[account_id] = worker
         await worker.start()

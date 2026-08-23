@@ -9,7 +9,7 @@
 4. 曬成約：低頻社會證明（人設層控制）
 5. 漸進升級：先調情後直球（人設層控制）
 6. 作息錯峰：每人隨機偏移，凌晨全群睡覺
-7. 水軍互認：managed_ids 互相識別（不硬聊，15% 概率製造群自己會活）
+7. 水軍互認：只接主動話題一次（65% 概率，最多兩輪，絕不級聯）
 """
 
 from __future__ import annotations
@@ -170,7 +170,8 @@ class AccountWorker:
                  persona: dict | None = None,
                  selected_groups: list[int] | None = None,
                  media_service: OrcaMediaService | None = None,
-                 active_ids: set | None = None):
+                 active_ids: set | None = None,
+                 managed_origins: dict | None = None):
         self.account_id = account_id
         self.session_key = session_key
         self.tg_api_id = tg_api_id
@@ -181,6 +182,7 @@ class AccountWorker:
         self.config = config
         self.managed_ids = managed_ids  # 所有水軍 TG user id（互認）
         self.active_ids = active_ids if active_ids is not None else managed_ids
+        self.managed_origins = managed_origins if managed_origins is not None else {}
         self.on_status_change = on_status_change
         # 指定群組：空集合 = 全部禁止；非空 = 只在這幾個群活動。
         self.selected_groups: set[int] = set(selected_groups or [])
@@ -311,8 +313,12 @@ class AccountWorker:
 
     # ---------- 事件處理 ----------
 
-    def _schedule_reply(self, event, delay: float) -> None:
-        task = asyncio.create_task(self._reply_later(event, delay))
+    def _schedule_reply(
+        self, event, delay: float, *, managed_followup: bool = False
+    ) -> None:
+        task = asyncio.create_task(
+            self._reply_later(event, delay, managed_followup=managed_followup)
+        )
         self._reply_tasks.add(task)
         task.add_done_callback(self._reply_tasks.discard)
 
@@ -341,7 +347,11 @@ class AccountWorker:
             # 人味延遲：被@/回覆 → 5-20 秒；普通 → 8-45 秒
             is_hot = event.mentioned or (event.is_reply and event.reply_to)
             delay = random.uniform(5, 20) if is_hot else random.uniform(8, 45)
-            self._schedule_reply(event, delay)
+            self._schedule_reply(
+                event,
+                delay,
+                managed_followup=int(event.sender_id or 0) in self.managed_ids,
+            )
         except Exception as e:
             self.stats["errors"] += 1
             print(f"[{self.name}] on_message error: {e}", flush=True)
@@ -442,13 +452,63 @@ class AccountWorker:
             int(event.chat_id or 0), message_id, self.account_id
         )
 
+    async def _should_follow_managed_origin(self, event) -> bool:
+        group_id = int(event.chat_id or 0)
+        sender_id = int(event.sender_id or 0)
+        message_id = int(
+            getattr(event, "id", 0)
+            or getattr(getattr(event, "message", None), "id", 0)
+            or 0
+        )
+        text = self._normalized_reply(str(event.raw_text or ""))
+        key = (group_id, sender_id, text)
+        expires_at = float(self.managed_origins.get(key, 0) or 0)
+        if not text or message_id <= 0 or expires_at < time.time():
+            if expires_at:
+                self.managed_origins.pop(key, None)
+            return False
+
+        candidates = sorted(
+            int(user_id)
+            for user_id in self.active_ids
+            if int(user_id) != sender_id
+        )
+        if not candidates or int(self.tg_user_id or 0) not in candidates:
+            return False
+        probability = max(
+            0.0,
+            min(1.0, float(self.config.water_cross_talk_probability)),
+        )
+        probability_key = f"managed-followup:{group_id}:{message_id}".encode()
+        score = int.from_bytes(
+            hashlib.blake2b(probability_key, digest_size=8).digest(), "big"
+        ) / float(2**64 - 1)
+        if score >= probability:
+            return False
+
+        winner = max(
+            candidates,
+            key=lambda user_id: hashlib.blake2b(
+                f"managed-winner:{group_id}:{message_id}:{user_id}".encode(),
+                digest_size=8,
+            ).digest(),
+        )
+        if int(self.tg_user_id or 0) != winner:
+            return False
+        claimed = await self.db.claim_managed_followup(
+            group_id, message_id, self.account_id, 600
+        )
+        if claimed:
+            # 只有原始主動發言可被接一次；接話本身不會成為新 origin。
+            self.managed_origins.pop(key, None)
+        return claimed
+
     async def _should_reply(self, event) -> bool:
         sender_id = int(event.sender_id or 0)
         if sender_id == self.tg_user_id:
             return False
-        # 水軍訊息絕不再觸發其他水軍，從根源阻斷級聯刷屏。
         if sender_id in self.managed_ids:
-            return False
+            return await self._should_follow_managed_origin(event)
         # 回覆別人或 @別人的訊息不插話；只有真正被指向的帳號可認領。
         if event.is_reply or event.mentioned:
             if not await self._is_directed_at_me(event):
@@ -477,12 +537,18 @@ class AccountWorker:
             return False
         return await self._claim_reply(event)
 
-    async def _reply_later(self, event, delay: float):
+    async def _reply_later(
+        self, event, delay: float, *, managed_followup: bool = False
+    ):
         await asyncio.sleep(delay)
         if not self.is_running or not self.tg_client:
             return
         try:
-            media_kind = self._requested_media_kind(event.raw_text or "")
+            media_kind = (
+                None
+                if managed_followup
+                else self._requested_media_kind(event.raw_text or "")
+            )
             if media_kind and self.media_service:
                 asset = await self._generate_requested_media(event, media_kind)
                 if asset:
@@ -501,7 +567,7 @@ class AccountWorker:
             await self._send_text_recorded(
                 int(event.chat_id),
                 text,
-                activity_kind="reply",
+                activity_kind="followup" if managed_followup else "reply",
                 stats_key="replies_sent",
             )
         except Exception as e:
@@ -877,6 +943,7 @@ class AccountWorker:
         activity_kind: str,
         stats_key: str,
         short_delay: bool = False,
+        managed_origin: bool = False,
     ) -> bool:
         async with self._send_lock:
             if not await self._send_message_unlocked(
@@ -886,6 +953,13 @@ class AccountWorker:
                 claim_text=True,
             ):
                 return False
+            if managed_origin and self.tg_user_id:
+                origin_key = (
+                    int(chat_id),
+                    int(self.tg_user_id),
+                    self._normalized_reply(text),
+                )
+                self.managed_origins[origin_key] = time.time() + 180
             self.stats[stats_key] += 1
             await self.db.add_message(
                 self.account_id,
@@ -945,6 +1019,7 @@ class AccountWorker:
                     topic,
                     activity_kind="proactive",
                     stats_key="proactive_sent",
+                    managed_origin=True,
                 )
                 if not sent:
                     continue

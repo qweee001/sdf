@@ -31,7 +31,7 @@ def test_defaults_present():
     assert s.memory_ttl_hours == 24
     assert s.min_typing_delay < s.max_typing_delay
     assert s.proactive_max_per_day >= 1
-    assert s.water_cross_talk_probability > 0
+    assert s.water_cross_talk_probability == 0.65
     assert s.ai_disable_thinking is False
     assert s.vision_model == "test-model"
     assert s.image_model
