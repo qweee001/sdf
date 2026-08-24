@@ -46,53 +46,89 @@ def _term_pattern(*terms: str) -> re.Pattern[str]:
     return re.compile("|".join(re.escape(term) for term in ordered))
 
 
-_GROUP_CONTEXT_PATTERN = _term_pattern(
-    "這個群", "这个群", "這群", "这群", "本群", "那群",
-    "群組", "群组", "群裡", "群里", "群內", "群内",
+_GROUP_META_CLAUSE_SPLIT_PATTERN = re.compile(r"[\r\n，,。．.!！？?；;：:]+")
+_SELECTED_GROUP_REFERENCE_PATTERN = _term_pattern(
+    "這個群", "这个群", "這群", "这群", "本群",
+    "群裡", "群里", "群內", "群内",
 )
-_GROUP_STAFF_ROLE_PATTERN = _term_pattern(
-    "管理員", "管理员", "群主", "小編", "小编", "助理", "版主", "客服",
+_GROUP_RULE_MARKER_PATTERN = _term_pattern("群規", "群规")
+_RULE_OR_VETTING_PREDICATE_PATTERN = _term_pattern(
+    "規則", "规则", "要求", "條件", "条件", "資格", "资格", "門檻", "门槛",
+    "審核", "审核", "篩選", "筛选", "篩過", "筛过", "過濾", "过滤",
+    "認證", "认证", "驗證", "验证", "驗過", "验过", "確認", "确认",
+    "把關", "把关", "不能", "不得", "禁止", "不准", "只准", "只許", "只许",
+    "必須", "必须", "規定", "规定",
+)
+_ENTRY_RELATION_PATTERN = _term_pattern(
+    "加入條件", "加入条件", "入場門檻", "入场门槛", "才能進", "才能进",
+    "就能進", "就能进", "入群", "進群", "进群", "加群", "加入", "進來",
+    "进来", "入場", "入场", "門檻", "门槛",
+)
+_ENTRY_AT_END_PATTERN = re.compile(r"(?:進|进)(?:了|啦|啊|呀|喔|哦)?$")
+_GROUP_STAFF_ACTION_PATTERN = _term_pattern(
+    "踢", "移除", "封鎖", "封锁", "把關", "把关", "審核", "审核",
+    "篩選", "筛选", "處理群", "处理群",
 )
 _STAFF_ENDORSEMENT_OR_ACTION_PATTERN = _term_pattern(
     "人很好", "超讚", "超赞", "很讚", "很赞", "用心", "負責", "负责",
-    "實在", "实在", "可靠", "踢", "移除", "封鎖", "封锁", "把關", "把关",
-    "審核", "审核", "篩選", "筛选", "處理群", "处理群",
+    "實在", "实在", "可靠", "很好", "很棒", "不錯", "不错",
+    "踢", "移除", "封鎖", "封锁", "把關", "把关", "審核", "审核",
+    "篩選", "筛选", "處理群", "处理群",
 )
-_ORDINARY_STAFF_PREFIXES = {
-    # 裸稱呼來自群務話術；先排除明確的一般職業／服務複合詞。
-    "助理": ("行政",),
-    "版主": ("論壇", "论坛"),
-    "客服": ("網路", "网络"),
-}
-_GROUP_ENTRY_MARKER_PATTERN = _term_pattern(
-    "群規", "群规", "入群", "進群", "进群", "加群",
+_GROUP_OWNER_ROLE_PATTERN = _term_pattern("群主")
+_ADMIN_ROLE_PATTERN = _term_pattern("管理員", "管理员")
+_ASSISTANT_ROLE_PATTERN = _term_pattern("助理")
+_CONTEXTUAL_GROUP_STAFF_ROLE_PATTERN = _term_pattern(
+    "版主", "客服", "小編", "小编"
 )
-_RULE_TERM_PATTERN = _term_pattern(
-    "規則", "规则", "要求", "條件", "条件", "門檻", "门槛", "資格", "资格",
-    "審核", "审核", "篩選", "筛选", "認證", "认证", "驗證", "验证", "把關",
-    "把关", "不能", "不得", "禁止", "不准", "只准", "只許", "只许", "必須",
-    "必须", "規定", "规定",
+_ORDINARY_ADMIN_DOMAIN_PATTERN = _term_pattern(
+    "大樓", "大楼", "大廈", "大厦", "社區", "社区", "物業", "物业",
+    "網站", "网站", "網頁", "网页", "網路平台", "网络平台", "平台",
+    "遊戲", "游戏", "伺服器", "服务器", "server", "公司", "學校", "学校",
+    "辦公室", "办公室",
 )
-_JOIN_PATTERN = _term_pattern("加入", "進來", "进来", "入場", "入场", "門檻", "门槛")
+_ORDINARY_ASSISTANT_DOMAIN_PATTERN = _term_pattern(
+    "行政", "研究", "教學", "教学", "醫療", "医疗", "攝影", "摄影",
+    "辦公室", "办公室", "公司",
+)
 _PAYMENT_PATTERN = _term_pattern(
     "1000", "一千", "付錢", "付钱", "付費", "付费", "付款", "繳費", "缴费",
     "繳錢", "缴钱", "交錢", "交钱", "會費", "会费", "收費", "收费", "費用", "费用",
 )
-_MEMBER_CONTEXT_PATTERN = _term_pattern(
-    "這裡的人", "这里的人", "群裡的人", "群里的人", "會員", "会员", "群友", "大家",
+_PAYMENT_AMOUNT_PATTERN = re.compile(
+    r"(?:付|繳|缴|交|收)\d+|\d+(?:元|塊|块)"
 )
-_ORDINARY_MEMBERSHIP_CONTEXT_PATTERN = _term_pattern("健身房")
-_SCREENING_PATTERN = _term_pattern(
-    "身分", "身份", "確認", "确认", "把關", "把关", "審核", "审核", "篩選", "筛选",
-    "過濾", "过滤", "擋掉", "挡掉", "認證", "认证", "驗證", "验证",
+_GROUP_MEMBER_SUBJECT_PATTERN = _term_pattern(
+    "這裡的人", "这里的人", "群裡的人", "群里的人", "群內的人", "群内的人",
+    "成員", "成员", "群友",
 )
-_IDENTITY_CLAIM_PATTERN = _term_pattern("本人", "真人", "身分", "身份", "正常", "可靠")
+_SCOPED_MEMBER_UNIVERSAL_PATTERN = _term_pattern(
+    "這裡全", "这里全", "每個人都", "每个人都", "每人都", "大家都",
+)
+_IDENTITY_CLAIM_PATTERN = _term_pattern("本人", "真人", "正常", "可靠")
+_IDENTITY_NOUN_PATTERN = _term_pattern("身分", "身份")
+_SCREENING_ACTION_PATTERN = _term_pattern(
+    "確認", "确认", "把關", "把关", "審核", "审核", "篩選", "筛选",
+    "篩過", "筛过", "過濾", "过滤", "擋掉", "挡掉", "認證", "认证",
+    "驗證", "验证", "驗過", "验过",
+)
+_COMPLETED_VETTING_PATTERN = _term_pattern(
+    "確認過", "确认过", "審核過", "审核过", "篩過", "筛过", "過濾掉",
+    "过滤掉", "認證過", "认证过", "驗證過", "验证过", "驗過", "验过",
+)
+_FIRST_PERSON_PLURAL_PATTERN = _term_pattern("我們", "我们", "咱們", "咱们")
 _SUSPICIOUS_ACCOUNT_PATTERN = _term_pattern(
-    "可疑帳號", "可疑账号", "帳號", "账号", "怪人",
+    "可疑帳號", "可疑账号", "可疑的帳號", "可疑的账号", "怪人",
+)
+_ACCOUNT_FILTERING_PATTERN = _term_pattern(
+    "篩選", "筛选", "篩過", "筛过", "過濾", "过滤", "擋掉", "挡掉",
+    "移除", "封鎖", "封锁",
 )
 _GROUP_ASSURANCE_PATTERN = _term_pattern(
     "絕對不會被騙", "绝对不会被骗", "不用擔心", "不用担心", "不必擔心", "不必担心",
-    "別擔心", "别担心", "不用怕", "不會被騙", "不会被骗", "不會有", "不会有",
+    "別擔心", "别担心", "保證", "保证", "不受騙", "不受骗", "不用怕",
+    "不怕被騙", "不怕被骗", "不會受騙", "不会受骗", "不會被騙", "不会被骗",
+    "不會有", "不会有",
     "安全", "放心", "可靠", "正常", "真人", "沒問題", "没问题", "很好", "很棒",
     "不錯", "不错", "真的可以", "值得", "保障", "詐騙", "诈骗", "仙人跳", "綁架",
     "绑架", "偷拍", "偷錄", "偷录", "秘密錄音", "秘密录音",
@@ -107,80 +143,109 @@ _GROUP_DEFENSE_PATTERN = _term_pattern(
 )
 
 
-def _patterns_are_near(
-    text: str,
-    first: re.Pattern[str],
-    second: re.Pattern[str],
-    max_gap: int,
-) -> bool:
-    """只在兩個已命名語意類別有明確近距關係時命中。"""
-    first_matches = list(first.finditer(text))
-    second_matches = list(second.finditer(text))
-    for left in first_matches:
-        for right in second_matches:
-            if left.end() <= right.start():
-                gap = right.start() - left.end()
-            elif right.end() <= left.start():
-                gap = left.start() - right.end()
-            else:
-                gap = 0
-            if gap <= max_gap:
-                return True
-    return False
+def _has_selected_group_reference(clause: str) -> bool:
+    return bool(_SELECTED_GROUP_REFERENCE_PATTERN.search(clause))
 
 
-def _mentions_group_staff_meta(text: str) -> bool:
-    claims = list(_STAFF_ENDORSEMENT_OR_ACTION_PATTERN.finditer(text))
-    contexts = list(_GROUP_CONTEXT_PATTERN.finditer(text))
-    for role in _GROUP_STAFF_ROLE_PATTERN.finditer(text):
-        prefixes = _ORDINARY_STAFF_PREFIXES.get(role.group(), ())
-        if any(text[max(0, role.start() - len(prefix)):role.start()] == prefix for prefix in prefixes):
-            continue
-        related = claims + contexts
-        if any(
-            min(abs(role.end() - item.start()), abs(item.end() - role.start())) <= 12
-            for item in related
-        ):
-            return True
-    return False
-
-
-def _mentions_group_rules(text: str) -> bool:
-    if _GROUP_ENTRY_MARKER_PATTERN.search(text):
+def _mentions_selected_group_policy_meta(clause: str) -> bool:
+    """規則／審查／入群條件必須正向指向目前群組。"""
+    if _GROUP_RULE_MARKER_PATTERN.search(clause):
         return True
-    return (
-        _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _RULE_TERM_PATTERN, 12)
-        or _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _JOIN_PATTERN, 8)
-    )
-
-
-def _mentions_paid_membership(text: str) -> bool:
-    if not _PAYMENT_PATTERN.search(text):
+    if not _has_selected_group_reference(clause):
         return False
-    if _patterns_are_near(text, _PAYMENT_PATTERN, _JOIN_PATTERN, 16):
-        return True
-    if _patterns_are_near(text, _PAYMENT_PATTERN, _GROUP_CONTEXT_PATTERN, 16):
-        return True
-    return (
-        not _ORDINARY_MEMBERSHIP_CONTEXT_PATTERN.search(text)
-        and _patterns_are_near(text, _PAYMENT_PATTERN, _MEMBER_CONTEXT_PATTERN, 12)
+    return bool(
+        _RULE_OR_VETTING_PREDICATE_PATTERN.search(clause)
+        or _ENTRY_RELATION_PATTERN.search(clause)
+        or _GROUP_STAFF_ACTION_PATTERN.search(clause)
     )
 
 
-def _mentions_group_screening_or_identity(text: str) -> bool:
-    return (
-        _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _SCREENING_PATTERN, 16)
-        or _patterns_are_near(text, _MEMBER_CONTEXT_PATTERN, _IDENTITY_CLAIM_PATTERN, 12)
-        or _patterns_are_near(text, _MEMBER_CONTEXT_PATTERN, _SCREENING_PATTERN, 12)
-        or _patterns_are_near(text, _SUSPICIOUS_ACCOUNT_PATTERN, _SCREENING_PATTERN, 12)
+def _mentions_group_staff_meta(clause: str) -> bool:
+    """只把群特定角色或没有一般行政领域的裸角色视为群务。"""
+    if not _STAFF_ENDORSEMENT_OR_ACTION_PATTERN.search(clause):
+        return False
+    if _GROUP_OWNER_ROLE_PATTERN.search(clause):
+        return True
+    if (
+        _ADMIN_ROLE_PATTERN.search(clause)
+        and not _ORDINARY_ADMIN_DOMAIN_PATTERN.search(clause)
+    ):
+        return True
+    if (
+        _ASSISTANT_ROLE_PATTERN.search(clause)
+        and not _ORDINARY_ASSISTANT_DOMAIN_PATTERN.search(clause)
+    ):
+        return True
+    return bool(
+        _has_selected_group_reference(clause)
+        and _CONTEXTUAL_GROUP_STAFF_ROLE_PATTERN.search(clause)
     )
 
 
-def _mentions_group_assurance_or_defense(text: str) -> bool:
-    return (
-        _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _GROUP_ASSURANCE_PATTERN, 18)
-        or _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _GROUP_NEGATIVE_PATTERN, 12)
-        or _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _GROUP_DEFENSE_PATTERN, 12)
+def _mentions_paid_entry(clause: str) -> bool:
+    """付款只有和进群／入场关系或目前群组关系同时出现才是群务。"""
+    has_payment = bool(
+        _PAYMENT_PATTERN.search(clause) or _PAYMENT_AMOUNT_PATTERN.search(clause)
+    )
+    if not has_payment:
+        return False
+    return bool(
+        _has_selected_group_reference(clause)
+        or _ENTRY_RELATION_PATTERN.search(clause)
+        or _ENTRY_AT_END_PATTERN.search(clause)
+    )
+
+
+def _has_member_identity_or_vetting_claim(clause: str) -> bool:
+    return bool(
+        _IDENTITY_CLAIM_PATTERN.search(clause)
+        or _COMPLETED_VETTING_PATTERN.search(clause)
+        or (
+            _IDENTITY_NOUN_PATTERN.search(clause)
+            and _SCREENING_ACTION_PATTERN.search(clause)
+        )
+    )
+
+
+def _mentions_group_member_identity_or_vetting(clause: str) -> bool:
+    """身份背书必须有群成员主体；可疑帐号过滤必须由我们执行。"""
+    has_member_subject = bool(
+        _GROUP_MEMBER_SUBJECT_PATTERN.search(clause)
+        or _SCOPED_MEMBER_UNIVERSAL_PATTERN.search(clause)
+    )
+    if has_member_subject and _has_member_identity_or_vetting_claim(clause):
+        return True
+    return bool(
+        _FIRST_PERSON_PLURAL_PATTERN.search(clause)
+        and _SUSPICIOUS_ACCOUNT_PATTERN.search(clause)
+        and _ACCOUNT_FILTERING_PATTERN.search(clause)
+    )
+
+
+def _mentions_selected_group_assurance_or_defense(clause: str) -> bool:
+    """安全保证、评价或护群话术必须明确指向目前群组。"""
+    if not _has_selected_group_reference(clause):
+        return False
+    return any(
+        pattern.search(clause)
+        for pattern in (
+            _GROUP_ASSURANCE_PATTERN,
+            _GROUP_NEGATIVE_PATTERN,
+            _GROUP_DEFENSE_PATTERN,
+        )
+    )
+
+
+def _clause_mentions_group_meta(clause: str) -> bool:
+    return any(
+        detector(clause)
+        for detector in (
+            _mentions_selected_group_policy_meta,
+            _mentions_group_staff_meta,
+            _mentions_paid_entry,
+            _mentions_group_member_identity_or_vetting,
+            _mentions_selected_group_assurance_or_defense,
+        )
     )
 
 _DIRECT_VIDEO_PATTERN = re.compile(
@@ -1374,18 +1439,17 @@ class AccountWorker:
 
     @staticmethod
     def _mentions_group_meta(text: str) -> bool:
-        """只擋群務、加入條件與群體背書，不把一般「群組」聊天誤傷。"""
+        """逐句判斷正向群務關係，避免跨標點拼出不存在的群務語意。"""
         normalized = unicodedata.normalize("NFKC", text or "").casefold()
-        normalized = re.sub(r"\s+", "", normalized)
-        if not normalized:
-            return False
-        return any(detector(normalized) for detector in (
-            _mentions_group_staff_meta,
-            _mentions_group_rules,
-            _mentions_paid_membership,
-            _mentions_group_screening_or_identity,
-            _mentions_group_assurance_or_defense,
-        ))
+        clauses = (
+            re.sub(r"\s+", "", clause)
+            for clause in _GROUP_META_CLAUSE_SPLIT_PATTERN.split(normalized)
+        )
+        return any(
+            _clause_mentions_group_meta(clause)
+            for clause in clauses
+            if clause
+        )
 
     @classmethod
     def _is_near_duplicate(cls, text: str, recent: list[str]) -> bool:

@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import pytest
+
 from app.worker import AccountWorker
 
 
@@ -27,6 +29,79 @@ _EXACT_ALLOWED_ORDINARY_CHAT = (
     "銀行審核擋掉詐騙",
     "健身房會員每月付費1000",
     "一群朋友都很正常",
+)
+
+_FIX_ROUND_2_FORBIDDEN_BY_CATEGORY = {
+    "selected_group_meta": (
+        "本群規則很嚴格",
+        "群内不能发广告",
+    ),
+    "group_staff": (
+        "管理員真的很棒",
+        "管理员 真的 很棒",
+        "群主真的很不錯",
+    ),
+    "paid_entry": (
+        "付1000就能進",
+        "付 １０００ 就能進",
+        "付1000就能进",
+    ),
+    "member_identity_or_vetting": (
+        "成員都是真人",
+        "這裡全是真人",
+        "每個人都驗過身分",
+        "大家都是真人",
+        "我们把可疑账号都筛过了",
+    ),
+    "selected_group_assurance": (
+        "群裡保證不受騙",
+        "这个群不用怕被骗",
+        "今天下雨。這個群不用怕被騙",
+    ),
+}
+
+_FIX_ROUND_2_ORDINARY_BY_CATEGORY = {
+    "ordinary_staff": (
+        "網路平台的客服很可靠",
+        "公司的行政部門助理很負責",
+        "巴哈論壇的版主很實在",
+        "大樓管理員真的很棒",
+        "網站管理員很負責",
+    ),
+    "ordinary_payment": (
+        "大家付錢分攤晚餐",
+        "電影院會員付費1000",
+        "我付1000買演唱會門票",
+    ),
+    "ordinary_account": (
+        "請確認你的銀行帳號",
+        "遊戲帳號已經驗證過",
+    ),
+    "ordinary_friend_group": (
+        "那群朋友都很正常",
+    ),
+    "ordinary_interest_group": (
+        "我想加入攝影群組分享作品",
+    ),
+    "ordinary_fraud_prevention": (
+        "銀行審核擋掉詐騙",
+        "網購不用怕被騙",
+    ),
+}
+
+_FIX_ROUND_2_FORBIDDEN_GENERATION_CASES = (
+    ("selected_group_meta", "本群規則很嚴格"),
+    ("group_staff", "管理員真的很棒"),
+    ("paid_entry", "付１０００就能進"),
+    ("member_identity_or_vetting", "成員都是真人"),
+    ("selected_group_assurance", "群裡保證不受騙"),
+)
+
+_FIX_ROUND_2_CLAUSE_BOUNDARY_CASES = (
+    "我想加入攝影群組分享作品，網購不用怕被騙",
+    "那群朋友都很正常，銀行會確認你的帳號",
+    "我想加入攝影群組分享作品。\n銀行審核擋掉詐騙",
+    "我想加入攝影群組分享作品;網購不用怕被騙",
 )
 
 
@@ -690,6 +765,109 @@ def test_exact_forbidden_incoming_messages_use_real_fallback_without_echo():
             ]
             assert incoming not in client.sent[0][1]
             assert worker.db.messages[-1][-1] == client.sent[0][1]
+
+    asyncio.run(main())
+
+
+def test_fix_round_2_forbidden_relationship_category_matrix():
+    missed = {
+        category: [
+            text
+            for text in examples
+            if not AccountWorker._mentions_group_meta(text)
+        ]
+        for category, examples in _FIX_ROUND_2_FORBIDDEN_BY_CATEGORY.items()
+    }
+
+    assert not {category: texts for category, texts in missed.items() if texts}
+
+
+def test_fix_round_2_ordinary_category_matrix():
+    false_positives = {
+        category: [
+            text
+            for text in examples
+            if AccountWorker._mentions_group_meta(text)
+        ]
+        for category, examples in _FIX_ROUND_2_ORDINARY_BY_CATEGORY.items()
+    }
+
+    assert not {
+        category: texts for category, texts in false_positives.items() if texts
+    }
+
+
+def test_fix_round_2_clause_boundaries_do_not_manufacture_group_meta():
+    false_positives = [
+        text
+        for text in _FIX_ROUND_2_CLAUSE_BOUNDARY_CASES
+        if AccountWorker._mentions_group_meta(text)
+    ]
+
+    assert not false_positives
+
+
+@pytest.mark.parametrize(
+    ("category", "candidate"),
+    _FIX_ROUND_2_FORBIDDEN_GENERATION_CASES,
+    ids=[case[0] for case in _FIX_ROUND_2_FORBIDDEN_GENERATION_CASES],
+)
+def test_fix_round_2_forbidden_category_uses_real_generation_guard(
+    category, candidate
+):
+    async def main():
+        worker = _worker()
+        compliant = f"淡水今天下雨，我想喝熱茶-{category}"
+        worker._call_ai = AsyncMock(side_effect=[candidate, compliant])
+
+        reply = await worker._generate_reply(_FakeEvent())
+
+        assert reply == compliant
+        assert worker._call_ai.await_count == 2
+        assert "群務" in worker._call_ai.await_args_list[1].args[1]
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    ("category", "incoming"),
+    _FIX_ROUND_2_FORBIDDEN_GENERATION_CASES,
+    ids=[case[0] for case in _FIX_ROUND_2_FORBIDDEN_GENERATION_CASES],
+)
+def test_fix_round_2_forbidden_category_uses_real_fallback_pivot(
+    category, incoming
+):
+    worker = _worker()
+    event = _FakeEvent()
+    event.raw_text = incoming
+
+    reply = worker._fallback_reply(event, managed_followup=False)
+
+    assert category
+    assert reply == "我今天想聊點日常，剛好在想晚餐要吃什麼"
+    assert incoming not in reply
+
+
+@pytest.mark.parametrize(
+    ("category", "candidate"),
+    [
+        (category, candidate)
+        for category, examples in _FIX_ROUND_2_ORDINARY_BY_CATEGORY.items()
+        for candidate in examples
+    ],
+)
+def test_fix_round_2_ordinary_candidate_passes_real_generation_once(
+    category, candidate
+):
+    async def main():
+        worker = _worker()
+        worker._call_ai = AsyncMock(return_value=candidate)
+
+        reply = await worker._generate_reply(_FakeEvent())
+
+        assert category
+        assert reply == candidate
+        assert worker._call_ai.await_count == 1
 
     asyncio.run(main())
 
