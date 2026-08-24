@@ -850,20 +850,22 @@ class AccountWorker:
             return "你想看什麼啦，先講清楚一點"
         if "捷運" in incoming:
             return "真的很煩，我上次也被卡在月台好久"
+        if "台劇" in incoming or "电视剧" in incoming or "電視劇" in incoming:
+            return "哪一部台劇這麼好看？被你講得我也想追了"
         if "衣服" in incoming or "穿" in incoming:
             return "聽起來很好看欸，準備去哪裡走走？"
         if "真誠" in incoming:
             return "真誠很加分，聊起來舒服最重要"
         detail = " ".join(incoming.split()).strip()[:18] or "剛剛那件事"
         if "害羞" in personality or "慢熟" in personality:
-            return f"你提到「{detail}」，我有認真看到"
+            return f"你提到{detail}，我有認真看到"
         if "風騷" in personality or "會撩" in personality:
-            return f"「{detail}」這句有意思，我也有點好奇"
+            return f"{detail}這句有意思，我也有點好奇"
         if "直球" in personality:
-            return f"你說的「{detail}」我有注意到"
+            return f"你說的{detail}我有注意到"
         if managed_followup:
-            return f"你提到「{detail}」，我也會想到這件事"
-        return f"「{detail}」我有看到，聽起來你很有感"
+            return f"你提到{detail}，我也會想到這件事"
+        return f"{detail}我有看到，聽起來你很有感"
 
     async def _finish_managed_reservation(self, event, sent: bool) -> None:
         group_id = int(event.chat_id or 0)

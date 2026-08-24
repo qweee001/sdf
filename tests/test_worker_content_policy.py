@@ -282,6 +282,20 @@ def test_static_fallbacks_remove_repeated_production_lines_and_use_current_detai
 
     assert forbidden.isdisjoint(replies)
     assert all("淡水下大雨" in reply for reply in replies)
+    assert all("「" not in reply and "」" not in reply for reply in replies)
+
+
+def test_drama_fallback_continues_topic_without_quoting_the_original_message():
+    worker = _worker()
+    worker.persona["personality"] = "風騷會撩"
+    event = _FakeEvent()
+    event.raw_text = "最近迷上一個台劇,超好看"
+
+    reply = worker._fallback_reply(event, managed_followup=False)
+
+    assert reply == "哪一部台劇這麼好看？被你講得我也想追了"
+    assert "「" not in reply and "」" not in reply
+    assert event.raw_text not in reply
 
 
 def test_all_welcome_templates_exclude_group_meta_assurances(monkeypatch):
