@@ -72,6 +72,10 @@ def _worker(
 ):
     cfg = SimpleNamespace(
         ai_model="test",
+        ai_temperature=0.8,
+        ai_max_tokens=200,
+        ai_timeout=17,
+        ai_disable_thinking=True,
         memory_max_messages=10,
         min_typing_delay=0,
         max_typing_delay=0,
@@ -230,6 +234,47 @@ def test_incoming_image_is_downloaded_only_for_vision_reply():
         assert worker.stats["images_seen"] == 1
         assert worker.stats["images_understood"] == 1
         assert worker.stats["image_understanding_errors"] == 0
+
+    asyncio.run(main())
+
+
+def test_semantically_blocked_vision_keeps_successful_claim_without_send():
+    async def main():
+        db = _DB()
+        event = _Event()
+        event.id = 92
+        db.claims[(-1001, 92)] = "w1"
+        media = SimpleNamespace(understand_image=AsyncMock(side_effect=[
+            "本群管理員很負責",
+            "這群絕對不會被騙",
+        ]))
+        classify = AsyncMock(side_effect=[
+            SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="BLOCK")
+            )]),
+            SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="BLOCK")
+            )]),
+        ])
+        ai_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=classify))
+        )
+        client = SimpleNamespace(send_message=AsyncMock())
+        worker = _worker(media, db=db)
+        worker.ai_client = cast(Any, ai_client)
+        worker.tg_client = cast(Any, client)
+        worker.tg_user_id = 101
+        worker.is_running = True
+
+        await worker._reply_later(event, 0)
+
+        assert media.understand_image.await_count == 2
+        assert classify.await_count == 2
+        client.send_message.assert_not_awaited()
+        assert db.messages == []
+        assert db.claims == {(-1001, 92): "w1"}
+        assert worker.failed_reply_claimants == {}
+        assert worker.stats["reply_drops"]["group_meta"] == 1
 
     asyncio.run(main())
 
