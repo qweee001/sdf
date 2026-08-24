@@ -6,6 +6,7 @@ import pytest
 from telethon.tl.types import MessageMediaPhoto, PhotoEmpty
 
 from app.config import load_settings
+from app.media import MediaAsset
 from app.worker import AccountWorker
 
 
@@ -215,7 +216,10 @@ def test_human_image_has_exactly_one_deterministic_responder(account_count):
     asyncio.run(main())
 
 
-@pytest.mark.parametrize("failure_mode", ["empty", "exception"])
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["empty", "exception", "download_empty", "download_exception"],
+)
 def test_failed_image_claimant_is_replaced_once(failure_mode):
     async def main():
         db = _ClaimDB()
@@ -223,16 +227,29 @@ def test_failed_image_claimant_is_replaced_once(failure_mode):
         owners = {(-5428680940, 999): (101, float("inf"))}
         signals = {}
         failed = {}
-        first_vision_started = asyncio.Event()
+        first_attempt_started = asyncio.Event()
         allow_first_failure = asyncio.Event()
         replacement_vision_started = asyncio.Event()
         allow_replacement_success = asyncio.Event()
         vision_accounts = []
+        download_count = 0
+
+        async def download_media(*, file):
+            nonlocal download_count
+            assert file is bytes
+            download_count += 1
+            if download_count == 1 and failure_mode.startswith("download_"):
+                first_attempt_started.set()
+                await allow_first_failure.wait()
+                if failure_mode == "download_exception":
+                    raise RuntimeError("download unavailable")
+                return b""
+            return b"jpeg"
 
         async def understand_image(account_id, *_args):
             vision_accounts.append(account_id)
             if account_id == "101":
-                first_vision_started.set()
+                first_attempt_started.set()
                 await allow_first_failure.wait()
                 if failure_mode == "exception":
                     raise RuntimeError("vision unavailable")
@@ -249,7 +266,7 @@ def test_failed_image_claimant_is_replaced_once(failure_mode):
         event = _event(text="", message_id=990)
         event.media = MessageMediaPhoto(photo=PhotoEmpty(id=990))
         event.file = SimpleNamespace(size=4, mime_type="image/jpeg")
-        event.download_media = AsyncMock(return_value=b"jpeg")
+        event.download_media = AsyncMock(side_effect=download_media)
 
         workers = [
             _worker(
@@ -275,7 +292,7 @@ def test_failed_image_claimant_is_replaced_once(failure_mode):
 
         assert await workers[0]._should_reply(event) is True
         first_task = asyncio.create_task(workers[0]._reply_later(event, 0))
-        await first_vision_started.wait()
+        await first_attempt_started.wait()
 
         async def wait_and_reply(worker):
             claimed = await worker._should_reply(event)
@@ -299,14 +316,131 @@ def test_failed_image_claimant_is_replaced_once(failure_mode):
         await first_task
 
         assert decisions == [True, False]
-        assert vision_accounts == ["101", "202"]
-        assert media.understand_image.await_count == 2
+        assert vision_accounts == (
+            ["202"]
+            if failure_mode.startswith("download_")
+            else ["101", "202"]
+        )
+        assert media.understand_image.await_count == len(vision_accounts)
+        assert event.download_media.await_count == 2
         assert sum(client.send_message.await_count for client in clients) == 1
         clients[0].send_message.assert_not_awaited()
         clients[1].send_message.assert_awaited_once_with(
             -5428680940, "第二個帳號看懂了照片"
         )
         clients[2].send_message.assert_not_awaited()
+        assert signals == {}
+        assert failed == {}
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("send_path", ["text", "media"])
+@pytest.mark.parametrize("record_failure", ["add_message", "touch_activity"])
+def test_post_send_record_failure_keeps_image_claim(send_path, record_failure):
+    async def main():
+        db = _ClaimDB()
+        active = {101, 202}
+        owners = {(-5428680940, 999): (101, float("inf"))}
+        signals = {}
+        failed = {}
+        first_generation_started = asyncio.Event()
+        allow_first_generation = asyncio.Event()
+        vision_accounts = []
+        media_accounts = []
+
+        async def add_message(*args):
+            if record_failure == "add_message" and args[0] == "101":
+                raise RuntimeError("post-send add_message failed")
+            db.messages.append(args)
+
+        async def touch_activity(*args):
+            if record_failure == "touch_activity" and args[0] == "101":
+                raise RuntimeError("post-send touch_activity failed")
+            db.activities.append(args)
+
+        async def understand_image(account_id, *_args):
+            vision_accounts.append(account_id)
+            if account_id == "101":
+                first_generation_started.set()
+                await allow_first_generation.wait()
+                return "第一個帳號看懂了照片"
+            return "第二個帳號不應再次看圖"
+
+        async def generate_image(account_id, *_args):
+            media_accounts.append(account_id)
+            if account_id == "101":
+                first_generation_started.set()
+                await allow_first_generation.wait()
+            return MediaAsset("image", b"png", "reply.png", "image/png")
+
+        db.add_message = AsyncMock(side_effect=add_message)
+        db.touch_activity = AsyncMock(side_effect=touch_activity)
+        media = SimpleNamespace(
+            understand_image=AsyncMock(side_effect=understand_image),
+            generate_image=AsyncMock(side_effect=generate_image),
+        )
+        event = _event(
+            text="傳張自拍看看" if send_path == "media" else "",
+            message_id=991,
+        )
+        event.media = MessageMediaPhoto(photo=PhotoEmpty(id=991))
+        event.file = SimpleNamespace(size=4, mime_type="image/jpeg")
+        event.download_media = AsyncMock(return_value=b"jpeg")
+
+        workers = [
+            _worker(
+                uid,
+                active,
+                managed_ids=active,
+                db=db,
+                human_owners=owners,
+                media_service=media,
+                reply_claim_signals=signals,
+                failed_reply_claimants=failed,
+            )
+            for uid in sorted(active)
+        ]
+        clients = []
+        for worker in workers:
+            worker.config.media_enabled = True
+            worker.config.media_max_input_bytes = 1024
+            client = SimpleNamespace(
+                send_message=AsyncMock(),
+                send_file=AsyncMock(),
+            )
+            worker.tg_client = client
+            worker.is_running = True
+            clients.append(client)
+
+        assert await workers[0]._should_reply(event) is True
+        first_task = asyncio.create_task(workers[0]._reply_later(event, 0))
+        await first_generation_started.wait()
+
+        async def wait_and_reply():
+            claimed = await workers[1]._should_reply(event)
+            if claimed:
+                await workers[1]._reply_later(event, 0)
+            return claimed
+
+        second_task = asyncio.create_task(wait_and_reply())
+        await asyncio.sleep(0)
+        allow_first_generation.set()
+        assert await second_task is False
+        await first_task
+
+        claim_key = (-5428680940, 991)
+        assert db.claims == {claim_key: "101"}
+        assert vision_accounts == (["101"] if send_path == "text" else [])
+        assert media_accounts == (["101"] if send_path == "media" else [])
+        assert sum(client.send_message.await_count for client in clients) == (
+            1 if send_path == "text" else 0
+        )
+        assert sum(client.send_file.await_count for client in clients) == (
+            1 if send_path == "media" else 0
+        )
+        clients[1].send_message.assert_not_awaited()
+        clients[1].send_file.assert_not_awaited()
         assert signals == {}
         assert failed == {}
 

@@ -23,7 +23,7 @@ import random
 import re
 import time
 import unicodedata
-from typing import Any
+from typing import Any, Callable
 
 from openai import AsyncOpenAI
 from telethon import TelegramClient, events
@@ -226,6 +226,7 @@ class AccountWorker:
         self._proactive_today = 0
         self._proactive_day = 0
         self._generation_reasons: dict[tuple[int, int], str] = {}
+        self._successful_vision_events: set[tuple[int, int]] = set()
 
         self.stats = {
             "replies_sent": 0,
@@ -528,11 +529,62 @@ class AccountWorker:
         )
         self.stats["human_claimed"] += 1
 
+    @staticmethod
+    def _extend_media_claim_expiry(
+        signal: asyncio.Event, deadline: float
+    ) -> None:
+        # The shared Event identity is the coordination generation; keeping the
+        # absolute expiry on it prevents one waiter from detaching its peers.
+        expires_at = float(
+            getattr(signal, "_sdf_reply_claim_expires_at", 0.0)
+        )
+        if deadline > expires_at:
+            setattr(signal, "_sdf_reply_claim_expires_at", deadline)
+
+    def _new_media_claim_signal(
+        self, key: tuple[int, int]
+    ) -> asyncio.Event:
+        signal = asyncio.Event()
+        self._extend_media_claim_expiry(
+            signal,
+            asyncio.get_running_loop().time() + _REPLY_TASK_WINDOW_SECONDS,
+        )
+        self.reply_claim_signals[key] = signal
+        return signal
+
+    def _media_claim_signal(self, key: tuple[int, int]) -> asyncio.Event:
+        signal = self.reply_claim_signals.get(key)
+        if signal is None:
+            return self._new_media_claim_signal(key)
+        if not hasattr(signal, "_sdf_reply_claim_expires_at"):
+            self._extend_media_claim_expiry(
+                signal,
+                asyncio.get_running_loop().time()
+                + _REPLY_TASK_WINDOW_SECONDS,
+            )
+        return signal
+
     def _expire_media_claim_state(
-        self, key: tuple[int, int], signal: asyncio.Event
+        self,
+        key: tuple[int, int],
+        signal: asyncio.Event,
+        force: bool = False,
     ) -> None:
         if self.reply_claim_signals.get(key) is not signal:
             return
+        if not force:
+            loop = asyncio.get_running_loop()
+            remaining = float(
+                getattr(signal, "_sdf_reply_claim_expires_at", 0.0)
+            ) - loop.time()
+            if remaining > 0:
+                loop.call_later(
+                    remaining,
+                    self._expire_media_claim_state,
+                    key,
+                    signal,
+                )
+                return
         self.reply_claim_signals.pop(key, None)
         self.failed_reply_claimants.pop(key, None)
 
@@ -541,10 +593,10 @@ class AccountWorker:
         claimant_id = int(self.tg_user_id or 0)
         if claimant_id in self.failed_reply_claimants.get(key, set()):
             return False
-        signal = self.reply_claim_signals.setdefault(key, asyncio.Event())
-
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _REPLY_TASK_WINDOW_SECONDS
+        signal = self._media_claim_signal(key)
+        self._extend_media_claim_expiry(signal, deadline)
         while signal is not None:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -560,7 +612,7 @@ class AccountWorker:
             if claimant_id in failed or not failed:
                 return False
             if await self._claim_reply(event):
-                self.reply_claim_signals[key] = asyncio.Event()
+                self._new_media_claim_signal(key)
                 self._mark_human_claim(event)
                 return True
 
@@ -568,16 +620,14 @@ class AccountWorker:
             if current is None or current is signal:
                 return False
             signal = current
+            self._extend_media_claim_expiry(signal, deadline)
         return False
 
-    async def _finish_media_claim(self, event, succeeded: bool) -> None:
+    async def _finish_media_claim(self, event, allow_takeover: bool) -> None:
         key = self._reply_claim_key(event)
-        signal = self.reply_claim_signals.get(key)
-        if signal is None:
-            signal = asyncio.Event()
-            self.reply_claim_signals[key] = signal
+        signal = self._media_claim_signal(key)
 
-        if not succeeded:
+        if allow_takeover:
             claimant_id = int(self.tg_user_id or 0)
             self.failed_reply_claimants.setdefault(key, set()).add(claimant_id)
             try:
@@ -586,17 +636,12 @@ class AccountWorker:
                 )
             finally:
                 signal.set()
-                asyncio.get_running_loop().call_later(
-                    _REPLY_TASK_WINDOW_SECONDS,
-                    self._expire_media_claim_state,
-                    key,
-                    signal,
-                )
+                self._expire_media_claim_state(key, signal)
             return
 
         signal.set()
         await asyncio.sleep(0)
-        self._expire_media_claim_state(key, signal)
+        self._expire_media_claim_state(key, signal, True)
 
     async def _claim_human_reply(self, event, owner_id: int | None = None) -> bool:
         is_photo = isinstance(getattr(event, "media", None), MessageMediaPhoto)
@@ -609,7 +654,7 @@ class AccountWorker:
                 return await self._wait_for_media_claim(event)
             return False
         if is_photo:
-            self.reply_claim_signals.setdefault(key, asyncio.Event())
+            self._media_claim_signal(key)
         claimed = await self._claim_reply(event)
         if not claimed:
             if is_photo:
@@ -734,6 +779,13 @@ class AccountWorker:
             self._generation_key(event), "generation_empty"
         )
 
+    def _take_successful_vision(self, event) -> bool:
+        key = self._generation_key(event)
+        if key not in self._successful_vision_events:
+            return False
+        self._successful_vision_events.remove(key)
+        return True
+
     def _fallback_reply(self, event, *, managed_followup: bool) -> str:
         """AI／內容檢查失敗時的最後短句兜底，避免已認領事件沉默。"""
         incoming = unicodedata.normalize("NFKC", str(event.raw_text or ""))
@@ -784,6 +836,8 @@ class AccountWorker:
     ):
         await asyncio.sleep(delay)
         sent = False
+        telegram_dispatched = False
+        allow_media_takeover = False
         is_human_reply = int(event.sender_id or 0) not in self.managed_ids
         is_media_claim = (
             is_human_reply
@@ -794,8 +848,13 @@ class AccountWorker:
             if managed_followup:
                 await self._finish_managed_reservation(event, False)
             if is_media_claim:
-                await self._finish_media_claim(event, False)
+                await self._finish_media_claim(event, True)
             return
+
+        def mark_telegram_dispatched() -> None:
+            nonlocal telegram_dispatched
+            telegram_dispatched = True
+
         try:
             media_kind = (
                 None
@@ -811,14 +870,29 @@ class AccountWorker:
                         "video": "[影片]",
                     }[media_kind]
                     if await self._send_media_recorded(
-                        int(event.chat_id), asset, marker
+                        int(event.chat_id),
+                        asset,
+                        marker,
+                        on_dispatched=(
+                            mark_telegram_dispatched if is_media_claim else None
+                        ),
                     ):
                         sent = True
                         if is_human_reply:
                             self.stats["human_sent"] += 1
                         return
             text = await self._generate_reply(event)
+            vision_succeeded = self._take_successful_vision(event)
             generation_reason = self._take_generation_reason(event)
+            allow_media_takeover = (
+                is_media_claim
+                and not vision_succeeded
+                and generation_reason in {
+                    "image_unavailable",
+                    "image_understanding_empty",
+                    "image_understanding_error",
+                }
+            )
             if text:
                 if managed_followup:
                     self.stats["managed_generated"] += 1
@@ -849,6 +923,9 @@ class AccountWorker:
                 require_media_enabled=isinstance(
                     getattr(event, "media", None), MessageMediaPhoto
                 ),
+                on_dispatched=(
+                    mark_telegram_dispatched if is_media_claim else None
+                ),
             )
             if sent and is_human_reply:
                 self.stats["human_sent"] += 1
@@ -859,7 +936,12 @@ class AccountWorker:
         finally:
             if is_media_claim:
                 try:
-                    await self._finish_media_claim(event, sent)
+                    if self._take_successful_vision(event):
+                        allow_media_takeover = False
+                    await self._finish_media_claim(
+                        event,
+                        allow_media_takeover and not telegram_dispatched,
+                    )
                 except Exception as e:
                     self.stats["errors"] += 1
                     self._record_reply_drop("media_claim_finalize_error")
@@ -988,11 +1070,18 @@ class AccountWorker:
             return await self._send_media_unlocked(chat_id, asset)
 
     async def _send_media_recorded(
-        self, chat_id: int, asset: MediaAsset, marker: str
+        self,
+        chat_id: int,
+        asset: MediaAsset,
+        marker: str,
+        *,
+        on_dispatched: Callable[[], None] | None = None,
     ) -> bool:
         async with self._send_lock:
             if not await self._send_media_unlocked(chat_id, asset):
                 return False
+            if on_dispatched:
+                on_dispatched()
             self.stats["replies_sent"] += 1
             await self.db.add_message(
                 self.account_id,
@@ -1008,6 +1097,7 @@ class AccountWorker:
             return True
 
     async def _generate_reply(self, event) -> str:
+        self._successful_vision_events.discard(self._generation_key(event))
         self._set_generation_reason(event, "generation_empty")
         group_id = int(event.chat_id or 0)
         is_image = isinstance(getattr(event, "media", None), MessageMediaPhoto)
@@ -1041,9 +1131,14 @@ class AccountWorker:
         async def call_reply(message: str) -> str:
             if image and self.media_service:
                 try:
-                    return await self.media_service.understand_image(
+                    result = await self.media_service.understand_image(
                         self.account_id, image[0], image[1], system_prompt, message
                     )
+                    if result:
+                        self._successful_vision_events.add(
+                            self._generation_key(event)
+                        )
+                    return result
                 except Exception as exc:
                     self._set_generation_reason(event, "image_understanding_error")
                     self.stats["image_understanding_errors"] += 1
@@ -1325,6 +1420,7 @@ class AccountWorker:
         short_delay: bool = False,
         managed_origin: bool = False,
         require_media_enabled: bool = False,
+        on_dispatched: Callable[[], None] | None = None,
     ) -> bool:
         async with self._send_lock:
             if not await self._send_message_unlocked(
@@ -1335,6 +1431,8 @@ class AccountWorker:
                 require_media_enabled=require_media_enabled,
             ):
                 return False
+            if on_dispatched:
+                on_dispatched()
             if managed_origin and self.tg_user_id:
                 origin_key = (
                     int(chat_id),

@@ -15,6 +15,7 @@ from app.worker import AccountWorker
 class _DB:
     def __init__(self):
         self.messages = []
+        self.claims = {}
 
     async def get_recent_messages(self, *_args, **_kwargs):
         return []
@@ -25,8 +26,21 @@ class _DB:
     async def add_message(self, *args):
         self.messages.append(args)
 
-    async def claim_message_response(self, *_args, **_kwargs):
-        return False
+    async def claim_message_response(self, group_id, message_id, account_id):
+        key = (group_id, message_id)
+        if key in self.claims:
+            return False
+        self.claims[key] = account_id
+        return True
+
+    async def release_message_response_claim(
+        self, group_id, message_id, account_id
+    ):
+        key = (group_id, message_id)
+        if self.claims.get(key) != account_id:
+            return False
+        del self.claims[key]
+        return True
 
 
 class _Event:
@@ -34,6 +48,9 @@ class _Event:
     chat_id = -1001
     sender_id = 999
     raw_text = ""
+    is_reply = False
+    mentioned = False
+    reply_to = None
     sender = SimpleNamespace(first_name="阿明", last_name=None)
     media = MessageMediaPhoto(photo=PhotoEmpty(id=1))
     file = SimpleNamespace(size=4, mime_type="image/jpeg")
@@ -47,6 +64,11 @@ def _worker(
     media_service=None,
     reply_claim_signals=None,
     failed_reply_claimants=None,
+    *,
+    uid: str | int = "w1",
+    managed_ids=None,
+    db=None,
+    human_owners=None,
 ):
     cfg = SimpleNamespace(
         ai_model="test",
@@ -58,17 +80,18 @@ def _worker(
         media_max_input_bytes=8 * 1024 * 1024,
     )
     return AccountWorker(
-        account_id="w1",
+        account_id=str(uid),
         session_key="k",
         tg_api_id=1,
         tg_api_hash="h",
         ai_client=cast(Any, None),
-        db=_DB(),
+        db=db or _DB(),
         config=cfg,
-        managed_ids=set(),
+        managed_ids=managed_ids or set(),
         on_status_change=None,
         selected_groups=[-1001],
         media_service=media_service,
+        human_owners=human_owners,
         reply_claim_signals=reply_claim_signals,
         failed_reply_claimants=failed_reply_claimants,
     )
@@ -141,6 +164,49 @@ def test_media_claim_wait_expiry_cleans_shared_state():
 
         with patch("app.worker._REPLY_TASK_WINDOW_SECONDS", 0.01):
             assert await worker._wait_for_media_claim(event) is False
+
+        assert signals == {}
+        assert failed == {}
+
+    asyncio.run(main())
+
+
+def test_earlier_waiter_timeout_keeps_later_waiter_attached():
+    async def main():
+        db = _DB()
+        active = {101, 202, 303}
+        owners = {(-1001, 78): (101, float("inf"))}
+        signals = {}
+        failed = {}
+        event = _Event()
+        event.id = 78
+
+        workers = [
+            _worker(
+                uid=uid,
+                managed_ids=active,
+                db=db,
+                human_owners=owners,
+                reply_claim_signals=signals,
+                failed_reply_claimants=failed,
+            )
+            for uid in sorted(active)
+        ]
+        for worker, uid in zip(workers, sorted(active)):
+            worker.tg_user_id = uid
+
+        with patch("app.worker._REPLY_TASK_WINDOW_SECONDS", 0.08):
+            assert await workers[0]._should_reply(event) is True
+            earlier = asyncio.create_task(workers[1]._should_reply(event))
+            await asyncio.sleep(0.04)
+            later = asyncio.create_task(workers[2]._should_reply(event))
+
+            assert await earlier is False
+            await workers[0]._finish_media_claim(event, True)
+            assert await later is True
+            assert db.claims == {(-1001, 78): "303"}
+
+            await workers[2]._finish_media_claim(event, False)
 
         assert signals == {}
         assert failed == {}
