@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 from telethon.tl.types import MessageMediaPhoto, PhotoEmpty
 
 from app.media import MediaAsset
+from app.persona import get_system_prompt
 from app.worker import AccountWorker
 
 
@@ -87,6 +88,91 @@ def test_incoming_image_is_downloaded_only_for_vision_reply():
         assert worker.stats["images_seen"] == 1
         assert worker.stats["images_understood"] == 1
         assert worker.stats["image_understanding_errors"] == 0
+
+    asyncio.run(main())
+
+
+def test_fifth_account_owns_image_download_vision_and_send_path():
+    async def main():
+        active_ids = {101, 202, 303, 404, 505}
+        owner_id = 505
+        owner_account_id = "account-5"
+        image_bytes = b"fifth-account-jpeg"
+        mime_type = "image/jpeg"
+        owners = {(-1001, 999): (owner_id, float("inf"))}
+        db = cast(Any, _DB())
+        db.claim_message_response = AsyncMock(return_value=True)
+        db.claim_group_text = AsyncMock(return_value=True)
+        db.touch_activity = AsyncMock()
+        media = SimpleNamespace(
+            understand_image=AsyncMock(return_value="第五個帳號看懂了這張照片")
+        )
+        client = SimpleNamespace(send_message=AsyncMock())
+        event = SimpleNamespace(
+            id=505,
+            chat_id=-1001,
+            sender_id=999,
+            sender=SimpleNamespace(first_name="真人"),
+            raw_text="",
+            media=MessageMediaPhoto(photo=PhotoEmpty(id=505)),
+            file=SimpleNamespace(size=len(image_bytes), mime_type=mime_type),
+            mentioned=False,
+            is_reply=False,
+            reply_to=None,
+            download_media=AsyncMock(return_value=image_bytes),
+        )
+
+        workers = []
+        for index, user_id in enumerate(sorted(active_ids), start=1):
+            worker = _worker(media)
+            worker.account_id = f"account-{index}"
+            worker.tg_user_id = user_id
+            worker.managed_ids = active_ids
+            worker.active_ids = active_ids
+            worker.human_owners = owners
+            worker.db = cast(Any, db)
+            worker.persona = {
+                "name": f"圖片帳號{index}",
+                "gender": "女",
+                "age": 20 + index,
+                "city": "台中",
+                "district": "北屯",
+                "industry": "設計師",
+                "university": "中興",
+                "personality": f"第{index}個帳號的個性",
+                "hobbies": ["攝影"],
+                "looking_for": "想認識人",
+                "meetups_done": index,
+                "schedule": "正常",
+            }
+            worker.name = worker.persona["name"]
+            worker.tg_client = cast(Any, client)
+            worker.is_running = True
+            workers.append(worker)
+
+        async def reply_if_owner(worker):
+            should_reply = await worker._should_reply(event)
+            if should_reply:
+                await worker._reply_later(event, 0)
+            return should_reply
+
+        decisions = await asyncio.gather(
+            *(reply_if_owner(worker) for worker in workers)
+        )
+
+        assert decisions == [False, False, False, False, True]
+        event.download_media.assert_awaited_once_with(file=bytes)
+        media.understand_image.assert_awaited_once()
+        vision_args = media.understand_image.await_args.args
+        assert vision_args[:4] == (
+            owner_account_id,
+            image_bytes,
+            mime_type,
+            get_system_prompt(workers[-1].persona),
+        )
+        client.send_message.assert_awaited_once_with(
+            -1001, "第五個帳號看懂了這張照片"
+        )
 
     asyncio.run(main())
 

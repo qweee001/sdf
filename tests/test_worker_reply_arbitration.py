@@ -2,11 +2,15 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+from telethon.tl.types import MessageMediaPhoto, PhotoEmpty
+
 from app.config import load_settings
 from app.worker import AccountWorker
 
 
-MANAGED = {101, 202, 303, 404}
+ACCOUNT_IDS: tuple[int, ...] = (101, 202, 303, 404, 505, 606, 707, 808)
+MANAGED: set[int] = set(ACCOUNT_IDS[:4])
 
 
 class _ClaimDB:
@@ -85,6 +89,7 @@ class _ClaimDB:
 def _worker(
     tg_user_id: int,
     active_ids: set[int] | None = None,
+    managed_ids: set[int] | None = None,
     db=None,
     managed_origins=None,
     human_owners=None,
@@ -105,7 +110,7 @@ def _worker(
         ai_client=SimpleNamespace(),
         db=db or _ClaimDB(),
         config=config,
-        managed_ids=set(MANAGED),
+        managed_ids=set(MANAGED) if managed_ids is None else managed_ids,
         active_ids=set(MANAGED) if active_ids is None else active_ids,
         managed_origins={} if managed_origins is None else managed_origins,
         human_owners={} if human_owners is None else human_owners,
@@ -159,16 +164,32 @@ def test_ordinary_human_message_has_at_most_one_responder():
     asyncio.run(main())
 
 
-def test_human_image_has_exactly_one_responder_across_four_accounts():
+@pytest.mark.parametrize("account_count", [1, 4, 5, 8])
+def test_human_image_has_exactly_one_deterministic_responder(account_count):
     async def main():
-        event = _event(text="", message_id=780)
-        event.media = object()
+        active_ids = set(ACCOUNT_IDS[:account_count])
+        owner_id = ACCOUNT_IDS[account_count - 1]
+        owners = {(-5428680940, 999): (owner_id, float("inf"))}
+        event = _event(text="", message_id=780 + account_count)
+        event.media = MessageMediaPhoto(photo=PhotoEmpty(id=account_count))
         db = _ClaimDB()
-        decisions = [
-            await _worker(uid, db=db)._should_reply(event)
-            for uid in sorted(MANAGED)
+        workers = [
+            _worker(
+                uid,
+                active_ids,
+                managed_ids=active_ids,
+                db=db,
+                human_owners=owners,
+            )
+            for uid in ACCOUNT_IDS[:account_count]
         ]
+
+        decisions = await asyncio.gather(
+            *(worker._should_reply(event) for worker in workers)
+        )
+
         assert decisions.count(True) == 1
+        assert decisions[account_count - 1] is True
 
     asyncio.run(main())
 
