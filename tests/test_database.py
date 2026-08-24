@@ -75,6 +75,23 @@ def test_crud_full_cycle():
         loop.close()
 
 
+def test_reply_claim_release_requires_current_owner(tmp_path):
+    async def main():
+        db = Database(str(tmp_path / "reply-claim.db"))
+        await db.connect()
+
+        assert await db.claim_message_response(111, 9002, "a1") is True
+        assert await db.release_message_response_claim(111, 9002, "a2") is False
+        assert await db.claim_message_response(111, 9002, "a2") is False
+
+        assert await db.release_message_response_claim(111, 9002, "a1") is True
+        assert await db.release_message_response_claim(111, 9002, "a1") is False
+        assert await db.claim_message_response(111, 9002, "a2") is True
+        await db.close()
+
+    asyncio.run(main())
+
+
 def test_groups_column_roundtrip():
     """指定群組：groups 欄位可存讀（JSON list of int）"""
     if os.path.exists(DB):

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from telethon.tl.types import MessageMediaPhoto, PhotoEmpty
 
+from app.manager import AccountManager
 from app.media import MediaAsset
 from app.persona import get_system_prompt
 from app.worker import AccountWorker
@@ -29,6 +30,7 @@ class _DB:
 
 
 class _Event:
+    id = 1
     chat_id = -1001
     sender_id = 999
     raw_text = ""
@@ -41,7 +43,11 @@ class _Event:
         return b"jpeg"
 
 
-def _worker(media_service=None):
+def _worker(
+    media_service=None,
+    reply_claim_signals=None,
+    failed_reply_claimants=None,
+):
     cfg = SimpleNamespace(
         ai_model="test",
         memory_max_messages=10,
@@ -63,6 +69,8 @@ def _worker(media_service=None):
         on_status_change=None,
         selected_groups=[-1001],
         media_service=media_service,
+        reply_claim_signals=reply_claim_signals,
+        failed_reply_claimants=failed_reply_claimants,
     )
 
 
@@ -71,6 +79,73 @@ def test_media_request_kind_distinguishes_files_from_live_video_calls():
     assert AccountWorker._requested_media_kind("可以用語音說嗎") == "voice"
     assert AccountWorker._requested_media_kind("拍個短片給我") == "video"
     assert AccountWorker._requested_media_kind("要不要開視訊") is None
+
+
+def test_media_claim_coordination_state_is_shared_by_reference():
+    signals = {}
+    failed = {}
+    worker = _worker(
+        reply_claim_signals=signals,
+        failed_reply_claimants=failed,
+    )
+
+    assert worker.reply_claim_signals is signals
+    assert worker.failed_reply_claimants is failed
+
+
+def test_manager_injects_same_media_claim_state_into_worker():
+    async def main():
+        manager = cast(Any, AccountManager.__new__(AccountManager))
+        manager.config = SimpleNamespace(tg_api_id=1, tg_api_hash="hash")
+        manager.db = SimpleNamespace(update_account=AsyncMock())
+        manager.secret_box = SimpleNamespace(decrypt=lambda value: value)
+        manager.workers = {}
+        manager._ai_client = None
+        manager._media_service = None
+        manager.managed_ids = set()
+        manager.active_ids = set()
+        manager.managed_origins = {}
+        manager.human_owners = {}
+        manager.recent_proactive_owners = {}
+        manager.last_human_activity = {}
+        manager.reply_claim_signals = {}
+        manager.failed_reply_claimants = {}
+        fake_worker = SimpleNamespace(start=AsyncMock(), is_running=True)
+
+        with patch("app.manager.AccountWorker", return_value=fake_worker) as factory:
+            await manager._start_account({
+                "id": "worker-1",
+                "session_key": "encrypted-session",
+                "groups": "[-1001]",
+            })
+
+        kwargs = factory.call_args.kwargs
+        assert kwargs["reply_claim_signals"] is manager.reply_claim_signals
+        assert kwargs["failed_reply_claimants"] is manager.failed_reply_claimants
+
+    asyncio.run(main())
+
+
+def test_media_claim_wait_expiry_cleans_shared_state():
+    async def main():
+        key = (-1001, 77)
+        signals = {key: asyncio.Event()}
+        failed = {key: {101}}
+        worker = _worker(
+            reply_claim_signals=signals,
+            failed_reply_claimants=failed,
+        )
+        worker.tg_user_id = 202
+        event = _Event()
+        event.id = 77
+
+        with patch("app.worker._REPLY_TASK_WINDOW_SECONDS", 0.01):
+            assert await worker._wait_for_media_claim(event) is False
+
+        assert signals == {}
+        assert failed == {}
+
+    asyncio.run(main())
 
 
 def test_incoming_image_is_downloaded_only_for_vision_reply():

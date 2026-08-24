@@ -15,7 +15,7 @@ MANAGED: set[int] = set(ACCOUNT_IDS[:4])
 
 class _ClaimDB:
     def __init__(self):
-        self.claims = set()
+        self.claims = {}
         self.text_claims = set()
         self.text_claim_lock = asyncio.Lock()
         self.followup_claims = set()
@@ -25,13 +25,28 @@ class _ClaimDB:
         self.messages = []
         self.activities = []
 
+    async def get_recent_messages(self, *_args, **_kwargs):
+        return []
+
+    async def get_recent_group_replies(self, *_args, **_kwargs):
+        return []
+
     async def claim_message_response(
         self, group_id: int, message_id: int, account_id: str
     ) -> bool:
         key = (group_id, message_id)
         if key in self.claims:
             return False
-        self.claims.add(key)
+        self.claims[key] = account_id
+        return True
+
+    async def release_message_response_claim(
+        self, group_id: int, message_id: int, account_id: str
+    ) -> bool:
+        key = (group_id, message_id)
+        if self.claims.get(key) != account_id:
+            return False
+        self.claims.pop(key)
         return True
 
     async def claim_group_text(
@@ -96,6 +111,9 @@ def _worker(
     recent_proactive_owners=None,
     last_human_activity=None,
     base_reply_probability=1.0,
+    media_service=None,
+    reply_claim_signals=None,
+    failed_reply_claimants=None,
 ) -> AccountWorker:
     config = load_settings()
     config.base_reply_probability = base_reply_probability
@@ -128,6 +146,9 @@ def _worker(
             "looking_for": "想認識人", "meetups_done": 1, "schedule": "正常",
         },
         selected_groups=[-5428680940],
+        media_service=media_service,
+        reply_claim_signals=reply_claim_signals,
+        failed_reply_claimants=failed_reply_claimants,
     )
     worker.tg_user_id = tg_user_id
     return worker
@@ -190,6 +211,104 @@ def test_human_image_has_exactly_one_deterministic_responder(account_count):
 
         assert decisions.count(True) == 1
         assert decisions[account_count - 1] is True
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("failure_mode", ["empty", "exception"])
+def test_failed_image_claimant_is_replaced_once(failure_mode):
+    async def main():
+        db = _ClaimDB()
+        active = {101, 202, 303}
+        owners = {(-5428680940, 999): (101, float("inf"))}
+        signals = {}
+        failed = {}
+        first_vision_started = asyncio.Event()
+        allow_first_failure = asyncio.Event()
+        replacement_vision_started = asyncio.Event()
+        allow_replacement_success = asyncio.Event()
+        vision_accounts = []
+
+        async def understand_image(account_id, *_args):
+            vision_accounts.append(account_id)
+            if account_id == "101":
+                first_vision_started.set()
+                await allow_first_failure.wait()
+                if failure_mode == "exception":
+                    raise RuntimeError("vision unavailable")
+                return ""
+            if account_id == "202":
+                replacement_vision_started.set()
+                await allow_replacement_success.wait()
+                return "第二個帳號看懂了照片"
+            raise AssertionError("third worker must not call vision")
+
+        media = SimpleNamespace(
+            understand_image=AsyncMock(side_effect=understand_image)
+        )
+        event = _event(text="", message_id=990)
+        event.media = MessageMediaPhoto(photo=PhotoEmpty(id=990))
+        event.file = SimpleNamespace(size=4, mime_type="image/jpeg")
+        event.download_media = AsyncMock(return_value=b"jpeg")
+
+        workers = [
+            _worker(
+                uid,
+                active,
+                managed_ids=active,
+                db=db,
+                human_owners=owners,
+                media_service=media,
+                reply_claim_signals=signals,
+                failed_reply_claimants=failed,
+            )
+            for uid in sorted(active)
+        ]
+        clients = []
+        for worker in workers:
+            worker.config.media_enabled = True
+            worker.config.media_max_input_bytes = 1024
+            client = SimpleNamespace(send_message=AsyncMock())
+            worker.tg_client = client
+            worker.is_running = True
+            clients.append(client)
+
+        assert await workers[0]._should_reply(event) is True
+        first_task = asyncio.create_task(workers[0]._reply_later(event, 0))
+        await first_vision_started.wait()
+
+        async def wait_and_reply(worker):
+            claimed = await worker._should_reply(event)
+            if claimed:
+                await worker._reply_later(event, 0)
+            return claimed
+
+        second_task = asyncio.create_task(wait_and_reply(workers[1]))
+        await asyncio.sleep(0)
+        third_task = asyncio.create_task(wait_and_reply(workers[2]))
+        await asyncio.sleep(0)
+        allow_first_failure.set()
+        await replacement_vision_started.wait()
+
+        claim_key = (-5428680940, 990)
+        assert failed == {claim_key: {101}}
+        assert db.claims[claim_key] == "202"
+        assert await workers[0]._should_reply(event) is False
+        allow_replacement_success.set()
+        decisions = await asyncio.gather(second_task, third_task)
+        await first_task
+
+        assert decisions == [True, False]
+        assert vision_accounts == ["101", "202"]
+        assert media.understand_image.await_count == 2
+        assert sum(client.send_message.await_count for client in clients) == 1
+        clients[0].send_message.assert_not_awaited()
+        clients[1].send_message.assert_awaited_once_with(
+            -5428680940, "第二個帳號看懂了照片"
+        )
+        clients[2].send_message.assert_not_awaited()
+        assert signals == {}
+        assert failed == {}
 
     asyncio.run(main())
 

@@ -36,6 +36,7 @@ from .media import MediaAsset, OrcaMediaService
 from .persona import generate_persona, generate_proactive_topic, get_system_prompt
 
 _MAX_REPLY_CHARS = 60
+_REPLY_TASK_WINDOW_SECONDS = 45.0
 
 _DIRECT_VIDEO_PATTERN = re.compile(
     r"(?:視訊|视讯|視頻|视频|視屏|视屏|視像|视像|直播|實況|实况)|"
@@ -174,7 +175,9 @@ class AccountWorker:
                  managed_origins: dict | None = None,
                  human_owners: dict | None = None,
                  recent_proactive_owners: dict | None = None,
-                 last_human_activity: dict | None = None):
+                 last_human_activity: dict | None = None,
+                 reply_claim_signals: dict[tuple[int, int], asyncio.Event] | None = None,
+                 failed_reply_claimants: dict[tuple[int, int], set[int]] | None = None):
         self.account_id = account_id
         self.session_key = session_key
         self.tg_api_id = tg_api_id
@@ -192,6 +195,12 @@ class AccountWorker:
         )
         self.last_human_activity = (
             last_human_activity if last_human_activity is not None else {}
+        )
+        self.reply_claim_signals = (
+            reply_claim_signals if reply_claim_signals is not None else {}
+        )
+        self.failed_reply_claimants = (
+            failed_reply_claimants if failed_reply_claimants is not None else {}
         )
         self.on_status_change = on_status_change
         # 指定群組：空集合 = 全部禁止；非空 = 只在這幾個群活動。
@@ -379,7 +388,11 @@ class AccountWorker:
                 return
             # 人味延遲：被@/回覆 → 5-20 秒；普通 → 8-45 秒
             is_hot = event.mentioned or (event.is_reply and event.reply_to)
-            delay = random.uniform(5, 20) if is_hot else random.uniform(8, 45)
+            delay = (
+                random.uniform(5, 20)
+                if is_hot
+                else random.uniform(8, _REPLY_TASK_WINDOW_SECONDS)
+            )
             self._schedule_reply(
                 event,
                 delay,
@@ -475,14 +488,21 @@ class AccountWorker:
             self.tg_user_id or 0
         )
 
-    async def _claim_reply(self, event) -> bool:
-        message_id = int(
-            getattr(event, "id", 0)
-            or getattr(getattr(event, "message", None), "id", 0)
-            or 0
+    @staticmethod
+    def _reply_claim_key(event) -> tuple[int, int]:
+        return (
+            int(event.chat_id or 0),
+            int(
+                getattr(event, "id", 0)
+                or getattr(getattr(event, "message", None), "id", 0)
+                or 0
+            ),
         )
+
+    async def _claim_reply(self, event) -> bool:
+        group_id, message_id = self._reply_claim_key(event)
         return await self.db.claim_message_response(
-            int(event.chat_id or 0), message_id, self.account_id
+            group_id, message_id, self.account_id
         )
 
     @staticmethod
@@ -499,12 +519,7 @@ class AccountWorker:
             return 0
         return int(owner_id)
 
-    async def _claim_human_reply(self, event, owner_id: int | None = None) -> bool:
-        if owner_id and int(self.tg_user_id or 0) != int(owner_id):
-            return False
-        claimed = await self._claim_reply(event)
-        if not claimed:
-            return False
+    def _mark_human_claim(self, event) -> None:
         group_id = int(event.chat_id or 0)
         sender_id = int(event.sender_id or 0)
         self.human_owners[(group_id, sender_id)] = (
@@ -512,6 +527,95 @@ class AccountWorker:
             time.time() + 15 * 60,
         )
         self.stats["human_claimed"] += 1
+
+    def _expire_media_claim_state(
+        self, key: tuple[int, int], signal: asyncio.Event
+    ) -> None:
+        if self.reply_claim_signals.get(key) is not signal:
+            return
+        self.reply_claim_signals.pop(key, None)
+        self.failed_reply_claimants.pop(key, None)
+
+    async def _wait_for_media_claim(self, event) -> bool:
+        key = self._reply_claim_key(event)
+        claimant_id = int(self.tg_user_id or 0)
+        if claimant_id in self.failed_reply_claimants.get(key, set()):
+            return False
+        signal = self.reply_claim_signals.setdefault(key, asyncio.Event())
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _REPLY_TASK_WINDOW_SECONDS
+        while signal is not None:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                self._expire_media_claim_state(key, signal)
+                return False
+            try:
+                await asyncio.wait_for(signal.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                self._expire_media_claim_state(key, signal)
+                return False
+
+            failed = self.failed_reply_claimants.get(key, set())
+            if claimant_id in failed or not failed:
+                return False
+            if await self._claim_reply(event):
+                self.reply_claim_signals[key] = asyncio.Event()
+                self._mark_human_claim(event)
+                return True
+
+            current = self.reply_claim_signals.get(key)
+            if current is None or current is signal:
+                return False
+            signal = current
+        return False
+
+    async def _finish_media_claim(self, event, succeeded: bool) -> None:
+        key = self._reply_claim_key(event)
+        signal = self.reply_claim_signals.get(key)
+        if signal is None:
+            signal = asyncio.Event()
+            self.reply_claim_signals[key] = signal
+
+        if not succeeded:
+            claimant_id = int(self.tg_user_id or 0)
+            self.failed_reply_claimants.setdefault(key, set()).add(claimant_id)
+            try:
+                await self.db.release_message_response_claim(
+                    key[0], key[1], self.account_id
+                )
+            finally:
+                signal.set()
+                asyncio.get_running_loop().call_later(
+                    _REPLY_TASK_WINDOW_SECONDS,
+                    self._expire_media_claim_state,
+                    key,
+                    signal,
+                )
+            return
+
+        signal.set()
+        await asyncio.sleep(0)
+        self._expire_media_claim_state(key, signal)
+
+    async def _claim_human_reply(self, event, owner_id: int | None = None) -> bool:
+        is_photo = isinstance(getattr(event, "media", None), MessageMediaPhoto)
+        claimant_id = int(self.tg_user_id or 0)
+        key = self._reply_claim_key(event)
+        if is_photo and claimant_id in self.failed_reply_claimants.get(key, set()):
+            return False
+        if owner_id and claimant_id != int(owner_id):
+            if is_photo:
+                return await self._wait_for_media_claim(event)
+            return False
+        if is_photo:
+            self.reply_claim_signals.setdefault(key, asyncio.Event())
+        claimed = await self._claim_reply(event)
+        if not claimed:
+            if is_photo:
+                return await self._wait_for_media_claim(event)
+            return False
+        self._mark_human_claim(event)
         return True
 
     async def _should_follow_managed_origin(self, event) -> bool:
@@ -579,6 +683,8 @@ class AccountWorker:
         # 回覆別人或 @別人的訊息不插話；只有真正被指向的帳號可認領。
         if event.is_reply or event.mentioned:
             if not await self._is_directed_at_me(event):
+                if isinstance(getattr(event, "media", None), MessageMediaPhoto):
+                    return await self._wait_for_media_claim(event)
                 return False
             return await self._claim_human_reply(event, int(self.tg_user_id or 0))
         group_id = int(event.chat_id or 0)
@@ -677,12 +783,19 @@ class AccountWorker:
         self, event, delay: float, *, managed_followup: bool = False
     ):
         await asyncio.sleep(delay)
+        sent = False
+        is_human_reply = int(event.sender_id or 0) not in self.managed_ids
+        is_media_claim = (
+            is_human_reply
+            and not managed_followup
+            and isinstance(getattr(event, "media", None), MessageMediaPhoto)
+        )
         if not self.is_running or not self.tg_client:
             if managed_followup:
                 await self._finish_managed_reservation(event, False)
+            if is_media_claim:
+                await self._finish_media_claim(event, False)
             return
-        sent = False
-        is_human_reply = int(event.sender_id or 0) not in self.managed_ids
         try:
             media_kind = (
                 None
@@ -700,6 +813,7 @@ class AccountWorker:
                     if await self._send_media_recorded(
                         int(event.chat_id), asset, marker
                     ):
+                        sent = True
                         if is_human_reply:
                             self.stats["human_sent"] += 1
                         return
@@ -743,6 +857,16 @@ class AccountWorker:
             self._record_reply_drop(type(e).__name__)
             print(f"[{self.name}] reply error: {e}", flush=True)
         finally:
+            if is_media_claim:
+                try:
+                    await self._finish_media_claim(event, sent)
+                except Exception as e:
+                    self.stats["errors"] += 1
+                    self._record_reply_drop("media_claim_finalize_error")
+                    print(
+                        f"[{self.name}] media claim finalize error: {e}",
+                        flush=True,
+                    )
             if managed_followup:
                 try:
                     await self._finish_managed_reservation(event, sent)

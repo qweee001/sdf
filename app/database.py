@@ -404,6 +404,20 @@ class Database:
             await self._c.commit()
             return cursor.rowcount == 1
 
+    async def release_message_response_claim(
+        self, group_id: int, message_id: int, account_id: str
+    ) -> bool:
+        if not group_id or message_id <= 0:
+            return False
+        key = f"reply:{group_id}:{message_id}"
+        async with self._claim_lock:
+            cursor = await self._c.execute(
+                "DELETE FROM outbound_claims WHERE claim_key = ? AND account_id = ?",
+                (key, account_id),
+            )
+            await self._c.commit()
+            return cursor.rowcount == 1
+
     @staticmethod
     def _normalize_outbound_text(text: str) -> str:
         normalized = unicodedata.normalize("NFKC", str(text)).casefold()

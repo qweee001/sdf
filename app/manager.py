@@ -35,6 +35,8 @@ class AccountManager:
         self.human_owners: dict[tuple[int, int], tuple[int, float]] = {}
         self.recent_proactive_owners: dict[int, tuple[int, float]] = {}
         self.last_human_activity: dict[int, float] = {}
+        self.reply_claim_signals: dict[tuple[int, int], asyncio.Event] = {}
+        self.failed_reply_claimants: dict[tuple[int, int], set[int]] = {}
         self._status: dict[str, dict] = {}
         self._ai_client = AsyncOpenAI(
             base_url=config.ai_base_url,
@@ -156,6 +158,8 @@ class AccountManager:
             human_owners=self.human_owners,
             recent_proactive_owners=self.recent_proactive_owners,
             last_human_activity=self.last_human_activity,
+            reply_claim_signals=self.reply_claim_signals,
+            failed_reply_claimants=self.failed_reply_claimants,
         )
         self.workers[account_id] = worker
         await worker.start()
