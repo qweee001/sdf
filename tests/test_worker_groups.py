@@ -1,5 +1,7 @@
 import asyncio
 import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 from app.config import load_settings
 from app.crypto import SecretBox
@@ -92,6 +94,39 @@ def test_worker_no_selected_groups_denies_all():
         loop.run_until_complete(main())
     finally:
         loop.close()
+
+
+def test_private_message_is_ignored_without_any_side_effects():
+    """私訊不屬於指定群組聊天：不記錄、不生成、不排程也不發送。"""
+    db = SimpleNamespace(
+        add_private_message=AsyncMock(),
+        add_message=AsyncMock(),
+        touch_activity=AsyncMock(),
+    )
+    worker = _make_worker(db, "private-off", [-1001])
+    client = SimpleNamespace(send_message=AsyncMock())
+    worker.tg_client = client
+    worker._should_reply = AsyncMock(return_value=True)
+    worker._call_ai = AsyncMock(return_value="不應產生")
+    worker._schedule_reply = Mock()
+    event = SimpleNamespace(
+        is_private=True,
+        is_group=False,
+        chat_id=12345,
+        sender_id=12345,
+        raw_text="私訊你好",
+        get_sender=AsyncMock(return_value=_FakeUser()),
+    )
+
+    asyncio.run(worker.on_message(event))
+
+    db.add_private_message.assert_not_awaited()
+    db.add_message.assert_not_awaited()
+    db.touch_activity.assert_not_awaited()
+    worker._should_reply.assert_not_awaited()
+    worker._call_ai.assert_not_awaited()
+    worker._schedule_reply.assert_not_called()
+    client.send_message.assert_not_awaited()
 
 
 def test_group_list_reflects_dialogs():

@@ -37,6 +37,151 @@ from .persona import generate_persona, generate_proactive_topic, get_system_prom
 
 _MAX_REPLY_CHARS = 60
 _REPLY_TASK_WINDOW_SECONDS = 45.0
+_MAX_RECENT_PROACTIVE_TOPICS = 64
+
+
+def _term_pattern(*terms: str) -> re.Pattern[str]:
+    """編譯已審核詞彙；分類關係由 helper 明確判斷。"""
+    ordered = sorted(set(terms), key=len, reverse=True)
+    return re.compile("|".join(re.escape(term) for term in ordered))
+
+
+_GROUP_CONTEXT_PATTERN = _term_pattern(
+    "這個群", "这个群", "這群", "这群", "本群", "那群",
+    "群組", "群组", "群裡", "群里", "群內", "群内",
+)
+_GROUP_STAFF_ROLE_PATTERN = _term_pattern(
+    "管理員", "管理员", "群主", "小編", "小编", "助理", "版主", "客服",
+)
+_STAFF_ENDORSEMENT_OR_ACTION_PATTERN = _term_pattern(
+    "人很好", "超讚", "超赞", "很讚", "很赞", "用心", "負責", "负责",
+    "實在", "实在", "可靠", "踢", "移除", "封鎖", "封锁", "把關", "把关",
+    "審核", "审核", "篩選", "筛选", "處理群", "处理群",
+)
+_ORDINARY_STAFF_PREFIXES = {
+    # 裸稱呼來自群務話術；先排除明確的一般職業／服務複合詞。
+    "助理": ("行政",),
+    "版主": ("論壇", "论坛"),
+    "客服": ("網路", "网络"),
+}
+_GROUP_ENTRY_MARKER_PATTERN = _term_pattern(
+    "群規", "群规", "入群", "進群", "进群", "加群",
+)
+_RULE_TERM_PATTERN = _term_pattern(
+    "規則", "规则", "要求", "條件", "条件", "門檻", "门槛", "資格", "资格",
+    "審核", "审核", "篩選", "筛选", "認證", "认证", "驗證", "验证", "把關",
+    "把关", "不能", "不得", "禁止", "不准", "只准", "只許", "只许", "必須",
+    "必须", "規定", "规定",
+)
+_JOIN_PATTERN = _term_pattern("加入", "進來", "进来", "入場", "入场", "門檻", "门槛")
+_PAYMENT_PATTERN = _term_pattern(
+    "1000", "一千", "付錢", "付钱", "付費", "付费", "付款", "繳費", "缴费",
+    "繳錢", "缴钱", "交錢", "交钱", "會費", "会费", "收費", "收费", "費用", "费用",
+)
+_MEMBER_CONTEXT_PATTERN = _term_pattern(
+    "這裡的人", "这里的人", "群裡的人", "群里的人", "會員", "会员", "群友", "大家",
+)
+_ORDINARY_MEMBERSHIP_CONTEXT_PATTERN = _term_pattern("健身房")
+_SCREENING_PATTERN = _term_pattern(
+    "身分", "身份", "確認", "确认", "把關", "把关", "審核", "审核", "篩選", "筛选",
+    "過濾", "过滤", "擋掉", "挡掉", "認證", "认证", "驗證", "验证",
+)
+_IDENTITY_CLAIM_PATTERN = _term_pattern("本人", "真人", "身分", "身份", "正常", "可靠")
+_SUSPICIOUS_ACCOUNT_PATTERN = _term_pattern(
+    "可疑帳號", "可疑账号", "帳號", "账号", "怪人",
+)
+_GROUP_ASSURANCE_PATTERN = _term_pattern(
+    "絕對不會被騙", "绝对不会被骗", "不用擔心", "不用担心", "不必擔心", "不必担心",
+    "別擔心", "别担心", "不用怕", "不會被騙", "不会被骗", "不會有", "不会有",
+    "安全", "放心", "可靠", "正常", "真人", "沒問題", "没问题", "很好", "很棒",
+    "不錯", "不错", "真的可以", "值得", "保障", "詐騙", "诈骗", "仙人跳", "綁架",
+    "绑架", "偷拍", "偷錄", "偷录", "秘密錄音", "秘密录音",
+)
+_GROUP_NEGATIVE_PATTERN = _term_pattern(
+    "都是機器人", "都是机器人", "爛", "烂", "很差", "糟", "假的", "騙人", "骗人",
+)
+_GROUP_DEFENSE_PATTERN = _term_pattern(
+    "別再罵", "别再骂", "不要罵", "不要骂", "別罵", "别骂", "不要批評", "不要批评",
+    "不要攻擊", "不要攻击", "沒那麼糟", "没那么糟", "別亂說", "别乱说", "不要亂講",
+    "不要乱讲",
+)
+
+
+def _patterns_are_near(
+    text: str,
+    first: re.Pattern[str],
+    second: re.Pattern[str],
+    max_gap: int,
+) -> bool:
+    """只在兩個已命名語意類別有明確近距關係時命中。"""
+    first_matches = list(first.finditer(text))
+    second_matches = list(second.finditer(text))
+    for left in first_matches:
+        for right in second_matches:
+            if left.end() <= right.start():
+                gap = right.start() - left.end()
+            elif right.end() <= left.start():
+                gap = left.start() - right.end()
+            else:
+                gap = 0
+            if gap <= max_gap:
+                return True
+    return False
+
+
+def _mentions_group_staff_meta(text: str) -> bool:
+    claims = list(_STAFF_ENDORSEMENT_OR_ACTION_PATTERN.finditer(text))
+    contexts = list(_GROUP_CONTEXT_PATTERN.finditer(text))
+    for role in _GROUP_STAFF_ROLE_PATTERN.finditer(text):
+        prefixes = _ORDINARY_STAFF_PREFIXES.get(role.group(), ())
+        if any(text[max(0, role.start() - len(prefix)):role.start()] == prefix for prefix in prefixes):
+            continue
+        related = claims + contexts
+        if any(
+            min(abs(role.end() - item.start()), abs(item.end() - role.start())) <= 12
+            for item in related
+        ):
+            return True
+    return False
+
+
+def _mentions_group_rules(text: str) -> bool:
+    if _GROUP_ENTRY_MARKER_PATTERN.search(text):
+        return True
+    return (
+        _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _RULE_TERM_PATTERN, 12)
+        or _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _JOIN_PATTERN, 8)
+    )
+
+
+def _mentions_paid_membership(text: str) -> bool:
+    if not _PAYMENT_PATTERN.search(text):
+        return False
+    if _patterns_are_near(text, _PAYMENT_PATTERN, _JOIN_PATTERN, 16):
+        return True
+    if _patterns_are_near(text, _PAYMENT_PATTERN, _GROUP_CONTEXT_PATTERN, 16):
+        return True
+    return (
+        not _ORDINARY_MEMBERSHIP_CONTEXT_PATTERN.search(text)
+        and _patterns_are_near(text, _PAYMENT_PATTERN, _MEMBER_CONTEXT_PATTERN, 12)
+    )
+
+
+def _mentions_group_screening_or_identity(text: str) -> bool:
+    return (
+        _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _SCREENING_PATTERN, 16)
+        or _patterns_are_near(text, _MEMBER_CONTEXT_PATTERN, _IDENTITY_CLAIM_PATTERN, 12)
+        or _patterns_are_near(text, _MEMBER_CONTEXT_PATTERN, _SCREENING_PATTERN, 12)
+        or _patterns_are_near(text, _SUSPICIOUS_ACCOUNT_PATTERN, _SCREENING_PATTERN, 12)
+    )
+
+
+def _mentions_group_assurance_or_defense(text: str) -> bool:
+    return (
+        _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _GROUP_ASSURANCE_PATTERN, 18)
+        or _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _GROUP_NEGATIVE_PATTERN, 12)
+        or _patterns_are_near(text, _GROUP_CONTEXT_PATTERN, _GROUP_DEFENSE_PATTERN, 12)
+    )
 
 _DIRECT_VIDEO_PATTERN = re.compile(
     r"(?:視訊|视讯|視頻|视频|視屏|视屏|視像|视像|直播|實況|实况)|"
@@ -225,6 +370,7 @@ class AccountWorker:
         self._dialogs: dict[int, str] = {}  # group_id -> 群名稱（供控制台勾選）
         self._proactive_today = 0
         self._proactive_day = 0
+        self._recent_proactive_topics: set[str] = set()
         self._generation_reasons: dict[tuple[int, int], str] = {}
         self._successful_vision_events: set[tuple[int, int]] = set()
 
@@ -285,6 +431,7 @@ class AccountWorker:
             self.is_running = True
             self._proactive_day = self._today_index()
             self._proactive_today = 0
+            self._recent_proactive_topics.clear()
             self._proactive_task = asyncio.create_task(self._proactive_loop())
             self._cleanup_task = asyncio.create_task(self._memory_cleanup_loop())
             await self._notify_status(
@@ -364,7 +511,6 @@ class AccountWorker:
             return
         try:
             if event.is_private:
-                await self._handle_private(event)
                 return
             if not event.is_group or event.chat_id is None:
                 return
@@ -444,34 +590,19 @@ class AccountWorker:
         city = self.persona["city"]
         if gender == "女":
             templates = [
-                f"歡迎歡迎～ {name} 是哪裡的呀？",
-                f"新來的 {name}！好開心有人加入 XD",
-                f"嗨 {name}～ 剛加入嗎？我們這邊人都不會咬人的啦",
-                f"{name} 你好呀～ 我們住{city}的比較多，你在哪邊？",
+                f"歡迎～{name} 今天過得怎麼樣？",
+                f"{name} 剛剛在忙什麼呀？",
+                f"嗨 {name}～你也是{city}附近嗎？",
+                f"{name} 最近有看什麼好看的嗎？",
             ]
         else:
             templates = [
-                f"嗨 {name}，歡迎加入～ 哪裡的兄弟？",
-                f"{name} 好，歡迎！我們這邊都很正常不會亂來",
-                f"歡迎新會員 {name} XD 有問題問我們就好",
-                f"嗨 {name}～ 我們都是認真想認識人的，放心",
+                f"嗨 {name}，今天在忙什麼？",
+                f"{name} 好，最近有吃到什麼好吃的嗎？",
+                f"歡迎 {name}，你平常都去哪裡晃？",
+                f"嗨 {name}，你也住{city}附近嗎？",
             ]
         return random.choice(templates)
-
-    async def _handle_private(self, event):
-        """私訊只記錄不回覆（防炸號），真人走助理流程"""
-        try:
-            sender_id = int(event.sender_id or 0)
-            if sender_id in self.managed_ids:
-                return
-            sender = await event.get_sender()
-            sender_name = get_display_name(sender) or f"用戶{sender_id}"
-            preview = (event.raw_text or "")[:200]
-            await self.db.add_private_message(
-                self.account_id, sender_id, sender_name, preview
-            )
-        except Exception:
-            pass
 
     # ---------- 回覆決策 ----------
 
@@ -787,9 +918,11 @@ class AccountWorker:
         return True
 
     def _fallback_reply(self, event, *, managed_followup: bool) -> str:
-        """AI／內容檢查失敗時的最後短句兜底，避免已認領事件沉默。"""
+        """AI／內容檢查失敗時，以當前細節生成短句兜底。"""
         incoming = unicodedata.normalize("NFKC", str(event.raw_text or ""))
         personality = str(self.persona.get("personality") or "")
+        if self._mentions_group_meta(incoming):
+            return "我今天想聊點日常，剛好在想晚餐要吃什麼"
         if "穿什麼" in incoming or "穿甚麼" in incoming:
             return "今天穿得比較簡單，你喜歡哪種風格？"
         if incoming.strip() in {"看看", "看一下", "給我看", "给我看"}:
@@ -800,15 +933,16 @@ class AccountWorker:
             return "聽起來很好看欸，準備去哪裡走走？"
         if "真誠" in incoming:
             return "真誠很加分，聊起來舒服最重要"
+        detail = " ".join(incoming.split()).strip()[:18] or "剛剛那件事"
         if "害羞" in personality or "慢熟" in personality:
-            return "我有看到，只是比較慢熟，先聊聊呀"
+            return f"你提到「{detail}」，我有認真看到"
         if "風騷" in personality or "會撩" in personality:
-            return "這話題有意思，再多說一點啊"
+            return f"「{detail}」這句有意思，我也有點好奇"
         if "直球" in personality:
-            return "有看到，想聊什麼就直接講"
+            return f"你說的「{detail}」我有注意到"
         if managed_followup:
-            return "我剛好也有同感，繼續說啊"
-        return "有看到啦，你想聊什麼？"
+            return f"你提到「{detail}」，我也會想到這件事"
+        return f"「{detail}」我有看到，聽起來你很有感"
 
     async def _finish_managed_reservation(self, event, sent: bool) -> None:
         group_id = int(event.chat_id or 0)
@@ -899,6 +1033,7 @@ class AccountWorker:
             else:
                 self._record_reply_drop(generation_reason)
                 if generation_reason in {
+                    "group_meta",
                     "blocked_video",
                     "too_long",
                     "near_duplicate",
@@ -1161,8 +1296,14 @@ class AccountWorker:
             return ""
         too_long = len(reply) > _MAX_REPLY_CHARS
         mentions_video = self._mentions_video_topic(reply)
+        mentions_group_meta = self._mentions_group_meta(reply)
         repetitive = self._is_near_duplicate(reply, recent_group_replies)
-        if not too_long and not mentions_video and not repetitive:
+        if (
+            not too_long
+            and not mentions_video
+            and not mentions_group_meta
+            and not repetitive
+        ):
             if image:
                 self.stats["images_understood"] += 1
             self._set_generation_reason(event, "ok")
@@ -1175,6 +1316,11 @@ class AccountWorker:
             correction += (
                 "不要提及或複述禁止話題，也不要解釋拒絕原因；"
                 "直接自然轉回文字聊天、交換聯絡方式或約出來見面。"
+            )
+        if mentions_group_meta:
+            correction += (
+                "上一版談到群務。不得談群務、加入條件、相關人員或替群體背書；"
+                "不要解釋拒絕原因，直接回應最新消息的具體內容。"
             )
         if repetitive:
             correction += (
@@ -1200,12 +1346,15 @@ class AccountWorker:
             return ""
         retry_too_long = len(retry) > _MAX_REPLY_CHARS
         retry_video = self._mentions_video_topic(retry)
+        retry_group_meta = self._mentions_group_meta(retry)
         retry_repetitive = self._is_near_duplicate(
             retry, recent_group_replies
         )
-        if retry_too_long or retry_video or retry_repetitive:
+        if retry_too_long or retry_video or retry_group_meta or retry_repetitive:
             reason = (
-                "blocked_video"
+                "group_meta"
+                if retry_group_meta
+                else "blocked_video"
                 if retry_video
                 else "too_long"
                 if retry_too_long
@@ -1222,6 +1371,21 @@ class AccountWorker:
     def _normalized_reply(text: str) -> str:
         normalized = unicodedata.normalize("NFKC", text or "").casefold()
         return re.sub(r"[^\w\u3400-\u9fff]+", "", normalized)
+
+    @staticmethod
+    def _mentions_group_meta(text: str) -> bool:
+        """只擋群務、加入條件與群體背書，不把一般「群組」聊天誤傷。"""
+        normalized = unicodedata.normalize("NFKC", text or "").casefold()
+        normalized = re.sub(r"\s+", "", normalized)
+        if not normalized:
+            return False
+        return any(detector(normalized) for detector in (
+            _mentions_group_staff_meta,
+            _mentions_group_rules,
+            _mentions_paid_membership,
+            _mentions_group_screening_or_identity,
+            _mentions_group_assurance_or_defense,
+        ))
 
     @classmethod
     def _is_near_duplicate(cls, text: str, recent: list[str]) -> bool:
@@ -1319,14 +1483,15 @@ class AccountWorker:
         except Exception:
             pass
         is_water = (int(event.sender_id or 0) in self.managed_ids)
-        water_hint = "（對方是群組裡另一位付費會員）" if is_water else ""
+        water_hint = "（對方是群組裡另一位成員）" if is_water else ""
         incoming = str(event.raw_text or "").strip()
         if isinstance(getattr(event, "media", None), MessageMediaPhoto):
             incoming = f"{incoming} [圖片]".strip()
         return (
             f"{context}"
             f"最新消息：[{sender_name or '有人'}]{water_hint} {incoming}\n"
-            "請根據上下文生成自然回覆（1-3 句，台灣繁體口語；"
+            "請先回應最新消息中的至少一個具體細節，再視需要延伸相關話題；"
+            "不能只叫對方繼續說。生成自然回覆（1-3 句，台灣繁體口語；"
             "最多 60 個字元，標點、空格也算）。"
         )
 
@@ -1464,6 +1629,27 @@ class AccountWorker:
         last_human = float(self.last_human_activity.get(int(group_id), 0) or 0)
         return last_human > 0 and time.time() - last_human < 10 * 60
 
+    def _reset_proactive_day(self) -> None:
+        today = self._today_index()
+        if today == self._proactive_day:
+            return
+        self._proactive_day = today
+        self._proactive_today = 0
+        self._recent_proactive_topics.clear()
+
+    def _next_proactive_topic(self) -> str:
+        """一天內不重複正規化話題；集合固定上限，重啟可清空。"""
+        self._reset_proactive_day()
+        if len(self._recent_proactive_topics) >= _MAX_RECENT_PROACTIVE_TOPICS:
+            return ""
+        for _ in range(16):
+            topic = generate_proactive_topic(self.persona)
+            normalized = self._normalized_reply(topic)
+            if normalized and normalized not in self._recent_proactive_topics:
+                self._recent_proactive_topics.add(normalized)
+                return topic
+        return ""
+
     async def _proactive_loop(self):
         while self.is_running:
             try:
@@ -1479,6 +1665,7 @@ class AccountWorker:
                     continue
                 if self._is_sleeping():
                     continue
+                self._reset_proactive_day()
                 if self._proactive_today >= self.config.proactive_max_per_day:
                     continue
                 if self._is_busy_hour() and random.random() < 0.5:
@@ -1509,7 +1696,9 @@ class AccountWorker:
                     interval,
                 ):
                     continue
-                topic = generate_proactive_topic(self.persona)
+                topic = self._next_proactive_topic()
+                if not topic:
+                    continue
                 sent = await self._send_text_recorded(
                     group_id,
                     topic,
@@ -1520,11 +1709,6 @@ class AccountWorker:
                 if not sent:
                     continue
                 self._proactive_today += 1
-                # 每日重置
-                today = self._today_index()
-                if today != self._proactive_day:
-                    self._proactive_day = today
-                    self._proactive_today = 0
             except asyncio.CancelledError:
                 return
             except Exception as e:

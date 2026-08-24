@@ -1,6 +1,6 @@
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from telethon.tl.types import MessageMediaPhoto, PhotoEmpty
@@ -176,6 +176,19 @@ def _event(*, sender_id=999, message_id=77, mentioned=False,
 def test_ordinary_human_message_has_at_most_one_responder():
     async def main():
         event = _event()
+        db = _ClaimDB()
+        decisions = [
+            await _worker(uid, db=db)._should_reply(event)
+            for uid in sorted(MANAGED)
+        ]
+        assert decisions.count(True) == 1
+
+    asyncio.run(main())
+
+
+def test_hostile_human_message_has_exactly_one_responder_without_pile_on():
+    async def main():
+        event = _event(text="這群爛死了，你們都是機器人吧")
         db = _ClaimDB()
         decisions = [
             await _worker(uid, db=db)._should_reply(event)
@@ -822,3 +835,118 @@ def test_recent_human_activity_suppresses_proactive_message():
     activity = {-5428680940: float("inf")}
     worker = _worker(101, last_human_activity=activity)
     assert worker._should_suppress_proactive(-5428680940) is True
+
+
+def test_proactive_topic_does_not_repeat_normalized_text_within_account_day(monkeypatch):
+    worker = _worker(101)
+    day = 321
+    monkeypatch.setattr(worker, "_today_index", lambda: day)
+    monkeypatch.setattr(
+        "app.worker.generate_proactive_topic",
+        Mock(side_effect=[
+            "週末想唱歌",
+            "週末想唱歌！",
+            "今天想吃牛肉麵",
+            "週末想唱歌",
+        ]),
+    )
+
+    assert worker._next_proactive_topic() == "週末想唱歌"
+    assert worker._next_proactive_topic() == "今天想吃牛肉麵"
+
+    day = 322
+    assert worker._next_proactive_topic() == "週末想唱歌"
+
+
+def test_live_proactive_loop_dedupes_rolls_day_and_stops_cleanly(monkeypatch):
+    async def main():
+        worker = _worker(101)
+        selected_group = -5428680940
+        unselected_group = -999999
+        clock = [321 * 86400.0]
+        sleep_calls = 0
+        loop_is_blocked = asyncio.Event()
+        never_resume = asyncio.Event()
+        third_send = asyncio.Event()
+        sends = []
+
+        worker.is_running = True
+        worker._last_activity = {
+            selected_group: clock[0],
+            unselected_group: clock[0],
+        }
+        worker._known_groups = {selected_group, unselected_group}
+        worker.config.proactive_enabled = True
+        worker.config.proactive_loop_min_seconds = 1.0
+        worker.config.proactive_loop_max_seconds = 1.0
+        worker.config.proactive_max_per_day = 10
+        worker.config.proactive_min_interval_minutes = 1
+        worker.db.claim_proactive_slot = AsyncMock(return_value=True)
+        worker._is_sleeping = Mock(return_value=False)
+        worker._is_busy_hour = Mock(return_value=False)
+        worker._should_suppress_proactive = Mock(return_value=False)
+
+        async def controlled_sleep(_delay):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls == 1:
+                clock[0] = 321 * 86400.0 + 60
+                return
+            if sleep_calls == 2:
+                clock[0] = 321 * 86400.0 + 180
+                return
+            if sleep_calls == 3:
+                clock[0] = 322 * 86400.0 + 60
+                return
+            loop_is_blocked.set()
+            await never_resume.wait()
+
+        async def record_send(group_id, text, **kwargs):
+            sends.append((group_id, text, kwargs))
+            if len(sends) == 3:
+                third_send.set()
+            return True
+
+        def select_only_group(groups):
+            assert groups == [selected_group]
+            return groups[0]
+
+        monkeypatch.setattr("app.worker.asyncio.sleep", controlled_sleep)
+        monkeypatch.setattr("app.worker.time.time", lambda: clock[0])
+        monkeypatch.setattr(worker, "_today_index", lambda: int(clock[0] // 86400))
+        monkeypatch.setattr("app.worker.random.choice", Mock(side_effect=select_only_group))
+        monkeypatch.setattr(
+            "app.worker.generate_proactive_topic",
+            Mock(side_effect=[
+                "週末想唱歌",
+                "週末想唱歌！",
+                "今天想吃牛肉麵",
+                "週末想唱歌",
+            ]),
+        )
+        monkeypatch.setattr(worker, "_send_text_recorded", record_send)
+
+        worker._proactive_task = asyncio.create_task(worker._proactive_loop())
+        live_task = worker._proactive_task
+        await third_send.wait()
+        await loop_is_blocked.wait()
+
+        assert [(group_id, text) for group_id, text, _kwargs in sends] == [
+            (selected_group, "週末想唱歌"),
+            (selected_group, "今天想吃牛肉麵"),
+            (selected_group, "週末想唱歌"),
+        ]
+        assert worker._normalized_reply(sends[0][1]) != worker._normalized_reply(
+            sends[1][1]
+        )
+        assert worker._normalized_reply(sends[0][1]) == worker._normalized_reply(
+            sends[2][1]
+        )
+
+        await worker.stop()
+
+        assert worker._proactive_task is None
+        assert live_task.done()
+        assert not worker.is_running
+
+    asyncio.run(main())

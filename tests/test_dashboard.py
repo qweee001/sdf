@@ -95,6 +95,14 @@ def test_groups_ui_uses_read_only_discovery_before_start():
         assert "先啟動帳號，再回來勾選" not in r.text
 
 
+def test_groups_ui_truthfully_says_empty_selection_disables_account():
+    with _make_dashboard() as client:
+        page = client.get("/").text
+        assert "不勾任何群" in page
+        assert "無法啟動" in page or "停用帳號" in page
+        assert "自動在所有群活動" not in page
+
+
 def test_account_start_requires_login():
     with _make_dashboard() as client:
         assert client.post("/api/accounts/abc/start").status_code == 401

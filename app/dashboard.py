@@ -487,7 +487,7 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 <div class="modal" id="groupsModal">
     <div class="modal-box" style="max-width:520px">
         <h3>指定群組（只讓此水軍在勾選的群活動）</h3>
-        <p class="meta" style="margin-bottom:0.8rem">不勾任何群 = 自動在所有群活動。開啟此畫面時會短暫唯讀連線取得群組，不會啟動水軍互動。</p>
+        <p class="meta" style="margin-bottom:0.8rem">不勾任何群 = 帳號無法啟動；清空既有選擇會停用帳號。開啟此畫面時會短暫唯讀連線取得群組，不會啟動水軍互動。</p>
         <div id="groupsList" style="max-height:45vh;overflow-y:auto"></div>
         <div style="margin-top:1rem">
             <button class="btn btn-primary" onclick="saveGroups()">儲存指定群組</button>

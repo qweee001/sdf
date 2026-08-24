@@ -6,7 +6,6 @@ from app.persona import (
     DAILY_TOPICS,
     GIRL_PROACTIVE,
     PERSONA_PROACTIVE,
-    SAFETY_TOPICS,
     SHOW_OFF_FEMALE,
     SHOW_OFF_MALE,
     TW_CITIES_MAJOR,
@@ -35,9 +34,22 @@ CONTENT_POOLS = [
     BOY_PROACTIVE,
     SHOW_OFF_FEMALE,
     SHOW_OFF_MALE,
-    SAFETY_TOPICS,
     *PERSONA_PROACTIVE.values(),
 ]
+
+FORBIDDEN_GROUP_META = (
+    "1000",
+    "付費",
+    "繳費",
+    "管理員",
+    "助理",
+    "把關",
+    "仙人跳",
+    "綁架",
+    "偷拍",
+    "怪人",
+    "這群真的可以",
+)
 
 
 def test_persona_fields():
@@ -67,15 +79,23 @@ def test_system_prompt_content():
     p = generate_persona()
     sp = get_system_prompt(p)
     assert "繁體中文" in sp
-    assert "1000 台幣" in sp
     assert "無安全審核" in sp
-    assert "仙人跳" in sp  # 安全賣點話術
     assert p["city"] in sp
     assert p["name"] in sp
     assert "每次回覆最多 60 個字元" in sp
     assert "標點、空格也算" in sp
     assert "你的固定聊天風格" in sp
     assert p["chat_style"] in sp
+    assert "先回應最新消息中的具體內容" in sp
+    assert "至少帶到一個具體細節" in sp
+    assert "觀點、感受、經驗或相關問題" in sp
+    assert "只能延伸與當前內容相關的話題" in sp
+    assert "沒有正在聊的內容" in sp
+    assert "不得討論群務、加入條件或替群體背書" in sp
+    assert "不要解釋拒絕原因" in sp
+    assert "只叫對方繼續說" in sp
+    for fragment in FORBIDDEN_GROUP_META:
+        assert fragment not in sp
 
 
 def test_chat_style_changes_hard_tone_rules():
@@ -120,21 +140,12 @@ def test_no_simplified_chinese_in_content_pools():
             assert not simp, f"簡體字 {simp} in: {s}"
 
 
-def test_safety_topics_exist():
-    """安全/把關閒聊池（設計比 10%）必須存在且非空"""
-    assert len(SAFETY_TOPICS) >= 4
-    assert any("仙人跳" in s for s in SAFETY_TOPICS)
-
-
-def test_proactive_topic_distribution_has_safety():
-    """主場發言 10% 是安全把關（抽樣驗證會抽到）"""
-    p = generate_persona()
-    seen = set()
-    for _ in range(400):
-        t = generate_proactive_topic(p)
-        seen.add(t)
-    # 400 次抽樣，安全池（6 句）應該至少被抽到一次
-    assert any(t in SAFETY_TOPICS for t in seen), "安全話題從未出現"
+def test_every_static_proactive_pool_excludes_group_meta_speech():
+    """逐句掃完整池，不靠隨機抽樣碰運氣。"""
+    for pool in CONTENT_POOLS:
+        for text in pool:
+            found = [fragment for fragment in FORBIDDEN_GROUP_META if fragment in text]
+            assert not found, f"群務話術 {found} in: {text}"
 
 
 def test_proactive_topic_not_empty():

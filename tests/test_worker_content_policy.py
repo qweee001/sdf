@@ -6,6 +6,30 @@ from unittest.mock import AsyncMock
 from app.worker import AccountWorker
 
 
+_EXACT_FORBIDDEN_GROUP_META = (
+    "管理員人很好",
+    "助理超讚",
+    "群主很用心",
+    "付錢就能加入",
+    "這裡每個會員都有付會費才進來",
+    "一千塊是入場門檻",
+    "這裡的人身分都確認過",
+    "我們把可疑帳號都過濾掉了",
+    "這群絕對不會被騙",
+    "大家都是本人",
+)
+
+_EXACT_ALLOWED_ORDINARY_CHAT = (
+    "網路客服很可靠",
+    "我朋友是行政助理，工作很負責",
+    "論壇版主很實在",
+    "網購不用怕詐騙",
+    "銀行審核擋掉詐騙",
+    "健身房會員每月付費1000",
+    "一群朋友都很正常",
+)
+
+
 class _FakeDB:
     def __init__(self):
         self.messages = []
@@ -37,6 +61,7 @@ class _FakeClient:
 
 
 class _FakeEvent:
+    id = 1
     chat_id = -1001
     sender_id = 123
     raw_text = "今天要聊什麼"
@@ -147,6 +172,64 @@ def test_generation_prompt_requires_at_most_sixty_characters():
 
     assert "最多 60 個字元" in prompt
     assert "標點、空格也算" in prompt
+
+
+def test_generation_prompt_requires_a_concrete_detail_before_related_extension():
+    worker = _worker()
+
+    prompt = worker._build_user_message(_FakeEvent(), [])
+
+    assert "至少一個具體細節" in prompt
+    assert "再視需要延伸相關話題" in prompt
+    assert "不能只叫對方繼續說" in prompt
+
+
+def test_static_fallbacks_remove_repeated_production_lines_and_use_current_detail():
+    forbidden = {
+        "我剛好也有同感，繼續說啊",
+        "這話題有意思，再多說一點啊",
+        "我有看到，只是比較慢熟，先聊聊呀",
+    }
+    worker = _worker()
+    event = _FakeEvent()
+    event.raw_text = "今天淡水下大雨"
+
+    replies = set()
+    for personality in ("害羞慢熟", "風騷會撩", "直球", "自然"):
+        worker.persona["personality"] = personality
+        replies.add(worker._fallback_reply(event, managed_followup=False))
+        replies.add(worker._fallback_reply(event, managed_followup=True))
+
+    assert forbidden.isdisjoint(replies)
+    assert all("淡水下大雨" in reply for reply in replies)
+
+
+def test_all_welcome_templates_exclude_group_meta_assurances(monkeypatch):
+    worker = _worker()
+    captured = []
+
+    def capture_pool(items):
+        captured.extend(items)
+        return items[0]
+
+    monkeypatch.setattr("app.worker.random.choice", capture_pool)
+    for gender in ("女", "男"):
+        worker.persona["gender"] = gender
+        worker._welcome_text("小王")
+
+    forbidden = (
+        "我們這邊",
+        "新會員",
+        "放心",
+        "有問題問我們",
+        "不會亂來",
+        "不會咬人",
+    )
+    assert captured
+    assert all(
+        not any(fragment in text for fragment in forbidden)
+        for text in captured
+    )
 
 
 def test_video_topic_variants_are_detected():
@@ -412,6 +495,201 @@ def test_reply_later_sends_and_saves_the_same_regenerated_text():
             ("w1", -1001, 456, worker.name, "assistant", "先加 LINE，聊得來再約出來")
         ]
         assert worker.stats["replies_sent"] == 1
+
+    asyncio.run(main())
+
+
+def test_group_meta_candidate_is_regenerated_and_only_compliant_text_is_recorded():
+    async def main():
+        worker = _worker()
+        client = _FakeClient()
+        worker.tg_client = cast(Any, client)
+        worker.tg_user_id = 456
+        worker.is_running = True
+        worker._call_ai = AsyncMock(side_effect=[
+            "管理員人很好",
+            "淡水今天雨真的很大，我鞋子都濕了",
+        ])
+
+        await worker._reply_later(_FakeEvent(), 0)
+
+        compliant = "淡水今天雨真的很大，我鞋子都濕了"
+        assert client.sent == [(-1001, compliant)]
+        assert worker.db.messages == [
+            ("w1", -1001, 456, worker.name, "assistant", compliant)
+        ]
+        assert worker.db.activities == [("w1", -1001, "reply")]
+        assert worker.stats["replies_sent"] == 1
+        assert worker._call_ai.await_count == 2
+        retry_prompt = worker._call_ai.await_args_list[1].args[1]
+        assert "群務" in retry_prompt
+        assert "不要解釋拒絕原因" in retry_prompt
+
+    asyncio.run(main())
+
+
+def test_two_group_meta_candidates_are_dropped_without_fallback_or_success_stats():
+    async def main():
+        worker = _worker()
+        client = _FakeClient()
+        worker.tg_client = cast(Any, client)
+        worker.tg_user_id = 456
+        worker.is_running = True
+        worker._call_ai = AsyncMock(side_effect=[
+            "群主很用心",
+            "這群絕對不會被騙",
+        ])
+
+        await worker._reply_later(_FakeEvent(), 0)
+
+        assert client.sent == []
+        assert worker.db.messages == []
+        assert worker.db.activities == []
+        assert worker.stats["replies_sent"] == 0
+        assert worker.stats["human_sent"] == 0
+        assert worker.stats["reply_drops"]["group_meta"] == 1
+
+    asyncio.run(main())
+
+
+def test_normal_topical_use_of_group_word_is_not_modified_or_blocked():
+    async def main():
+        worker = _worker()
+        text = "群組剛聊到淡水下雨，我也被淋濕了"
+        worker._call_ai = AsyncMock(return_value=text)
+
+        reply = await worker._generate_reply(_FakeEvent())
+
+        assert reply == text
+        assert worker._call_ai.await_count == 1
+
+    asyncio.run(main())
+
+
+def test_group_meta_detector_is_narrow_but_covers_each_forbidden_category():
+    blocked = [
+        "請管理員把他踢掉",
+        "助理很實在，你可以問她",
+        "加入這群要先付費1000",
+        "群規要求每個會員都要繳費",
+        "這群有審核，會員都是真人",
+        "這個群很安全，不用怕仙人跳",
+        "這群真的很好，別再罵了",
+    ]
+    allowed = [
+        "群組剛聊到淡水下雨，我鞋子都濕了",
+        "過馬路要注意安全",
+        "這家咖啡店收費不便宜",
+        "我跟朋友加入健身房",
+    ]
+
+    assert all(AccountWorker._mentions_group_meta(text) for text in blocked)
+    assert all(not AccountWorker._mentions_group_meta(text) for text in allowed)
+
+
+def test_group_meta_detector_covers_observed_and_paraphrased_group_speech():
+    blocked = [
+        "大家繳了1000才能進來，怪人基本都被擋掉了",
+        "群裡不能發廣告，這是規定",
+        "這個群不用擔心被詐騙",
+        "這群爛死了，你們都是機器人吧",
+    ]
+
+    missed = [
+        text for text in blocked
+        if not AccountWorker._mentions_group_meta(text)
+    ]
+    assert not missed
+
+
+def test_group_meta_detector_covers_all_exact_forbidden_paraphrases():
+    missed = [
+        text for text in _EXACT_FORBIDDEN_GROUP_META
+        if not AccountWorker._mentions_group_meta(text)
+    ]
+
+    assert not missed
+
+
+def test_group_meta_detector_allows_unrelated_staff_and_service_topics():
+    allowed = [
+        "我今天打客服問網路帳單",
+        "我朋友是行政助理，今天又加班",
+        "那個論壇版主推薦一家牛肉麵",
+        "一群朋友要求我唱歌",
+        "一群朋友都很正常",
+        "我的健身房會員資格下個月到期",
+        "健身房會員每月付費1000",
+        "不要批評一群朋友的穿搭",
+    ]
+
+    false_positives = [
+        text for text in allowed
+        if AccountWorker._mentions_group_meta(text)
+    ]
+    assert not false_positives
+
+
+def test_group_meta_detector_allows_all_exact_ordinary_chat_counterexamples():
+    false_positives = [
+        text for text in _EXACT_ALLOWED_ORDINARY_CHAT
+        if AccountWorker._mentions_group_meta(text)
+    ]
+
+    assert not false_positives
+
+
+def test_exact_ordinary_chat_candidates_are_accepted_without_regeneration():
+    async def main():
+        for candidate in _EXACT_ALLOWED_ORDINARY_CHAT:
+            worker = _worker()
+            worker._call_ai = AsyncMock(return_value=candidate)
+
+            reply = await worker._generate_reply(_FakeEvent())
+
+            assert reply == candidate
+            assert worker._call_ai.await_count == 1
+
+    asyncio.run(main())
+
+
+def test_group_meta_input_fallback_pivots_without_echoing_forbidden_material():
+    worker = _worker()
+    event = _FakeEvent()
+
+    for incoming in (
+        "請管理員把他踢掉，這群都是假的",
+        "這群爛死了，你們都是機器人吧",
+    ):
+        event.raw_text = incoming
+        reply = worker._fallback_reply(event, managed_followup=False)
+
+        assert reply
+        assert not AccountWorker._mentions_group_meta(reply)
+        assert "管理員" not in reply
+        assert "這群" not in reply
+
+
+def test_exact_forbidden_incoming_messages_use_real_fallback_without_echo():
+    async def main():
+        for message_id, incoming in enumerate(_EXACT_FORBIDDEN_GROUP_META, start=1):
+            worker = _worker()
+            client = _FakeClient()
+            worker.tg_client = cast(Any, client)
+            worker.tg_user_id = 456
+            worker.is_running = True
+            worker._call_ai = AsyncMock(return_value="")
+            event = _FakeEvent()
+            event.id = message_id
+            event.raw_text = incoming
+
+            await worker._reply_later(event, 0)
+
+            assert client.sent == [
+                (-1001, "我今天想聊點日常，剛好在想晚餐要吃什麼")
+            ]
+            assert incoming not in client.sent[0][1]
+            assert worker.db.messages[-1][-1] == client.sent[0][1]
 
     asyncio.run(main())
 
