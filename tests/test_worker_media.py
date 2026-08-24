@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from telethon.tl.types import MessageMediaPhoto, PhotoEmpty
 
 from app.media import MediaAsset
@@ -92,29 +93,32 @@ def test_incoming_image_is_downloaded_only_for_vision_reply():
     asyncio.run(main())
 
 
-def test_fifth_account_owns_image_download_vision_and_send_path():
+@pytest.mark.parametrize("account_count", [5, 8])
+def test_last_account_owns_image_download_vision_and_send_path(account_count):
     async def main():
-        active_ids = {101, 202, 303, 404, 505}
-        owner_id = 505
-        owner_account_id = "account-5"
-        image_bytes = b"fifth-account-jpeg"
-        mime_type = "image/jpeg"
+        account_ids = (101, 202, 303, 404, 505, 606, 707, 808)
+        active_ids = set(account_ids[:account_count])
+        owner_id = account_ids[account_count - 1]
+        owner_account_id = f"account-{account_count}"
+        image_bytes = f"account-{account_count}-image".encode()
+        mime_type = {5: "image/jpeg", 8: "image/png"}[account_count]
+        vision_reply = f"第{account_count}個帳號看懂了這張照片"
         owners = {(-1001, 999): (owner_id, float("inf"))}
         db = cast(Any, _DB())
         db.claim_message_response = AsyncMock(return_value=True)
         db.claim_group_text = AsyncMock(return_value=True)
         db.touch_activity = AsyncMock()
         media = SimpleNamespace(
-            understand_image=AsyncMock(return_value="第五個帳號看懂了這張照片")
+            understand_image=AsyncMock(return_value=vision_reply)
         )
         client = SimpleNamespace(send_message=AsyncMock())
         event = SimpleNamespace(
-            id=505,
+            id=owner_id,
             chat_id=-1001,
             sender_id=999,
             sender=SimpleNamespace(first_name="真人"),
             raw_text="",
-            media=MessageMediaPhoto(photo=PhotoEmpty(id=505)),
+            media=MessageMediaPhoto(photo=PhotoEmpty(id=owner_id)),
             file=SimpleNamespace(size=len(image_bytes), mime_type=mime_type),
             mentioned=False,
             is_reply=False,
@@ -160,7 +164,9 @@ def test_fifth_account_owns_image_download_vision_and_send_path():
             *(reply_if_owner(worker) for worker in workers)
         )
 
-        assert decisions == [False, False, False, False, True]
+        assert decisions.count(True) == 1
+        assert decisions[account_count - 1] is True
+        assert workers[decisions.index(True)].tg_user_id == owner_id
         event.download_media.assert_awaited_once_with(file=bytes)
         media.understand_image.assert_awaited_once()
         vision_args = media.understand_image.await_args.args
@@ -170,9 +176,7 @@ def test_fifth_account_owns_image_download_vision_and_send_path():
             mime_type,
             get_system_prompt(workers[-1].persona),
         )
-        client.send_message.assert_awaited_once_with(
-            -1001, "第五個帳號看懂了這張照片"
-        )
+        client.send_message.assert_awaited_once_with(-1001, vision_reply)
 
     asyncio.run(main())
 
