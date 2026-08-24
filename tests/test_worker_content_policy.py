@@ -104,6 +104,76 @@ _FIX_ROUND_2_CLAUSE_BOUNDARY_CASES = (
     "我想加入攝影群組分享作品;網購不用怕被騙",
 )
 
+_FIX_ROUND_3_FROZEN_CASES = (
+    (False, "攝影群的群規不准廣告"),
+    (False, "遊戲群的群規禁止外掛"),
+    (False, "工作群組的管理員很負責"),
+    (False, "攝影群組的管理員很負責"),
+    (False, "那群同學的管理員很負責"),
+    (False, "牙醫診所助理很負責"),
+    (False, "群裡有人稱讚平台客服很可靠"),
+    (True, "網站管理員也是本群管理員而且很負責"),
+    (True, "交兩千才能進"),
+    (True, "付兩千就能進"),
+    (True, "成員都做過身份核驗"),
+    (True, "大家都經過篩選"),
+    (True, "群友都通過實名認證"),
+    (False, "每個人都要本人到銀行辦理"),
+    (False, "大家都是真人演員"),
+    (False, "群裡有人分享網購防詐騙新聞"),
+    (False, "這群今天在聊銀行安全"),
+    (False, "這群正在討論新聞裡的詐騙案件"),
+)
+
+_FIX_ROUND_3_ADDITIONAL_CASES = (
+    # Generic named-other groups: examples are test-owned and not production vocabulary.
+    (False, "讀書群的群規不准洗版"),
+    (False, "登山群組的管理員很負責"),
+    (False, "美食群規禁止貼廣告"),
+    # Ordinary organizations and role subjects across the required structural classes.
+    (False, "海景社區管理員很負責"),
+    (False, "仁愛醫院助理很可靠"),
+    (False, "英文補習中心助理很用心"),
+    (False, "藍天工作室助理很負責"),
+    (False, "遊戲伺服器管理員很可靠"),
+    (False, "平台客服稱讚醫生很可靠"),
+    (False, "管理員稱讚牙醫很負責"),
+    # Chinese amounts bind to entry, while ordinary purchases/rent stay ordinary.
+    (True, "交兩百才能進"),
+    (True, "付三千就能進"),
+    (True, "繳一萬入群"),
+    (False, "付兩百買午餐"),
+    (False, "花三千買相機"),
+    (False, "交一萬租金"),
+    # Completed vetting order variants and ordinary real-person obligations/compounds.
+    (True, "成員身份都核驗過"),
+    (True, "群友都經過篩選"),
+    (True, "大家都通過實名認證"),
+    (True, "每個人都已完成身份確認"),
+    (False, "每個人都要本人到醫院報到"),
+    (False, "所有人需本人到現場辦理"),
+    (False, "真人演員都經過試鏡"),
+    # Direct current-group assurances versus reporting/discussion topic frames.
+    (True, "這群很安全"),
+    (True, "本群保證資料安全"),
+    (True, "群裡不會有詐騙"),
+    (True, "這個群值得信任"),
+    (False, "群裡有人轉發電商防詐騙文章"),
+    (False, "這群在討論醫院消防安全"),
+    (False, "本群今天聊新聞裡的詐騙案件"),
+    (False, "群內有人分享銀行保障話題"),
+    # A later explicit selected-group role wins over an earlier ordinary role.
+    (True, "網站管理員很可靠而且本群管理員很負責"),
+)
+
+_FIX_ROUND_3_REAL_PATH_CASES = (
+    ("named_group_rule", "本群群規不准廣告", "讀書群規不准洗版"),
+    ("staff_binding", "本群管理員很負責", "平台客服很可靠"),
+    ("paid_entry", "付兩千就能進", "付兩百買午餐"),
+    ("member_vetting", "成員都做過身份核驗", "大家都是真人演員"),
+    ("assurance_topic", "這群很安全", "這群在聊銀行安全"),
+)
+
 
 class _FakeDB:
     def __init__(self):
@@ -870,6 +940,123 @@ def test_fix_round_2_ordinary_candidate_passes_real_generation_once(
         assert worker._call_ai.await_count == 1
 
     asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    ("expected", "text"),
+    _FIX_ROUND_3_FROZEN_CASES,
+    ids=[f"frozen-{index:02d}" for index in range(1, 19)],
+)
+def test_fix_round_3_frozen_entity_predicate_mismatches(expected, text):
+    assert AccountWorker._mentions_group_meta(text) is expected
+
+
+@pytest.mark.parametrize(
+    ("expected", "text"),
+    _FIX_ROUND_3_ADDITIONAL_CASES,
+    ids=[f"structural-{index:02d}" for index in range(
+        1, len(_FIX_ROUND_3_ADDITIONAL_CASES) + 1
+    )],
+)
+def test_fix_round_3_structural_and_adversarial_matrix(expected, text):
+    assert AccountWorker._mentions_group_meta(text) is expected
+
+
+@pytest.mark.parametrize(
+    ("category", "forbidden", "ordinary"),
+    _FIX_ROUND_3_REAL_PATH_CASES,
+    ids=[case[0] for case in _FIX_ROUND_3_REAL_PATH_CASES],
+)
+def test_fix_round_3_forbidden_candidate_regenerates_once(
+    category, forbidden, ordinary
+):
+    async def main():
+        worker = _worker()
+        worker._call_ai = AsyncMock(side_effect=[forbidden, ordinary])
+
+        reply = await worker._generate_reply(_FakeEvent())
+
+        assert reply == ordinary
+        assert worker._call_ai.await_count == 2
+        assert "群務" in worker._call_ai.await_args_list[1].args[1]
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    ("category", "forbidden", "ordinary"),
+    _FIX_ROUND_3_REAL_PATH_CASES,
+    ids=[case[0] for case in _FIX_ROUND_3_REAL_PATH_CASES],
+)
+def test_fix_round_3_two_forbidden_candidates_drop(
+    category, forbidden, ordinary
+):
+    async def main():
+        worker = _worker()
+        worker._call_ai = AsyncMock(side_effect=[forbidden, forbidden])
+
+        reply = await worker._generate_reply(_FakeEvent())
+
+        assert reply == ""
+        assert worker._call_ai.await_count == 2
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    ("category", "forbidden", "ordinary"),
+    _FIX_ROUND_3_REAL_PATH_CASES,
+    ids=[case[0] for case in _FIX_ROUND_3_REAL_PATH_CASES],
+)
+def test_fix_round_3_ordinary_candidate_passes_generation_once(
+    category, forbidden, ordinary
+):
+    async def main():
+        worker = _worker()
+        worker._call_ai = AsyncMock(return_value=ordinary)
+
+        reply = await worker._generate_reply(_FakeEvent())
+
+        assert reply == ordinary
+        assert worker._call_ai.await_count == 1
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    ("category", "forbidden", "ordinary"),
+    _FIX_ROUND_3_REAL_PATH_CASES,
+    ids=[case[0] for case in _FIX_ROUND_3_REAL_PATH_CASES],
+)
+def test_fix_round_3_forbidden_fallback_pivots_without_echo(
+    category, forbidden, ordinary
+):
+    worker = _worker()
+    event = _FakeEvent()
+    event.raw_text = forbidden
+
+    reply = worker._fallback_reply(event, managed_followup=False)
+
+    assert reply == "我今天想聊點日常，剛好在想晚餐要吃什麼"
+    assert forbidden not in reply
+
+
+@pytest.mark.parametrize(
+    ("category", "forbidden", "ordinary"),
+    _FIX_ROUND_3_REAL_PATH_CASES,
+    ids=[case[0] for case in _FIX_ROUND_3_REAL_PATH_CASES],
+)
+def test_fix_round_3_ordinary_fallback_keeps_current_detail(
+    category, forbidden, ordinary
+):
+    worker = _worker()
+    event = _FakeEvent()
+    event.raw_text = ordinary
+
+    reply = worker._fallback_reply(event, managed_followup=False)
+
+    assert ordinary in reply
+    assert reply != "我今天想聊點日常，剛好在想晚餐要吃什麼"
 
 
 def test_reply_later_does_not_send_or_save_after_two_violations():
