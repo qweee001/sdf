@@ -89,6 +89,7 @@ class _FakeDB:
         self.messages = []
         self.activities = []
         self.recent_group_replies = []
+        self.reply_events = []
 
     async def get_recent_messages(self, *_args):
         return []
@@ -104,6 +105,9 @@ class _FakeDB:
 
     async def touch_activity(self, *args):
         self.activities.append(args)
+
+    async def record_reply_event(self, *args, **kwargs):
+        self.reply_events.append((args, kwargs))
 
 
 class _FakeClient:
@@ -264,38 +268,70 @@ def test_generation_prompt_requires_a_concrete_detail_before_related_extension()
     assert "不能只叫對方繼續說" in prompt
 
 
-def test_static_fallbacks_remove_repeated_production_lines_and_use_current_detail():
-    forbidden = {
-        "我剛好也有同感，繼續說啊",
-        "這話題有意思，再多說一點啊",
-        "我有看到，只是比較慢熟，先聊聊呀",
-    }
-    worker = _worker()
-    event = _FakeEvent()
-    event.raw_text = "今天淡水下大雨"
+def test_empty_generation_gets_one_bounded_retry():
+    async def main():
+        worker = _worker()
+        valid_retry = "淡水今天雨真的很大，我鞋子都濕了"
+        worker._call_ai = AsyncMock(side_effect=["", valid_retry])
 
-    replies = set()
-    for personality in ("害羞慢熟", "風騷會撩", "直球", "自然"):
-        worker.persona["personality"] = personality
-        replies.add(worker._fallback_reply(event, managed_followup=False))
-        replies.add(worker._fallback_reply(event, managed_followup=True))
+        reply = await worker._generate_reply(_FakeEvent())
 
-    assert forbidden.isdisjoint(replies)
-    assert all("淡水下大雨" in reply for reply in replies)
-    assert all("「" not in reply and "」" not in reply for reply in replies)
+        assert reply == valid_retry
+        assert worker._call_ai.await_count == 2
+
+    asyncio.run(main())
 
 
-def test_drama_fallback_continues_topic_without_quoting_the_original_message():
-    worker = _worker()
-    worker.persona["personality"] = "風騷會撩"
-    event = _FakeEvent()
-    event.raw_text = "最近迷上一個台劇,超好看"
+def test_two_empty_generations_drop_without_static_fallback_or_success_record():
+    async def main():
+        worker = _worker()
+        client = _FakeClient()
+        worker.tg_client = cast(Any, client)
+        worker.tg_user_id = 456
+        worker.is_running = True
+        worker._call_ai = AsyncMock(side_effect=["", ""])
 
-    reply = worker._fallback_reply(event, managed_followup=False)
+        await worker._reply_later(_FakeEvent(), 0)
 
-    assert reply == "哪一部台劇這麼好看？被你講得我也想追了"
-    assert "「" not in reply and "」" not in reply
-    assert event.raw_text not in reply
+        assert worker._call_ai.await_count == 2
+        assert client.sent == []
+        assert worker.db.messages == []
+        assert worker.db.activities == []
+        assert worker.stats["replies_sent"] == 0
+        assert worker.stats["human_sent"] == 0
+        assert worker.stats["reply_drops"]["ai_empty"] == 1
+        assert worker.db.reply_events == [
+            (
+                (),
+                {
+                    "group_id": -1001,
+                    "message_id": 1,
+                    "account_id": "w1",
+                    "stage": "generation",
+                    "reason": "ai_empty",
+                },
+            )
+        ]
+
+    asyncio.run(main())
+
+
+def test_second_policy_violation_is_audited_by_policy_stage():
+    async def main():
+        worker = _worker()
+        client = _FakeClient()
+        worker.tg_client = cast(Any, client)
+        worker.tg_user_id = 456
+        worker.is_running = True
+        worker._call_ai = AsyncMock(side_effect=["甲" * 61, "乙" * 61])
+
+        await worker._reply_later(_FakeEvent(), 0)
+
+        assert client.sent == []
+        assert worker.db.reply_events[-1][1]["stage"] == "policy"
+        assert worker.db.reply_events[-1][1]["reason"] == "too_long"
+
+    asyncio.run(main())
 
 
 def test_all_welcome_templates_exclude_group_meta_assurances(monkeypatch):
@@ -854,38 +890,6 @@ def test_suspicious_ordinary_generation_is_allowed_without_regeneration():
         classifier.assert_awaited_once()
 
     asyncio.run(main())
-
-
-def test_suspicious_input_fallback_pivots_locally_without_classifier_or_echo():
-    worker = _worker()
-    classifier = _set_classifier_effects(worker, "ALLOW")
-    event = _FakeEvent()
-
-    for incoming in (
-        "請管理員把他踢掉，這群都是假的",
-        "圖書館管理員很負責",
-        "這群爛死了，你們都是機器人吧",
-    ):
-        event.raw_text = incoming
-        reply = worker._fallback_reply(event, managed_followup=False)
-
-        assert reply == "我今天想聊點日常，剛好在想晚餐要吃什麼"
-        assert incoming not in reply
-        assert not AccountWorker._may_mention_group_meta(reply)
-
-    classifier.assert_not_awaited()
-
-
-def test_everyday_input_fallback_keeps_current_detail_without_classifier():
-    worker = _worker()
-    classifier = _set_classifier_effects(worker, "BLOCK")
-    event = _FakeEvent()
-    event.raw_text = "今天淡水下大雨"
-
-    reply = worker._fallback_reply(event, managed_followup=False)
-
-    assert "淡水下大雨" in reply
-    classifier.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

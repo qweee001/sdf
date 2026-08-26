@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import secrets
 
@@ -31,6 +32,7 @@ class AccountManager:
         self._feature_lock = asyncio.Lock()
         self.managed_ids: set[int] = set()
         self.active_ids: set[int] = set()
+        self.active_group_ids: dict[int, set[int]] = {}
         self.managed_origins: dict[tuple[int, int, str], float] = {}
         self.human_owners: dict[tuple[int, int], tuple[int, float]] = {}
         self.recent_proactive_owners: dict[int, tuple[int, float]] = {}
@@ -154,6 +156,7 @@ class AccountManager:
             selected_groups=selected_groups,
             media_service=self._media_service,
             active_ids=self.active_ids,
+            active_group_ids=self.active_group_ids,
             managed_origins=self.managed_origins,
             human_owners=self.human_owners,
             recent_proactive_owners=self.recent_proactive_owners,
@@ -326,7 +329,11 @@ class AccountManager:
             if not ids:
                 if worker:
                     # 先收緊記憶體白名單，阻止已排隊工作進入發送邊界。
-                    worker.selected_groups = set()
+                    updater = getattr(worker, "update_selected_groups", None)
+                    if callable(updater):
+                        updater(set())
+                    else:
+                        worker.selected_groups = set()
                 await self.db.update_account(
                     account_id,
                     groups="[]",
@@ -344,10 +351,23 @@ class AccountManager:
                 setup_complete=1,
             )
             if worker:
-                worker.selected_groups = set(ids)
+                updater = getattr(worker, "update_selected_groups", None)
+                if callable(updater):
+                    updater(set(ids))
+                else:
+                    worker.selected_groups = set(ids)
             return ""
 
     async def status(self) -> dict:
+        audit_getter = getattr(self.db, "reply_event_summary", None)
+        reply_audit = {}
+        if callable(audit_getter):
+            audit_result = audit_getter()
+            reply_audit = (
+                await audit_result
+                if inspect.isawaitable(audit_result)
+                else audit_result
+            )
         accounts = []
         for acc in await self.db.list_accounts():
             worker = self.workers.get(acc["id"])
@@ -377,6 +397,7 @@ class AccountManager:
             })
         return {
             "accounts": accounts,
+            "reply_audit": reply_audit,
             "total": len(accounts),
             "running": sum(1 for a in accounts if a["is_running"]),
             "media_spend_usd": round(await self.db.media_spend_total(), 6),

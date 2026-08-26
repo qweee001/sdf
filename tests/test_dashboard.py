@@ -177,12 +177,13 @@ def test_persona_edit_and_groups_endpoints():
 
 
 def test_status_includes_groups_fields():
-    """/api/status 回傳含 groups 與 groups_available 欄位"""
+    """/api/status 回傳含 groups、groups_available 與持久回覆診斷。"""
     with _make_dashboard() as client:
         client.post("/api/login", json={"username": "admin", "password": "secret123"})
         r = client.get("/api/status")
         assert r.status_code == 200
         assert "accounts" in r.json()
+        assert "reply_audit" in r.json()
 
 
 def test_feature_toggles_require_login_persist_and_apply_immediately():

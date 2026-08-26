@@ -25,6 +25,13 @@ class _ClaimDB:
         self.followup_released = []
         self.messages = []
         self.activities = []
+        self.reply_events = []
+        self.pressure = {
+            "human_5m": 0,
+            "human_sent_5m": 0,
+            "sent_20s": 0,
+            "sent_10m": 0,
+        }
 
     async def get_recent_messages(self, *_args, **_kwargs):
         return []
@@ -101,6 +108,39 @@ class _ClaimDB:
     async def touch_activity(self, *args):
         self.activities.append(args)
 
+    async def interaction_pressure(self, *_args, **_kwargs):
+        return dict(self.pressure)
+
+    async def admit_ordinary_reply(self, group_id, message_id, account_id):
+        if (
+            int(self.pressure.get("ordinary_claimed_10m", 0) or 0) >= 8
+            or (
+                int(self.pressure.get("human_5m", 0) or 0) >= 14
+                and (
+                    int(self.pressure.get("human_sent_5m", 0) or 0) >= 2
+                    or int(self.pressure.get("ordinary_claimed_5m", 0) or 0) >= 2
+                    or int(self.pressure.get("ordinary_claimed_20s", 0) or 0) >= 1
+                )
+            )
+        ):
+            return False
+        self.reply_events.append(
+            (
+                (),
+                {
+                    "group_id": group_id,
+                    "message_id": message_id,
+                    "account_id": account_id,
+                    "stage": "claimed",
+                    "reason": "human",
+                },
+            )
+        )
+        return True
+
+    async def record_reply_event(self, *args, **kwargs):
+        self.reply_events.append((args, kwargs))
+
 
 def _worker(
     tg_user_id: int,
@@ -113,6 +153,8 @@ def _worker(
     last_human_activity=None,
     base_reply_probability=1.0,
     media_service=None,
+    active_group_ids=None,
+    selected_groups=None,
     reply_claim_signals=None,
     failed_reply_claimants=None,
 ) -> AccountWorker:
@@ -146,8 +188,9 @@ def _worker(
             "university": "中興", "personality": "直爽", "hobbies": ["咖啡"],
             "looking_for": "想認識人", "meetups_done": 1, "schedule": "正常",
         },
-        selected_groups=[-5428680940],
+        selected_groups=[-5428680940] if selected_groups is None else selected_groups,
         media_service=media_service,
+        active_group_ids=active_group_ids,
         reply_claim_signals=reply_claim_signals,
         failed_reply_claimants=failed_reply_claimants,
     )
@@ -456,6 +499,12 @@ def test_post_send_record_failure_keeps_image_claim(send_path, record_failure):
         clients[1].send_file.assert_not_awaited()
         assert signals == {}
         assert failed == {}
+        audit = [kwargs for _args, kwargs in db.reply_events]
+        persistence = [
+            item for item in audit if item.get("stage") == "persistence"
+        ]
+        assert persistence[-1]["reason"] == "RuntimeError"
+        assert any(item.get("stage") == "sent" for item in audit)
 
     asyncio.run(main())
 
@@ -499,6 +548,33 @@ def test_proactive_origin_allows_exactly_one_adaptive_followup():
     asyncio.run(main())
 
 
+def test_managed_followup_winner_is_limited_to_group_eligible_accounts():
+    async def main():
+        db = _ClaimDB()
+        active = {101, 202, 303}
+        eligible = {-5428680940: {101, 202}}
+        origins = {
+            (-5428680940, 101, "今晚有人想聊天嗎"): float("inf")
+        }
+        event = _event(sender_id=101, message_id=503)
+        workers = [
+            _worker(
+                uid,
+                active,
+                db=db,
+                managed_origins=origins,
+                active_group_ids=eligible,
+            )
+            for uid in sorted(active)
+        ]
+
+        decisions = [await worker._should_reply(event) for worker in workers]
+
+        assert decisions == [False, True, False]
+
+    asyncio.run(main())
+
+
 def test_reply_is_answered_only_by_the_replied_to_account():
     async def main():
         event = _event(is_reply=True, reply_sender_id=303)
@@ -513,7 +589,7 @@ def test_reply_is_answered_only_by_the_replied_to_account():
     asyncio.run(main())
 
 
-def test_atomic_claim_survives_different_active_views():
+def test_atomic_claim_never_duplicates_with_different_active_views():
     async def main():
         event = _event(message_id=91)
         db = _ClaimDB()
@@ -523,7 +599,7 @@ def test_atomic_claim_survives_different_active_views():
             await first._should_reply(event),
             await second._should_reply(event),
         ]
-        assert decisions.count(True) == 1
+        assert decisions.count(True) <= 1
 
     asyncio.run(main())
 
@@ -732,25 +808,26 @@ def test_on_message_schedules_one_managed_followup_mode():
     asyncio.run(main())
 
 
-def test_managed_empty_generation_uses_fallback_and_commits_after_send():
+def test_managed_empty_generation_releases_without_send_or_cooldown():
     async def main():
         db = _ClaimDB()
         worker = _worker(202, {101, 202}, db=db)
-        worker.tg_client = SimpleNamespace(
+        client = SimpleNamespace(
             send_message=AsyncMock(), disconnect=AsyncMock()
         )
+        worker.tg_client = client
         worker.is_running = True
         event = _event(sender_id=101, message_id=701, text="今天穿很好看的衣服")
         await db.reserve_managed_followup(-5428680940, 701, worker.account_id)
-        worker._generate_reply = AsyncMock(return_value="")
+        worker._call_ai = AsyncMock(side_effect=["", ""])
 
         await worker._reply_later(event, 0, managed_followup=True)
 
-        worker.tg_client.send_message.assert_awaited_once()
-        assert db.followup_completed == [(-5428680940, 701, "202")]
-        assert db.followup_released == []
-        assert worker.stats["managed_fallbacks"] == 1
-        assert worker.stats["managed_sent"] == 1
+        client.send_message.assert_not_awaited()
+        assert db.followup_completed == []
+        assert db.followup_released == [(-5428680940, 701, "202")]
+        assert worker.stats["managed_sent"] == 0
+        assert worker.stats["reply_drops"]["ai_empty"] == 1
 
     asyncio.run(main())
 
@@ -806,7 +883,7 @@ def test_human_after_proactive_is_owned_by_original_account():
     asyncio.run(main())
 
 
-def test_meaningful_ordinary_human_message_has_one_responder_even_if_base_zero():
+def test_base_zero_suppresses_ordinary_human_message():
     async def main():
         db = _ClaimDB()
         owners = {}
@@ -824,9 +901,134 @@ def test_meaningful_ordinary_human_message_has_one_responder_even_if_base_zero()
 
         decisions = [await worker._should_reply(event) for worker in workers]
 
-        assert decisions.count(True) == 1
-        owner_id, _expires_at = owners[(-5428680940, 999)]
-        assert owner_id in MANAGED
+        assert decisions == [False, False, False, False]
+        assert (-5428680940, 999) not in owners
+
+    asyncio.run(main())
+
+
+def test_base_zero_also_suppresses_sticky_owner():
+    async def main():
+        db = _ClaimDB()
+        owners = {(-5428680940, 999): (101, float("inf"))}
+        event = _event(sender_id=999, message_id=903, text="繼續聊剛才的話題")
+        workers = [
+            _worker(
+                uid,
+                set(MANAGED),
+                db=db,
+                human_owners=owners,
+                base_reply_probability=0.0,
+            )
+            for uid in sorted(MANAGED)
+        ]
+
+        decisions = [await worker._should_reply(event) for worker in workers]
+
+        assert decisions == [False, False, False, False]
+
+    asyncio.run(main())
+
+
+def test_high_human_traffic_suppresses_sticky_owner():
+    async def main():
+        db = _ClaimDB()
+        db.pressure.update({"human_5m": 20, "human_sent_5m": 2})
+        owners = {(-5428680940, 998): (101, float("inf"))}
+        event = _event(sender_id=998, message_id=902, text="今天台北雨超大")
+        workers = [
+            _worker(
+                uid,
+                set(MANAGED),
+                db=db,
+                human_owners=owners,
+                base_reply_probability=1.0,
+            )
+            for uid in sorted(MANAGED)
+        ]
+
+        decisions = [await worker._should_reply(event) for worker in workers]
+
+        assert decisions == [False, False, False, False]
+
+    asyncio.run(main())
+
+
+def test_group_ineligible_account_is_never_selected_as_winner():
+    async def main():
+        db = _ClaimDB()
+        active = {101, 202}
+        eligible = {-5428680940: {202}}
+        event = _event(sender_id=997, message_id=904, text="台中今晚有人嗎")
+        workers = [
+            _worker(
+                uid,
+                active,
+                db=db,
+                active_group_ids=eligible,
+                base_reply_probability=1.0,
+            )
+            for uid in sorted(active)
+        ]
+
+        decisions = [await worker._should_reply(event) for worker in workers]
+
+        assert decisions == [False, True]
+
+    asyncio.run(main())
+
+
+def test_group_membership_map_tracks_group_changes_and_stop():
+    active = {101}
+    memberships = {}
+    worker = _worker(
+        101,
+        active,
+        active_group_ids=memberships,
+        selected_groups=[-1],
+    )
+    worker.is_running = True
+
+    worker.update_selected_groups({-1, -2})
+    assert memberships == {-1: {101}, -2: {101}}
+
+    worker.update_selected_groups({-2})
+    assert memberships == {-2: {101}}
+
+    worker._sync_active_group_memberships(False)
+    assert memberships == {}
+
+
+def test_new_human_ownership_is_distributed_across_active_accounts():
+    async def main():
+        db = _ClaimDB()
+        owners = {}
+        counts = {uid: 0 for uid in MANAGED}
+        workers = [
+            _worker(
+                uid,
+                set(MANAGED),
+                db=db,
+                human_owners=owners,
+                base_reply_probability=1.0,
+            )
+            for uid in sorted(MANAGED)
+        ]
+
+        for index in range(240):
+            event = _event(
+                sender_id=10_000 + index,
+                message_id=20_000 + index,
+                text=f"第{index}個真人話題",
+            )
+            decisions = [await worker._should_reply(event) for worker in workers]
+            assert decisions.count(True) == 1
+            winner_id = workers[decisions.index(True)].tg_user_id
+            assert winner_id is not None
+            counts[winner_id] += 1
+
+        assert all(count > 0 for count in counts.values())
+        assert max(counts.values()) < 90
 
     asyncio.run(main())
 

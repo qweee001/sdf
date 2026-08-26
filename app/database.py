@@ -21,6 +21,7 @@ class Database:
         self._media_budget_lock = asyncio.Lock()
         self._claim_lock = asyncio.Lock()
         self._settings_lock = asyncio.Lock()
+        self._event_lock = asyncio.Lock()
 
     @property
     def _c(self) -> aiosqlite.Connection:
@@ -126,6 +127,38 @@ class Database:
                 value TEXT NOT NULL,
                 updated_at REAL NOT NULL
             )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS group_events (
+                group_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                sender_kind TEXT NOT NULL,
+                observed_at REAL NOT NULL,
+                PRIMARY KEY (group_id, message_id)
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_group_events_pressure
+            ON group_events (group_id, sender_kind, observed_at DESC)
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS reply_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                account_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                at REAL NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_reply_events_unique_stage
+            ON reply_events (group_id, message_id, account_id, stage, reason)
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_reply_events_pressure
+            ON reply_events (group_id, stage, reason, at DESC)
         """)
         await db.commit()
 
@@ -249,6 +282,155 @@ class Database:
             (group_id, limit),
         )
         return [str(row["content"]) for row in await cursor.fetchall()]
+
+    # ---------- 去重流量與持久回覆診斷 ----------
+
+    async def record_group_event(
+        self, group_id: int, message_id: int, sender_kind: str
+    ) -> bool:
+        """跨觀察帳號只記一次 Telegram 平台事件，不保存內容或身分。"""
+        if not group_id or message_id <= 0 or sender_kind not in {"human", "managed"}:
+            return False
+        async with self._event_lock:
+            cursor = await self._c.execute(
+                "INSERT OR IGNORE INTO group_events "
+                "(group_id, message_id, sender_kind, observed_at) VALUES (?, ?, ?, ?)",
+                (int(group_id), int(message_id), sender_kind, time.time()),
+            )
+            await self._c.commit()
+            return cursor.rowcount == 1
+
+    async def record_reply_event(
+        self,
+        *,
+        group_id: int,
+        message_id: int,
+        account_id: str,
+        stage: str,
+        reason: str,
+    ) -> bool:
+        """持久保存阶段和原因；绝不保存 prompt、输入或回复正文。"""
+        if not group_id or message_id <= 0 or not stage or not reason:
+            return False
+        async with self._event_lock:
+            cursor = await self._c.execute(
+                "INSERT OR IGNORE INTO reply_events "
+                "(group_id, message_id, account_id, stage, reason, at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    int(group_id),
+                    int(message_id),
+                    str(account_id),
+                    str(stage),
+                    str(reason),
+                    time.time(),
+                ),
+            )
+            await self._c.commit()
+            return cursor.rowcount == 1
+
+    async def interaction_pressure(
+        self, group_id: int, *, now: float | None = None
+    ) -> dict[str, int]:
+        current = float(now if now is not None else time.time())
+        cursor = await self._c.execute(
+            "SELECT "
+            "SUM(CASE WHEN sender_kind = 'human' AND observed_at >= ? THEN 1 ELSE 0 END) AS human_5m "
+            "FROM group_events WHERE group_id = ? AND observed_at >= ?",
+            (current - 300, int(group_id), current - 300),
+        )
+        human_row = await cursor.fetchone()
+        cursor = await self._c.execute(
+            "SELECT "
+            "SUM(CASE WHEN stage = 'sent' AND reason = 'human' AND at >= ? THEN 1 ELSE 0 END) AS human_sent_5m, "
+            "SUM(CASE WHEN stage = 'claimed' AND reason = 'human' AND at >= ? THEN 1 ELSE 0 END) AS ordinary_claimed_5m, "
+            "SUM(CASE WHEN stage = 'claimed' AND reason = 'human' AND at >= ? THEN 1 ELSE 0 END) AS ordinary_claimed_20s, "
+            "SUM(CASE WHEN stage = 'claimed' AND reason = 'human' AND at >= ? THEN 1 ELSE 0 END) AS ordinary_claimed_10m, "
+            "SUM(CASE WHEN stage = 'sent' AND at >= ? THEN 1 ELSE 0 END) AS sent_20s, "
+            "SUM(CASE WHEN stage = 'sent' AND at >= ? THEN 1 ELSE 0 END) AS sent_10m "
+            "FROM reply_events WHERE group_id = ? AND at >= ?",
+            (
+                current - 300,
+                current - 300,
+                current - 20,
+                current - 600,
+                current - 20,
+                current - 600,
+                int(group_id),
+                current - 600,
+            ),
+        )
+        reply_row = await cursor.fetchone()
+        return {
+            "human_5m": int((human_row["human_5m"] if human_row else 0) or 0),
+            "human_sent_5m": int((reply_row["human_sent_5m"] if reply_row else 0) or 0),
+            "ordinary_claimed_5m": int((reply_row["ordinary_claimed_5m"] if reply_row else 0) or 0),
+            "ordinary_claimed_20s": int((reply_row["ordinary_claimed_20s"] if reply_row else 0) or 0),
+            "ordinary_claimed_10m": int((reply_row["ordinary_claimed_10m"] if reply_row else 0) or 0),
+            "sent_20s": int((reply_row["sent_20s"] if reply_row else 0) or 0),
+            "sent_10m": int((reply_row["sent_10m"] if reply_row else 0) or 0),
+        }
+
+    async def admit_ordinary_reply(
+        self, group_id: int, message_id: int, account_id: str
+    ) -> bool:
+        """原子执行群级普通回复预算，并记录一次排队占位。"""
+        if not group_id or message_id <= 0:
+            return False
+        now = time.time()
+        async with self._event_lock:
+            async with aiosqlite.connect(self.db_path, timeout=30) as event_db:
+                event_db.row_factory = aiosqlite.Row
+                try:
+                    await event_db.execute("BEGIN IMMEDIATE")
+                    human_cursor = await event_db.execute(
+                        "SELECT COUNT(*) AS n FROM group_events "
+                        "WHERE group_id = ? AND sender_kind = 'human' AND observed_at >= ?",
+                        (int(group_id), now - 300),
+                    )
+                    human_row = await human_cursor.fetchone()
+                    human_5m = int((human_row["n"] if human_row else 0) or 0)
+                    claim_cursor = await event_db.execute(
+                        "SELECT "
+                        "SUM(CASE WHEN at >= ? THEN 1 ELSE 0 END) AS n20, "
+                        "SUM(CASE WHEN at >= ? THEN 1 ELSE 0 END) AS n5, "
+                        "COUNT(*) AS n10 "
+                        "FROM reply_events WHERE group_id = ? "
+                        "AND stage = 'claimed' AND reason = 'human' AND at >= ?",
+                        (now - 20, now - 300, int(group_id), now - 600),
+                    )
+                    claim_row = await claim_cursor.fetchone()
+                    claimed_20s = int((claim_row["n20"] if claim_row else 0) or 0)
+                    claimed_5m = int((claim_row["n5"] if claim_row else 0) or 0)
+                    claimed_10m = int((claim_row["n10"] if claim_row else 0) or 0)
+                    if claimed_10m >= 8 or (
+                        human_5m >= 14 and (claimed_20s >= 1 or claimed_5m >= 2)
+                    ):
+                        await event_db.rollback()
+                        return False
+                    cursor = await event_db.execute(
+                        "INSERT OR IGNORE INTO reply_events "
+                        "(group_id, message_id, account_id, stage, reason, at) "
+                        "VALUES (?, ?, ?, 'claimed', 'human', ?)",
+                        (int(group_id), int(message_id), str(account_id), now),
+                    )
+                    await event_db.commit()
+                    return cursor.rowcount == 1
+                except BaseException:
+                    await event_db.rollback()
+                    raise
+
+    async def reply_event_summary(self, hours: int = 24) -> dict[str, dict[str, int]]:
+        cutoff = time.time() - max(1, int(hours)) * 3600
+        cursor = await self._c.execute(
+            "SELECT stage, reason, COUNT(*) AS n FROM reply_events "
+            "WHERE at >= ? GROUP BY stage, reason ORDER BY stage, reason",
+            (cutoff,),
+        )
+        summary: dict[str, dict[str, int]] = {}
+        for row in await cursor.fetchall():
+            summary.setdefault(str(row["stage"]), {})[str(row["reason"])] = int(row["n"])
+        return summary
 
     @staticmethod
     def _billing_day() -> str:
@@ -634,4 +816,6 @@ class Database:
         cutoff = time.time() - ttl_hours * 3600
         await self._c.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
         await self._c.execute("DELETE FROM private_messages WHERE timestamp < ?", (cutoff,))
+        await self._c.execute("DELETE FROM group_events WHERE observed_at < ?", (cutoff,))
+        await self._c.execute("DELETE FROM reply_events WHERE at < ?", (cutoff,))
         await self._c.commit()

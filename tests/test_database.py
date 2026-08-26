@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 
 from app.database import Database
 
@@ -339,5 +340,88 @@ def test_runtime_feature_flags_persist_across_database_connections():
             "voice_media_enabled": "0",
         }
         await second.close()
+
+    asyncio.run(main())
+
+
+def test_group_event_counts_are_deduplicated_across_observers(tmp_path):
+    async def main():
+        db = Database(str(tmp_path / "group-events.db"))
+        await db.connect()
+
+        assert await db.record_group_event(111, 9001, "human") is True
+        assert await db.record_group_event(111, 9001, "human") is False
+        assert await db.record_group_event(111, 9002, "human") is True
+
+        pressure = await db.interaction_pressure(111)
+        assert pressure["human_5m"] == 2
+        await db.close()
+
+    asyncio.run(main())
+
+
+def test_reply_stage_audit_is_persistent_and_excludes_message_content(tmp_path):
+    async def main():
+        db_path = str(tmp_path / "reply-events.db")
+        first = Database(db_path)
+        await first.connect()
+        await first.record_reply_event(
+            group_id=111,
+            message_id=9001,
+            account_id="a1",
+            stage="generation",
+            reason="ai_empty",
+        )
+        await first.record_reply_event(
+            group_id=111,
+            message_id=9002,
+            account_id="a2",
+            stage="sent",
+            reason="human",
+        )
+        await first.close()
+
+        second = Database(db_path)
+        await second.connect()
+        summary = await second.reply_event_summary(hours=24)
+        pressure = await second.interaction_pressure(111)
+        assert summary["generation"]["ai_empty"] == 1
+        assert summary["sent"]["human"] == 1
+        assert pressure["human_sent_5m"] == 1
+
+        cursor = await second._c.execute("PRAGMA table_info(reply_events)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        assert "content" not in columns
+        assert "prompt" not in columns
+        await second.close()
+
+    asyncio.run(main())
+
+
+def test_high_traffic_ordinary_admission_is_atomically_capped(tmp_path):
+    async def main():
+        db = Database(str(tmp_path / "ordinary-admission.db"))
+        await db.connect()
+        for message_id in range(1, 15):
+            await db.record_group_event(222, message_id, "human")
+
+        assert await db.admit_ordinary_reply(222, 9_999, "a0") is True
+        await db._c.execute(
+            "UPDATE reply_events SET at = ? WHERE message_id = ?",
+            (time.time() - 30, 9_999),
+        )
+        await db._c.commit()
+
+        admitted = await asyncio.gather(
+            *(
+                db.admit_ordinary_reply(222, 10_000 + index, f"a{index % 4}")
+                for index in range(12)
+            )
+        )
+
+        assert admitted.count(True) == 1
+        pressure = await db.interaction_pressure(222)
+        assert pressure["ordinary_claimed_5m"] == 2
+        await db.close()
 
     asyncio.run(main())

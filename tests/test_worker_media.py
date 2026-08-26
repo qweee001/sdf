@@ -82,6 +82,7 @@ def _worker(
         media_enabled=True,
         voice_media_enabled=False,
         media_max_input_bytes=8 * 1024 * 1024,
+        base_reply_probability=1.0,
     )
     return AccountWorker(
         account_id=str(uid),
@@ -131,6 +132,7 @@ def test_manager_injects_same_media_claim_state_into_worker():
         manager._media_service = None
         manager.managed_ids = set()
         manager.active_ids = set()
+        manager.active_group_ids = {}
         manager.managed_origins = {}
         manager.human_owners = {}
         manager.recent_proactive_owners = {}
