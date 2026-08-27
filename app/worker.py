@@ -303,6 +303,9 @@ class AccountWorker:
         self._proactive_today = 0
         self._proactive_day = 0
         self._recent_proactive_topics: set[str] = set()
+        self._realtime_voice_day = 0
+        self._realtime_voice_today = 0
+        self._last_realtime_voice = 0.0
         self._generation_reasons: dict[tuple[int, int], str] = {}
         self._successful_vision_events: set[tuple[int, int]] = set()
 
@@ -311,6 +314,8 @@ class AccountWorker:
             "errors": 0,
             "proactive_sent": 0,
             "voice_proactive_sent": 0,
+            "voice_realtime_sent": 0,
+            "voice_realtime_errors": 0,
             "managed_claimed": 0,
             "managed_generated": 0,
             "managed_fallbacks": 0,
@@ -1156,6 +1161,24 @@ class AccountWorker:
                     generation_reason,
                 )
                 return
+            # 即時話題語音：真人回覆、非素材請求、非追趕式 followup，
+            # 且該帳號當日額度／間隔／時段都允許時，以 12% 機率改發語音；
+            # 合成或發送失敗則自動回退文字（fail-closed，绝不漏发回复）。
+            if (
+                is_human_reply
+                and not managed_followup
+                and media_kind is None
+                and self._realtime_voice_due(time.time())
+                and random.random() < 0.12
+            ):
+                voice_text = text if len(text) <= 220 else text[:217] + "…"
+                if await self._send_realtime_voice(int(event.chat_id), voice_text):
+                    self.stats["human_sent"] += 1
+                    human_counted = True
+                    await self._audit_reply(event, "sent", "human")
+                    sent = True
+                    sent_audited = True
+                    return
             sent = await self._send_text_recorded(
                 int(event.chat_id),
                 text,
@@ -1872,7 +1895,9 @@ class AccountWorker:
         asset = self.voice_library.asset_for_day(self.account_id, day_index)
         if asset is None:
             return False
-        if not await self.db.claim_daily_voice(self.account_id, day_index):
+        if not await self.db.claim_daily_voice(
+            self.account_id, day_index, group_id=group_id
+        ):
             return False
         return await self._send_media_recorded(
             group_id,
@@ -1888,6 +1913,9 @@ class AccountWorker:
                 await asyncio.sleep(60)
                 if not self.is_running:
                     return
+                if not bool(getattr(self.config, "voice_daily_pre_gen", False)):
+                    # 預生成每日語音預設關閉；語音主路徑是即時話題語音。
+                    continue
                 await self._maybe_send_daily_voice()
             except asyncio.CancelledError:
                 return
@@ -1895,6 +1923,98 @@ class AccountWorker:
                 self.stats["errors"] += 1
                 print(f"[{self.name}] daily voice error: {exc}", flush=True)
                 await asyncio.sleep(60)
+
+    # ---------- 即時話題語音（本地 IndexTTS2 服務） ----------
+
+    @staticmethod
+    def _voice_profile_key(persona: dict) -> str:
+        try:
+            age = int(persona.get("age") or 0)
+        except (TypeError, ValueError):
+            return "21"
+        if age < 23:
+            return "21"
+        if age < 27:
+            return "25"
+        if age < 31:
+            return "29"
+        return "34"
+
+    def _realtime_voice_due(self, current: float) -> bool:
+        cfg = self.config
+        if (
+            not self.is_running
+            or not self.tg_client
+            or not bool(getattr(cfg, "voice_media_enabled", False))
+            or not bool(getattr(cfg, "media_enabled", True))
+            or not getattr(cfg, "voice_realtime_url", "")
+            or not getattr(cfg, "voice_realtime_token", "")
+        ):
+            return False
+        if not self.selected_groups:
+            return False
+        day = self._hkt_day_index(current)
+        if day != self._realtime_voice_day:
+            self._realtime_voice_day = day
+            self._realtime_voice_today = 0
+        limit = max(0, int(getattr(cfg, "voice_realtime_daily_max", 3) or 0))
+        if limit <= 0 or self._realtime_voice_today >= limit:
+            return False
+        # 同一帳號兩條即時語音至少間隔 45 分鐘，避免機器感。
+        if current - self._last_realtime_voice < 45 * 60:
+            return False
+        second = self._hkt_second_of_day(current)
+        # 桃花源真人高峰 20:00-22:00 不搶話（與每日語音一致）。
+        if 20 * 3600 <= second < 22 * 3600:
+            return False
+        return True
+
+    async def _synthesize_realtime_voice(self, text: str) -> MediaAsset | None:
+        """Call the local IndexTTS2 service; None on any failure (fail-closed)."""
+        cfg = self.config
+        url = f"{cfg.voice_realtime_url}/v1/synthesize"
+        voice = self._voice_profile_key(self.persona)
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(200.0)) as client:
+                resp = await client.post(
+                    url,
+                    json={"voice": voice, "text": text[:220]},
+                    headers={"Authorization": f"Bearer {cfg.voice_realtime_token}"},
+                )
+            if resp.status_code != 200:
+                self.stats["voice_realtime_errors"] += 1
+                print(
+                    f"[{self.name}] realtime voice http {resp.status_code}",
+                    flush=True,
+                )
+                return None
+            data = resp.content
+            if len(data) < 2000 or len(data) > 2 * 1024 * 1024:
+                self.stats["voice_realtime_errors"] += 1
+                return None
+            return MediaAsset("voice", data, f"realtime-{voice}.ogg", "audio/ogg")
+        except Exception as exc:
+            self.stats["voice_realtime_errors"] += 1
+            print(f"[{self.name}] realtime voice failed: {exc}", flush=True)
+            return None
+
+    async def _send_realtime_voice(self, chat_id: int, text: str) -> bool:
+        asset = await self._synthesize_realtime_voice(text)
+        if asset is None:
+            return False
+        sent = await self._send_media_recorded(
+            chat_id,
+            asset,
+            "[語音]",
+            activity_kind="voice_realtime",
+            stats_key="voice_realtime_sent",
+        )
+        if sent:
+            self._realtime_voice_today += 1
+            self._last_realtime_voice = time.time()
+        return sent
 
     def _should_suppress_proactive(self, group_id: int) -> bool:
         last_human = float(self.last_human_activity.get(int(group_id), 0) or 0)

@@ -20,8 +20,14 @@ class _VoiceDB:
         self.messages = []
         self.activities = []
 
-    async def claim_daily_voice(self, account_id: str, day_index: int) -> bool:
-        self.claim_calls.append((account_id, day_index))
+    async def claim_daily_voice(
+        self,
+        account_id: str,
+        day_index: int,
+        group_id: int | None = None,
+        min_interval_seconds: float = 30 * 60,
+    ) -> bool:
+        self.claim_calls.append((account_id, day_index, group_id))
         if self.claimed:
             return False
         self.claimed = True
@@ -116,5 +122,53 @@ def test_worker_suppresses_daily_voice_during_taohuayuan_busy_hours_or_recent_hu
         assert await worker._maybe_send_daily_voice(now=quiet) is False
         assert db.claim_calls == []
         worker.tg_client.send_file.assert_not_awaited()
+
+    asyncio.run(main())
+
+
+def test_daily_voice_group_separation_blocks_second_account_within_30_minutes(tmp_path: Path):
+    """同一群 30 分鐘內只允許一個帳號的每日語音（防止 14:15/14:16 同時兩條）。"""
+    async def main():
+        path = str(tmp_path / "voice-group.db")
+        first = Database(path)
+        second = Database(path)
+        await first.connect()
+        await second.connect()
+        try:
+            assert await first.claim_daily_voice("acct-1", 100, group_id=-1001) is True
+            await first.touch_activity("acct-1", -1001, "voice_proactive")
+            # 同群另一個帳號：30 分鐘內被拒
+            assert await second.claim_daily_voice("acct-2", 100, group_id=-1001) is False
+            # 同群同一帳號重試也被拒（每日一次）
+            assert await first.claim_daily_voice("acct-1", 100, group_id=-1001) is False
+            # 30 分鐘前之後的 activity 不影響：把 activity 時點改舊
+            await first._c.execute(
+                "UPDATE activity SET at = at - 31 * 60 "
+                "WHERE group_id = -1001 AND kind = 'voice_proactive'"
+            )
+            await first._c.commit()
+            assert await second.claim_daily_voice("acct-2", 100, group_id=-1001) is True
+            # 不同群不受影響
+            assert await first.claim_daily_voice("acct-3", 100, group_id=-1002) is True
+        finally:
+            await first.close()
+            await second.close()
+
+    asyncio.run(main())
+
+
+def test_worker_does_not_send_when_group_claim_is_refused():
+    async def main():
+        db = _VoiceDB()
+
+        async def refuse(*args, **kwargs):
+            return False
+
+        db.claim_daily_voice = refuse
+        worker = _voice_worker(db)
+        now = _hkt_timestamp(100, 23, 59)
+        assert await worker._maybe_send_daily_voice(now=now) is False
+        worker.tg_client.send_file.assert_not_awaited()
+        assert db.messages == []
 
     asyncio.run(main())

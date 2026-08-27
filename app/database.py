@@ -802,19 +802,55 @@ class Database:
             await self._c.commit()
             return cursor.rowcount == 1
 
-    async def claim_daily_voice(self, account_id: str, day_index: int) -> bool:
-        """Atomically allow at most one proactive voice per account and UTC day."""
+    async def claim_daily_voice(
+        self,
+        account_id: str,
+        day_index: int,
+        group_id: int | None = None,
+        min_interval_seconds: float = 30 * 60,
+    ) -> bool:
+        """Atomically allow at most one proactive voice per account and HKT day.
+
+        When ``group_id`` is provided, also require that no other account sent a
+        voice in that group within ``min_interval_seconds`` (activity table,
+        kind ``voice_proactive``) so managed accounts never post near-simultaneous
+        voice notes into the same group.
+        """
         if not str(account_id).strip() or int(day_index) < 0:
             return False
         key = f"daily-voice:{account_id}:{int(day_index)}"
-        async with aiosqlite.connect(self.db_path, timeout=30) as claim_db:
-            cursor = await claim_db.execute(
-                "INSERT OR IGNORE INTO outbound_claims "
-                "(claim_key, account_id, claimed_at) VALUES (?, ?, ?)",
-                (key, str(account_id), time.time()),
-            )
-            await claim_db.commit()
-            return cursor.rowcount == 1
+        now = time.time()
+        cutoff = now - max(0.0, float(min_interval_seconds))
+        async with self._claim_lock:
+            async with aiosqlite.connect(self.db_path, timeout=30) as claim_db:
+                try:
+                    await claim_db.execute("BEGIN IMMEDIATE")
+                    cursor = await claim_db.execute(
+                        "INSERT OR IGNORE INTO outbound_claims "
+                        "(claim_key, account_id, claimed_at) VALUES (?, ?, ?)",
+                        (key, str(account_id), now),
+                    )
+                    if cursor.rowcount != 1:
+                        await claim_db.rollback()
+                        return False
+                    if group_id:
+                        other = await claim_db.execute(
+                            "SELECT 1 FROM activity WHERE group_id = ? "
+                            "AND kind = 'voice_proactive' AND at > ? LIMIT 1",
+                            (int(group_id), cutoff),
+                        )
+                        if await other.fetchone():
+                            await claim_db.execute(
+                                "DELETE FROM outbound_claims WHERE claim_key = ?",
+                                (key,),
+                            )
+                            await claim_db.rollback()
+                            return False
+                    await claim_db.commit()
+                    return True
+                except BaseException:
+                    await claim_db.rollback()
+                    raise
 
     async def stats_for(self, account_id: str) -> dict:
         cursor = await self._c.execute(

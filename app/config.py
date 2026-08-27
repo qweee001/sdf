@@ -73,6 +73,10 @@ class Settings:
     media_enabled: bool
     voice_media_enabled: bool
     voice_assets_dir: str
+    voice_daily_pre_gen: bool
+    voice_realtime_url: str
+    voice_realtime_token: str
+    voice_realtime_daily_max: int
     media_daily_budget_usd: float
     media_max_input_bytes: int
     media_generation_timeout: float
@@ -150,6 +154,12 @@ def load_settings() -> Settings:
         # 每日隨機語音素材目錄（含 manifest.json + 各帳號 ogg 片段），
         # 預設落在 Railway 的 /data volume；啟用前必須先部署素材包。
         voice_assets_dir=os.getenv("VOICE_ASSETS_DIR", "/data/voice-assets").strip(),
+        # 預生成每日語音預設關閉：語音主路徑改為即時話題語音（本地 IndexTTS2 服務）。
+        voice_daily_pre_gen=_bool("VOICE_DAILY_PREGEN", False),
+        # 即時語音：本地 Mac 上的 IndexTTS2 服務（cloudflared 隧道暴露）。
+        voice_realtime_url=os.getenv("VOICE_REALTIME_URL", "").strip().rstrip("/"),
+        voice_realtime_token=os.getenv("VOICE_REALTIME_TOKEN", "").strip(),
+        voice_realtime_daily_max=_int("VOICE_REALTIME_DAILY_MAX", 3),
         media_daily_budget_usd=_float("MEDIA_DAILY_BUDGET_USD", 10.0),
         media_max_input_bytes=_int(
             "MEDIA_MAX_INPUT_BYTES", 8 * 1024 * 1024
