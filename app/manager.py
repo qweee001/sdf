@@ -19,6 +19,7 @@ from .crypto import SecretBox
 from .database import Database
 from .media import OrcaMediaService
 from .persona import generate_persona
+from .voice_assets import VoiceAssetLibrary
 from .worker import AccountWorker
 
 
@@ -30,6 +31,7 @@ class AccountManager:
         self.workers: dict[str, AccountWorker] = {}
         self._lifecycle_locks: dict[str, asyncio.Lock] = {}
         self._feature_lock = asyncio.Lock()
+        self._voice_library = VoiceAssetLibrary(config.voice_assets_dir)
         self.managed_ids: set[int] = set()
         self.active_ids: set[int] = set()
         self.active_group_ids: dict[int, set[int]] = {}
@@ -65,33 +67,45 @@ class AccountManager:
         return {
             "media_enabled": bool(self.config.media_enabled),
             "voice_enabled": bool(self.config.voice_media_enabled),
-            # 本地克隆台灣腔尚未接入；不得回退 OrcaRouter TTS。
-            "voice_available": False,
+            # 本地 IndexTTS2 素材就緒才視為可用；絕不允許 OrcaRouter TTS。
+            "voice_available": self._voice_library_has_assets(),
         }
+
+    def _voice_library_has_assets(self) -> bool:
+        try:
+            self._voice_library.reload()
+            return len(getattr(self._voice_library, "_accounts", {}) or {}) > 0
+        except Exception:
+            return False
 
     async def load_runtime_settings(self) -> None:
         stored = await self.db.get_runtime_settings()
         self.config.media_enabled = self._stored_bool(
             stored.get("media_enabled"), bool(self.config.media_enabled)
         )
-        # 即使舊資料誤寫為 1，也要 fail-closed。
-        self.config.voice_media_enabled = False
-        if stored.get("voice_media_enabled") == "1":
-            await self.db.set_runtime_settings({"voice_media_enabled": "0"})
+        # 語音只有「本機素材就緒」+「DB 明寫 1」才允許開啟；其餘一律 fail-closed。
+        if stored.get("voice_media_enabled") == "1" and self._voice_library_has_assets():
+            self.config.voice_media_enabled = True
+        else:
+            self.config.voice_media_enabled = False
+            if stored.get("voice_media_enabled") == "1":
+                await self.db.set_runtime_settings({"voice_media_enabled": "0"})
 
     async def update_feature_flags(
         self, *, media_enabled: bool, voice_enabled: bool
     ) -> str:
-        if voice_enabled:
-            return "本地克隆台灣腔尚未就緒，語音功能不能開啟"
+        if voice_enabled and not self._voice_library_has_assets():
+            return "本機語音素材未就緒，語音功能不能開啟"
         async with self._feature_lock:
             await self.db.set_runtime_settings({
                 "media_enabled": "1" if media_enabled else "0",
-                "voice_media_enabled": "0",
+                "voice_media_enabled": "1" if voice_enabled else "0",
             })
             # 所有 worker 共用同一 Settings 物件，更新後立即熱生效。
             self.config.media_enabled = bool(media_enabled)
-            self.config.voice_media_enabled = False
+            self.config.voice_media_enabled = (
+                bool(voice_enabled) and self._voice_library_has_assets()
+            )
         return ""
 
     @staticmethod
@@ -163,6 +177,7 @@ class AccountManager:
             last_human_activity=self.last_human_activity,
             reply_claim_signals=self.reply_claim_signals,
             failed_reply_claimants=self.failed_reply_claimants,
+            voice_library=self._voice_library,
         )
         self.workers[account_id] = worker
         await worker.start()

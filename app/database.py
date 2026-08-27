@@ -802,6 +802,20 @@ class Database:
             await self._c.commit()
             return cursor.rowcount == 1
 
+    async def claim_daily_voice(self, account_id: str, day_index: int) -> bool:
+        """Atomically allow at most one proactive voice per account and UTC day."""
+        if not str(account_id).strip() or int(day_index) < 0:
+            return False
+        key = f"daily-voice:{account_id}:{int(day_index)}"
+        async with aiosqlite.connect(self.db_path, timeout=30) as claim_db:
+            cursor = await claim_db.execute(
+                "INSERT OR IGNORE INTO outbound_claims "
+                "(claim_key, account_id, claimed_at) VALUES (?, ?, ?)",
+                (key, str(account_id), time.time()),
+            )
+            await claim_db.commit()
+            return cursor.rowcount == 1
+
     async def stats_for(self, account_id: str) -> dict:
         cursor = await self._c.execute(
             "SELECT COUNT(*) AS n FROM messages WHERE account_id = ? AND role = 'assistant'",

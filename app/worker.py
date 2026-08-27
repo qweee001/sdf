@@ -247,13 +247,15 @@ class AccountWorker:
                  recent_proactive_owners: dict | None = None,
                  last_human_activity: dict | None = None,
                  reply_claim_signals: dict[tuple[int, int], asyncio.Event] | None = None,
-                 failed_reply_claimants: dict[tuple[int, int], set[int]] | None = None):
+                 failed_reply_claimants: dict[tuple[int, int], set[int]] | None = None,
+                 voice_library: Any | None = None):
         self.account_id = account_id
         self.session_key = session_key
         self.tg_api_id = tg_api_id
         self.tg_api_hash = tg_api_hash
         self.ai_client = ai_client
         self.media_service = media_service
+        self.voice_library = voice_library
         self.db = db
         self.config = config
         self.managed_ids = managed_ids  # 所有水軍 TG user id（互認）
@@ -291,6 +293,7 @@ class AccountWorker:
         self.status_detail = ""
 
         self._proactive_task: asyncio.Task | None = None
+        self._voice_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
         self._reply_tasks: set[asyncio.Task] = set()
         self._send_lock = asyncio.Lock()
@@ -307,6 +310,7 @@ class AccountWorker:
             "replies_sent": 0,
             "errors": 0,
             "proactive_sent": 0,
+            "voice_proactive_sent": 0,
             "managed_claimed": 0,
             "managed_generated": 0,
             "managed_fallbacks": 0,
@@ -381,6 +385,7 @@ class AccountWorker:
             self._proactive_today = 0
             self._recent_proactive_topics.clear()
             self._proactive_task = asyncio.create_task(self._proactive_loop())
+            self._voice_task = asyncio.create_task(self._daily_voice_loop())
             self._cleanup_task = asyncio.create_task(self._memory_cleanup_loop())
             await self._notify_status(
                 "connected", me.id, get_display_name(me) or ""
@@ -408,7 +413,7 @@ class AccountWorker:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._reply_tasks.clear()
-        for task in (self._proactive_task, self._cleanup_task):
+        for task in (self._proactive_task, self._voice_task, self._cleanup_task):
             if task:
                 task.cancel()
                 try:
@@ -416,6 +421,7 @@ class AccountWorker:
                 except (asyncio.CancelledError, Exception):
                     pass
         self._proactive_task = None
+        self._voice_task = None
         self._cleanup_task = None
         if self.tg_client:
             await self.tg_client.disconnect()
@@ -1337,13 +1343,15 @@ class AccountWorker:
         marker: str,
         *,
         on_dispatched: Callable[[], None] | None = None,
+        activity_kind: str = "reply",
+        stats_key: str = "replies_sent",
     ) -> bool:
         async with self._send_lock:
             if not await self._send_media_unlocked(chat_id, asset):
                 return False
             if on_dispatched:
                 on_dispatched()
-            self.stats["replies_sent"] += 1
+            self.stats[stats_key] += 1
             await self.db.add_message(
                 self.account_id,
                 chat_id,
@@ -1353,7 +1361,7 @@ class AccountWorker:
                 marker,
             )
             await self.db.touch_activity(
-                self.account_id, chat_id, "reply"
+                self.account_id, chat_id, activity_kind
             )
             return True
 
@@ -1810,6 +1818,83 @@ class AccountWorker:
             return True
 
     # ---------- 主動發言 ----------
+
+    @staticmethod
+    def _hkt_day_index(now: float) -> int:
+        return int((float(now) + 8 * 3600) // 86400)
+
+    @staticmethod
+    def _hkt_second_of_day(now: float) -> int:
+        return int((float(now) + 8 * 3600) % 86400)
+
+    def _daily_voice_target_second(self, day_index: int) -> int:
+        """Stable per-account/day random time outside 桃花源's 20–22 busy window."""
+        windows = (
+            (11 * 3600, 20 * 3600),
+            (22 * 3600, 23 * 3600 + 30 * 60),
+        )
+        total = sum(end - start for start, end in windows)
+        seed = hashlib.sha256(
+            f"{self.account_id}:{int(day_index)}:daily-voice".encode("utf-8")
+        ).digest()
+        offset = int.from_bytes(seed[:8], "big") % total
+        for start, end in windows:
+            width = end - start
+            if offset < width:
+                return start + offset
+            offset -= width
+        return windows[-1][0]
+
+    async def _maybe_send_daily_voice(self, *, now: float | None = None) -> bool:
+        current = time.time() if now is None else float(now)
+        if (
+            not self.is_running
+            or not self.tg_client
+            or not bool(getattr(self.config, "voice_media_enabled", False))
+            or self.voice_library is None
+            or not self.selected_groups
+        ):
+            return False
+        second = self._hkt_second_of_day(current)
+        if 20 * 3600 <= second < 22 * 3600:
+            return False
+        day_index = self._hkt_day_index(current)
+        if second < self._daily_voice_target_second(day_index):
+            return False
+        groups = sorted(int(group_id) for group_id in self.selected_groups)
+        group_seed = hashlib.sha256(
+            f"{self.account_id}:{day_index}:daily-voice-group".encode("utf-8")
+        ).digest()
+        group_id = groups[int.from_bytes(group_seed[:8], "big") % len(groups)]
+        last_human = float(self.last_human_activity.get(group_id, 0) or 0)
+        if last_human > 0 and current - last_human < 10 * 60:
+            return False
+        asset = self.voice_library.asset_for_day(self.account_id, day_index)
+        if asset is None:
+            return False
+        if not await self.db.claim_daily_voice(self.account_id, day_index):
+            return False
+        return await self._send_media_recorded(
+            group_id,
+            asset,
+            "[語音]",
+            activity_kind="voice_proactive",
+            stats_key="voice_proactive_sent",
+        )
+
+    async def _daily_voice_loop(self) -> None:
+        while self.is_running:
+            try:
+                await asyncio.sleep(60)
+                if not self.is_running:
+                    return
+                await self._maybe_send_daily_voice()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                self.stats["errors"] += 1
+                print(f"[{self.name}] daily voice error: {exc}", flush=True)
+                await asyncio.sleep(60)
 
     def _should_suppress_proactive(self, group_id: int) -> bool:
         last_human = float(self.last_human_activity.get(int(group_id), 0) or 0)

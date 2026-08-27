@@ -72,6 +72,7 @@ class Settings:
     video_model: str
     media_enabled: bool
     voice_media_enabled: bool
+    voice_assets_dir: str
     media_daily_budget_usd: float
     media_max_input_bytes: int
     media_generation_timeout: float
@@ -146,6 +147,9 @@ def load_settings() -> Settings:
         media_enabled=_bool("MEDIA_ENABLED", True),
         # 語音目前只允許未來的本地克隆後端；OrcaRouter TTS 不得啟用。
         voice_media_enabled=False,
+        # 每日隨機語音素材目錄（含 manifest.json + 各帳號 ogg 片段），
+        # 預設落在 Railway 的 /data volume；啟用前必須先部署素材包。
+        voice_assets_dir=os.getenv("VOICE_ASSETS_DIR", "/data/voice-assets").strip(),
         media_daily_budget_usd=_float("MEDIA_DAILY_BUDGET_USD", 10.0),
         media_max_input_bytes=_int(
             "MEDIA_MAX_INPUT_BYTES", 8 * 1024 * 1024
