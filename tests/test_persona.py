@@ -51,6 +51,17 @@ FORBIDDEN_GROUP_META = (
     "這群真的可以",
 )
 
+FORBIDDEN_MAINLAND_TERMS = (
+    "拼單",
+    "外賣",
+    "視頻",
+)
+
+GENERIC_PROACTIVE_FRAGMENTS = (
+    "想慢慢認識新朋友",
+    "想認識新朋友",
+)
+
 
 def test_persona_fields():
     p = generate_persona()
@@ -106,6 +117,20 @@ def test_chat_style_changes_hard_tone_rules():
     assert "不要高頻使用「幹」「笑死」「哈哈」" in sp
 
 
+def test_system_prompt_rejects_mainland_terms_and_gives_taiwan_aliases():
+    p = generate_persona()
+    sp = get_system_prompt(p)
+    forbidden_line = next(
+        line for line in sp.splitlines() if line.startswith("- 不用大陸用語")
+    )
+    for term in ("拼單", "外賣", "視頻"):
+        assert f"「{term}」" in forbidden_line
+    taiwan_line = next(
+        line for line in sp.splitlines() if line.startswith("- 台灣人說")
+    )
+    assert "一起叫、外送、影片" in taiwan_line
+
+
 def test_system_prompt_preserves_adult_policy_after_approved_language_cleanup():
     """保留成人政策；只套用使用者明確要求的英文示例清理與窄幅追加。"""
     p = generate_persona()
@@ -138,6 +163,22 @@ def test_no_simplified_chinese_in_content_pools():
         for s in pool:
             simp = [ch for ch in s if ch in SIMP_ONLY]
             assert not simp, f"簡體字 {simp} in: {s}"
+
+
+def test_static_content_pools_exclude_mainland_terms():
+    """繁體字形也可能是大陸用語，不能只靠簡體字檢查。"""
+    for pool in CONTENT_POOLS:
+        for text in pool:
+            found = [term for term in FORBIDDEN_MAINLAND_TERMS if term in text]
+            assert not found, f"大陸用語 {found} in: {text}"
+
+
+def test_static_proactive_topics_use_concrete_life_details():
+    """主動話題要像生活碎念，不要像交友機器人的自我介紹。"""
+    for pool in CONTENT_POOLS:
+        for text in pool:
+            found = [fragment for fragment in GENERIC_PROACTIVE_FRAGMENTS if fragment in text]
+            assert not found, f"模板化交友開場 {found} in: {text}"
 
 
 def test_every_static_proactive_pool_excludes_group_meta_speech():
