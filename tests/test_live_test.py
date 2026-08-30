@@ -308,6 +308,7 @@ class FakeManager:
         self._clock = clock
         self.config = SimpleNamespace(
             media_enabled=True,
+            vision_model="gemini-3.5-flash-lite",
             voice_media_enabled=True,
             voice_realtime_url="https://voice.test",
             voice_realtime_token="token",
@@ -767,6 +768,34 @@ def _request(asset_root, **overrides):
     }
     request.update(overrides)
     return request
+
+
+def test_live_test_rejects_unapproved_vision_model_before_start(tmp_path):
+    async def main():
+        root = tmp_path / "assets"
+        root.mkdir()
+        clock = FakeClock()
+        db = Database(str(tmp_path / "vision-model-gate.db"))
+        await db.connect()
+        await _seed_accounts(db)
+        manager = FakeManager(db, clock)
+        manager.config.vision_model = "google/gemini-3.5-flash-lite"
+        live_test = BoundedLiveTest(
+            manager,
+            enabled=True,
+            wan22_ready=False,
+            asset_root=root,
+            clock=clock.time,
+            sleep=clock.sleep,
+        )
+
+        with pytest.raises(LiveTestError, match="vision model is not approved"):
+            await live_test.start(_video_disabled_request(root))
+        assert manager.live_test_start_calls == []
+        assert live_test.outbound_gate._active is None
+        await db.close()
+
+    asyncio.run(main())
 
 
 def _video_disabled_request(asset_root, **overrides):

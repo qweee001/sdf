@@ -466,6 +466,7 @@ class _ContractHTTPClient:
 
 def _video_config(**overrides):
     values = {
+        "vision_model": "gemini-3.5-flash-lite",
         "video_realtime_url": "https://wan.example",
         "video_realtime_token": "wan-token",
         "video_realtime_request_timeout": 3.0,

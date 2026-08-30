@@ -14,6 +14,9 @@ from openai import APIConnectionError
 from PIL import Image, ImageOps
 
 
+APPROVED_VISION_MODEL = "gemini-3.5-flash-lite"
+
+
 @dataclass(frozen=True)
 class MediaAsset:
     kind: str
@@ -26,7 +29,7 @@ class OrcaMediaService:
     """OrcaRouter 多模態與媒體生成；付費生成先走共用預算闸門。"""
 
     _MODEL_BUDGETS = {
-        "vision": ("vision_model", "gemini-3.5-flash-lite", 0.10),
+        "vision": ("vision_model", APPROVED_VISION_MODEL, 0.10),
         "image": (
             "image_model",
             "google/imagen-4.0-fast-generate-001",

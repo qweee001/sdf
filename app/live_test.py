@@ -18,7 +18,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 
-from .media import MediaAsset
+from .media import APPROVED_VISION_MODEL, MediaAsset
 from .persona import get_system_prompt
 
 if TYPE_CHECKING:
@@ -1124,6 +1124,8 @@ class BoundedLiveTest:
         config = self.manager.config
         if not bool(getattr(config, "media_enabled", False)):
             return "media feature is disabled"
+        if str(getattr(config, "vision_model", "")).strip() != APPROVED_VISION_MODEL:
+            return "vision model is not approved for live test"
         if not bool(getattr(config, "voice_media_enabled", False)):
             return "voice feature is disabled"
         if not str(getattr(config, "voice_realtime_url", "")).strip():
