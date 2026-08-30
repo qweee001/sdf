@@ -9,7 +9,11 @@ from app.worker import AccountWorker
 
 
 class _VoiceLibrary:
+    def __init__(self):
+        self.calls = []
+
     def asset_for_day(self, account_id: str, day_index: int) -> MediaAsset:
+        self.calls.append((account_id, day_index))
         return MediaAsset("voice", b"ogg-audio", f"{account_id}-{day_index}.ogg", "audio/ogg")
 
 
@@ -86,7 +90,7 @@ def test_daily_voice_claim_is_atomic_per_account_and_day_across_connections(tmp_
     asyncio.run(main())
 
 
-def test_worker_sends_one_daily_voice_note_only_when_enabled_and_due():
+def test_worker_daily_pregenerated_voice_is_always_fail_closed():
     async def main():
         db = _VoiceDB()
         worker = _voice_worker(db, enabled=False)
@@ -97,14 +101,13 @@ def test_worker_sends_one_daily_voice_note_only_when_enabled_and_due():
         worker.tg_client.send_file.assert_not_awaited()
 
         worker.config.voice_media_enabled = True
-        assert await worker._maybe_send_daily_voice(now=now) is True
         assert await worker._maybe_send_daily_voice(now=now) is False
-        worker.tg_client.send_file.assert_awaited_once()
-        args, kwargs = worker.tg_client.send_file.await_args
-        assert args[0] == -1001
-        assert kwargs["voice_note"] is True
-        assert len(db.messages) == 1
-        assert db.activities == [("acct-1", -1001, "voice_proactive")]
+        assert worker.voice_library.calls == []
+        assert db.claim_calls == []
+        worker.tg_client.send_file.assert_not_awaited()
+        assert db.messages == []
+        assert db.activities == []
+        assert worker.stats["voice_proactive_sent"] == 0
 
     asyncio.run(main())
 
@@ -172,3 +175,9 @@ def test_worker_does_not_send_when_group_claim_is_refused():
         assert db.messages == []
 
     asyncio.run(main())
+
+
+def test_worker_start_never_creates_daily_voice_loop_even_if_flag_true():
+    import inspect
+
+    assert "_daily_voice_loop" not in inspect.getsource(AccountWorker.start)

@@ -13,6 +13,7 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from .live_test import LiveTestError
 from .manager import AccountManager
 from .telegram_login import (
     LoginConflict,
@@ -135,6 +136,38 @@ class Dashboard:
                 "ok": True,
                 "features": self.manager.feature_status(),
             })
+
+        @app.post("/api/live-test/start")
+        async def start_live_test(request: Request):
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            try:
+                data = await request.json()
+            except Exception:
+                return JSONResponse({"error": "測試設定格式錯誤"}, status_code=400)
+            if not isinstance(data, dict):
+                return JSONResponse({"error": "測試設定格式錯誤"}, status_code=400)
+            try:
+                result = await self.manager.start_live_test(data)
+            except LiveTestError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
+            return JSONResponse({"ok": True, "live_test": result})
+
+        @app.get("/api/live-test/status")
+        async def live_test_status(request: Request):
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            return JSONResponse({
+                "ok": True,
+                "live_test": await self.manager.live_test_status(),
+            })
+
+        @app.post("/api/live-test/stop")
+        async def stop_live_test(request: Request):
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            result = await self.manager.stop_live_test()
+            return JSONResponse({"ok": True, "live_test": result})
 
         @app.post("/api/accounts/{account_id}/start")
         async def start_account(account_id: str, request: Request):

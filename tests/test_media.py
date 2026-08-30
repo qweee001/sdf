@@ -1,11 +1,13 @@
 import asyncio
 import base64
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from openai import APITimeoutError
+from PIL import Image
 
 from app.media import OrcaMediaService
 
@@ -101,7 +103,7 @@ def _service(db=None, http=None, resolver=None):
         ),
     )
     config = SimpleNamespace(
-        vision_model="google/gemini-3.5-flash-lite",
+        vision_model="gemini-3.5-flash-lite",
         image_model="google/imagen-4.0-fast-generate-001",
         image_fallback_model="google/imagen-4.0-generate-001",
         speech_model="openai/tts-1",
@@ -110,6 +112,7 @@ def _service(db=None, http=None, resolver=None):
         media_daily_budget_usd=10.0,
         voice_media_enabled=False,
         media_generation_timeout=30.0,
+        media_max_input_bytes=8 * 1024 * 1024,
         media_download_hosts=("media.test",),
         ai_api_key="x",
         ai_base_url="https://api.orcarouter.ai/v1",
@@ -128,19 +131,249 @@ def _service(db=None, http=None, resolver=None):
     return service, client
 
 
+def _image_bytes(
+    *,
+    image_format="PNG",
+    size=(320, 240),
+    exif_orientation=None,
+    noisy=False,
+):
+    image = (
+        Image.effect_noise(size, 80).convert("RGB")
+        if noisy
+        else Image.new("RGB", size, "#6b8eaa")
+    )
+    output = BytesIO()
+    exif = Image.Exif()
+    if exif_orientation is not None:
+        exif[274] = exif_orientation
+    image.save(output, format=image_format, exif=exif)
+    return output.getvalue()
+
+
+def _submitted_image(client):
+    kwargs = client.chat.completions.create.await_args.kwargs
+    parts = kwargs["messages"][1]["content"]
+    data_url = parts[1]["image_url"]["url"]
+    header, encoded = data_url.split(",", 1)
+    return kwargs, parts, header, base64.b64decode(encoded, validate=True)
+
+
 def test_image_understanding_uses_local_data_url():
     async def main():
         db = _DB()
         service, client = _service(db=db)
         text = await service.understand_image(
-            "a1", b"jpeg", "image/jpeg", "只描述圖片", "使用者傳來的照片"
+            "a1", _image_bytes(), "image/png", "只描述圖片", "使用者傳來的照片"
         )
         assert text == "照片裡是一杯咖啡"
         assert db.calls[0][0][1:3] == ("vision", 0.10)
-        kwargs = client.chat.completions.create.await_args.kwargs
-        parts = kwargs["messages"][1]["content"]
+        kwargs, parts, header, normalized = _submitted_image(client)
+        assert kwargs["model"] == "gemini-3.5-flash-lite"
         assert parts[1]["type"] == "image_url"
-        assert parts[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+        assert header == "data:image/jpeg;base64"
+        assert normalized.startswith(b"\xff\xd8\xff")
+
+    asyncio.run(main())
+
+
+def test_image_understanding_bounds_routeway_jpeg_while_retaining_detail():
+    async def main():
+        service, client = _service()
+        source = _image_bytes(size=(1700, 1300), noisy=True)
+        assert len(source) < service.config.media_max_input_bytes
+
+        text = await service.understand_image(
+            "a1", source, "image/png", "只描述圖片", "使用者傳來的照片"
+        )
+
+        assert text == "照片裡是一杯咖啡"
+        _kwargs, _parts, header, normalized = _submitted_image(client)
+        assert header == "data:image/jpeg;base64"
+        assert len(normalized) <= 512 * 1024
+        with Image.open(BytesIO(normalized)) as image:
+            image.load()
+            assert image.format == "JPEG"
+            assert max(image.size) >= 800
+            assert max(image.size) <= 1600
+
+    asyncio.run(main())
+
+
+def test_image_understanding_applies_exif_orientation_and_corrects_mime():
+    async def main():
+        service, client = _service()
+        rotated_source = _image_bytes(
+            image_format="JPEG", size=(120, 60), exif_orientation=6
+        )
+
+        text = await service.understand_image(
+            "a1",
+            rotated_source,
+            "image/png",
+            "只描述圖片",
+            "使用者傳來的照片",
+        )
+
+        assert text == "照片裡是一杯咖啡"
+        _kwargs, _parts, header, normalized = _submitted_image(client)
+        assert header == "data:image/jpeg;base64"
+        with Image.open(BytesIO(normalized)) as image:
+            image.load()
+            assert image.size == (60, 120)
+            assert image.getexif().get(274) is None
+
+    asyncio.run(main())
+
+
+def test_invalid_image_fails_closed_before_budget_or_api_call():
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+
+        text = await service.understand_image(
+            "a1", b"not-an-image", "image/png", "只描述圖片", "壞掉的照片"
+        )
+
+        assert text == ""
+        assert db.calls == []
+        client.chat.completions.create.assert_not_awaited()
+
+    asyncio.run(main())
+
+
+def test_unsupported_image_format_fails_before_budget_or_api_call():
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+
+        text = await service.understand_image(
+            "a1", _image_bytes(image_format="BMP"), "image/bmp",
+            "只描述圖片", "不支援的圖片",
+        )
+
+        assert text == ""
+        assert db.calls == []
+        client.chat.completions.create.assert_not_awaited()
+
+    asyncio.run(main())
+
+
+def test_oversized_decoded_image_fails_before_budget_or_pixel_load(monkeypatch):
+    class HeaderOnlyImage:
+        format = "PNG"
+        size = (4001, 3000)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def load(self):
+            raise AssertionError("oversized image pixels must never be loaded")
+
+    monkeypatch.setattr(
+        "app.media.Image.open", lambda _stream, **_kwargs: HeaderOnlyImage()
+    )
+
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+
+        text = await service.understand_image(
+            "a1", b"header-only", "image/png", "只描述圖片", "超大圖片"
+        )
+
+        assert text == ""
+        assert db.calls == []
+        client.chat.completions.create.assert_not_awaited()
+
+    asyncio.run(main())
+
+
+def test_vision_decoder_allowlists_formats_at_decoder_entry(monkeypatch):
+    original_open = Image.open
+    observed = []
+
+    def guarded_open(stream, *args, **kwargs):
+        observed.append(kwargs.get("formats"))
+        return original_open(stream, *args, **kwargs)
+
+    monkeypatch.setattr("app.media.Image.open", guarded_open)
+    service, _client = _service()
+
+    service._validate_vision_image_header(_image_bytes())
+    normalized = service._normalize_vision_image(_image_bytes())
+
+    assert normalized.startswith(b"\xff\xd8")
+    assert observed
+    assert all(item == ("JPEG", "PNG", "WEBP") for item in observed)
+
+
+def test_vision_input_has_immutable_eight_mib_hard_ceiling(monkeypatch):
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+        service.config.media_max_input_bytes = 16 * 1024 * 1024
+        decoder_called = False
+
+        def forbidden_decoder(_image):
+            nonlocal decoder_called
+            decoder_called = True
+            raise AssertionError("decoder must not run above immutable hard ceiling")
+
+        monkeypatch.setattr(
+            service, "_validate_vision_image_header", forbidden_decoder
+        )
+        text = await service.understand_image(
+            "a1", b"x" * (8 * 1024 * 1024 + 1), "image/jpeg",
+            "只描述圖片", "超過硬上限的圖片",
+        )
+
+        assert text == ""
+        assert decoder_called is False
+        assert db.calls == []
+        client.chat.completions.create.assert_not_awaited()
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    ("image_format", "truncated_bytes"), [("JPEG", 1), ("PNG", 22)]
+)
+def test_truncated_image_fails_before_budget_or_api_call(
+    image_format, truncated_bytes
+):
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+        truncated = _image_bytes(image_format=image_format)[:-truncated_bytes]
+
+        text = await service.understand_image(
+            "a1", truncated, f"image/{image_format.lower()}",
+            "只描述圖片", "截斷的照片",
+        )
+
+        assert text == ""
+        assert db.calls == []
+        client.chat.completions.create.assert_not_awaited()
+
+    asyncio.run(main())
+
+
+def test_vision_budget_denial_stops_before_image_api_call():
+    async def main():
+        db = _DB(allowed=False)
+        service, client = _service(db=db)
+
+        text = await service.understand_image(
+            "a1", _image_bytes(), "image/png", "只描述圖片", "使用者傳來的照片"
+        )
+
+        assert text == ""
+        assert db.calls[0][0][1:3] == ("vision", 0.10)
+        client.chat.completions.create.assert_not_awaited()
 
     asyncio.run(main())
 

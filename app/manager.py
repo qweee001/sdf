@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import secrets
 
 from openai import AsyncOpenAI
@@ -17,10 +18,10 @@ from telethon.sessions import StringSession
 from .config import Settings
 from .crypto import SecretBox
 from .database import Database
+from .live_test import BoundedLiveTest
 from .media import OrcaMediaService
 from .persona import generate_persona
-from .voice_assets import VoiceAssetLibrary
-from .worker import AccountWorker
+from .worker import AccountWorker, FIXED_ACCOUNT_PERSONA_AGES
 
 
 class AccountManager:
@@ -31,7 +32,7 @@ class AccountManager:
         self.workers: dict[str, AccountWorker] = {}
         self._lifecycle_locks: dict[str, asyncio.Lock] = {}
         self._feature_lock = asyncio.Lock()
-        self._voice_library = VoiceAssetLibrary(config.voice_assets_dir)
+        self._voice_library = None
         self.managed_ids: set[int] = set()
         self.active_ids: set[int] = set()
         self.active_group_ids: dict[int, set[int]] = {}
@@ -52,10 +53,49 @@ class AccountManager:
             db=db,
             config=config,
         )
+        enabled_values = {"1", "true", "yes", "on"}
+        self.live_test = BoundedLiveTest(
+            self,
+            enabled=os.getenv("LIVE_TEST_ENABLED", "").strip().lower()
+            in enabled_values,
+            wan22_ready=os.getenv("LIVE_TEST_WAN22_READY", "").strip().lower()
+            in enabled_values,
+            asset_root=os.getenv("LIVE_TEST_ASSET_ROOT", "").strip() or None,
+        )
 
     def _lifecycle_lock(self, account_id: str) -> asyncio.Lock:
         """Serialize lifecycle mutations for one account."""
-        return self._lifecycle_locks.setdefault(account_id, asyncio.Lock())
+        locks = getattr(self, "_lifecycle_locks", None)
+        if locks is None:
+            locks = {}
+            self._lifecycle_locks = locks
+        return locks.setdefault(account_id, asyncio.Lock())
+
+    async def _fixed_persona_mutation_blocked(self, account_id: str) -> bool:
+        """Deny fixed-persona writes for every active/reconciliation run state."""
+        if account_id not in FIXED_ACCOUNT_PERSONA_AGES:
+            return False
+        gate = getattr(self.live_test, "outbound_gate", None)
+        active = getattr(gate, "_active", None)
+        if isinstance(active, tuple) and len(active) == 5:
+            # Lockdown intentionally replaces the account set with an empty set,
+            # so any active gate blocks every fixed-account persona mutation.
+            return True
+        finder = getattr(self.db, "get_live_test_reconciliation_run", None)
+        if not callable(finder):
+            return False
+        try:
+            latest = await finder()
+        except Exception:
+            return True
+        if not isinstance(latest, dict) or latest.get("status") not in {
+            "running",
+            "lockdown",
+            "needs_reconciliation",
+        }:
+            return False
+        account_ids = {str(value) for value in latest.get("account_ids", [])}
+        return account_id in account_ids
 
     @staticmethod
     def _stored_bool(raw: str | None, default: bool) -> bool:
@@ -64,27 +104,26 @@ class AccountManager:
         return str(raw).strip() == "1"
 
     def feature_status(self) -> dict[str, bool]:
+        voice_available = self._voice_realtime_available()
         return {
             "media_enabled": bool(self.config.media_enabled),
-            "voice_enabled": bool(self.config.voice_media_enabled),
-            # 本地 IndexTTS2 素材就緒才視為可用；絕不允許 OrcaRouter TTS。
-            "voice_available": self._voice_library_has_assets(),
+            "voice_enabled": bool(self.config.voice_media_enabled and voice_available),
+            "voice_available": voice_available,
         }
 
-    def _voice_library_has_assets(self) -> bool:
-        try:
-            self._voice_library.reload()
-            return len(getattr(self._voice_library, "_accounts", {}) or {}) > 0
-        except Exception:
-            return False
+    def _voice_realtime_available(self) -> bool:
+        return bool(
+            str(getattr(self.config, "voice_realtime_url", "") or "").strip()
+            and str(getattr(self.config, "voice_realtime_token", "") or "").strip()
+        )
 
     async def load_runtime_settings(self) -> None:
+        await self.live_test.reconcile()
         stored = await self.db.get_runtime_settings()
         self.config.media_enabled = self._stored_bool(
             stored.get("media_enabled"), bool(self.config.media_enabled)
         )
-        # 語音只有「本機素材就緒」+「DB 明寫 1」才允許開啟；其餘一律 fail-closed。
-        if stored.get("voice_media_enabled") == "1" and self._voice_library_has_assets():
+        if stored.get("voice_media_enabled") == "1" and self._voice_realtime_available():
             self.config.voice_media_enabled = True
         else:
             self.config.voice_media_enabled = False
@@ -94,8 +133,8 @@ class AccountManager:
     async def update_feature_flags(
         self, *, media_enabled: bool, voice_enabled: bool
     ) -> str:
-        if voice_enabled and not self._voice_library_has_assets():
-            return "本機語音素材未就緒，語音功能不能開啟"
+        if voice_enabled and not self._voice_realtime_available():
+            return "即時 IndexTTS2 URL/token 未就緒，語音功能不能開啟"
         async with self._feature_lock:
             await self.db.set_runtime_settings({
                 "media_enabled": "1" if media_enabled else "0",
@@ -104,7 +143,7 @@ class AccountManager:
             # 所有 worker 共用同一 Settings 物件，更新後立即熱生效。
             self.config.media_enabled = bool(media_enabled)
             self.config.voice_media_enabled = (
-                bool(voice_enabled) and self._voice_library_has_assets()
+                bool(voice_enabled) and self._voice_realtime_available()
             )
         return ""
 
@@ -117,7 +156,10 @@ class AccountManager:
             raw = json.loads(raw_groups)
             if not isinstance(raw, list):
                 return []
-            return sorted({int(group_id) for group_id in raw if int(group_id) != 0})
+            parsed = {int(group_id) for group_id in raw}
+            if any(group_id >= 0 for group_id in parsed):
+                return []
+            return sorted(parsed)
         except (TypeError, ValueError, json.JSONDecodeError):
             return []
 
@@ -135,11 +177,30 @@ class AccountManager:
 
     async def start_all(self):
         """部署重啟後恢復所有 enabled 帳號"""
+        blocked = await self.live_test.start_block_error()
+        if blocked:
+            return blocked
         for acc in await self._refresh_managed_ids():
             if acc.get("enabled"):
-                await self._start_account(acc)
+                await self._start_account(acc, require_enabled=True)
+        return ""
 
-    async def _start_account(self, acc: dict):
+    async def _start_account(
+        self, acc: dict, *, require_enabled: bool = False
+    ) -> None:
+        account_id = str(acc["id"])
+        async with self._lifecycle_lock(account_id):
+            if await self.live_test.start_block_error():
+                return
+            if require_enabled:
+                persisted = await self.db.get_account(account_id)
+                if persisted is not None:
+                    if not int(persisted.get("enabled") or 0):
+                        return
+                    acc = persisted
+            await self._start_account_unlocked(acc)
+
+    async def _start_account_unlocked(self, acc: dict) -> None:
         account_id = acc["id"]
         if account_id in self.workers:
             return
@@ -177,7 +238,12 @@ class AccountManager:
             last_human_activity=self.last_human_activity,
             reply_claim_signals=self.reply_claim_signals,
             failed_reply_claimants=self.failed_reply_claimants,
-            voice_library=self._voice_library,
+            voice_library=None,
+            outbound_gate=(
+                self.live_test.outbound_gate
+                if getattr(self, "live_test", None) is not None
+                else None
+            ),
         )
         self.workers[account_id] = worker
         await worker.start()
@@ -202,18 +268,25 @@ class AccountManager:
         """新增帳號（session 已驗證可用），生成地域分佈人設"""
         account_id = secrets.token_hex(6)
         persona = generate_persona(await self._used_cities())
-        await self.db.create_account(
-            account_id, name, self.secret_box.encrypt(session_key),
-            json.dumps(persona, ensure_ascii=False),
-        )
-        if enable:
-            new_acc = await self.db.get_account(account_id)
-            if new_acc:
-                await self._start_account(new_acc)
-        return await self.db.get_account(account_id)
+        async with self._lifecycle_lock(account_id):
+            await self.db.create_account(
+                account_id, name, self.secret_box.encrypt(session_key),
+                json.dumps(persona, ensure_ascii=False),
+            )
+            if enable:
+                new_acc = await self.db.get_account(account_id)
+                if new_acc:
+                    await self._start_account_unlocked(new_acc)
+            return await self.db.get_account(account_id)
 
     async def start(self, account_id: str) -> str:
+        blocked = await self.live_test.start_block_error()
+        if blocked:
+            return blocked
         async with self._lifecycle_lock(account_id):
+            blocked = await self.live_test.start_block_error()
+            if blocked:
+                return blocked
             acc = await self.db.get_account(account_id)
             if not acc:
                 return "帳號不存在"
@@ -231,7 +304,7 @@ class AccountManager:
             acc = await self.db.get_account(account_id)
             if not acc:
                 return "帳號不存在"
-            await self._start_account(acc)
+            await self._start_account_unlocked(acc)
             if account_id in self.workers:
                 return ""
             await self.db.update_account(account_id, enabled=0)
@@ -262,33 +335,43 @@ class AccountManager:
             return ""
 
     async def regen_persona(self, account_id: str) -> dict | None:
-        """重新生成人設（換一個城市的真人）"""
-        acc = await self.db.get_account(account_id)
-        if not acc:
-            return None
-        persona = generate_persona(await self._used_cities(exclude_id=account_id))
-        await self.db.update_account(
-            account_id, persona=json.dumps(persona, ensure_ascii=False)
-        )
-        worker = self.workers.get(account_id)
-        if worker:
-            worker.persona = persona
-            worker.name = persona["name"]
-        return persona
+        """Regenerate only when no live-test/reconciliation state protects it."""
+        async with self._lifecycle_lock(account_id):
+            acc = await self.db.get_account(account_id)
+            if not acc or await self._fixed_persona_mutation_blocked(account_id):
+                return None
+            persona = generate_persona(
+                await self._used_cities(exclude_id=account_id)
+            )
+            if await self._fixed_persona_mutation_blocked(account_id):
+                return None
+            await self.db.update_account(
+                account_id, persona=json.dumps(persona, ensure_ascii=False)
+            )
+            worker = self.workers.get(account_id)
+            if worker:
+                worker.persona = persona
+                worker.name = persona["name"]
+            return persona
 
     async def update_persona(self, account_id: str, persona: dict) -> dict | None:
-        """手動修改人設（含性格），儲存並套用至運行中的 worker"""
-        acc = await self.db.get_account(account_id)
-        if not acc:
-            return None
-        await self.db.update_account(
-            account_id, persona=json.dumps(persona, ensure_ascii=False)
-        )
-        worker = self.workers.get(account_id)
-        if worker:
-            worker.persona = persona
-            worker.name = persona.get("name", worker.name)
-        return persona
+        """Persist manual changes unless a fixed live-test persona is protected."""
+        async with self._lifecycle_lock(account_id):
+            acc = await self.db.get_account(account_id)
+            if not acc or await self._fixed_persona_mutation_blocked(account_id):
+                return None
+            # Recheck immediately before the DB write so a run that became active
+            # while this request waited cannot mutate its fixed persona.
+            if await self._fixed_persona_mutation_blocked(account_id):
+                return None
+            await self.db.update_account(
+                account_id, persona=json.dumps(persona, ensure_ascii=False)
+            )
+            worker = self.workers.get(account_id)
+            if worker:
+                worker.persona = persona
+                worker.name = persona.get("name", worker.name)
+            return persona
 
     async def list_available_groups(self, account_id: str) -> tuple[list[dict], str]:
         """用短暫唯讀連線列出帳號所在群組，不啟動任何互動任務。"""
@@ -334,12 +417,17 @@ class AccountManager:
                     print(f"[{account_id}] Telegram 群組探索連線關閉失敗", flush=True)
 
     async def save_groups(self, account_id: str, group_ids: list[int]) -> str:
-        """指定群組；空白名單立即停用帳號，絕不退回所有群組。"""
+        """Persist only negative peers proven to be groups for this account."""
         async with self._lifecycle_lock(account_id):
             acc = await self.db.get_account(account_id)
             if not acc:
                 return "帳號不存在"
-            ids = sorted({int(g) for g in group_ids if int(g) != 0})
+            try:
+                ids = sorted({int(group_id) for group_id in group_ids})
+            except (TypeError, ValueError):
+                return "群組 ID 格式錯誤"
+            if any(group_id >= 0 for group_id in ids):
+                return "群組 ID 必須是負數，正數私訊目標禁止儲存"
             worker = self.workers.get(account_id)
             if not ids:
                 if worker:
@@ -359,6 +447,27 @@ class AccountManager:
                 if worker:
                     await worker.stop()
                 return ""
+
+            if worker is not None and callable(getattr(worker, "group_list", None)):
+                available_groups = worker.group_list()
+            else:
+                available_groups, discovery_error = await self.list_available_groups(
+                    account_id
+                )
+                if discovery_error:
+                    return discovery_error
+            available_ids: set[int] = set()
+            for item in available_groups:
+                if not isinstance(item, dict) or isinstance(item.get("id"), bool):
+                    continue
+                try:
+                    available_id = int(item.get("id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if available_id < 0 and item.get("is_group", True) is True:
+                    available_ids.add(available_id)
+            if not set(ids).issubset(available_ids):
+                return "只能選擇該帳號目前實際加入的 Telegram 群組"
 
             await self.db.update_account(
                 account_id,
@@ -426,6 +535,15 @@ class AccountManager:
             ],
         }
 
+    async def start_live_test(self, request: dict) -> dict:
+        return await self.live_test.start(request)
+
+    async def live_test_status(self) -> dict:
+        return await self.live_test.status()
+
+    async def stop_live_test(self) -> dict:
+        return await self.live_test.stop()
+
     async def close_all(self):
         for worker in list(self.workers.values()):
             await worker.stop()
@@ -433,6 +551,7 @@ class AccountManager:
 
     async def aclose(self):
         """關閉所有資源（worker + AI client）"""
+        await self.live_test.stop("manager_close")
         await self.close_all()
         try:
             await self._media_service.aclose()

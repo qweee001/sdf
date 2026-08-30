@@ -140,6 +140,10 @@ def test_manager_injects_same_media_claim_state_into_worker():
         manager.last_human_activity = {}
         manager.reply_claim_signals = {}
         manager.failed_reply_claimants = {}
+        manager.live_test = SimpleNamespace(
+            start_block_error=AsyncMock(return_value=""),
+            outbound_gate=None,
+        )
         fake_worker = SimpleNamespace(start=AsyncMock(), is_running=True)
 
         with patch("app.manager.AccountWorker", return_value=fake_worker) as factory:

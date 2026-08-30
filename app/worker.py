@@ -17,12 +17,17 @@ from __future__ import annotations
 import asyncio
 import difflib
 import hashlib
+import hmac
 import inspect
 import io
+import json
+import math
 import random
 import re
+import secrets
 import time
 import unicodedata
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from openai import AsyncOpenAI
@@ -41,6 +46,135 @@ _MAX_RECENT_PROACTIVE_TOPICS = 64
 _HIGH_TRAFFIC_HUMANS_5M = 14
 _HIGH_TRAFFIC_MAX_ORDINARY_5M = 2
 _MAX_ORDINARY_CLAIMS_10M = 8
+
+_LIVE_TEST_VOICE_GROUP_ID = -5428680940
+FIXED_ACCOUNT_PERSONA_AGES = {
+    "2ce525dfb0d4": 21,
+    "faa9a202f96e": 25,
+    "038632e4395b": 29,
+    "e63e27a4340d": 34,
+}
+_VOICE_ACCOUNT_PROFILE_MAP = {
+    account_id: str(age) for account_id, age in FIXED_ACCOUNT_PERSONA_AGES.items()
+}
+_VOICE_METADATA_ID_PATTERN = re.compile(r"^[!-~]{1,128}$")
+_VOICE_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_ZERO_SHA256 = "0" * 64
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceGenerationEvidence:
+    """Fresh reply bound to the exact live-test trigger and chat snapshot."""
+
+    run_id: str
+    event_id: str
+    account_id: str
+    group_id: int
+    trigger_received_at: int | float
+    snapshot_at: int | float
+    snapshot_sha256: str
+    profile_id: str
+    text: str
+
+    def __iter__(self):
+        """Keep tuple unpacking readable while retaining the full evidence object."""
+        yield self.snapshot_sha256
+        yield self.text
+
+
+@dataclass(frozen=True, slots=True)
+class VideoContextEvidence:
+    """Fresh Wan brief bound to the exact live-test trigger and chat snapshot."""
+
+    run_id: str
+    event_id: str
+    account_id: str
+    group_id: int
+    trigger_received_at: int | float
+    snapshot_at: int | float
+    snapshot_sha256: str
+    profile_id: int
+    context_prompt: str
+
+
+@dataclass(frozen=True, slots=True)
+class MediaEvidence:
+    """Hashes and timestamps required by the live-test outbound DB gate."""
+
+    request_id: str
+    snapshot_sha256: str
+    output_sha256: str
+    trigger_received_at: int | float
+    snapshot_at: int | float
+    profile_id: str
+    content_sha256: str
+    decode_metadata_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class BoundMediaAsset:
+    """One immutable envelope carried intact into the final send_file permit."""
+
+    run_id: str
+    event_id: str
+    account_id: str
+    group_id: int
+    kind: str
+    trigger_received_at: int | float
+    snapshot_at: int | float
+    snapshot_sha256: str
+    request_id: str
+    output_sha256: str
+    profile_id: str
+    content_sha256: str
+    decode_metadata_sha256: str
+    asset: MediaAsset
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundMediaPermit:
+    """Gate permit and its inseparable generation/send evidence."""
+
+    gate_permit: Any
+    bound_asset: BoundMediaAsset
+
+
+@dataclass(frozen=True, slots=True)
+class BoundVoiceAsset:
+    """Immutable, response-verified audio and its complete evidence envelope."""
+
+    run_id: str
+    event_id: str
+    account_id: str
+    group_id: int
+    profile_id: str
+    text: str
+    text_sha256: str
+    asset: MediaAsset
+    media_evidence: MediaEvidence
+    request_id: str = field(init=False)
+    snapshot_sha256: str = field(init=False)
+    output_sha256: str = field(init=False)
+    trigger_received_at: int | float = field(init=False)
+    snapshot_at: int | float = field(init=False)
+
+    def __post_init__(self) -> None:
+        evidence = self.media_evidence
+        object.__setattr__(self, "request_id", evidence.request_id)
+        object.__setattr__(self, "snapshot_sha256", evidence.snapshot_sha256)
+        object.__setattr__(self, "output_sha256", evidence.output_sha256)
+        object.__setattr__(
+            self, "trigger_received_at", evidence.trigger_received_at
+        )
+        object.__setattr__(self, "snapshot_at", evidence.snapshot_at)
+
+
+@dataclass(frozen=True, slots=True)
+class _RealtimeContextSnapshot:
+    trigger_received_at: int | float
+    snapshot_at: int | float
+    snapshot_sha256: str
+    context: str
 
 
 _GROUP_META_SUSPECT_PATTERNS = (
@@ -248,7 +382,8 @@ class AccountWorker:
                  last_human_activity: dict | None = None,
                  reply_claim_signals: dict[tuple[int, int], asyncio.Event] | None = None,
                  failed_reply_claimants: dict[tuple[int, int], set[int]] | None = None,
-                 voice_library: Any | None = None):
+                 voice_library: Any | None = None,
+                 outbound_gate: Any | None = None):
         self.account_id = account_id
         self.session_key = session_key
         self.tg_api_id = tg_api_id
@@ -256,6 +391,7 @@ class AccountWorker:
         self.ai_client = ai_client
         self.media_service = media_service
         self.voice_library = voice_library
+        self.outbound_gate = outbound_gate
         self.db = db
         self.config = config
         self.managed_ids = managed_ids  # 所有水軍 TG user id（互認）
@@ -293,7 +429,6 @@ class AccountWorker:
         self.status_detail = ""
 
         self._proactive_task: asyncio.Task | None = None
-        self._voice_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
         self._reply_tasks: set[asyncio.Task] = set()
         self._send_lock = asyncio.Lock()
@@ -308,6 +443,7 @@ class AccountWorker:
         self._last_realtime_voice = 0.0
         self._generation_reasons: dict[tuple[int, int], str] = {}
         self._successful_vision_events: set[tuple[int, int]] = set()
+        self._pending_live_video_evidence: dict[str, VideoContextEvidence] = {}
 
         self.stats = {
             "replies_sent": 0,
@@ -390,7 +526,6 @@ class AccountWorker:
             self._proactive_today = 0
             self._recent_proactive_topics.clear()
             self._proactive_task = asyncio.create_task(self._proactive_loop())
-            self._voice_task = asyncio.create_task(self._daily_voice_loop())
             self._cleanup_task = asyncio.create_task(self._memory_cleanup_loop())
             await self._notify_status(
                 "connected", me.id, get_display_name(me) or ""
@@ -418,7 +553,7 @@ class AccountWorker:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._reply_tasks.clear()
-        for task in (self._proactive_task, self._voice_task, self._cleanup_task):
+        for task in (self._proactive_task, self._cleanup_task):
             if task:
                 task.cancel()
                 try:
@@ -426,7 +561,6 @@ class AccountWorker:
                 except (asyncio.CancelledError, Exception):
                     pass
         self._proactive_task = None
-        self._voice_task = None
         self._cleanup_task = None
         if self.tg_client:
             await self.tg_client.disconnect()
@@ -1161,24 +1295,8 @@ class AccountWorker:
                     generation_reason,
                 )
                 return
-            # 即時話題語音：真人回覆、非素材請求、非追趕式 followup，
-            # 且該帳號當日額度／間隔／時段都允許時，以 12% 機率改發語音；
-            # 合成或發送失敗則自動回退文字（fail-closed，绝不漏发回复）。
-            if (
-                is_human_reply
-                and not managed_followup
-                and media_kind is None
-                and self._realtime_voice_due(time.time())
-                and random.random() < 0.12
-            ):
-                voice_text = text if len(text) <= 220 else text[:217] + "…"
-                if await self._send_realtime_voice(int(event.chat_id), voice_text):
-                    self.stats["human_sent"] += 1
-                    human_counted = True
-                    await self._audit_reply(event, "sent", "human")
-                    sent = True
-                    sent_audited = True
-                    return
+            # Evidence-bound realtime TTS is reserved for bounded live tests.
+            # Ordinary replies always use text; they have no run/event/snapshot envelope.
             sent = await self._send_text_recorded(
                 int(event.chat_id),
                 text,
@@ -1298,10 +1416,8 @@ class AccountWorker:
             return await self.media_service.generate_image(
                 self.account_id, prompt
             )
-        if kind == "video":
-            return await self.media_service.generate_video(
-                self.account_id, prompt
-            )
+        # Every video must use the bounded snapshot -> Wan -> evidence path.
+        # Explicit ordinary video requests fail closed; never use Orca/Minimax.
         return None
 
     async def _incoming_image(self, event) -> tuple[bytes, str] | None:
@@ -1327,8 +1443,216 @@ class AccountWorker:
         mime_type = str(getattr(file_info, "mime_type", "") or "image/jpeg")
         return bytes(data), mime_type
 
+    @staticmethod
+    def _active_gate_run_id(gate: Any, chat_id: int | None = None) -> str | None:
+        active = getattr(gate, "_active", None)
+        if not isinstance(active, tuple) or len(active) != 5:
+            return None
+        run_id, _account_ids, target_group, _expires_at, _generation = active
+        if chat_id is not None and int(target_group) != int(chat_id):
+            return None
+        run_id = str(run_id)
+        if _VOICE_METADATA_ID_PATTERN.fullmatch(run_id) is None:
+            return None
+        return run_id
+
+    async def _persona_guard_run_id(
+        self, gate: Any, *, explicit_run_id: str | None = None, chat_id: int | None = None
+    ) -> str | None:
+        if explicit_run_id:
+            return str(explicit_run_id)
+        active_run_id = self._active_gate_run_id(gate, chat_id)
+        if active_run_id:
+            return active_run_id
+        finder = getattr(self.db, "get_live_test_reconciliation_run", None)
+        if not callable(finder):
+            return None
+        try:
+            latest = await finder()
+        except Exception:
+            return None
+        if not isinstance(latest, dict) or latest.get("status") not in {
+            "running",
+            "lockdown",
+            "needs_reconciliation",
+        }:
+            return None
+        account_ids = {str(value) for value in latest.get("account_ids", [])}
+        if self.account_id not in account_ids:
+            return None
+        return str(latest.get("id") or "") or None
+
+    async def _enter_persona_integrity_lockdown(self, gate: Any, run_id: str) -> None:
+        locker = getattr(gate, "lockdown", None)
+        if callable(locker):
+            try:
+                result = locker(run_id)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                pass
+        marker = getattr(self.db, "mark_live_test_needs_reconciliation", None)
+        if callable(marker):
+            try:
+                result = marker(
+                    run_id,
+                    f"persona_integrity_failed: {self.account_id}",
+                )
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                pass
+
+    async def _fixed_persona_integrity_ok(self, gate: Any, run_id: str | None) -> bool:
+        expected_age = FIXED_ACCOUNT_PERSONA_AGES.get(self.account_id)
+        if expected_age is None or not run_id:
+            return True
+        getter = getattr(self.db, "get_account", None)
+        valid = False
+        if callable(getter):
+            try:
+                account = await getter(self.account_id)
+                db_persona = json.loads(str((account or {}).get("persona") or "{}"))
+                worker_persona = self.persona
+                valid = (
+                    isinstance(db_persona, dict)
+                    and isinstance(worker_persona, dict)
+                    and db_persona == worker_persona
+                    and db_persona.get("gender") == "女"
+                    and type(db_persona.get("age")) is int
+                    and db_persona.get("age") == expected_age
+                    and worker_persona.get("gender") == "女"
+                    and type(worker_persona.get("age")) is int
+                    and worker_persona.get("age") == expected_age
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                valid = False
+            except Exception:
+                valid = False
+        if valid:
+            return True
+        await self._enter_persona_integrity_lockdown(gate, run_id)
+        return False
+
+    def _valid_bound_media_before_reserve(
+        self,
+        bound: BoundMediaAsset,
+        *,
+        gate: Any,
+        chat_id: int,
+        asset: MediaAsset,
+        event_id: str | None,
+        kind: str,
+    ) -> bool:
+        expected_profile = _VOICE_ACCOUNT_PROFILE_MAP.get(self.account_id)
+        active_run_id = self._active_gate_run_id(gate, chat_id)
+        return bool(
+            isinstance(bound, BoundMediaAsset)
+            and bound.asset is asset
+            and bound.account_id == self.account_id
+            and bound.group_id == int(chat_id)
+            and bound.kind == kind == asset.kind
+            and bound.event_id == str(event_id or "")
+            and expected_profile is not None
+            and bound.profile_id == expected_profile
+            and _VOICE_METADATA_ID_PATTERN.fullmatch(bound.run_id)
+            and _VOICE_METADATA_ID_PATTERN.fullmatch(bound.event_id)
+            and re.fullmatch(r"[0-9a-f]{32}", bound.request_id)
+            and bound.request_id != "0" * 32
+            and _VOICE_SHA256_PATTERN.fullmatch(bound.snapshot_sha256)
+            and bound.snapshot_sha256 != _ZERO_SHA256
+            and _VOICE_SHA256_PATTERN.fullmatch(bound.output_sha256)
+            and bound.output_sha256 != _ZERO_SHA256
+            and _VOICE_SHA256_PATTERN.fullmatch(bound.content_sha256)
+            and bound.content_sha256 != _ZERO_SHA256
+            and (
+                (bound.kind == "voice" and bound.decode_metadata_sha256 == "")
+                or (
+                    bound.kind == "video"
+                    and _VOICE_SHA256_PATTERN.fullmatch(
+                        bound.decode_metadata_sha256
+                    )
+                    and bound.decode_metadata_sha256 != _ZERO_SHA256
+                )
+            )
+            and self._valid_voice_timestamp(bound.trigger_received_at)
+            and self._valid_voice_timestamp(bound.snapshot_at)
+            and float(bound.snapshot_at) >= float(bound.trigger_received_at)
+            and (active_run_id is None or bound.run_id == active_run_id)
+        )
+
+    @staticmethod
+    def _gate_permit_matches_bound(permit: _BoundMediaPermit) -> bool:
+        gate_permit = permit.gate_permit
+        bound = permit.bound_asset
+        return bool(
+            getattr(gate_permit, "run_id", None) == bound.run_id
+            and getattr(gate_permit, "event_id", None) == bound.event_id
+            and getattr(gate_permit, "account_id", None) == bound.account_id
+            and getattr(gate_permit, "group_id", None) == bound.group_id
+            and getattr(gate_permit, "kind", None) == bound.kind
+            and getattr(gate_permit, "trigger_received_at", None)
+            == bound.trigger_received_at
+            and getattr(gate_permit, "snapshot_at", None) == bound.snapshot_at
+            and getattr(gate_permit, "profile_id", None) == bound.profile_id
+            and getattr(gate_permit, "content_sha256", None)
+            == bound.content_sha256
+            and getattr(gate_permit, "decode_metadata_sha256", None)
+            == bound.decode_metadata_sha256
+            and getattr(gate_permit, "request_id", None) == bound.request_id
+            and getattr(gate_permit, "snapshot_sha256", None)
+            == bound.snapshot_sha256
+            and getattr(gate_permit, "output_sha256", None)
+            == bound.output_sha256
+        )
+
+    @staticmethod
+    def _final_bound_raw_bytes(bound: BoundMediaAsset) -> bytes | None:
+        data = bound.asset.data
+        if (
+            type(data) is not bytes
+            or bound.snapshot_sha256 == _ZERO_SHA256
+            or bound.output_sha256 == _ZERO_SHA256
+        ):
+            return None
+        actual_output_sha256 = hashlib.sha256(data).hexdigest()
+        if not hmac.compare_digest(actual_output_sha256, bound.output_sha256):
+            return None
+        return data
+
+    @staticmethod
+    async def _release_bound_reservation(
+        gate: Any,
+        bound: BoundMediaAsset,
+        *,
+        detail: str,
+    ) -> bool:
+        return await gate.release_bound(
+            run_id=bound.run_id,
+            event_id=bound.event_id,
+            account_id=bound.account_id,
+            group_id=bound.group_id,
+            kind=bound.kind,
+            request_id=bound.request_id,
+            snapshot_sha256=bound.snapshot_sha256,
+            output_sha256=bound.output_sha256,
+            trigger_received_at=bound.trigger_received_at,
+            snapshot_at=bound.snapshot_at,
+            profile_id=bound.profile_id,
+            content_sha256=bound.content_sha256,
+            decode_metadata_sha256=bound.decode_metadata_sha256,
+            detail=detail,
+        )
+
     async def _send_media_unlocked(
-        self, chat_id: int, asset: MediaAsset
+        self,
+        chat_id: int,
+        asset: MediaAsset,
+        *,
+        live_test_event_id: str | None = None,
+        live_test_kind: str | None = None,
+        media_evidence: MediaEvidence | None = None,
+        bound_asset: BoundMediaAsset | None = None,
     ) -> bool:
         client = self.tg_client
         if (
@@ -1345,19 +1669,197 @@ class AccountWorker:
             getattr(self.config, "media_enabled", False)
         ):
             return False
-        file_obj = io.BytesIO(asset.data)
+        kind = str(live_test_kind or asset.kind)
+        gate = self.outbound_gate
+        if bound_asset is not None:
+            if not self._valid_bound_media_before_reserve(
+                bound_asset,
+                gate=gate,
+                chat_id=int(chat_id),
+                asset=asset,
+                event_id=live_test_event_id,
+                kind=kind,
+            ):
+                return False
+            if media_evidence != MediaEvidence(
+                request_id=bound_asset.request_id,
+                snapshot_sha256=bound_asset.snapshot_sha256,
+                output_sha256=bound_asset.output_sha256,
+                trigger_received_at=bound_asset.trigger_received_at,
+                snapshot_at=bound_asset.snapshot_at,
+                profile_id=bound_asset.profile_id,
+                content_sha256=bound_asset.content_sha256,
+                decode_metadata_sha256=bound_asset.decode_metadata_sha256,
+            ):
+                return False
+        elif media_evidence is not None:
+            # Hashes and timestamps may not travel separately at this boundary.
+            return False
+
+        guard_run_id = await self._persona_guard_run_id(
+            gate,
+            explicit_run_id=bound_asset.run_id if bound_asset is not None else None,
+            chat_id=int(chat_id),
+        )
+        if not await self._fixed_persona_integrity_ok(gate, guard_run_id):
+            return False
+
+        permit = None
+        bound_permit = None
+        if gate is not None:
+            evidence_kwargs: dict[str, Any] = {}
+            if bound_asset is not None:
+                evidence_kwargs = {
+                    "request_id": bound_asset.request_id,
+                    "snapshot_sha256": bound_asset.snapshot_sha256,
+                    "output_sha256": bound_asset.output_sha256,
+                    "trigger_received_at": bound_asset.trigger_received_at,
+                    "snapshot_at": bound_asset.snapshot_at,
+                    "profile_id": bound_asset.profile_id,
+                    "content_sha256": bound_asset.content_sha256,
+                    "decode_metadata_sha256": bound_asset.decode_metadata_sha256,
+                }
+            permit = await gate.reserve(
+                account_id=self.account_id,
+                group_id=int(chat_id),
+                kind=kind,
+                event_id=live_test_event_id,
+                **evidence_kwargs,
+            )
+            if not permit.allowed:
+                return False
+            permit_run_id = str(getattr(permit, "run_id", "") or guard_run_id or "")
+            if not await self._fixed_persona_integrity_ok(gate, permit_run_id):
+                await gate.complete(
+                    permit,
+                    sent=False,
+                    detail="persona integrity failed before send_file validation",
+                )
+                return False
+            if bound_asset is not None:
+                bound_permit = _BoundMediaPermit(
+                    gate_permit=permit,
+                    bound_asset=bound_asset,
+                )
+            permit_invalid = (
+                not self.is_running
+                or self.tg_client is not client
+                or not gate.validate(
+                    permit,
+                    account_id=self.account_id,
+                    group_id=int(chat_id),
+                )
+            )
+            bound_mismatch = bool(
+                bound_permit is not None
+                and not self._gate_permit_matches_bound(bound_permit)
+            )
+            if permit_invalid or bound_mismatch:
+                if bound_mismatch and bound_asset is not None:
+                    await self._release_bound_reservation(
+                        gate,
+                        bound_asset,
+                        detail="permit envelope mismatch before send_file RPC",
+                    )
+                else:
+                    await gate.complete(
+                        permit,
+                        sent=False,
+                        detail="permit revoked before send_file RPC",
+                    )
+                return False
+
+        # This synchronous check is deliberately the final operation before the
+        # bytes are captured and the Telegram RPC begins while _send_lock is held.
+        bound_data = (
+            self._final_bound_raw_bytes(bound_asset)
+            if bound_asset is not None
+            else None
+        )
+        if bound_asset is not None and bound_data is None:
+            if permit is not None and gate is not None:
+                rpc_started = await gate.mark_rpc_started(permit)
+                await gate.complete(
+                    permit,
+                    sent=False,
+                    rpc_started=rpc_started,
+                    detail=(
+                        "bound raw-byte SHA256 mismatch after reservation; "
+                        "attempt conservatively consumed"
+                    ),
+                )
+            return False
+        data = bound_data if bound_asset is not None else asset.data
+        if type(data) is not bytes:
+            if permit is not None and gate is not None:
+                await gate.complete(
+                    permit,
+                    sent=False,
+                    detail="non-bytes media payload before send_file RPC",
+                )
+            return False
+        file_obj = io.BytesIO(data)
         file_obj.name = asset.filename
         kwargs: dict[str, Any] = {"parse_mode": None}
         if asset.kind == "voice":
             kwargs["voice_note"] = True
         elif asset.kind == "video":
             kwargs["supports_streaming"] = True
-        await client.send_file(chat_id, file_obj, **kwargs)
+        rpc_started = False
+        if permit is not None and gate is not None:
+            if not await gate.mark_rpc_started(permit):
+                if bound_asset is not None:
+                    await self._release_bound_reservation(
+                        gate,
+                        bound_asset,
+                        detail="rpc_started transition rejected before send_file RPC",
+                    )
+                else:
+                    await gate.complete(
+                        permit,
+                        sent=False,
+                        detail="rpc_started transition rejected before send_file RPC",
+                    )
+                return False
+            rpc_started = True
+        try:
+            await client.send_file(chat_id, file_obj, **kwargs)
+        except BaseException as exc:
+            if permit is not None and gate is not None:
+                await gate.complete(
+                    permit,
+                    sent=False,
+                    rpc_started=rpc_started,
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
+            raise
+        if (
+            permit is not None
+            and gate is not None
+            and not await gate.complete(permit, sent=True)
+        ):
+            return False
         return True
 
-    async def _send_media(self, chat_id: int, asset: MediaAsset) -> bool:
+    async def _send_media(
+        self,
+        chat_id: int,
+        asset: MediaAsset,
+        *,
+        live_test_event_id: str | None = None,
+        live_test_kind: str | None = None,
+        media_evidence: MediaEvidence | None = None,
+        bound_asset: BoundMediaAsset | None = None,
+    ) -> bool:
         async with self._send_lock:
-            return await self._send_media_unlocked(chat_id, asset)
+            return await self._send_media_unlocked(
+                chat_id,
+                asset,
+                live_test_event_id=live_test_event_id,
+                live_test_kind=live_test_kind,
+                media_evidence=media_evidence,
+                bound_asset=bound_asset,
+            )
 
     async def _send_media_recorded(
         self,
@@ -1368,9 +1870,20 @@ class AccountWorker:
         on_dispatched: Callable[[], None] | None = None,
         activity_kind: str = "reply",
         stats_key: str = "replies_sent",
+        live_test_event_id: str | None = None,
+        live_test_kind: str | None = None,
+        media_evidence: MediaEvidence | None = None,
+        bound_asset: BoundMediaAsset | None = None,
     ) -> bool:
         async with self._send_lock:
-            if not await self._send_media_unlocked(chat_id, asset):
+            if not await self._send_media_unlocked(
+                chat_id,
+                asset,
+                live_test_event_id=live_test_event_id,
+                live_test_kind=live_test_kind,
+                media_evidence=media_evidence,
+                bound_asset=bound_asset,
+            ):
                 return False
             if on_dispatched:
                 on_dispatched()
@@ -1387,6 +1900,230 @@ class AccountWorker:
                 self.account_id, chat_id, activity_kind
             )
             return True
+
+    async def send_live_test_asset(
+        self,
+        chat_id: int,
+        asset: MediaAsset,
+        *,
+        event_id: str,
+        kind: str,
+        media_evidence: MediaEvidence,
+        marker: str | None = None,
+    ) -> bool:
+        """Freeze verified video evidence, then carry it into the final permit."""
+        gate = self.outbound_gate
+        run_id = self._active_gate_run_id(gate, int(chat_id))
+        profile_id = _VOICE_ACCOUNT_PROFILE_MAP.get(self.account_id)
+        video_evidence = self._pending_live_video_evidence.get(str(event_id))
+        if (
+            kind != "video"
+            or asset.kind != kind
+            or gate is None
+            or run_id is None
+            or profile_id is None
+            or not isinstance(media_evidence, MediaEvidence)
+            or not isinstance(video_evidence, VideoContextEvidence)
+            or video_evidence.run_id != run_id
+            or video_evidence.event_id != str(event_id)
+            or video_evidence.account_id != self.account_id
+            or video_evidence.group_id != int(chat_id)
+            or str(video_evidence.profile_id) != profile_id
+            or video_evidence.trigger_received_at
+            != media_evidence.trigger_received_at
+            or video_evidence.snapshot_at != media_evidence.snapshot_at
+            or video_evidence.snapshot_sha256 != media_evidence.snapshot_sha256
+            or media_evidence.profile_id != str(video_evidence.profile_id)
+            or media_evidence.content_sha256
+            != hashlib.sha256(
+                video_evidence.context_prompt.encode("utf-8")
+            ).hexdigest()
+            or _VOICE_SHA256_PATTERN.fullmatch(
+                media_evidence.decode_metadata_sha256
+            )
+            is None
+        ):
+            return False
+        bound = BoundMediaAsset(
+            run_id=video_evidence.run_id,
+            event_id=video_evidence.event_id,
+            account_id=video_evidence.account_id,
+            group_id=video_evidence.group_id,
+            kind=kind,
+            trigger_received_at=video_evidence.trigger_received_at,
+            snapshot_at=video_evidence.snapshot_at,
+            snapshot_sha256=video_evidence.snapshot_sha256,
+            request_id=media_evidence.request_id,
+            output_sha256=media_evidence.output_sha256,
+            profile_id=str(video_evidence.profile_id),
+            content_sha256=media_evidence.content_sha256,
+            decode_metadata_sha256=media_evidence.decode_metadata_sha256,
+            asset=asset,
+        )
+        try:
+            return await self._send_media_recorded(
+                int(chat_id),
+                asset,
+                marker or "[影片]",
+                activity_kind="live_test_video",
+                stats_key="proactive_sent",
+                live_test_event_id=str(event_id),
+                live_test_kind=kind,
+                media_evidence=media_evidence,
+                bound_asset=bound,
+            )
+        finally:
+            if self._pending_live_video_evidence.get(str(event_id)) is video_evidence:
+                self._pending_live_video_evidence.pop(str(event_id), None)
+
+    async def _current_realtime_context(
+        self,
+        group_id: int,
+        *,
+        trigger_received_at: int | float,
+    ) -> _RealtimeContextSnapshot | None:
+        """Read and freeze context while preserving caller-captured trigger time."""
+        if (
+            isinstance(group_id, bool)
+            or not isinstance(group_id, int)
+            or group_id >= 0
+            or not self._valid_voice_timestamp(trigger_received_at)
+        ):
+            return None
+        history = await self.db.get_recent_messages(
+            self.account_id,
+            group_id,
+            int(getattr(self.config, "memory_max_messages", 30)),
+        )
+        lines: list[str] = []
+        snapshot_parts = [self.account_id, str(group_id)]
+        for item in history:
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            role = str(item.get("role") or "user").strip()
+            sender = str(item.get("sender_name") or "有人").strip()
+            timestamp = str(item.get("timestamp") or "")
+            lines.append(f"[{role}/{sender}] {content}")
+            snapshot_parts.append(
+                "\x1f".join((role, sender, content, timestamp))
+            )
+        if not lines:
+            return None
+        snapshot_at = time.time()
+        if (
+            not self._valid_voice_timestamp(snapshot_at)
+            or snapshot_at < trigger_received_at
+        ):
+            return None
+        snapshot = "\x1e".join(snapshot_parts)
+        return _RealtimeContextSnapshot(
+            trigger_received_at=trigger_received_at,
+            snapshot_at=snapshot_at,
+            snapshot_sha256=hashlib.sha256(snapshot.encode("utf-8")).hexdigest(),
+            context="\n".join(lines),
+        )
+
+    async def generate_realtime_voice_reply(
+        self,
+        group_id: int,
+        *,
+        run_id: str,
+        event_id: str,
+        trigger_received_at: int | float,
+    ) -> VoiceGenerationEvidence | None:
+        """Generate a new reply from one caller-timestamped, immutable snapshot."""
+        profile_id = _VOICE_ACCOUNT_PROFILE_MAP.get(self.account_id)
+        if (
+            group_id != _LIVE_TEST_VOICE_GROUP_ID
+            or group_id not in self.selected_groups
+            or profile_id is None
+            or profile_id != self._voice_profile_key(self.persona)
+            or _VOICE_METADATA_ID_PATTERN.fullmatch(run_id) is None
+            or _VOICE_METADATA_ID_PATTERN.fullmatch(event_id) is None
+        ):
+            return None
+        snapshot = await self._current_realtime_context(
+            group_id,
+            trigger_received_at=trigger_received_at,
+        )
+        if snapshot is None:
+            return None
+        prompt = (
+            "以下是觸發當下的群聊快照：\n"
+            f"{snapshot.context}\n\n"
+            "請依照你的人設，直接回應最新話題的一個具體細節，生成適合語音訊息的"
+            "自然台灣繁體口語。只能輸出要說的內容，不要旁白或格式標記，最多120字。"
+        )
+        reply = str(
+            await self._call_ai(get_system_prompt(self.persona), prompt) or ""
+        ).strip()
+        if not reply or len(reply) > 120:
+            return None
+        return VoiceGenerationEvidence(
+            run_id=run_id,
+            event_id=event_id,
+            account_id=self.account_id,
+            group_id=group_id,
+            trigger_received_at=snapshot.trigger_received_at,
+            snapshot_at=snapshot.snapshot_at,
+            snapshot_sha256=snapshot.snapshot_sha256,
+            profile_id=profile_id,
+            text=reply,
+        )
+
+    async def generate_realtime_video_brief(
+        self,
+        group_id: int,
+        *,
+        run_id: str,
+        event_id: str,
+        trigger_received_at: int | float,
+    ) -> VideoContextEvidence | None:
+        """Generate a Wan brief from one caller-timestamped immutable snapshot."""
+        expected_profile = _VOICE_ACCOUNT_PROFILE_MAP.get(self.account_id)
+        if (
+            group_id != _LIVE_TEST_VOICE_GROUP_ID
+            or group_id not in self.selected_groups
+            or expected_profile is None
+            or expected_profile != self._voice_profile_key(self.persona)
+            or _VOICE_METADATA_ID_PATTERN.fullmatch(run_id) is None
+            or _VOICE_METADATA_ID_PATTERN.fullmatch(event_id) is None
+        ):
+            return None
+        snapshot = await self._current_realtime_context(
+            group_id,
+            trigger_received_at=trigger_received_at,
+        )
+        if snapshot is None:
+            return None
+        prompt = (
+            "以下是觸發當下的群聊快照：\n"
+            f"{snapshot.context}\n\n"
+            "請依照你的人設和最新話題，寫一段供 Wan 生成短影片的 context_prompt。"
+            "畫面必須像本人剛為群聊拍攝、自然回應最新話題；不要虛構付款、見面成果或"
+            "群組保證。只輸出影片畫面與動作描述，最多300字。"
+        )
+        brief = str(
+            await self._call_ai(get_system_prompt(self.persona), prompt) or ""
+        ).strip()
+        if not brief or len(brief) > 300:
+            return None
+        evidence = VideoContextEvidence(
+            run_id=run_id,
+            event_id=event_id,
+            account_id=self.account_id,
+            group_id=group_id,
+            trigger_received_at=snapshot.trigger_received_at,
+            snapshot_at=snapshot.snapshot_at,
+            snapshot_sha256=snapshot.snapshot_sha256,
+            profile_id=int(expected_profile),
+            context_prompt=brief,
+        )
+        if len(self._pending_live_video_evidence) >= 128:
+            self._pending_live_video_evidence.clear()
+        self._pending_live_video_evidence[event_id] = evidence
+        return evidence
 
     async def _generate_reply(self, event) -> str:
         self._successful_vision_events.discard(self._generation_key(event))
@@ -1753,6 +2490,8 @@ class AccountWorker:
         short_delay: bool = False,
         claim_text: bool = False,
         require_media_enabled: bool = False,
+        live_test_event_id: str | None = None,
+        live_test_kind: str | None = None,
     ) -> bool:
         if len(text) > _MAX_REPLY_CHARS:
             return False
@@ -1781,15 +2520,90 @@ class AccountWorker:
             int(chat_id), text, self.account_id
         ):
             return False
-        await client.send_message(chat_id, text)
+        permit = None
+        gate = self.outbound_gate
+        guard_run_id = await self._persona_guard_run_id(
+            gate, chat_id=int(chat_id)
+        )
+        if not await self._fixed_persona_integrity_ok(gate, guard_run_id):
+            return False
+        if gate is not None:
+            permit = await gate.reserve(
+                account_id=self.account_id,
+                group_id=int(chat_id),
+                kind=live_test_kind or "text",
+                event_id=live_test_event_id,
+            )
+            if not permit.allowed:
+                return False
+            permit_run_id = str(getattr(permit, "run_id", "") or guard_run_id or "")
+            if not await self._fixed_persona_integrity_ok(gate, permit_run_id):
+                await gate.complete(
+                    permit,
+                    sent=False,
+                    detail="persona integrity failed before send_message validation",
+                )
+                return False
+            if (
+                not self.is_running
+                or self.tg_client is not client
+                or not gate.validate(
+                    permit,
+                    account_id=self.account_id,
+                    group_id=int(chat_id),
+                )
+            ):
+                await gate.complete(
+                    permit,
+                    sent=False,
+                    detail="permit revoked before send_message RPC",
+                )
+                return False
+        rpc_started = False
+        if permit is not None and gate is not None:
+            if not await gate.mark_rpc_started(permit):
+                await gate.complete(
+                    permit,
+                    sent=False,
+                    detail="rpc_started transition rejected before send_message RPC",
+                )
+                return False
+            rpc_started = True
+        try:
+            await client.send_message(chat_id, text)
+        except BaseException as exc:
+            if permit is not None and gate is not None:
+                await gate.complete(
+                    permit,
+                    sent=False,
+                    rpc_started=rpc_started,
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
+            raise
+        if (
+            permit is not None
+            and gate is not None
+            and not await gate.complete(permit, sent=True)
+        ):
+            return False
         return True
 
     async def _send_message(
-        self, chat_id, text: str, short_delay: bool = False
+        self,
+        chat_id,
+        text: str,
+        short_delay: bool = False,
+        *,
+        live_test_event_id: str | None = None,
+        live_test_kind: str | None = None,
     ) -> bool:
         async with self._send_lock:
             return await self._send_message_unlocked(
-                chat_id, text, short_delay=short_delay
+                chat_id,
+                text,
+                short_delay=short_delay,
+                live_test_event_id=live_test_event_id,
+                live_test_kind=live_test_kind,
             )
 
     async def _send_text_recorded(
@@ -1803,6 +2617,8 @@ class AccountWorker:
         managed_origin: bool = False,
         require_media_enabled: bool = False,
         on_dispatched: Callable[[], None] | None = None,
+        live_test_event_id: str | None = None,
+        live_test_kind: str | None = None,
     ) -> bool:
         async with self._send_lock:
             if not await self._send_message_unlocked(
@@ -1811,6 +2627,8 @@ class AccountWorker:
                 short_delay=short_delay,
                 claim_text=True,
                 require_media_enabled=require_media_enabled,
+                live_test_event_id=live_test_event_id,
+                live_test_kind=live_test_kind,
             ):
                 return False
             if on_dispatched:
@@ -1850,79 +2668,9 @@ class AccountWorker:
     def _hkt_second_of_day(now: float) -> int:
         return int((float(now) + 8 * 3600) % 86400)
 
-    def _daily_voice_target_second(self, day_index: int) -> int:
-        """Stable per-account/day random time outside 桃花源's 20–22 busy window."""
-        windows = (
-            (11 * 3600, 20 * 3600),
-            (22 * 3600, 23 * 3600 + 30 * 60),
-        )
-        total = sum(end - start for start, end in windows)
-        seed = hashlib.sha256(
-            f"{self.account_id}:{int(day_index)}:daily-voice".encode("utf-8")
-        ).digest()
-        offset = int.from_bytes(seed[:8], "big") % total
-        for start, end in windows:
-            width = end - start
-            if offset < width:
-                return start + offset
-            offset -= width
-        return windows[-1][0]
-
     async def _maybe_send_daily_voice(self, *, now: float | None = None) -> bool:
-        current = time.time() if now is None else float(now)
-        if (
-            not self.is_running
-            or not self.tg_client
-            or not bool(getattr(self.config, "voice_media_enabled", False))
-            or self.voice_library is None
-            or not self.selected_groups
-        ):
-            return False
-        second = self._hkt_second_of_day(current)
-        if 20 * 3600 <= second < 22 * 3600:
-            return False
-        day_index = self._hkt_day_index(current)
-        if second < self._daily_voice_target_second(day_index):
-            return False
-        groups = sorted(int(group_id) for group_id in self.selected_groups)
-        group_seed = hashlib.sha256(
-            f"{self.account_id}:{day_index}:daily-voice-group".encode("utf-8")
-        ).digest()
-        group_id = groups[int.from_bytes(group_seed[:8], "big") % len(groups)]
-        last_human = float(self.last_human_activity.get(group_id, 0) or 0)
-        if last_human > 0 and current - last_human < 10 * 60:
-            return False
-        asset = self.voice_library.asset_for_day(self.account_id, day_index)
-        if asset is None:
-            return False
-        if not await self.db.claim_daily_voice(
-            self.account_id, day_index, group_id=group_id
-        ):
-            return False
-        return await self._send_media_recorded(
-            group_id,
-            asset,
-            "[語音]",
-            activity_kind="voice_proactive",
-            stats_key="voice_proactive_sent",
-        )
-
-    async def _daily_voice_loop(self) -> None:
-        while self.is_running:
-            try:
-                await asyncio.sleep(60)
-                if not self.is_running:
-                    return
-                if not bool(getattr(self.config, "voice_daily_pre_gen", False)):
-                    # 預生成每日語音預設關閉；語音主路徑是即時話題語音。
-                    continue
-                await self._maybe_send_daily_voice()
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                self.stats["errors"] += 1
-                print(f"[{self.name}] daily voice error: {exc}", flush=True)
-                await asyncio.sleep(60)
+        """Pre-generated daily voice is permanently disabled."""
+        return False
 
     # ---------- 即時話題語音（本地 IndexTTS2 服務） ----------
 
@@ -1939,6 +2687,43 @@ class AccountWorker:
         if age < 31:
             return "29"
         return "34"
+
+    @staticmethod
+    def _valid_voice_timestamp(value: object) -> bool:
+        return (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and value >= 0
+        )
+
+    def _valid_voice_generation_evidence(
+        self, evidence: object
+    ) -> VoiceGenerationEvidence | None:
+        if not isinstance(evidence, VoiceGenerationEvidence):
+            return None
+        expected_profile = _VOICE_ACCOUNT_PROFILE_MAP.get(self.account_id)
+        if (
+            expected_profile is None
+            or evidence.account_id != self.account_id
+            or evidence.group_id != _LIVE_TEST_VOICE_GROUP_ID
+            or evidence.group_id not in self.selected_groups
+            or evidence.profile_id != expected_profile
+            or self._voice_profile_key(self.persona) != expected_profile
+            or not isinstance(evidence.run_id, str)
+            or _VOICE_METADATA_ID_PATTERN.fullmatch(evidence.run_id) is None
+            or not isinstance(evidence.event_id, str)
+            or _VOICE_METADATA_ID_PATTERN.fullmatch(evidence.event_id) is None
+            or not self._valid_voice_timestamp(evidence.trigger_received_at)
+            or not self._valid_voice_timestamp(evidence.snapshot_at)
+            or evidence.snapshot_at < evidence.trigger_received_at
+            or not isinstance(evidence.snapshot_sha256, str)
+            or _VOICE_SHA256_PATTERN.fullmatch(evidence.snapshot_sha256) is None
+            or not isinstance(evidence.text, str)
+            or not 1 <= len(evidence.text) <= 220
+        ):
+            return None
+        return evidence
 
     def _realtime_voice_due(self, current: float) -> bool:
         cfg = self.config
@@ -1969,52 +2754,173 @@ class AccountWorker:
             return False
         return True
 
-    async def _synthesize_realtime_voice(self, text: str) -> MediaAsset | None:
-        """Call the local IndexTTS2 service; None on any failure (fail-closed)."""
+    async def _synthesize_realtime_voice(
+        self, evidence: VoiceGenerationEvidence
+    ) -> BoundVoiceAsset | None:
+        """Call IndexTTS2 and accept only an exactly echoed evidence envelope."""
+        validated = self._valid_voice_generation_evidence(evidence)
         cfg = self.config
-        url = f"{cfg.voice_realtime_url}/v1/synthesize"
-        voice = self._voice_profile_key(self.persona)
+        if (
+            validated is None
+            or not getattr(cfg, "voice_realtime_url", "")
+            or not getattr(cfg, "voice_realtime_token", "")
+        ):
+            self.stats["voice_realtime_errors"] += 1
+            return None
+        evidence = validated
+
+        request_id = secrets.token_hex(16)
+        if re.fullmatch(r"[0-9a-f]{32}", request_id) is None:
+            self.stats["voice_realtime_errors"] += 1
+            return None
+        payload = {
+            "request_id": request_id,
+            "run_id": evidence.run_id,
+            "event_id": evidence.event_id,
+            "account_id": evidence.account_id,
+            "group_id": evidence.group_id,
+            "trigger_received_at": evidence.trigger_received_at,
+            "snapshot_at": evidence.snapshot_at,
+            "snapshot_sha256": evidence.snapshot_sha256,
+            "profile_id": evidence.profile_id,
+            "voice": evidence.profile_id,
+            "text": evidence.text,
+        }
+        text_sha256 = hashlib.sha256(evidence.text.encode("utf-8")).hexdigest()
+        url = f"{str(cfg.voice_realtime_url).rstrip('/')}/v1/synthesize"
         import httpx
 
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(200.0)) as client:
                 resp = await client.post(
                     url,
-                    json={"voice": voice, "text": text[:220]},
+                    json=payload,
                     headers={"Authorization": f"Bearer {cfg.voice_realtime_token}"},
                 )
             if resp.status_code != 200:
                 self.stats["voice_realtime_errors"] += 1
-                print(
-                    f"[{self.name}] realtime voice http {resp.status_code}",
-                    flush=True,
-                )
                 return None
-            data = resp.content
-            if len(data) < 2000 or len(data) > 2 * 1024 * 1024:
+            data = bytes(resp.content)
+            if (
+                len(data) < 2000
+                or len(data) > 2 * 1024 * 1024
+                or not data.startswith(b"OggS")
+                or str(resp.headers.get("content-type", "")).split(";", 1)[0]
+                .strip()
+                .lower()
+                != "audio/ogg"
+            ):
                 self.stats["voice_realtime_errors"] += 1
                 return None
-            return MediaAsset("voice", data, f"realtime-{voice}.ogg", "audio/ogg")
+            output_sha256 = hashlib.sha256(data).hexdigest()
+            expected_headers = {
+                "X-SDF-Contract-Version": "1",
+                "X-SDF-Request-ID": request_id,
+                "X-SDF-Run-ID": evidence.run_id,
+                "X-SDF-Event-ID": evidence.event_id,
+                "X-SDF-Account-ID": evidence.account_id,
+                "X-SDF-Group-ID": str(evidence.group_id),
+                "X-SDF-Trigger-Received-At": str(evidence.trigger_received_at),
+                "X-SDF-Snapshot-At": str(evidence.snapshot_at),
+                "X-SDF-Profile-ID": evidence.profile_id,
+                "X-SDF-Snapshot-SHA256": evidence.snapshot_sha256,
+                "X-SDF-Text-SHA256": text_sha256,
+                "X-SDF-Output-SHA256": output_sha256,
+            }
+            if any(
+                str(resp.headers.get(name, "")) != expected
+                for name, expected in expected_headers.items()
+            ):
+                self.stats["voice_realtime_errors"] += 1
+                return None
+            media_evidence = MediaEvidence(
+                request_id=request_id,
+                snapshot_sha256=evidence.snapshot_sha256,
+                output_sha256=output_sha256,
+                trigger_received_at=evidence.trigger_received_at,
+                snapshot_at=evidence.snapshot_at,
+                profile_id=evidence.profile_id,
+                content_sha256=text_sha256,
+                decode_metadata_sha256="",
+            )
+            return BoundVoiceAsset(
+                run_id=evidence.run_id,
+                event_id=evidence.event_id,
+                account_id=evidence.account_id,
+                group_id=evidence.group_id,
+                profile_id=evidence.profile_id,
+                text=evidence.text,
+                text_sha256=text_sha256,
+                asset=MediaAsset(
+                    "voice",
+                    data,
+                    f"realtime-{evidence.profile_id}-{request_id}.ogg",
+                    "audio/ogg",
+                ),
+                media_evidence=media_evidence,
+            )
         except Exception as exc:
             self.stats["voice_realtime_errors"] += 1
             print(f"[{self.name}] realtime voice failed: {exc}", flush=True)
             return None
 
-    async def _send_realtime_voice(self, chat_id: int, text: str) -> bool:
-        asset = await self._synthesize_realtime_voice(text)
-        if asset is None:
-            return False
+    async def _send_realtime_voice(
+        self,
+        evidence: VoiceGenerationEvidence,
+        *,
+        live_test_event_id: str | None = None,
+        live_test_kind: str | None = None,
+        before_send: Callable[[BoundVoiceAsset], Any] | None = None,
+    ) -> BoundVoiceAsset | None:
+        """Synthesize, expose immutable evidence to the gate, then send exactly it."""
+        if (
+            live_test_event_id is not None
+            and live_test_event_id != getattr(evidence, "event_id", None)
+        ) or (live_test_kind is not None and live_test_kind != "voice"):
+            return None
+        bound = await self._synthesize_realtime_voice(evidence)
+        if bound is None:
+            return None
+        if before_send is not None:
+            result = before_send(bound)
+            if inspect.isawaitable(result):
+                result = await result
+            if result is False:
+                return None
+        send_event_id = str(live_test_event_id or bound.event_id)
+        send_kind = str(live_test_kind or "voice")
+        final_bound = BoundMediaAsset(
+            run_id=bound.run_id,
+            event_id=bound.event_id,
+            account_id=bound.account_id,
+            group_id=bound.group_id,
+            kind="voice",
+            trigger_received_at=bound.trigger_received_at,
+            snapshot_at=bound.snapshot_at,
+            snapshot_sha256=bound.snapshot_sha256,
+            request_id=bound.request_id,
+            output_sha256=bound.output_sha256,
+            profile_id=bound.profile_id,
+            content_sha256=bound.text_sha256,
+            decode_metadata_sha256="",
+            asset=bound.asset,
+        )
         sent = await self._send_media_recorded(
-            chat_id,
-            asset,
+            bound.group_id,
+            bound.asset,
             "[語音]",
             activity_kind="voice_realtime",
             stats_key="voice_realtime_sent",
+            live_test_event_id=send_event_id,
+            live_test_kind=send_kind,
+            media_evidence=bound.media_evidence,
+            bound_asset=final_bound,
         )
-        if sent:
-            self._realtime_voice_today += 1
-            self._last_realtime_voice = time.time()
-        return sent
+        if not sent:
+            return None
+        self._realtime_voice_today += 1
+        self._last_realtime_voice = time.time()
+        return bound
 
     def _should_suppress_proactive(self, group_id: int) -> bool:
         last_human = float(self.last_human_activity.get(int(group_id), 0) or 0)

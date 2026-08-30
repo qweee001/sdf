@@ -5,11 +5,13 @@ import base64
 import ipaddress
 import socket
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 import httpx
 from openai import APIConnectionError
+from PIL import Image, ImageOps
 
 
 @dataclass(frozen=True)
@@ -24,7 +26,7 @@ class OrcaMediaService:
     """OrcaRouter 多模態與媒體生成；付費生成先走共用預算闸門。"""
 
     _MODEL_BUDGETS = {
-        "vision": ("vision_model", "google/gemini-3.5-flash-lite", 0.10),
+        "vision": ("vision_model", "gemini-3.5-flash-lite", 0.10),
         "image": (
             "image_model",
             "google/imagen-4.0-fast-generate-001",
@@ -39,6 +41,13 @@ class OrcaMediaService:
         "google/imagen-4.0-generate-001": 0.04,
     }
     _MAX_OUTPUT_BYTES = 50 * 1024 * 1024
+    _VISION_MAX_JPEG_BYTES = 512 * 1024
+    _VISION_HARD_MAX_INPUT_BYTES = 8 * 1024 * 1024
+    _VISION_MAX_DIMENSION = 1600
+    _VISION_MIN_DIMENSION = 800
+    _VISION_MAX_PIXELS = 12_000_000
+    _VISION_ALLOWED_FORMATS_ORDERED = ("JPEG", "PNG", "WEBP")
+    _VISION_ALLOWED_FORMATS = frozenset(_VISION_ALLOWED_FORMATS_ORDERED)
     _SUGGESTIVE_IMAGE_POLICY = (
         "All people are fictional adult age 21+; sensual dating-app style is allowed, "
         "but no visible genitals, no explicit sex act, no real-person likeness, "
@@ -181,6 +190,84 @@ class OrcaMediaService:
             if not address.is_global:
                 raise ValueError("媒體下載網址不安全")
 
+    @classmethod
+    def _validate_vision_image_header(cls, data: bytes) -> None:
+        with Image.open(
+            BytesIO(data), formats=cls._VISION_ALLOWED_FORMATS_ORDERED
+        ) as source:
+            if str(source.format or "").upper() not in cls._VISION_ALLOWED_FORMATS:
+                raise ValueError("輸入圖片格式不合規")
+            width, height = source.size
+            if (
+                width <= 0
+                or height <= 0
+                or width * height > cls._VISION_MAX_PIXELS
+            ):
+                raise ValueError("輸入圖片尺寸不合規")
+
+    @classmethod
+    def _normalize_vision_image(cls, data: bytes) -> bytes:
+        cls._validate_vision_image_header(data)
+        with Image.open(
+            BytesIO(data), formats=cls._VISION_ALLOWED_FORMATS_ORDERED
+        ) as source:
+            width, height = source.size
+            if (
+                width <= 0
+                or height <= 0
+                or width * height > cls._VISION_MAX_PIXELS
+            ):
+                raise ValueError("輸入圖片尺寸不合規")
+            source.load()
+            oriented = ImageOps.exif_transpose(source)
+            if oriented.mode in {"RGBA", "LA"} or "transparency" in oriented.info:
+                rgba = oriented.convert("RGBA")
+                normalized = Image.new("RGB", rgba.size, "white")
+                normalized.paste(rgba, mask=rgba.getchannel("A"))
+            else:
+                normalized = oriented.convert("RGB")
+
+        largest_dimension = max(normalized.size)
+        if largest_dimension > cls._VISION_MAX_DIMENSION:
+            scale = cls._VISION_MAX_DIMENSION / largest_dimension
+            normalized = normalized.resize(
+                (
+                    max(1, round(normalized.width * scale)),
+                    max(1, round(normalized.height * scale)),
+                ),
+                Image.Resampling.LANCZOS,
+            )
+
+        while True:
+            for quality in (85, 75, 65, 55):
+                output = BytesIO()
+                normalized.save(
+                    output,
+                    format="JPEG",
+                    quality=quality,
+                    optimize=True,
+                    progressive=True,
+                )
+                payload = output.getvalue()
+                if len(payload) <= cls._VISION_MAX_JPEG_BYTES:
+                    return payload
+
+            largest_dimension = max(normalized.size)
+            if largest_dimension <= cls._VISION_MIN_DIMENSION:
+                raise ValueError("正規化圖片大小不合規")
+            next_largest = max(
+                cls._VISION_MIN_DIMENSION,
+                round(largest_dimension * 0.8),
+            )
+            scale = next_largest / largest_dimension
+            normalized = normalized.resize(
+                (
+                    max(1, round(normalized.width * scale)),
+                    max(1, round(normalized.height * scale)),
+                ),
+                Image.Resampling.LANCZOS,
+            )
+
     async def understand_image(
         self,
         account_id: str,
@@ -189,9 +276,20 @@ class OrcaMediaService:
         system_prompt: str,
         user_text: str,
     ) -> str:
+        input_limit = min(
+            int(getattr(self.config, "media_max_input_bytes", 8 * 1024 * 1024)),
+            self._VISION_HARD_MAX_INPUT_BYTES,
+        )
+        if not image or len(image) > input_limit:
+            return ""
+        try:
+            await asyncio.to_thread(self._validate_vision_image_header, image)
+            normalized = await asyncio.to_thread(self._normalize_vision_image, image)
+        except Exception:
+            return ""
         if not await self._reserve(account_id, "vision"):
             return ""
-        encoded = base64.b64encode(image).decode("ascii")
+        encoded = base64.b64encode(normalized).decode("ascii")
         response = await self.client.chat.completions.create(
             model=self.config.vision_model,
             messages=[
@@ -209,7 +307,7 @@ class OrcaMediaService:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:{mime_type};base64,{encoded}"
+                                "url": f"data:image/jpeg;base64,{encoded}"
                             },
                         },
                     ],

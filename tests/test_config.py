@@ -36,7 +36,7 @@ def test_defaults_present():
     assert s.proactive_loop_max_seconds == 720
     assert s.acceptance_test_mode is False
     assert s.ai_disable_thinking is False
-    assert s.vision_model == "google/gemini-3.5-flash-lite"
+    assert s.vision_model == "gemini-3.5-flash-lite"
     assert s.image_model == "google/imagen-4.0-fast-generate-001"
     assert s.image_fallback_model == "google/imagen-4.0-generate-001"
     assert s.speech_model
@@ -67,3 +67,26 @@ def test_non_finite_media_budget_falls_back_to_finite_default(monkeypatch):
     budget = load_settings().media_daily_budget_usd
     assert math.isfinite(budget)
     assert budget == 10.0
+
+
+def test_realtime_video_config_uses_url_token_and_bounded_timing(monkeypatch):
+    monkeypatch.setenv("VIDEO_REALTIME_URL", "https://wan.example/")
+    monkeypatch.setenv("VIDEO_REALTIME_TOKEN", "wan-token")
+    monkeypatch.setenv("VIDEO_REALTIME_REQUEST_TIMEOUT", "-50")
+    monkeypatch.setenv("VIDEO_REALTIME_POLL_TIMEOUT", "9999")
+    monkeypatch.setenv("VIDEO_REALTIME_POLL_INTERVAL", "0")
+    monkeypatch.setenv("VIDEO_REALTIME_DOWNLOAD_TIMEOUT", "NaN")
+
+    settings = load_settings()
+
+    assert settings.video_realtime_url == "https://wan.example"
+    assert settings.video_realtime_token == "wan-token"
+    assert settings.video_realtime_request_timeout == 1.0
+    assert settings.video_realtime_poll_timeout == 600.0
+    assert settings.video_realtime_poll_interval == 0.1
+    assert settings.video_realtime_download_timeout == 60.0
+
+
+def test_daily_voice_pregen_env_is_ignored_fail_closed(monkeypatch):
+    monkeypatch.setenv("VOICE_DAILY_PREGEN", "true")
+    assert load_settings().voice_daily_pre_gen is False

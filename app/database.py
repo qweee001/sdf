@@ -2,14 +2,34 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import os
 import re
 import time
 import unicodedata
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
+
+
+_FIXED_LIVE_TEST_ACCOUNT_IDS = {
+    "2ce525dfb0d4",
+    "faa9a202f96e",
+    "038632e4395b",
+    "e63e27a4340d",
+}
+_FIXED_LIVE_TEST_ACCOUNT_PROFILES = {
+    "2ce525dfb0d4": "21",
+    "faa9a202f96e": "25",
+    "038632e4395b": "29",
+    "e63e27a4340d": "34",
+}
+_FIXED_LIVE_TEST_GROUP_ID = -5428680940
+_FIXED_LIVE_TEST_DURATION_SECONDS = 3_600
+_FIXED_LIVE_TEST_EVENT_CAP = 40
+_FIXED_LIVE_TEST_SCHEDULE_SIZE = 30
 
 
 class Database:
@@ -160,6 +180,72 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_reply_events_pressure
             ON reply_events (group_id, stage, reason, at DESC)
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS live_test_runs (
+                id TEXT PRIMARY KEY,
+                account_ids TEXT NOT NULL,
+                group_id INTEGER NOT NULL,
+                duration_seconds INTEGER NOT NULL,
+                event_cap INTEGER NOT NULL,
+                schedule TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                stopped_at REAL,
+                stop_reason TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_live_test_runs_status
+            ON live_test_runs (status, started_at DESC)
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS live_test_events (
+                run_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                group_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                reserved_at REAL NOT NULL,
+                completed_at REAL,
+                detail TEXT NOT NULL DEFAULT '',
+                request_id TEXT NOT NULL DEFAULT '',
+                snapshot_sha256 TEXT NOT NULL DEFAULT '',
+                output_sha256 TEXT NOT NULL DEFAULT '',
+                trigger_received_at REAL NOT NULL DEFAULT 0,
+                snapshot_at REAL NOT NULL DEFAULT 0,
+                profile_id TEXT NOT NULL DEFAULT '',
+                content_sha256 TEXT NOT NULL DEFAULT '',
+                decode_metadata_sha256 TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (run_id, event_id)
+            )
+        """)
+        event_cols = await db.execute("PRAGMA table_info(live_test_events)")
+        event_col_names = {r[1] for r in await event_cols.fetchall()}
+        if "group_id" not in event_col_names:
+            await db.execute(
+                "ALTER TABLE live_test_events ADD COLUMN group_id INTEGER NOT NULL DEFAULT 0"
+            )
+        for column in ("request_id", "snapshot_sha256", "output_sha256"):
+            if column not in event_col_names:
+                await db.execute(
+                    f"ALTER TABLE live_test_events ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
+        for column in ("trigger_received_at", "snapshot_at"):
+            if column not in event_col_names:
+                await db.execute(
+                    f"ALTER TABLE live_test_events ADD COLUMN {column} REAL NOT NULL DEFAULT 0"
+                )
+        for column in ("profile_id", "content_sha256", "decode_metadata_sha256"):
+            if column not in event_col_names:
+                await db.execute(
+                    f"ALTER TABLE live_test_events ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_live_test_events_run_state
+            ON live_test_events (run_id, state, reserved_at)
+        """)
         await db.commit()
 
     async def close(self):
@@ -195,6 +281,800 @@ class Database:
                 except BaseException:
                     await settings_db.rollback()
                     raise
+
+    # ---------- 有界真人測試 ----------
+
+    async def create_live_test_run(
+        self,
+        *,
+        run_id: str,
+        account_ids: list[str],
+        group_id: int,
+        duration_seconds: int,
+        event_cap: int,
+        schedule: list[dict],
+        started_at: float | None = None,
+    ) -> bool:
+        """Persist one active bounded run without relying on process memory."""
+        if (
+            not isinstance(account_ids, list)
+            or len(account_ids) != 4
+            or len(set(account_ids)) != 4
+            or not all(isinstance(account_id, str) for account_id in account_ids)
+            or set(account_ids) != _FIXED_LIVE_TEST_ACCOUNT_IDS
+            or isinstance(group_id, bool)
+            or not isinstance(group_id, int)
+            or group_id != _FIXED_LIVE_TEST_GROUP_ID
+            or isinstance(duration_seconds, bool)
+            or not isinstance(duration_seconds, int)
+            or duration_seconds != _FIXED_LIVE_TEST_DURATION_SECONDS
+            or isinstance(event_cap, bool)
+            or not isinstance(event_cap, int)
+            or event_cap != _FIXED_LIVE_TEST_EVENT_CAP
+            or not isinstance(schedule, list)
+            or len(schedule) != _FIXED_LIVE_TEST_SCHEDULE_SIZE
+        ):
+            raise ValueError("fixed live-test envelope is required")
+        identifier = str(run_id).strip()
+        duration = int(duration_seconds)
+        cap = int(event_cap)
+        started = float(time.time() if started_at is None else started_at)
+        if not identifier or duration <= 0 or cap <= 0:
+            return False
+        accounts_json = json.dumps(
+            [str(account_id) for account_id in account_ids],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        schedule_json = json.dumps(
+            schedule, ensure_ascii=False, separators=(",", ":")
+        )
+        async with aiosqlite.connect(self.db_path, timeout=30) as run_db:
+            run_db.row_factory = aiosqlite.Row
+            try:
+                await run_db.execute("BEGIN IMMEDIATE")
+                await run_db.execute(
+                    "UPDATE live_test_runs SET status = 'needs_reconciliation', "
+                    "stopped_at = NULL, stop_reason = 'expired' "
+                    "WHERE status = 'running' AND expires_at <= ?",
+                    (started,),
+                )
+                cursor = await run_db.execute(
+                    "SELECT id FROM live_test_runs WHERE "
+                    "status IN ('running', 'needs_reconciliation', 'lockdown') "
+                    "OR (status = 'failed' AND stop_reason LIKE '%stop_failed%') LIMIT 1"
+                )
+                if await cursor.fetchone() is not None:
+                    # Keep any expiry transition above durable while refusing
+                    # to create a replacement run in the same write transaction.
+                    await run_db.commit()
+                    return False
+                cursor = await run_db.execute(
+                    "INSERT OR IGNORE INTO live_test_runs "
+                    "(id, account_ids, group_id, duration_seconds, event_cap, "
+                    "schedule, status, started_at, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)",
+                    (
+                        identifier,
+                        accounts_json,
+                        int(group_id),
+                        duration,
+                        cap,
+                        schedule_json,
+                        started,
+                        started + duration,
+                    ),
+                )
+                await run_db.commit()
+                return cursor.rowcount == 1
+            except BaseException:
+                await run_db.rollback()
+                raise
+
+    async def reserve_live_test_event(
+        self,
+        run_id: str,
+        event_id: str,
+        account_id: str,
+        kind: str,
+        *,
+        group_id: int,
+        scripted: bool,
+        request_id: str = "",
+        snapshot_sha256: str = "",
+        output_sha256: str = "",
+        trigger_received_at: float = 0.0,
+        snapshot_at: float = 0.0,
+        profile_id: str = "",
+        content_sha256: str = "",
+        decode_metadata_sha256: str = "",
+        now: float | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> bool:
+        """Atomically consume one persistent dispatch slot before Telegram may run."""
+        if not all(str(value).strip() for value in (run_id, event_id, account_id, kind)):
+            return False
+        if isinstance(group_id, bool) or not isinstance(group_id, int) or group_id >= 0:
+            return False
+        if not isinstance(scripted, bool):
+            return False
+        kind_identifier = str(kind).strip()
+        raw_request_identifier = str(request_id or "")
+        raw_snapshot_hash = str(snapshot_sha256 or "")
+        raw_output_hash = str(output_sha256 or "")
+        raw_profile_id = str(profile_id or "")
+        raw_content_hash = str(content_sha256 or "")
+        raw_decode_hash = str(decode_metadata_sha256 or "")
+        request_identifier = raw_request_identifier.strip()
+        snapshot_hash = raw_snapshot_hash.strip().lower()
+        output_hash = raw_output_hash.strip().lower()
+        profile_identifier = raw_profile_id.strip()
+        content_hash = raw_content_hash.strip().lower()
+        decode_hash = raw_decode_hash.strip().lower()
+        if len(request_identifier) > 200 or not self._valid_optional_sha256(
+            snapshot_hash
+        ) or any(
+            not self._valid_optional_sha256(value)
+            for value in (output_hash, content_hash, decode_hash)
+        ):
+            return False
+        media_kind = kind_identifier in {"voice", "video"}
+        valid_media_timestamps = (
+            not isinstance(trigger_received_at, bool)
+            and not isinstance(snapshot_at, bool)
+            and isinstance(trigger_received_at, (int, float))
+            and isinstance(snapshot_at, (int, float))
+            and math.isfinite(float(trigger_received_at))
+            and math.isfinite(float(snapshot_at))
+            and float(trigger_received_at) >= 0
+            and float(snapshot_at) >= float(trigger_received_at)
+        )
+        if kind_identifier in {"voice", "video"} and (
+            re.fullmatch(r"[0-9a-f]{32}", request_identifier) is None
+            or not snapshot_hash
+            or not output_hash
+            or not content_hash
+            or not valid_media_timestamps
+            or profile_identifier
+            != _FIXED_LIVE_TEST_ACCOUNT_PROFILES.get(str(account_id), "")
+            or (kind_identifier == "voice" and bool(decode_hash))
+            or (kind_identifier == "video" and not decode_hash)
+            or raw_request_identifier != request_identifier
+            or raw_snapshot_hash != snapshot_hash
+            or raw_output_hash != output_hash
+            or raw_profile_id != profile_identifier
+            or raw_content_hash != content_hash
+            or raw_decode_hash != decode_hash
+        ):
+            return False
+        if not media_kind and (
+            request_identifier
+            or snapshot_hash
+            or output_hash
+            or isinstance(trigger_received_at, bool)
+            or not isinstance(trigger_received_at, (int, float))
+            or float(trigger_received_at) != 0.0
+            or isinstance(snapshot_at, bool)
+            or not isinstance(snapshot_at, (int, float))
+            or float(snapshot_at) != 0.0
+            or profile_identifier
+            or content_hash
+            or decode_hash
+        ):
+            return False
+        async with aiosqlite.connect(self.db_path, timeout=30) as event_db:
+            event_db.row_factory = aiosqlite.Row
+            try:
+                # The write lock serializes cap checks across processes/connections.
+                await event_db.execute("BEGIN IMMEDIATE")
+                # Read time only after acquiring the write lock. A reservation
+                # may wait here behind another SQLite writer long enough for
+                # the bounded run to expire.
+                current = float(
+                    clock() if clock is not None else time.time() if now is None else now
+                )
+                cursor = await event_db.execute(
+                    "SELECT status, expires_at, event_cap, account_ids, group_id, schedule "
+                    "FROM live_test_runs "
+                    "WHERE id = ?",
+                    (str(run_id),),
+                )
+                run = await cursor.fetchone()
+                if run is None or str(run["status"]) != "running":
+                    await event_db.rollback()
+                    return False
+                if current >= float(run["expires_at"]):
+                    await event_db.execute(
+                        "UPDATE live_test_runs SET status = 'needs_reconciliation', "
+                        "stopped_at = NULL, stop_reason = 'expired' WHERE id = ?",
+                        (str(run_id),),
+                    )
+                    await event_db.commit()
+                    return False
+                try:
+                    authorized_accounts = {
+                        str(value) for value in json.loads(str(run["account_ids"]))
+                    }
+                    schedule = json.loads(str(run["schedule"]))
+                except (TypeError, json.JSONDecodeError):
+                    await event_db.rollback()
+                    return False
+                if (
+                    str(account_id) not in authorized_accounts
+                    or int(group_id) != int(run["group_id"])
+                ):
+                    await event_db.rollback()
+                    return False
+                if scripted:
+                    matching = [
+                        event
+                        for event in schedule
+                        if isinstance(event, dict)
+                        and str(event.get("event_id") or "") == str(event_id)
+                    ]
+                    if len(matching) != 1 or (
+                        str(matching[0].get("account_id") or "") != str(account_id)
+                        or str(matching[0].get("kind") or "") != kind_identifier
+                    ):
+                        await event_db.rollback()
+                        return False
+                elif not str(event_id).startswith("organic:"):
+                    await event_db.rollback()
+                    return False
+                if request_identifier:
+                    cursor = await event_db.execute(
+                        "SELECT 1 FROM live_test_events "
+                        "WHERE run_id = ? AND request_id = ? LIMIT 1",
+                        (str(run_id), request_identifier),
+                    )
+                    if await cursor.fetchone() is not None:
+                        await event_db.rollback()
+                        return False
+                cursor = await event_db.execute(
+                    "SELECT 1 FROM live_test_events "
+                    "WHERE run_id = ? AND event_id = ?",
+                    (str(run_id), str(event_id)),
+                )
+                if await cursor.fetchone() is not None:
+                    await event_db.rollback()
+                    return False
+                cursor = await event_db.execute(
+                    "SELECT COUNT(*) AS n FROM live_test_events WHERE run_id = ? "
+                    "AND state IN ('reserved', 'rpc_started', 'sent', 'failed', "
+                    "'hard_attempt')",
+                    (str(run_id),),
+                )
+                count_row = await cursor.fetchone()
+                reserved = int(count_row["n"] if count_row else 0)
+                if reserved >= int(run["event_cap"]):
+                    await event_db.rollback()
+                    return False
+                await event_db.execute(
+                    "INSERT INTO live_test_events "
+                    "(run_id, event_id, account_id, group_id, kind, state, reserved_at, "
+                    "request_id, snapshot_sha256, output_sha256, trigger_received_at, "
+                    "snapshot_at, profile_id, content_sha256, decode_metadata_sha256) "
+                    "VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(run_id),
+                        str(event_id),
+                        str(account_id),
+                        int(group_id),
+                        kind_identifier,
+                        current,
+                        request_identifier,
+                        snapshot_hash,
+                        output_hash,
+                        float(trigger_received_at),
+                        float(snapshot_at),
+                        profile_identifier,
+                        content_hash,
+                        decode_hash,
+                    ),
+                )
+                await event_db.commit()
+                return True
+            except BaseException:
+                await event_db.rollback()
+                raise
+
+    async def mark_live_test_event_rpc_started(
+        self,
+        run_id: str,
+        event_id: str,
+        *,
+        account_id: str,
+        group_id: int,
+        kind: str,
+        request_id: str = "",
+        snapshot_sha256: str = "",
+        output_sha256: str = "",
+        trigger_received_at: float = 0.0,
+        snapshot_at: float = 0.0,
+        profile_id: str = "",
+        content_sha256: str = "",
+        decode_metadata_sha256: str = "",
+    ) -> bool:
+        """Persist the last durable boundary immediately before the RPC."""
+
+        normalized = {
+            "kind": str(kind or "").strip().lower(),
+            "request_id": str(request_id or "").strip().lower(),
+            "snapshot_sha256": str(snapshot_sha256 or "").strip().lower(),
+            "output_sha256": str(output_sha256 or "").strip().lower(),
+            "profile_id": str(profile_id or "").strip(),
+            "content_sha256": str(content_sha256 or "").strip().lower(),
+            "decode_metadata_sha256": str(
+                decode_metadata_sha256 or ""
+            ).strip().lower(),
+        }
+        try:
+            trigger_value = float(trigger_received_at)
+            snapshot_value = float(snapshot_at)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(trigger_value) or not math.isfinite(snapshot_value):
+            return False
+
+        async with aiosqlite.connect(self.db_path, timeout=30) as event_db:
+            event_db.row_factory = aiosqlite.Row
+            await event_db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await event_db.execute(
+                    """
+                    SELECT account_id, group_id, kind, state, request_id,
+                           snapshot_sha256, output_sha256,
+                           trigger_received_at, snapshot_at, profile_id,
+                           content_sha256, decode_metadata_sha256
+                    FROM live_test_events
+                    WHERE run_id=? AND event_id=?
+                    """,
+                    (run_id, event_id),
+                )
+                row = await cursor.fetchone()
+                if row is None or row[3] != "reserved":
+                    await event_db.rollback()
+                    return False
+                expected = (
+                    str(account_id),
+                    int(group_id),
+                    normalized["kind"],
+                    normalized["request_id"],
+                    normalized["snapshot_sha256"],
+                    normalized["output_sha256"],
+                    trigger_value,
+                    snapshot_value,
+                    normalized["profile_id"],
+                    normalized["content_sha256"],
+                    normalized["decode_metadata_sha256"],
+                )
+                actual = (
+                    str(row[0]),
+                    int(row[1]),
+                    str(row[2] or "").strip().lower(),
+                    str(row[4] or "").strip().lower(),
+                    str(row[5] or "").strip().lower(),
+                    str(row[6] or "").strip().lower(),
+                    float(row[7] or 0.0),
+                    float(row[8] or 0.0),
+                    str(row[9] or "").strip(),
+                    str(row[10] or "").strip().lower(),
+                    str(row[11] or "").strip().lower(),
+                )
+                if actual != expected:
+                    await event_db.rollback()
+                    return False
+                cur = await event_db.execute(
+                    """
+                    UPDATE live_test_events
+                    SET state='rpc_started', detail='rpc_started'
+                    WHERE run_id=? AND event_id=? AND state='reserved'
+                    """,
+                    (run_id, event_id),
+                )
+                if cur.rowcount != 1:
+                    await event_db.rollback()
+                    return False
+                await event_db.commit()
+                return True
+            except BaseException:
+                await event_db.rollback()
+                raise
+
+    async def reconcile_live_test_events(
+        self,
+        run_id: str,
+        reason: str,
+        *,
+        now: float | None = None,
+    ) -> dict[str, int]:
+        """Resolve every non-terminal reservation before a run is finalized."""
+
+        completed_at = float(time.time() if now is None else now)
+        if not math.isfinite(completed_at):
+            raise ValueError("reconciliation timestamp must be finite")
+        safe_reason = str(reason or "reconciliation")[:500]
+        async with aiosqlite.connect(self.db_path, timeout=30) as event_db:
+            await event_db.execute("BEGIN IMMEDIATE")
+            try:
+                released = await event_db.execute(
+                    """
+                    UPDATE live_test_events
+                    SET state='released', completed_at=?, detail=?
+                    WHERE run_id=? AND state='reserved'
+                    """,
+                    (completed_at, f"reconciled_pre_rpc: {safe_reason}", run_id),
+                )
+                hard = await event_db.execute(
+                    """
+                    UPDATE live_test_events
+                    SET state='hard_attempt', completed_at=?, detail=?
+                    WHERE run_id=? AND state='rpc_started'
+                    """,
+                    (completed_at, f"reconciled_rpc_unknown: {safe_reason}", run_id),
+                )
+                await event_db.commit()
+                return {
+                    "released": int(released.rowcount),
+                    "hard_attempt": int(hard.rowcount),
+                }
+            except BaseException:
+                await event_db.rollback()
+                raise
+
+    async def release_live_test_event_bound(
+        self,
+        run_id: str,
+        event_id: str,
+        *,
+        account_id: str,
+        group_id: int,
+        kind: str,
+        request_id: str = "",
+        snapshot_sha256: str = "",
+        output_sha256: str = "",
+        trigger_received_at: float = 0.0,
+        snapshot_at: float = 0.0,
+        profile_id: str = "",
+        content_sha256: str = "",
+        decode_metadata_sha256: str = "",
+        detail: str = "",
+    ) -> bool:
+        """Release a pre-RPC reservation using only trusted bound identity."""
+
+        expected = {
+            "account_id": str(account_id),
+            "group_id": int(group_id),
+            "kind": str(kind or "").strip(),
+            "request_id": str(request_id or "").strip(),
+            "snapshot_sha256": str(snapshot_sha256 or "").strip().lower(),
+            "output_sha256": str(output_sha256 or "").strip().lower(),
+            "trigger_received_at": float(trigger_received_at),
+            "snapshot_at": float(snapshot_at),
+            "profile_id": str(profile_id or "").strip(),
+            "content_sha256": str(content_sha256 or "").strip().lower(),
+            "decode_metadata_sha256": str(
+                decode_metadata_sha256 or ""
+            ).strip().lower(),
+        }
+        if any(
+            not math.isfinite(expected[key])
+            for key in ("trigger_received_at", "snapshot_at")
+        ):
+            return False
+        async with aiosqlite.connect(self.db_path, timeout=30) as event_db:
+            event_db.row_factory = aiosqlite.Row
+            await event_db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await event_db.execute(
+                    """
+                    SELECT account_id, group_id, kind, state, request_id,
+                           snapshot_sha256, output_sha256,
+                           trigger_received_at, snapshot_at, profile_id,
+                           content_sha256, decode_metadata_sha256
+                    FROM live_test_events
+                    WHERE run_id=? AND event_id=?
+                    """,
+                    (str(run_id), str(event_id)),
+                )
+                row = await cursor.fetchone()
+                if row is None or str(row["state"]) != "reserved":
+                    await event_db.rollback()
+                    return False
+                actual = {
+                    "account_id": str(row["account_id"]),
+                    "group_id": int(row["group_id"]),
+                    "kind": str(row["kind"] or ""),
+                    "request_id": str(row["request_id"] or ""),
+                    "snapshot_sha256": str(row["snapshot_sha256"] or ""),
+                    "output_sha256": str(row["output_sha256"] or ""),
+                    "trigger_received_at": float(row["trigger_received_at"] or 0.0),
+                    "snapshot_at": float(row["snapshot_at"] or 0.0),
+                    "profile_id": str(row["profile_id"] or ""),
+                    "content_sha256": str(row["content_sha256"] or ""),
+                    "decode_metadata_sha256": str(
+                        row["decode_metadata_sha256"] or ""
+                    ),
+                }
+                if actual != expected:
+                    await event_db.rollback()
+                    return False
+                updated = await event_db.execute(
+                    """
+                    UPDATE live_test_events
+                    SET state='released', completed_at=?, detail=?
+                    WHERE run_id=? AND event_id=? AND state='reserved'
+                    """,
+                    (time.time(), str(detail)[:500], str(run_id), str(event_id)),
+                )
+                if updated.rowcount != 1:
+                    await event_db.rollback()
+                    return False
+                await event_db.commit()
+                return True
+            except BaseException:
+                await event_db.rollback()
+                raise
+
+    async def finish_live_test_event(
+        self,
+        run_id: str,
+        event_id: str,
+        state: str,
+        detail: str = "",
+        *,
+        kind: str = "",
+        request_id: str = "",
+        snapshot_sha256: str = "",
+        output_sha256: str = "",
+        trigger_received_at: float = 0.0,
+        snapshot_at: float = 0.0,
+        profile_id: str = "",
+        content_sha256: str = "",
+        decode_metadata_sha256: str = "",
+        rpc_started: bool = False,
+    ) -> bool:
+        if state not in {"sent", "failed", "hard_attempt", "released", "cancelled"}:
+            return False
+        requested_audit = {
+            "kind": str(kind or ""),
+            "request_id": str(request_id or ""),
+            "snapshot_sha256": str(snapshot_sha256 or ""),
+            "output_sha256": str(output_sha256 or ""),
+            "profile_id": str(profile_id or ""),
+            "content_sha256": str(content_sha256 or ""),
+            "decode_metadata_sha256": str(decode_metadata_sha256 or ""),
+        }
+        normalized_audit = {
+            "kind": requested_audit["kind"].strip(),
+            "request_id": requested_audit["request_id"].strip(),
+            "snapshot_sha256": requested_audit["snapshot_sha256"].strip().lower(),
+            "output_sha256": requested_audit["output_sha256"].strip().lower(),
+            "profile_id": requested_audit["profile_id"].strip(),
+            "content_sha256": requested_audit["content_sha256"].strip().lower(),
+            "decode_metadata_sha256": requested_audit[
+                "decode_metadata_sha256"
+            ].strip().lower(),
+        }
+        if len(normalized_audit["request_id"]) > 200 or any(
+            not self._valid_optional_sha256(normalized_audit[key])
+            for key in (
+                "snapshot_sha256",
+                "output_sha256",
+                "content_sha256",
+                "decode_metadata_sha256",
+            )
+        ):
+            return False
+        async with aiosqlite.connect(self.db_path, timeout=30) as event_db:
+            event_db.row_factory = aiosqlite.Row
+            try:
+                await event_db.execute("BEGIN IMMEDIATE")
+                cursor = await event_db.execute(
+                    "SELECT state, kind, request_id, snapshot_sha256, output_sha256, "
+                    "trigger_received_at, snapshot_at, profile_id, content_sha256, "
+                    "decode_metadata_sha256 "
+                    "FROM live_test_events WHERE run_id = ? AND event_id = ?",
+                    (str(run_id), str(event_id)),
+                )
+                current = await cursor.fetchone()
+                required_state = (
+                    "rpc_started"
+                    if state in {"sent", "hard_attempt"} or rpc_started
+                    else "reserved"
+                )
+                if current is None or str(current["state"]) != required_state:
+                    await event_db.rollback()
+                    return False
+                if state not in {"released", "cancelled"}:
+                    current_kind = str(current["kind"])
+                    if current_kind in {"voice", "video"}:
+                        if (
+                            requested_audit != normalized_audit
+                            or any(
+                                not normalized_audit[key]
+                                for key in (
+                                    "kind",
+                                    "request_id",
+                                    "snapshot_sha256",
+                                    "output_sha256",
+                                    "profile_id",
+                                    "content_sha256",
+                                )
+                            )
+                            or (
+                                current_kind == "voice"
+                                and bool(normalized_audit["decode_metadata_sha256"])
+                            )
+                            or (
+                                current_kind == "video"
+                                and not normalized_audit["decode_metadata_sha256"]
+                            )
+                            or any(
+                                str(current[key] or "") != normalized_audit[key]
+                                for key in normalized_audit
+                            )
+                            or not isinstance(trigger_received_at, (int, float))
+                            or isinstance(trigger_received_at, bool)
+                            or not isinstance(snapshot_at, (int, float))
+                            or isinstance(snapshot_at, bool)
+                            or not math.isfinite(float(trigger_received_at))
+                            or not math.isfinite(float(snapshot_at))
+                            or float(current["trigger_received_at"])
+                            != float(trigger_received_at)
+                            or float(current["snapshot_at"]) != float(snapshot_at)
+                        ):
+                            await event_db.rollback()
+                            return False
+                    elif (
+                        normalized_audit["kind"] != current_kind
+                        or any(
+                            normalized_audit[key]
+                            for key in normalized_audit
+                            if key != "kind"
+                        )
+                        or any(
+                            value != 0.0
+                            for value in (trigger_received_at, snapshot_at)
+                        )
+                    ):
+                        await event_db.rollback()
+                        return False
+                cursor = await event_db.execute(
+                    "UPDATE live_test_events SET state = ?, completed_at = ?, detail = ? "
+                    "WHERE run_id = ? AND event_id = ? AND state = ?",
+                    (
+                        state,
+                        time.time(),
+                        str(detail)[:500],
+                        str(run_id),
+                        str(event_id),
+                        required_state,
+                    ),
+                )
+                await event_db.commit()
+                return cursor.rowcount == 1
+            except BaseException:
+                await event_db.rollback()
+                raise
+
+    @staticmethod
+    def _valid_optional_sha256(value: str) -> bool:
+        return not value or re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+    async def get_live_test_event(self, run_id: str, event_id: str) -> dict | None:
+        cursor = await self._c.execute(
+            "SELECT run_id, event_id, account_id, group_id, kind, state, reserved_at, "
+            "completed_at, detail, request_id, snapshot_sha256, output_sha256, "
+            "trigger_received_at, snapshot_at, profile_id, content_sha256, "
+            "decode_metadata_sha256 "
+            "FROM live_test_events WHERE run_id = ? AND event_id = ?",
+            (str(run_id), str(event_id)),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def mark_live_test_needs_reconciliation(
+        self, run_id: str, reason: str
+    ) -> bool:
+        cursor = await self._c.execute(
+            "UPDATE live_test_runs SET status = 'needs_reconciliation', "
+            "stopped_at = NULL, stop_reason = ? WHERE id = ? AND ("
+            "status IN ('running', 'needs_reconciliation', 'lockdown', 'expired') OR "
+            "(status = 'failed' AND stop_reason LIKE '%stop_failed%'))",
+            (str(reason)[:500], str(run_id)),
+        )
+        await self._c.commit()
+        return cursor.rowcount == 1
+
+    async def get_live_test_reconciliation_run(self) -> dict | None:
+        cursor = await self._c.execute(
+            "SELECT id FROM live_test_runs WHERE "
+            "status IN ('running', 'needs_reconciliation', 'lockdown') OR "
+            "(status = 'expired' AND stop_reason = 'expired') OR "
+            "(status = 'failed' AND stop_reason LIKE '%stop_failed%') "
+            "ORDER BY started_at ASC LIMIT 1"
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return await self.get_live_test_run(str(row["id"]))
+
+    async def has_live_test_reconciliation(self) -> bool:
+        return await self.get_live_test_reconciliation_run() is not None
+
+    async def finish_live_test_run(
+        self,
+        run_id: str,
+        status: str,
+        reason: str = "",
+        *,
+        stopped_at: float | None = None,
+    ) -> bool:
+        if status not in {"completed", "stopped", "expired", "failed"}:
+            return False
+        cursor = await self._c.execute(
+            "UPDATE live_test_runs SET status = ?, stopped_at = ?, stop_reason = ? "
+            "WHERE id = ? AND status IN "
+            "('running', 'needs_reconciliation', 'lockdown', 'expired')",
+            (
+                status,
+                float(time.time() if stopped_at is None else stopped_at),
+                str(reason)[:500],
+                str(run_id),
+            ),
+        )
+        await self._c.commit()
+        return cursor.rowcount == 1
+
+    async def get_live_test_run(self, run_id: str | None = None) -> dict | None:
+        if run_id is None:
+            cursor = await self._c.execute(
+                "SELECT * FROM live_test_runs ORDER BY started_at DESC LIMIT 1"
+            )
+        else:
+            cursor = await self._c.execute(
+                "SELECT * FROM live_test_runs WHERE id = ?", (str(run_id),)
+            )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["account_ids"] = json.loads(result["account_ids"])
+            result["schedule"] = json.loads(result["schedule"])
+        except (TypeError, json.JSONDecodeError):
+            result["account_ids"] = []
+            result["schedule"] = []
+        counts_cursor = await self._c.execute(
+            "SELECT state, COUNT(*) AS n FROM live_test_events "
+            "WHERE run_id = ? GROUP BY state",
+            (str(result["id"]),),
+        )
+        counts = {
+            str(item["state"]): int(item["n"])
+            for item in await counts_cursor.fetchall()
+        }
+        result["reserved"] = sum(counts.values())
+        result["pending"] = counts.get("reserved", 0) + counts.get(
+            "rpc_started", 0
+        )
+        result["sent"] = counts.get("sent", 0)
+        result["failed"] = counts.get("failed", 0)
+        result["hard_attempt"] = counts.get("hard_attempt", 0)
+        result["released"] = counts.get("released", 0)
+        result["cancelled"] = counts.get("cancelled", 0)
+        result["cap_used"] = sum(
+            counts.get(state, 0)
+            for state in (
+                "reserved",
+                "rpc_started",
+                "sent",
+                "failed",
+                "hard_attempt",
+            )
+        )
+        return result
 
     # ---------- 帳號 ----------
 

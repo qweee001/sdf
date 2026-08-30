@@ -167,6 +167,12 @@ def test_manager_update_persona_and_save_groups():
             def __init__(self):
                 self.stopped = False
 
+            def group_list(self):
+                return [
+                    {"id": -1002, "title": "台中水群"},
+                    {"id": -1001, "title": "台北約會群"},
+                ]
+
             async def stop(self):
                 self.stopped = True
                 self.is_running = False
@@ -323,6 +329,21 @@ def test_manager_requires_group_setup_before_start(monkeypatch):
         bad = await db.get_account("bad-groups")
         assert bad["enabled"] == 0
 
+        await db.create_account(
+            "private-target",
+            "錯把私訊當群組",
+            box.encrypt("session"),
+            '{"name":"美玲","personality":"活潑"}',
+        )
+        await db.update_account(
+            "private-target", groups="[12345]", setup_complete=1, enabled=0
+        )
+        err = await manager.start("private-target")
+        assert err == "請至少選擇一個有效群組，再啟動帳號"
+        private_target = await db.get_account("private-target")
+        assert private_target["enabled"] == 0
+        assert private_target["setup_complete"] == 0
+
         await manager.aclose()
         await db.close()
 
@@ -440,11 +461,11 @@ def test_manager_concurrent_stop_and_start_leave_consistent_state():
         allow_stop = asyncio.Event()
         manager.workers["race"] = FakeWorker(stop_started, allow_stop)
 
-        async def fake_start(account):
-            assert account["id"] == "race"
+        async def fake_start(acc):
+            assert acc["id"] == "race"
             manager.workers["race"] = FakeWorker()
 
-        manager._start_account = fake_start
+        manager._start_account_unlocked = fake_start
 
         stop_task = asyncio.create_task(manager.stop("race"))
         await stop_started.wait()
@@ -460,5 +481,43 @@ def test_manager_concurrent_stop_and_start_leave_consistent_state():
 
         manager.workers.clear()
         await manager.aclose()
+
+    asyncio.run(main())
+
+
+def test_save_groups_rejects_private_and_unverified_targets(tmp_path):
+    async def main():
+        db = Database(str(tmp_path / "save-groups-verified.db"))
+        await db.connect()
+        cfg = _config()
+        box = SecretBox(cfg.account_encryption_key)
+        manager = AccountManager(cfg, db, box)
+        await db.create_account("verified", "測試", box.encrypt("session"))
+
+        manager.list_available_groups = AsyncMock(
+            return_value=(
+                [
+                    {"id": -5428680940, "title": "唯一真群", "is_group": True},
+                    {"id": -999, "title": "偽裝 peer", "is_group": False},
+                    {"id": 12345, "title": "私訊", "is_group": False},
+                ],
+                "",
+            )
+        )
+
+        assert "正數" in await manager.save_groups("verified", [12345])
+        assert "實際加入" in await manager.save_groups("verified", [-123456])
+        assert "實際加入" in await manager.save_groups("verified", [-999])
+        account = await db.get_account("verified")
+        assert account["groups"] is None
+        assert account["setup_complete"] == 0
+
+        assert await manager.save_groups("verified", [-5428680940]) == ""
+        saved = await db.get_account("verified")
+        assert saved["groups"] == "[-5428680940]"
+        assert saved["setup_complete"] == 1
+        assert manager.list_available_groups.await_count == 3
+        await manager.aclose()
+        await db.close()
 
     asyncio.run(main())

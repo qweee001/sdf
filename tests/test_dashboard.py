@@ -206,16 +206,20 @@ def test_feature_toggles_require_login_persist_and_apply_immediately():
         assert client.get("/api/status").json()["features"]["media_enabled"] is False
 
 
-def test_voice_toggle_refuses_enable_until_local_assets_are_ready(tmp_path, monkeypatch):
-    # 指向空的素材目錄，確保「本機語音素材未就緒」→ 拒絕開啟
+def test_voice_toggle_refuses_enable_until_realtime_gateway_is_configured(
+    tmp_path, monkeypatch
+):
+    # 预生成素材已永久停用；即使存在素材目录，缺少实时网关 URL/token 也必须拒绝。
     monkeypatch.setenv("VOICE_ASSETS_DIR", str(tmp_path))
+    monkeypatch.setenv("VOICE_REALTIME_URL", "")
+    monkeypatch.setenv("VOICE_REALTIME_TOKEN", "")
     with _make_dashboard() as client:
         client.post("/api/login", json={"username": "admin", "password": "secret123"})
         response = client.post(
             "/api/features", json={"media_enabled": True, "voice_enabled": True}
         )
         assert response.status_code == 409
-        assert "素材未就緒" in response.json()["error"]
+        assert "即時 IndexTTS2 URL/token 未就緒" in response.json()["error"]
         assert client.get("/api/status").json()["features"]["voice_enabled"] is False
         assert client.get("/api/status").json()["features"]["voice_available"] is False
 

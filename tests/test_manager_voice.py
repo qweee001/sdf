@@ -1,6 +1,9 @@
 import asyncio
 import json
 import os
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from app.config import load_settings
 from app.crypto import SecretBox
@@ -34,7 +37,7 @@ def _write_manifest(tmp_path, account_id: str):
     )
 
 
-def test_manager_exposes_voice_available_only_when_assets_exist(tmp_path):
+def test_manager_exposes_voice_available_only_with_realtime_credentials(tmp_path):
     if os.path.exists(DB):
         os.remove(DB)
 
@@ -42,20 +45,22 @@ def test_manager_exposes_voice_available_only_when_assets_exist(tmp_path):
         db = Database(DB)
         await db.connect()
         cfg = _config(tmp_path)
+        cfg.voice_realtime_url = ""
+        cfg.voice_realtime_token = ""
         box = SecretBox(cfg.account_encryption_key)
         manager = AccountManager(cfg, db, box)
         assert manager.feature_status()["voice_available"] is False
         assert manager.feature_status()["voice_enabled"] is False
 
-        # 無素材時不允許開啟
+        # 即時 IndexTTS2 credentials 不完整時不允許開啟。
         err = await manager.update_feature_flags(
             media_enabled=True, voice_enabled=True
         )
         assert err != ""
         assert manager.config.voice_media_enabled is False
 
-        # 素材就緒後才能開啟
-        _write_manifest(tmp_path, "acct-1")
+        cfg.voice_realtime_url = "https://voice.example"
+        cfg.voice_realtime_token = "voice-token"
         err = await manager.update_feature_flags(
             media_enabled=True, voice_enabled=True
         )
@@ -74,7 +79,7 @@ def test_manager_exposes_voice_available_only_when_assets_exist(tmp_path):
     asyncio.run(main())
 
 
-def test_manager_starts_worker_with_shared_voice_library(tmp_path):
+def test_manager_never_injects_pregenerated_voice_library(tmp_path):
     if os.path.exists(DB):
         os.remove(DB)
 
@@ -82,7 +87,8 @@ def test_manager_starts_worker_with_shared_voice_library(tmp_path):
         db = Database(DB)
         await db.connect()
         cfg = _config(tmp_path)
-        _write_manifest(tmp_path, "acct-2")
+        cfg.voice_realtime_url = "https://voice.example"
+        cfg.voice_realtime_token = "voice-token"
         box = SecretBox(cfg.account_encryption_key)
         manager = AccountManager(cfg, db, box)
         encrypted = box.encrypt("session-string")
@@ -97,8 +103,6 @@ def test_manager_starts_worker_with_shared_voice_library(tmp_path):
             self._voice_task = None
             worker_holder["w"] = self
 
-        from unittest.mock import patch
-
         from app.worker import AccountWorker
 
         with patch.object(
@@ -107,10 +111,76 @@ def test_manager_starts_worker_with_shared_voice_library(tmp_path):
             await manager._start_account(acc)
         worker = worker_holder.get("w")
         assert worker is not None
-        # worker 共用 manager 的素材庫，且能找到自己的片段
-        asset = worker.voice_library.asset_for_day("acct-2", 0)
-        assert isinstance(asset, MediaAsset)
-        assert asset.data == b"\x00\x01\x02fake-opus"
+        assert worker.voice_library is None
+        await db.close()
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    ("account_id", "age"),
+    [
+        ("2ce525dfb0d4", 21),
+        ("faa9a202f96e", 25),
+        ("038632e4395b", 29),
+        ("e63e27a4340d", 34),
+    ],
+)
+def test_fixed_persona_cannot_update_or_regenerate_while_live_test_active(
+    tmp_path, account_id, age
+):
+    async def main():
+        db = Database(str(tmp_path / "fixed-persona-active.db"))
+        await db.connect()
+        cfg = _config(tmp_path)
+        box = SecretBox(cfg.account_encryption_key)
+        manager = AccountManager(cfg, db, box)
+        original = {
+            "name": f"固定{age}",
+            "gender": "女",
+            "age": age,
+            "city": "台北",
+        }
+        await db.create_account(
+            account_id,
+            f"固定{age}",
+            box.encrypt("session-string"),
+            json.dumps(original, ensure_ascii=False),
+        )
+        worker = type("Worker", (), {})()
+        worker.persona = dict(original)
+        worker.name = original["name"]
+        worker.is_running = True
+        manager.workers[account_id] = worker
+        manager.live_test.outbound_gate.activate(
+            run_id="persona-lock",
+            account_ids=[account_id],
+            group_id=-5428680940,
+        )
+
+        changed = dict(original, name="被竄改", age=99)
+        assert await manager.update_persona(account_id, changed) is None
+        assert await manager.regen_persona(account_id) is None
+        assert manager.live_test.outbound_gate.lockdown("persona-lock") is True
+        assert await manager.update_persona(account_id, changed) is None
+        manager.live_test.outbound_gate.deactivate("persona-lock")
+        with patch.object(
+            db,
+            "get_live_test_reconciliation_run",
+            AsyncMock(
+                return_value={
+                    "id": "persona-lock",
+                    "status": "needs_reconciliation",
+                    "account_ids": [account_id],
+                }
+            ),
+        ):
+            assert await manager.regen_persona(account_id) is None
+        persisted = await db.get_account(account_id)
+        assert json.loads(persisted["persona"]) == original
+        assert worker.persona == original
+        await manager._media_service.aclose()
+        await manager._ai_client.close()
         await db.close()
 
     asyncio.run(main())

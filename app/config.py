@@ -27,6 +27,10 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _bounded_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    return min(max(_float(name, default), minimum), maximum)
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.getenv(name, "").strip().lower()
     if not raw:
@@ -77,6 +81,12 @@ class Settings:
     voice_realtime_url: str
     voice_realtime_token: str
     voice_realtime_daily_max: int
+    video_realtime_url: str
+    video_realtime_token: str
+    video_realtime_request_timeout: float
+    video_realtime_poll_timeout: float
+    video_realtime_poll_interval: float
+    video_realtime_download_timeout: float
     media_daily_budget_usd: float
     media_max_input_bytes: int
     media_generation_timeout: float
@@ -130,7 +140,7 @@ def load_settings() -> Settings:
         ai_disable_thinking=_bool("AI_DISABLE_THINKING", False),
         vision_model=(
             os.getenv("VISION_MODEL", "").strip()
-            or "google/gemini-3.5-flash-lite"
+            or "gemini-3.5-flash-lite"
         ),
         image_model=(
             os.getenv("IMAGE_MODEL", "").strip()
@@ -154,12 +164,26 @@ def load_settings() -> Settings:
         # 每日隨機語音素材目錄（含 manifest.json + 各帳號 ogg 片段），
         # 預設落在 Railway 的 /data volume；啟用前必須先部署素材包。
         voice_assets_dir=os.getenv("VOICE_ASSETS_DIR", "/data/voice-assets").strip(),
-        # 預生成每日語音預設關閉：語音主路徑改為即時話題語音（本地 IndexTTS2 服務）。
-        voice_daily_pre_gen=_bool("VOICE_DAILY_PREGEN", False),
+        # 預生成每日語音已永久停用；環境變數不得重新開啟。
+        voice_daily_pre_gen=False,
         # 即時語音：本地 Mac 上的 IndexTTS2 服務（cloudflared 隧道暴露）。
         voice_realtime_url=os.getenv("VOICE_REALTIME_URL", "").strip().rstrip("/"),
         voice_realtime_token=os.getenv("VOICE_REALTIME_TOKEN", "").strip(),
         voice_realtime_daily_max=_int("VOICE_REALTIME_DAILY_MAX", 3),
+        video_realtime_url=os.getenv("VIDEO_REALTIME_URL", "").strip().rstrip("/"),
+        video_realtime_token=os.getenv("VIDEO_REALTIME_TOKEN", "").strip(),
+        video_realtime_request_timeout=_bounded_float(
+            "VIDEO_REALTIME_REQUEST_TIMEOUT", 30.0, 1.0, 60.0
+        ),
+        video_realtime_poll_timeout=_bounded_float(
+            "VIDEO_REALTIME_POLL_TIMEOUT", 300.0, 1.0, 600.0
+        ),
+        video_realtime_poll_interval=_bounded_float(
+            "VIDEO_REALTIME_POLL_INTERVAL", 2.0, 0.1, 10.0
+        ),
+        video_realtime_download_timeout=_bounded_float(
+            "VIDEO_REALTIME_DOWNLOAD_TIMEOUT", 60.0, 1.0, 120.0
+        ),
         media_daily_budget_usd=_float("MEDIA_DAILY_BUDGET_USD", 10.0),
         media_max_input_bytes=_int(
             "MEDIA_MAX_INPUT_BYTES", 8 * 1024 * 1024
