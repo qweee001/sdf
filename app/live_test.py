@@ -1149,8 +1149,7 @@ class BoundedLiveTest:
         self, account_ids: list[str], group_id: int
     ) -> None:
         requested = set(account_ids)
-        workers = self.manager.workers
-        if requested != _FIXED_LIVE_TEST_ACCOUNT_IDS or set(workers) != requested:
+        if requested != _FIXED_LIVE_TEST_ACCOUNT_IDS:
             raise LiveTestError("request must select the four fixed managed accounts")
         selected_sets: list[set[int]] = []
         ages: list[int] = []
@@ -1158,19 +1157,52 @@ class BoundedLiveTest:
             account = await self.db.get_account(account_id)
             if account is None:
                 raise LiveTestError("request must select the four fixed managed accounts")
-            if not int(account.get("setup_complete") or 0) or not int(
-                account.get("enabled") or 0
-            ):
+            if not int(account.get("setup_complete") or 0):
+                raise LiveTestError(f"account {account_id} is not configured")
+            try:
+                persona = json.loads(str(account.get("persona") or "{}"))
+                age = int(persona.get("age") or 0)
+                raw_groups = json.loads(str(account.get("groups") or "[]"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                persona, age, raw_groups = {}, 0, []
+            if not isinstance(persona, dict) or persona.get("gender") != "女":
+                raise LiveTestError(f"account {account_id} persona must be female")
+            if age != int(_ACCOUNT_PROFILE_MAP[account_id]):
+                raise LiveTestError("fixed account profile mapping mismatch")
+            if not isinstance(raw_groups, list):
+                raw_groups = []
+            selected_sets.append(
+                {
+                    int(value)
+                    for value in raw_groups
+                    if type(value) is int and int(value) < 0
+                }
+            )
+            ages.append(age)
+        common = set.intersection(*selected_sets) if selected_sets else set()
+        if group_id not in common:
+            raise LiveTestError("no common selected group for all four accounts")
+        if set(ages) != _FIXED_PERSONA_AGES or len(ages) != len(set(ages)):
+            raise LiveTestError("persona ages must be exactly 21, 25, 29, and 34")
+
+    async def _validate_running_accounts(
+        self, account_ids: list[str], group_id: int
+    ) -> None:
+        requested = set(account_ids)
+        workers = self.manager.workers
+        if requested != _FIXED_LIVE_TEST_ACCOUNT_IDS or set(workers) != requested:
+            raise LiveTestError("request must select the four fixed managed accounts")
+        ages: list[int] = []
+        selected_sets: list[set[int]] = []
+        for account_id in account_ids:
+            account = await self.db.get_account(account_id)
+            if account is None or not int(account.get("enabled") or 0):
                 raise LiveTestError(f"account {account_id} is not configured")
             try:
                 persona = json.loads(str(account.get("persona") or "{}"))
                 age = int(persona.get("age") or 0)
             except (TypeError, ValueError, json.JSONDecodeError):
                 persona, age = {}, 0
-            if not isinstance(persona, dict) or persona.get("gender") != "女":
-                raise LiveTestError(f"account {account_id} persona must be female")
-            if age != int(_ACCOUNT_PROFILE_MAP[account_id]):
-                raise LiveTestError("fixed account profile mapping mismatch")
             worker = workers.get(account_id)
             if (
                 worker is None
@@ -1269,6 +1301,8 @@ class BoundedLiveTest:
         if event_cap != 40:
             raise LiveTestError("event_cap must be exactly 40")
         await self._validate_accounts(account_ids, group_id)
+        if self.manager.workers:
+            await self._validate_running_accounts(account_ids, group_id)
 
         raw_schedule = request.get("schedule")
         if not isinstance(raw_schedule, list) or not raw_schedule:
@@ -1385,6 +1419,7 @@ class BoundedLiveTest:
                 group_id=normalized["group_id"],
                 expires_at=started_at + normalized["duration_seconds"],
             )
+            created = False
             try:
                 created = await self.db.create_live_test_run(
                     run_id=run_id,
@@ -1395,25 +1430,70 @@ class BoundedLiveTest:
                     schedule=normalized["schedule"],
                     started_at=started_at,
                 )
-            except BaseException:
-                self.outbound_gate.deactivate(run_id)
+                if not created:
+                    raise LiveTestError("another persistent live test is already running")
+                self._run_id = run_id
+                self._account_ids = tuple(normalized["account_ids"])
+                async def validate_and_activate() -> None:
+                    await self._validate_running_accounts(
+                        normalized["account_ids"], normalized["group_id"]
+                    )
+                    self.outbound_gate.activate(
+                        run_id=run_id,
+                        account_ids=normalized["account_ids"],
+                        group_id=normalized["group_id"],
+                        expires_at=started_at + normalized["duration_seconds"],
+                    )
+
+                start_error = await self.manager.start_live_test_accounts(
+                    normalized["account_ids"],
+                    normalized["group_id"],
+                    before_release=validate_and_activate,
+                )
+                if start_error:
+                    raise LiveTestError(str(start_error))
+                self._task = asyncio.create_task(
+                    self._run(run_id, normalized, started_at),
+                    name=f"bounded-live-test:{run_id}",
+                )
+            except BaseException as exc:
+                self.outbound_gate.lockdown(run_id)
+                if created:
+                    stop_errors = await self._stop_accounts(
+                        tuple(normalized["account_ids"])
+                    )
+                    reason = f"startup_failed: {type(exc).__name__}: {exc}"
+                    if stop_errors:
+                        reason += "; " + "; ".join(stop_errors)
+                    if stop_errors:
+                        try:
+                            await self.db.mark_live_test_needs_reconciliation(
+                                run_id, reason
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        persisted = False
+                        try:
+                            persisted = await self.db.finish_live_test_run(
+                                run_id, "failed", reason
+                            )
+                        except Exception:
+                            persisted = False
+                        if persisted:
+                            self.outbound_gate.deactivate(run_id)
+                        else:
+                            try:
+                                await self.db.mark_live_test_needs_reconciliation(
+                                    run_id, reason
+                                )
+                            except Exception:
+                                pass
+                else:
+                    self.outbound_gate.deactivate(run_id)
+                self._run_id = None
+                self._account_ids = ()
                 raise
-            if not created:
-                self.outbound_gate.deactivate(run_id)
-                raise LiveTestError("another persistent live test is already running")
-            self._run_id = run_id
-            self._account_ids = tuple(normalized["account_ids"])
-            # No await separates committed DB visibility from this transition.
-            self.outbound_gate.activate(
-                run_id=run_id,
-                account_ids=normalized["account_ids"],
-                group_id=normalized["group_id"],
-                expires_at=started_at + normalized["duration_seconds"],
-            )
-            self._task = asyncio.create_task(
-                self._run(run_id, normalized, started_at),
-                name=f"bounded-live-test:{run_id}",
-            )
             return {
                 "id": run_id,
                 "status": "running",
@@ -1865,7 +1945,7 @@ class BoundedLiveTest:
                     errors.append(f"{account_id}: {result}")
             except Exception as exc:
                 errors.append(f"{account_id}: {type(exc).__name__}")
-                worker = self.manager.workers.get(account_id)
+                worker = self.manager.workers.pop(account_id, None)
                 if worker is not None:
                     try:
                         await worker.stop()

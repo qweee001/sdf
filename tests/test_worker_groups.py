@@ -485,6 +485,69 @@ def test_manager_concurrent_stop_and_start_leave_consistent_state():
     asyncio.run(main())
 
 
+def test_live_test_cohort_locks_block_stop_until_activation_callback():
+    class FakeDB:
+        def __init__(self, account_ids, group_id):
+            self.accounts = {
+                account_id: {
+                    "id": account_id,
+                    "name": account_id,
+                    "session_key": "unused",
+                    "setup_complete": 1,
+                    "groups": f"[{group_id}]",
+                    "enabled": 1,
+                }
+                for account_id in account_ids
+            }
+
+        async def get_account(self, account_id):
+            account = self.accounts.get(account_id)
+            return dict(account) if account else None
+
+        async def update_account(self, account_id, **fields):
+            self.accounts[account_id].update(fields)
+
+    class FakeWorker:
+        def __init__(self):
+            self.is_running = True
+
+        async def stop(self):
+            self.is_running = False
+
+    async def main():
+        account_ids = ["cohort-a", "cohort-b", "cohort-c", "cohort-d"]
+        group_id = -5428680940
+        cfg = _config()
+        db = FakeDB(account_ids, group_id)
+        manager = AccountManager(cfg, db, SecretBox(cfg.account_encryption_key))
+        manager.workers = {account_id: FakeWorker() for account_id in account_ids}
+        callback_entered = asyncio.Event()
+        release_callback = asyncio.Event()
+
+        async def validate_and_activate():
+            callback_entered.set()
+            await release_callback.wait()
+
+        cohort_task = asyncio.create_task(
+            manager.start_live_test_accounts(
+                account_ids,
+                group_id,
+                before_release=validate_and_activate,
+            )
+        )
+        await callback_entered.wait()
+        stop_task = asyncio.create_task(manager.stop(account_ids[0]))
+        await asyncio.sleep(0)
+        assert not stop_task.done()
+
+        release_callback.set()
+        assert await cohort_task == ""
+        assert await stop_task == ""
+        assert account_ids[0] not in manager.workers
+
+    asyncio.run(main())
+
+
 def test_save_groups_rejects_private_and_unverified_targets(tmp_path):
     async def main():
         db = Database(str(tmp_path / "save-groups-verified.db"))

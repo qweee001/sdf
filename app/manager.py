@@ -9,6 +9,8 @@ import inspect
 import json
 import os
 import secrets
+from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 
 from openai import AsyncOpenAI
 from telethon import TelegramClient
@@ -309,6 +311,41 @@ class AccountManager:
                 return ""
             await self.db.update_account(account_id, enabled=0)
             return "啟動失敗：session 無效或 Telegram 拒登"
+
+    async def start_live_test_accounts(
+        self,
+        account_ids: list[str],
+        group_id: int,
+        *,
+        before_release: Callable[[], Awaitable[None]] | None = None,
+    ) -> str:
+        """Start a validated live-test cohort while its outbound gate is locked."""
+        normalized_ids = [str(account_id) for account_id in account_ids]
+        async with AsyncExitStack() as stack:
+            for account_id in sorted(set(normalized_ids)):
+                await stack.enter_async_context(self._lifecycle_lock(account_id))
+            for account_id in normalized_ids:
+                acc = await self.db.get_account(account_id)
+                if not acc or not int(acc.get("setup_complete") or 0):
+                    return f"account {account_id} is not configured"
+                if self._parse_groups(acc.get("groups")) != [int(group_id)]:
+                    return "no common selected group for all four accounts"
+                worker = self.workers.get(account_id)
+                if worker is not None and bool(getattr(worker, "is_running", False)):
+                    continue
+                await self.db.update_account(account_id, enabled=1)
+                await self._refresh_managed_ids()
+                acc = await self.db.get_account(account_id)
+                if not acc:
+                    return f"account {account_id} is not configured"
+                await self._start_account_unlocked(acc)
+                worker = self.workers.get(account_id)
+                if worker is None or not bool(getattr(worker, "is_running", False)):
+                    await self.db.update_account(account_id, enabled=0)
+                    return "啟動失敗：session 無效或 Telegram 拒登"
+            if before_release is not None:
+                await before_release()
+        return ""
 
     async def stop(self, account_id: str) -> str:
         async with self._lifecycle_lock(account_id):

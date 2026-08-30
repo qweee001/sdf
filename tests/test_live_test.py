@@ -305,6 +305,7 @@ class FakeWorker:
 class FakeManager:
     def __init__(self, db, clock):
         self.db = db
+        self._clock = clock
         self.config = SimpleNamespace(
             media_enabled=True,
             voice_media_enabled=True,
@@ -323,9 +324,38 @@ class FakeManager:
         self.last_human_activity = {}
         self.stopped = []
         self.video_client = FakeVideoClient()
+        self.live_test_start_calls = []
+        self.live_test: Any = SimpleNamespace(outbound_gate=None)
+        self.live_test_start_fail_after: int | None = None
+        self.live_test_start_gate_scopes: list[frozenset[str]] = []
+
+    async def start_live_test_accounts(
+        self, account_ids, group_id, *, before_release=None
+    ):
+        self.live_test_start_calls.append((tuple(account_ids), group_id))
+        for account_id in account_ids:
+            if account_id in self.workers:
+                continue
+            active = self.live_test.outbound_gate._active
+            self.live_test_start_gate_scopes.append(
+                active[1] if active else frozenset({"missing-gate"})
+            )
+            if (
+                self.live_test_start_fail_after is not None
+                and len(self.workers) >= self.live_test_start_fail_after
+            ):
+                return "injected live-test account startup failure"
+            await self.db.update_account(account_id, enabled=1)
+            worker = FakeWorker(account_id, self._clock)
+            worker.outbound_gate = self.live_test.outbound_gate
+            self.workers[account_id] = worker
+        if before_release is not None:
+            await before_release()
+        return ""
 
     async def stop(self, account_id):
         self.stopped.append(account_id)
+        await self.db.update_account(account_id, enabled=0)
         worker = self.workers.pop(account_id, None)
         if worker:
             await worker.stop()
@@ -839,6 +869,152 @@ def test_video_disabled_run_dispatches_exact_non_video_scope_and_stops(tmp_path)
             len(worker.media_service.vision_calls) for worker in workers
         ) == 2
         assert set(manager.stopped) == set(ACCOUNT_IDS)
+        await db.close()
+
+    asyncio.run(main())
+
+
+def test_live_test_starts_four_configured_stopped_accounts_before_run(tmp_path):
+    async def main():
+        root = tmp_path / "assets"
+        root.mkdir()
+        db = Database(str(tmp_path / "live-test-start-stopped.db"))
+        await db.connect()
+        await _seed_accounts(db)
+        for account_id in ACCOUNT_IDS:
+            await db.update_account(account_id, enabled=0)
+        clock = FakeClock()
+        manager = FakeManager(db, clock)
+        manager.workers.clear()
+        live_test = BoundedLiveTest(
+            manager,
+            enabled=True,
+            wan22_ready=False,
+            asset_root=root,
+            clock=clock.time,
+            sleep=clock.sleep,
+        )
+        manager.live_test = live_test
+
+        started = await live_test.start(_video_disabled_request(root))
+        assert started["status"] == "running"
+        assert manager.live_test_start_calls == [(tuple(ACCOUNT_IDS), GROUP_ID)]
+        assert manager.live_test_start_gate_scopes == [frozenset()] * 4
+        assert set(manager.workers) == set(ACCOUNT_IDS)
+        for account_id in ACCOUNT_IDS:
+            account = await db.get_account(account_id)
+            assert account is not None
+            assert account["enabled"] == 1
+        final = await live_test.wait()
+        assert final["status"] == "completed", final
+        assert final["running"] == 0
+        await db.close()
+
+    asyncio.run(main())
+
+
+def test_live_test_partial_account_start_failure_rolls_back_under_lockdown(tmp_path):
+    async def main():
+        root = tmp_path / "assets"
+        root.mkdir()
+        db = Database(str(tmp_path / "live-test-start-rollback.db"))
+        await db.connect()
+        await _seed_accounts(db)
+        for account_id in ACCOUNT_IDS:
+            await db.update_account(account_id, enabled=0)
+        clock = FakeClock()
+        manager = FakeManager(db, clock)
+        manager.workers.clear()
+        manager.live_test_start_fail_after = 2
+        live_test = BoundedLiveTest(
+            manager,
+            enabled=True,
+            wan22_ready=False,
+            asset_root=root,
+            clock=clock.time,
+            sleep=clock.sleep,
+        )
+        manager.live_test = live_test
+
+        with pytest.raises(
+            LiveTestError, match="injected live-test account startup failure"
+        ):
+            await live_test.start(_video_disabled_request(root))
+
+        latest = await db.get_live_test_run()
+        assert latest is not None
+        assert latest["status"] == "failed"
+        assert set(manager.stopped) == set(ACCOUNT_IDS)
+        assert manager.workers == {}
+        assert manager.live_test_start_gate_scopes == [frozenset()] * 3
+        assert live_test.outbound_gate._active is None
+        for account_id in ACCOUNT_IDS:
+            account = await db.get_account(account_id)
+            assert account is not None
+            assert account["enabled"] == 0
+        await db.close()
+
+    asyncio.run(main())
+
+
+def test_live_test_startup_rollback_persist_failure_keeps_reconciliation_lockdown(
+    tmp_path, monkeypatch
+):
+    async def main():
+        root = tmp_path / "assets"
+        root.mkdir()
+        db = Database(str(tmp_path / "live-test-start-persist-failure.db"))
+        await db.connect()
+        await _seed_accounts(db)
+        for account_id in ACCOUNT_IDS:
+            await db.update_account(account_id, enabled=0)
+        clock = FakeClock()
+        manager = FakeManager(db, clock)
+        manager.workers.clear()
+        manager.live_test_start_fail_after = 2
+        live_test = BoundedLiveTest(
+            manager,
+            enabled=True,
+            wan22_ready=False,
+            asset_root=root,
+            clock=clock.time,
+            sleep=clock.sleep,
+        )
+        manager.live_test = live_test
+        original_update = db.update_account
+
+        async def fail_first_account_disable(account_id, **values):
+            if account_id == ACCOUNT_IDS[0] and values.get("enabled") == 0:
+                raise RuntimeError("injected disable persistence failure")
+            return await original_update(account_id, **values)
+
+        monkeypatch.setattr(db, "update_account", fail_first_account_disable)
+
+        with pytest.raises(
+            LiveTestError, match="injected live-test account startup failure"
+        ):
+            await live_test.start(_video_disabled_request(root))
+
+        latest = await db.get_live_test_run()
+        assert latest is not None
+        assert latest["status"] == "needs_reconciliation"
+        assert "persist RuntimeError" in latest["stop_reason"]
+        assert manager.workers == {}
+        assert live_test.outbound_gate._active is not None
+        assert live_test.outbound_gate._active[1] == frozenset()
+        assert await live_test.start_block_error()
+
+        restarted_manager = FakeManager(db, clock)
+        restarted_manager.workers.clear()
+        restarted = BoundedLiveTest(
+            restarted_manager,
+            enabled=True,
+            wan22_ready=False,
+            asset_root=root,
+            clock=clock.time,
+            sleep=clock.sleep,
+        )
+        assert await restarted.start_block_error()
         await db.close()
 
     asyncio.run(main())
