@@ -93,6 +93,26 @@ def test_reply_claim_release_requires_current_owner(tmp_path):
     asyncio.run(main())
 
 
+def test_continuous_slot_serializes_generation_and_releases_failures(tmp_path):
+    async def main():
+        db = Database(str(tmp_path / "continuous-slot.db"))
+        await db.connect()
+
+        assert await db.reserve_continuous_slot(111, 10, "a1", 10, 60) is True
+        assert await db.reserve_continuous_slot(111, 11, "a2", 10, 60) is False
+
+        assert await db.release_continuous_slot(111, 10, "a2") is False
+        assert await db.release_continuous_slot(111, 10, "a1") is True
+        assert await db.reserve_continuous_slot(111, 11, "a2", 10, 60) is True
+
+        await db.touch_activity("a2", 111, "proactive")
+        assert await db.complete_continuous_slot(111, 11, "a2") is True
+        assert await db.reserve_continuous_slot(111, 12, "a1", 10, 60) is False
+        await db.close()
+
+    asyncio.run(main())
+
+
 def test_groups_column_roundtrip():
     """指定群組：groups 欄位可存讀（JSON list of int）"""
     if os.path.exists(DB):

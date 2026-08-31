@@ -1,4 +1,5 @@
 import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -1150,5 +1151,291 @@ def test_live_proactive_loop_dedupes_rolls_day_and_stops_cleanly(monkeypatch):
         assert worker._proactive_task is None
         assert live_task.done()
         assert not worker.is_running
+
+    asyncio.run(main())
+
+
+def test_continuous_mode_high_traffic_still_has_exactly_one_human_responder():
+    async def main():
+        managed = set(range(1001, 1012))
+        db = _ClaimDB()
+        db.pressure.update({
+            "human_5m": 50,
+            "human_sent_5m": 50,
+            "ordinary_claimed_5m": 50,
+            "ordinary_claimed_10m": 50,
+            "ordinary_claimed_20s": 5,
+        })
+        event = _event(sender_id=9001, message_id=99001, text="剛下班，有人還醒著嗎")
+        decisions = []
+        for uid in sorted(managed):
+            worker = _worker(
+                uid,
+                active_ids=managed,
+                managed_ids=managed,
+                db=db,
+                active_group_ids={-5428680940: set(managed)},
+            )
+            worker.config.continuous_activity_mode = True
+            decisions.append(await worker._should_reply(event))
+
+        assert decisions.count(True) == 1
+        assert len(db.claims) == 1
+
+    asyncio.run(main())
+
+
+def test_continuous_turn_rotates_every_eligible_account_in_each_group():
+    managed = set(range(1001, 1012))
+    groups = {-5428680940, -5428680941}
+    worker = _worker(
+        1001,
+        active_ids=managed,
+        managed_ids=managed,
+        active_group_ids={group_id: set(managed) for group_id in groups},
+        selected_groups=sorted(groups),
+    )
+    worker.config.continuous_activity_mode = True
+
+    for group_id in groups:
+        winners = [
+            worker._continuous_turn_winner(group_id, slot)
+            for slot in range(len(managed))
+        ]
+        assert set(winners) == managed
+        assert len(winners) == len(set(winners))
+
+
+def test_continuous_reply_extends_latest_group_topic():
+    class _HistoryDB(_ClaimDB):
+        async def get_recent_messages(self, account_id, group_id, limit=30):
+            return [
+                {
+                    "sender_id": 9001,
+                    "sender_name": "真人A",
+                    "role": "user",
+                    "content": "剛下班想吃火鍋",
+                    "timestamp": 100.0,
+                },
+                {
+                    "sender_id": 1002,
+                    "sender_name": "帳號1002",
+                    "role": "assistant",
+                    "content": "麻辣鍋還是酸菜魚鍋？",
+                    "timestamp": 101.0,
+                },
+            ]
+
+    async def main():
+        db = _HistoryDB()
+        worker = _worker(1001, db=db)
+        worker.config.continuous_activity_mode = True
+        worker._generate_reply = AsyncMock(return_value="酸菜魚鍋我可以，加白肉片更讚")
+
+        text = await worker._generate_continuous_reply(-5428680940)
+
+        assert text == "酸菜魚鍋我可以，加白肉片更讚"
+        event = worker._generate_reply.await_args.args[0]
+        assert event.chat_id == -5428680940
+        assert event.sender_id == 1002
+        assert event.raw_text == "麻辣鍋還是酸菜魚鍋？"
+
+    asyncio.run(main())
+
+
+def test_continuous_tick_covers_both_groups_without_managed_cascade(monkeypatch):
+    class _TickDB(_ClaimDB):
+        def __init__(self):
+            super().__init__()
+            self.slots = []
+
+        async def reserve_continuous_slot(
+            self, group_id, slot, account_id, min_interval_seconds, pending_seconds
+        ):
+            self.slots.append((group_id, slot, account_id, min_interval_seconds))
+            return True
+
+        async def complete_continuous_slot(self, group_id, slot, account_id):
+            return True
+
+        async def release_continuous_slot(self, group_id, slot, account_id):
+            return True
+
+    async def main():
+        groups = [-5428680941, -5428680940]
+        db = _TickDB()
+        worker = _worker(
+            1001,
+            db=db,
+            active_ids={1001},
+            managed_ids={1001},
+            active_group_ids={group_id: {1001} for group_id in groups},
+            selected_groups=groups,
+        )
+        worker.config.continuous_activity_mode = True
+        worker.config.continuous_activity_interval_seconds = 10.0
+        worker._generate_continuous_reply = AsyncMock(
+            side_effect=["第一群延展", "第二群延展"]
+        )
+        worker._send_text_recorded = AsyncMock(return_value=True)
+        monkeypatch.setattr("app.worker.time.time", lambda: 120.0)
+
+        await worker._continuous_activity_tick()
+
+        assert {item[0] for item in db.slots} == set(groups)
+        assert worker._send_text_recorded.await_count == 2
+        for call in worker._send_text_recorded.await_args_list:
+            assert call.kwargs["managed_origin"] is False
+
+    asyncio.run(main())
+
+
+def test_continuous_tick_defers_to_fresh_human_message(monkeypatch):
+    class _TickDB(_ClaimDB):
+        async def claim_proactive_slot(
+            self, group_id, slot, account_id, min_interval_seconds
+        ):
+            return True
+
+    async def main():
+        group_id = -5428680940
+        worker = _worker(
+            1001,
+            db=_TickDB(),
+            active_ids={1001},
+            managed_ids={1001},
+            active_group_ids={group_id: {1001}},
+            selected_groups=[group_id],
+        )
+        worker.config.continuous_activity_mode = True
+        worker.config.continuous_activity_interval_seconds = 10.0
+        worker.last_human_activity[group_id] = 115.0
+        worker._generate_continuous_reply = AsyncMock(return_value="不應搶話")
+        worker._send_text_recorded = AsyncMock(return_value=True)
+        monkeypatch.setattr("app.worker.time.time", lambda: 120.0)
+
+        await worker._continuous_activity_tick()
+
+        worker._generate_continuous_reply.assert_not_awaited()
+        worker._send_text_recorded.assert_not_awaited()
+
+    asyncio.run(main())
+
+
+def test_continuous_tick_completes_success_and_releases_failed_send(monkeypatch):
+    class _ReservationDB(_ClaimDB):
+        def __init__(self):
+            super().__init__()
+            self.completed = []
+            self.released = []
+
+        async def reserve_continuous_slot(
+            self, group_id, slot, account_id, min_interval_seconds, pending_seconds
+        ):
+            return True
+
+        async def complete_continuous_slot(self, group_id, slot, account_id):
+            self.completed.append((group_id, slot, account_id))
+            return True
+
+        async def release_continuous_slot(self, group_id, slot, account_id):
+            self.released.append((group_id, slot, account_id))
+            return True
+
+    async def main():
+        groups = [-5428680941, -5428680940]
+        db = _ReservationDB()
+        worker = _worker(
+            1001,
+            db=db,
+            active_ids={1001},
+            managed_ids={1001},
+            active_group_ids={group_id: {1001} for group_id in groups},
+            selected_groups=groups,
+        )
+        worker.config.continuous_activity_mode = True
+        worker.config.continuous_activity_interval_seconds = 10.0
+        worker._generate_continuous_reply = AsyncMock(
+            side_effect=["第一群延展", "第二群延展"]
+        )
+        worker._send_text_recorded = AsyncMock(side_effect=[True, False])
+        monkeypatch.setattr("app.worker.time.time", lambda: 120.0)
+
+        await worker._continuous_activity_tick()
+
+        assert len(db.completed) == 1
+        assert len(db.released) == 1
+        assert {db.completed[0][0], db.released[0][0]} == set(groups)
+
+    asyncio.run(main())
+
+
+def test_continuous_mode_assigns_single_emoji_even_when_base_probability_is_zero():
+    async def main():
+        managed = set(range(1001, 1012))
+        db = _ClaimDB()
+        event = _event(sender_id=9001, message_id=99002, text="😊")
+        decisions = []
+        for uid in sorted(managed):
+            worker = _worker(
+                uid,
+                active_ids=managed,
+                managed_ids=managed,
+                db=db,
+                active_group_ids={-5428680940: set(managed)},
+            )
+            worker.config.continuous_activity_mode = True
+            worker.config.base_reply_probability = 0.0
+            decisions.append(await worker._should_reply(event))
+
+        assert decisions.count(True) == 1
+        assert len(db.claims) == 1
+
+    asyncio.run(main())
+
+
+def test_continuous_mode_ignores_sticky_human_owner_for_each_new_message():
+    async def main():
+        managed = set(range(1001, 1012))
+        group_id = -5428680940
+        sender_id = 9001
+        shared_owner = {(group_id, sender_id): (1001, time.time() + 900)}
+        probe = _worker(
+            1001,
+            active_ids=managed,
+            managed_ids=managed,
+            active_group_ids={group_id: set(managed)},
+        )
+        message_id = next(
+            candidate
+            for candidate in range(99100, 99200)
+            if probe._ordinary_reply_winner(
+                _event(sender_id=sender_id, message_id=candidate, text="你們在聊什麼")
+            )
+            != 1001
+        )
+        event = _event(
+            sender_id=sender_id,
+            message_id=message_id,
+            text="你們在聊什麼",
+        )
+        expected = probe._ordinary_reply_winner(event)
+        db = _ClaimDB()
+        winners = []
+        for uid in sorted(managed):
+            worker = _worker(
+                uid,
+                active_ids=managed,
+                managed_ids=managed,
+                db=db,
+                active_group_ids={group_id: set(managed)},
+                human_owners=shared_owner,
+            )
+            worker.config.continuous_activity_mode = True
+            if await worker._should_reply(event):
+                winners.append(uid)
+
+        assert winners == [expected]
+        assert winners != [1001]
 
     asyncio.run(main())

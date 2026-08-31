@@ -1682,6 +1682,134 @@ class Database:
             await self._c.commit()
             return cursor.rowcount == 1
 
+    async def reserve_continuous_slot(
+        self,
+        group_id: int,
+        slot: int,
+        account_id: str,
+        min_interval_seconds: float,
+        pending_seconds: float,
+    ) -> bool:
+        """Serialize one continuous generation/send pipeline per group."""
+        if (
+            not group_id
+            or slot < 0
+            or not account_id
+            or not math.isfinite(float(min_interval_seconds))
+            or not math.isfinite(float(pending_seconds))
+            or min_interval_seconds <= 0
+            or pending_seconds <= 0
+        ):
+            return False
+        now = time.time()
+        event_key = f"continuous-slot:{group_id}:{slot}"
+        pending_key = f"continuous-pending:{group_id}"
+        event_prefix = f"continuous-slot:{group_id}:%"
+        cutoff = now - float(min_interval_seconds)
+        pending_cutoff = now - float(pending_seconds)
+        cleanup_cutoff = now - max(3600.0, float(pending_seconds))
+        async with self._claim_lock:
+            async with aiosqlite.connect(self.db_path, timeout=30) as claim_db:
+                try:
+                    await claim_db.execute("BEGIN IMMEDIATE")
+                    await claim_db.execute(
+                        "DELETE FROM outbound_claims "
+                        "WHERE claim_key = ? AND claimed_at < ?",
+                        (pending_key, pending_cutoff),
+                    )
+                    await claim_db.execute(
+                        "DELETE FROM outbound_claims "
+                        "WHERE claim_key LIKE ? AND claimed_at < ?",
+                        (event_prefix, cleanup_cutoff),
+                    )
+                    cursor = await claim_db.execute(
+                        "SELECT 1 FROM outbound_claims "
+                        "WHERE claim_key IN (?, ?) LIMIT 1",
+                        (event_key, pending_key),
+                    )
+                    if await cursor.fetchone() is not None:
+                        await claim_db.rollback()
+                        return False
+                    cursor = await claim_db.execute(
+                        "SELECT 1 FROM activity WHERE group_id = ? "
+                        "AND kind = 'proactive' AND at > ? LIMIT 1",
+                        (int(group_id), cutoff),
+                    )
+                    if await cursor.fetchone() is not None:
+                        await claim_db.rollback()
+                        return False
+                    await claim_db.executemany(
+                        "INSERT INTO outbound_claims "
+                        "(claim_key, account_id, claimed_at) VALUES (?, ?, ?)",
+                        [
+                            (event_key, account_id, now),
+                            (pending_key, account_id, now),
+                        ],
+                    )
+                    await claim_db.commit()
+                    return True
+                except BaseException:
+                    await claim_db.rollback()
+                    raise
+
+    async def complete_continuous_slot(
+        self, group_id: int, slot: int, account_id: str
+    ) -> bool:
+        event_key = f"continuous-slot:{group_id}:{slot}"
+        pending_key = f"continuous-pending:{group_id}"
+        async with self._claim_lock:
+            async with aiosqlite.connect(self.db_path, timeout=30) as claim_db:
+                try:
+                    await claim_db.execute("BEGIN IMMEDIATE")
+                    cursor = await claim_db.execute(
+                        "SELECT COUNT(*) FROM outbound_claims "
+                        "WHERE claim_key IN (?, ?) AND account_id = ?",
+                        (event_key, pending_key, account_id),
+                    )
+                    row = await cursor.fetchone()
+                    if int(row[0] if row else 0) != 2:
+                        await claim_db.rollback()
+                        return False
+                    await claim_db.execute(
+                        "DELETE FROM outbound_claims "
+                        "WHERE claim_key = ? AND account_id = ?",
+                        (pending_key, account_id),
+                    )
+                    await claim_db.commit()
+                    return True
+                except BaseException:
+                    await claim_db.rollback()
+                    raise
+
+    async def release_continuous_slot(
+        self, group_id: int, slot: int, account_id: str
+    ) -> bool:
+        event_key = f"continuous-slot:{group_id}:{slot}"
+        pending_key = f"continuous-pending:{group_id}"
+        async with self._claim_lock:
+            async with aiosqlite.connect(self.db_path, timeout=30) as claim_db:
+                try:
+                    await claim_db.execute("BEGIN IMMEDIATE")
+                    cursor = await claim_db.execute(
+                        "SELECT COUNT(*) FROM outbound_claims "
+                        "WHERE claim_key IN (?, ?) AND account_id = ?",
+                        (event_key, pending_key, account_id),
+                    )
+                    row = await cursor.fetchone()
+                    if int(row[0] if row else 0) != 2:
+                        await claim_db.rollback()
+                        return False
+                    await claim_db.execute(
+                        "DELETE FROM outbound_claims "
+                        "WHERE claim_key IN (?, ?) AND account_id = ?",
+                        (event_key, pending_key, account_id),
+                    )
+                    await claim_db.commit()
+                    return True
+                except BaseException:
+                    await claim_db.rollback()
+                    raise
+
     async def claim_daily_voice(
         self,
         account_id: str,

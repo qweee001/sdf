@@ -54,6 +54,8 @@ def _hosts(name: str, default: str) -> tuple[str, ...]:
 @dataclass
 class Settings:
     acceptance_test_mode: bool
+    continuous_activity_mode: bool
+    continuous_activity_interval_seconds: float
     # Telegram
     tg_api_id: int
     tg_api_hash: str
@@ -125,6 +127,10 @@ def load_settings() -> Settings:
     acceptance_test_mode = _bool("ACCEPTANCE_TEST_MODE", False)
     return Settings(
         acceptance_test_mode=acceptance_test_mode,
+        continuous_activity_mode=_bool("CONTINUOUS_ACTIVITY_MODE", False),
+        continuous_activity_interval_seconds=_bounded_float(
+            "CONTINUOUS_ACTIVITY_INTERVAL_SECONDS", 10.0, 10.0, 600.0
+        ),
         tg_api_id=int(_required("TG_API_ID")),
         tg_api_hash=_required("TG_API_HASH"),
         account_encryption_key=_required("ACCOUNT_ENCRYPTION_KEY"),

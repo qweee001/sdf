@@ -28,6 +28,7 @@ import secrets
 import time
 import unicodedata
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from openai import AsyncOpenAI
@@ -896,7 +897,10 @@ class AccountWorker:
             if is_photo:
                 return await self._wait_for_media_claim(event)
             return False
-        if ordinary and not await self._admit_ordinary_reply(event):
+        continuous = bool(
+            getattr(self.config, "continuous_activity_mode", False)
+        )
+        if ordinary and not continuous and not await self._admit_ordinary_reply(event):
             await self.db.release_message_response_claim(
                 key[0], key[1], self.account_id
             )
@@ -971,6 +975,7 @@ class AccountWorker:
 
     async def _should_reply(self, event) -> bool:
         sender_id = int(event.sender_id or 0)
+        continuous = bool(getattr(self.config, "continuous_activity_mode", False))
         if sender_id == self.tg_user_id:
             return False
         if sender_id in self.managed_ids:
@@ -982,12 +987,25 @@ class AccountWorker:
                     return await self._wait_for_media_claim(event)
                 return False
             return await self._claim_human_reply(event, int(self.tg_user_id or 0))
-        if not self._is_meaningful_human_message(event):
+        if not self._is_meaningful_human_message(event) and not (
+            continuous
+            and (
+                bool(str(event.raw_text or "").strip())
+                or getattr(event, "media", None) is not None
+            )
+        ):
             return False
         if not await self._ordinary_reply_allowed(event):
             return False
         group_id = int(event.chat_id or 0)
         eligible_in_group = self.active_group_ids.get(group_id, set())
+        if continuous:
+            winner = self._ordinary_reply_winner(event)
+            if not winner:
+                return False
+            return await self._claim_human_reply(
+                event, winner, ordinary=True
+            )
         owner_key = (group_id, sender_id)
         owner_id = self._active_owner(self.human_owners.get(owner_key))
         if (
@@ -1096,14 +1114,18 @@ class AccountWorker:
             return {}
 
     async def _ordinary_reply_allowed(self, event) -> bool:
+        group_id, message_id = self._reply_claim_key(event)
+        if not group_id or message_id <= 0:
+            return False
+        if bool(getattr(self.config, "continuous_activity_mode", False)):
+            # 连续活跃模式仍由稳定赢家 + 数据库 claim 保证 exactly-one；
+            # 这里只取消概率与高峰预算，确保每条真人消息有人接住。
+            return True
         probability = max(
             0.0,
             min(1.0, float(getattr(self.config, "base_reply_probability", 0.35))),
         )
         if probability <= 0:
-            return False
-        group_id, message_id = self._reply_claim_key(event)
-        if not group_id or message_id <= 0:
             return False
         pressure = await self._interaction_pressure(group_id)
         human_5m = int(pressure.get("human_5m", 0) or 0)
@@ -2947,9 +2969,143 @@ class AccountWorker:
                 return topic
         return ""
 
+    def _continuous_turn_winner(self, group_id: int, slot: int) -> int:
+        """Return one rotating eligible account for a group/time slot."""
+        eligible_ids = (
+            self.active_group_ids.get(int(group_id), set())
+            if self._group_eligibility_enabled
+            else self.active_ids
+        )
+        candidates = sorted(
+            int(user_id)
+            for user_id in eligible_ids
+            if int(user_id) > 0 and int(user_id) in self.active_ids
+        )
+        if not candidates:
+            return 0
+        offset = int.from_bytes(
+            hashlib.blake2b(
+                f"continuous-group:{int(group_id)}".encode(), digest_size=2
+            ).digest(),
+            "big",
+        ) % len(candidates)
+        return candidates[(int(slot) + offset) % len(candidates)]
+
+    async def _generate_continuous_reply(self, group_id: int) -> str:
+        """Extend the latest concrete group topic using this account's persona."""
+        history = await self.db.get_recent_messages(
+            self.account_id,
+            int(group_id),
+            max(1, int(getattr(self.config, "memory_max_messages", 30))),
+        )
+        if not history:
+            return self._next_proactive_topic()
+        latest = history[-1]
+        sender_name = str(latest.get("sender_name") or "有人")
+        event = SimpleNamespace(
+            chat_id=int(group_id),
+            sender_id=int(latest.get("sender_id") or 0),
+            id=0,
+            message=None,
+            raw_text=str(latest.get("content") or "").strip(),
+            media=None,
+            sender=SimpleNamespace(
+                first_name=sender_name,
+                last_name="",
+                title=sender_name,
+            ),
+            is_reply=False,
+            mentioned=False,
+        )
+        if not event.raw_text:
+            return self._next_proactive_topic()
+        return await self._generate_reply(event)
+
+    async def _continuous_activity_tick(self) -> None:
+        interval = max(
+            10.0,
+            float(
+                getattr(
+                    self.config,
+                    "continuous_activity_interval_seconds",
+                    10.0,
+                )
+            ),
+        )
+        current = time.time()
+        slot = int(current // interval)
+        for group_id in sorted(int(gid) for gid in self.selected_groups):
+            if self._continuous_turn_winner(group_id, slot) != int(
+                self.tg_user_id or 0
+            ):
+                continue
+            last_human = float(self.last_human_activity.get(group_id, 0) or 0)
+            if last_human and current - last_human < interval:
+                # 先给真人唯一赢家一个发送窗口，下一槽再继续延展。
+                continue
+            pending_seconds = max(120.0, interval * 12.0)
+            if not await self.db.reserve_continuous_slot(
+                group_id,
+                slot,
+                self.account_id,
+                interval,
+                pending_seconds,
+            ):
+                continue
+            sent = False
+            try:
+                text = await self._generate_continuous_reply(group_id)
+                if text:
+                    sent = await self._send_text_recorded(
+                        group_id,
+                        text,
+                        activity_kind="proactive",
+                        stats_key="proactive_sent",
+                        managed_origin=False,
+                    )
+            except asyncio.CancelledError:
+                await self.db.release_continuous_slot(
+                    group_id, slot, self.account_id
+                )
+                raise
+            except Exception as e:
+                self.stats["errors"] += 1
+                print(f"[{self.name}] continuous activity error: {e}", flush=True)
+            if sent:
+                completed = await self.db.complete_continuous_slot(
+                    group_id, slot, self.account_id
+                )
+                if not completed:
+                    self.stats["errors"] += 1
+                    print(
+                        f"[{self.name}] continuous slot completion failed",
+                        flush=True,
+                    )
+            else:
+                await self.db.release_continuous_slot(
+                    group_id, slot, self.account_id
+                )
+
     async def _proactive_loop(self):
         while self.is_running:
             try:
+                if bool(getattr(self.config, "continuous_activity_mode", False)):
+                    interval = max(
+                        10.0,
+                        float(
+                            getattr(
+                                self.config,
+                                "continuous_activity_interval_seconds",
+                                10.0,
+                            )
+                        ),
+                    )
+                    await asyncio.sleep(min(1.0, interval / 4.0))
+                    if not self.is_running:
+                        return
+                    if self.config.proactive_enabled:
+                        await self._continuous_activity_tick()
+                    continue
                 # 隨機間隔 4-12 分鐘（錯峰）
                 loop_min = max(1.0, float(self.config.proactive_loop_min_seconds))
                 loop_max = max(

@@ -35,6 +35,8 @@ def test_defaults_present():
     assert s.proactive_loop_min_seconds == 240
     assert s.proactive_loop_max_seconds == 720
     assert s.acceptance_test_mode is False
+    assert s.continuous_activity_mode is False
+    assert s.continuous_activity_interval_seconds == 10.0
     assert s.ai_disable_thinking is False
     assert s.vision_model == "gemini-3.5-flash-lite"
     assert s.image_model == "google/imagen-4.0-fast-generate-001"
@@ -60,6 +62,14 @@ def test_acceptance_mode_is_deterministic_and_bounded(monkeypatch):
     assert s.proactive_min_interval_minutes == 1.0
     assert s.proactive_loop_min_seconds == 5.0
     assert s.proactive_loop_max_seconds == 8.0
+
+
+def test_continuous_activity_env_is_explicit_and_interval_is_bounded(monkeypatch):
+    monkeypatch.setenv("CONTINUOUS_ACTIVITY_MODE", "true")
+    monkeypatch.setenv("CONTINUOUS_ACTIVITY_INTERVAL_SECONDS", "1")
+    settings = load_settings()
+    assert settings.continuous_activity_mode is True
+    assert settings.continuous_activity_interval_seconds == 10.0
 
 
 def test_non_finite_media_budget_falls_back_to_finite_default(monkeypatch):
