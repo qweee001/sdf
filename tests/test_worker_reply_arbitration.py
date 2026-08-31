@@ -1370,6 +1370,102 @@ def test_continuous_tick_completes_success_and_releases_failed_send(monkeypatch)
     asyncio.run(main())
 
 
+def test_continuous_tick_completes_dispatched_slot_when_recording_fails(monkeypatch):
+    class _ReservationDB(_ClaimDB):
+        def __init__(self):
+            super().__init__()
+            self.completed = []
+            self.released = []
+
+        async def reserve_continuous_slot(
+            self, group_id, slot, account_id, min_interval_seconds, pending_seconds
+        ):
+            return True
+
+        async def complete_continuous_slot(self, group_id, slot, account_id):
+            self.completed.append((group_id, slot, account_id))
+            return True
+
+        async def release_continuous_slot(self, group_id, slot, account_id):
+            self.released.append((group_id, slot, account_id))
+            return True
+
+    async def main():
+        group_id = -5428680940
+        db = _ReservationDB()
+        worker = _worker(
+            1001,
+            db=db,
+            active_ids={1001},
+            managed_ids={1001},
+            active_group_ids={group_id: {1001}},
+            selected_groups=[group_id],
+        )
+        worker.config.continuous_activity_mode = True
+        worker.config.continuous_activity_interval_seconds = 10.0
+        worker._generate_continuous_reply = AsyncMock(return_value="已送出但記錄失敗")
+
+        async def send_then_record_fails(*_args, **kwargs):
+            kwargs["on_dispatched"]()
+            raise RuntimeError("post-send persistence failed")
+
+        worker._send_text_recorded = AsyncMock(side_effect=send_then_record_fails)
+        monkeypatch.setattr("app.worker.time.time", lambda: 120.0)
+
+        await worker._continuous_activity_tick()
+
+        assert db.completed == [(group_id, 12, "1001")]
+        assert db.released == []
+
+    asyncio.run(main())
+
+
+def test_continuous_tick_completes_unknown_send_on_cancellation(monkeypatch):
+    class _ReservationDB(_ClaimDB):
+        def __init__(self):
+            super().__init__()
+            self.completed = []
+            self.released = []
+
+        async def reserve_continuous_slot(
+            self, group_id, slot, account_id, min_interval_seconds, pending_seconds
+        ):
+            return True
+
+        async def complete_continuous_slot(self, group_id, slot, account_id):
+            self.completed.append((group_id, slot, account_id))
+            return True
+
+        async def release_continuous_slot(self, group_id, slot, account_id):
+            self.released.append((group_id, slot, account_id))
+            return True
+
+    async def main():
+        group_id = -5428680940
+        db = _ReservationDB()
+        worker = _worker(
+            1001,
+            db=db,
+            active_ids={1001},
+            managed_ids={1001},
+            active_group_ids={group_id: {1001}},
+            selected_groups=[group_id],
+        )
+        worker.config.continuous_activity_mode = True
+        worker.config.continuous_activity_interval_seconds = 10.0
+        worker._generate_continuous_reply = AsyncMock(return_value="發送結果未知")
+        worker._send_text_recorded = AsyncMock(side_effect=asyncio.CancelledError)
+        monkeypatch.setattr("app.worker.time.time", lambda: 120.0)
+
+        with pytest.raises(asyncio.CancelledError):
+            await worker._continuous_activity_tick()
+
+        assert db.completed == [(group_id, 12, "1001")]
+        assert db.released == []
+
+    asyncio.run(main())
+
+
 def test_continuous_mode_assigns_single_emoji_even_when_base_probability_is_zero():
     async def main():
         managed = set(range(1001, 1012))

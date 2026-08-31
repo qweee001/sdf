@@ -3052,26 +3052,68 @@ class AccountWorker:
                 pending_seconds,
             ):
                 continue
-            sent = False
             try:
                 text = await self._generate_continuous_reply(group_id)
-                if text:
-                    sent = await self._send_text_recorded(
-                        group_id,
-                        text,
-                        activity_kind="proactive",
-                        stats_key="proactive_sent",
-                        managed_origin=False,
-                    )
             except asyncio.CancelledError:
+                # 生成阶段尚未进入 Telegram RPC，可安全让下一账号接管。
                 await self.db.release_continuous_slot(
                     group_id, slot, self.account_id
                 )
                 raise
             except Exception as e:
                 self.stats["errors"] += 1
-                print(f"[{self.name}] continuous activity error: {e}", flush=True)
-            if sent:
+                print(f"[{self.name}] continuous generation error: {e}", flush=True)
+                await self.db.release_continuous_slot(
+                    group_id, slot, self.account_id
+                )
+                continue
+            if not text:
+                await self.db.release_continuous_slot(
+                    group_id, slot, self.account_id
+                )
+                continue
+
+            dispatched = False
+
+            def mark_dispatched() -> None:
+                nonlocal dispatched
+                dispatched = True
+
+            sent = False
+            delivery_unknown = False
+            try:
+                sent = await self._send_text_recorded(
+                    group_id,
+                    text,
+                    activity_kind="proactive",
+                    stats_key="proactive_sent",
+                    managed_origin=False,
+                    on_dispatched=mark_dispatched,
+                )
+            except asyncio.CancelledError:
+                # 取消可能发生在 Telegram RPC 已被服务端接收之后；fail-closed。
+                delivery_unknown = True
+                try:
+                    await asyncio.shield(
+                        self.db.complete_continuous_slot(
+                            group_id, slot, self.account_id
+                        )
+                    )
+                except Exception as complete_error:
+                    self.stats["errors"] += 1
+                    print(
+                        f"[{self.name}] continuous cancelled slot completion error: "
+                        f"{complete_error}",
+                        flush=True,
+                    )
+                raise
+            except Exception as e:
+                # 发送调用抛错时无法证明 Telegram 未接收；禁止释放后重复发送。
+                delivery_unknown = True
+                self.stats["errors"] += 1
+                print(f"[{self.name}] continuous send error: {e}", flush=True)
+
+            if sent or dispatched or delivery_unknown:
                 completed = await self.db.complete_continuous_slot(
                     group_id, slot, self.account_id
                 )
