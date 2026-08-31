@@ -1451,6 +1451,25 @@ class Database:
         row = await cursor.fetchone()
         return float(row["at"] if row else 0.0)
 
+    async def last_human_activity_by_group(
+        self, *, now: float | None = None
+    ) -> dict[int, float]:
+        """每群最近一次真人活動時間；進程重啟後用於回填降頻記憶。"""
+        window = 24 * 3600
+        current = float(now if now is not None else time.time())
+        cursor = await self._c.execute(
+            "SELECT group_id, MAX(observed_at) AS at FROM group_events "
+            "WHERE sender_kind = 'human' AND observed_at >= ? "
+            "GROUP BY group_id",
+            (float(now if now is not None else time.time()) - window,),
+        )
+        rows = await cursor.fetchall()
+        return {
+            int(row["group_id"]): float(row["at"])
+            for row in rows
+            if row["at"]
+        }
+
     async def claim_message_response(
         self, group_id: int, message_id: int, account_id: str
     ) -> bool:
@@ -1637,6 +1656,34 @@ class Database:
                 except BaseException:
                     await claim_db.rollback()
                     raise
+
+    async def ensure_managed_followup_cooldown(
+        self,
+        group_id: int,
+        account_id: str,
+        cooldown_seconds: float = 600,
+        *,
+        now: float | None = None,
+    ) -> None:
+        """發送成功後的冷卻兜底：即使 reserve/complete 鏈斷裂也強制寫入群級冷卻。
+
+        觀察到的真實故障：互聊洪水期間 cooldown 行缺失，多條 followup 在
+        600 秒內連發。此方法幂等，發送成功後必須呼叫。
+        """
+        if not group_id or cooldown_seconds <= 0:
+            return
+        cooldown_key = f"managed-followup-cooldown:{group_id}"
+        current = float(now if now is not None else time.time())
+        async with self._claim_lock:
+            cursor = await self._c.execute(
+                "INSERT INTO outbound_claims "
+                "(claim_key, account_id, claimed_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(claim_key) DO UPDATE SET "
+                "account_id = excluded.account_id, "
+                "claimed_at = MAX(claimed_at, excluded.claimed_at)",
+                (cooldown_key, account_id, current),
+            )
+            await self._c.commit()
 
     async def release_managed_followup(
         self, group_id: int, message_id: int, account_id: str

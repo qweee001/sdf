@@ -1230,8 +1230,15 @@ class AccountWorker:
             if completed:
                 self.stats["managed_sent"] += 1
             else:
-                self.stats["errors"] += 1
-                self._record_reply_drop("cooldown_commit_failed")
+                # reserve/complete 鏈斷裂（如進程重啟）時冷卻仍必須生效，
+                # 否則互聊洪水會在 600 秒窗口內連發（觀察到的真實故障）。
+                await self.db.ensure_managed_followup_cooldown(
+                    group_id, self.account_id, 600
+                )
+                self.stats["managed_sent"] += 1
+                self.stats["cooldown_fallback"] = (
+                    int(self.stats.get("cooldown_fallback", 0)) + 1
+                )
             return
         await self.db.release_managed_followup(
             group_id, message_id, self.account_id
@@ -2220,11 +2227,15 @@ class AccountWorker:
                 self._set_generation_reason(event, "ai_empty")
                 return ""
         too_long = len(reply) > _MAX_REPLY_CHARS
+        format_leak = self._has_format_leak(reply)
+        simplified = self._has_simplified_chars(reply)
         mentions_video = self._mentions_video_topic(reply)
         mentions_group_meta = await self._candidate_mentions_current_group_meta(reply)
         repetitive = self._is_near_duplicate(reply, recent_group_replies)
         if (
             not too_long
+            and not format_leak
+            and not simplified
             and not mentions_video
             and not mentions_group_meta
             and not repetitive
@@ -2240,6 +2251,10 @@ class AccountWorker:
                 if mentions_group_meta
                 else "blocked_video"
                 if mentions_video
+                else "format_leak"
+                if format_leak
+                else "simplified_chars"
+                if simplified
                 else "too_long"
                 if too_long
                 else "near_duplicate"
@@ -2250,6 +2265,10 @@ class AccountWorker:
         # 不在發送層做逐詞替換，避免改壞語意和造成 Telegram / DB 記憶不一致。
         # 空白或內容違規共用一次重生；仍違規就不發送。
         correction = "上一版不符合要求。回覆最多 60 個字元（標點、空格也算），絕不能超過。"
+        if format_leak:
+            correction += "上一版包含 <answer> 等標籤或格式標記；絕不能輸出任何標籤、括號指令或格式標記，只輸出自然對話文字。"
+        if simplified:
+            correction += "上一版含簡體字；必須全部使用繁體中文。"
         if mentions_video:
             correction += (
                 "不要提及或複述禁止話題，也不要解釋拒絕原因；"
@@ -2283,17 +2302,30 @@ class AccountWorker:
                 self._set_generation_reason(event, "ai_empty")
             return ""
         retry_too_long = len(retry) > _MAX_REPLY_CHARS
+        retry_format_leak = self._has_format_leak(retry)
+        retry_simplified = self._has_simplified_chars(retry)
         retry_video = self._mentions_video_topic(retry)
         retry_group_meta = await self._candidate_mentions_current_group_meta(retry)
         retry_repetitive = self._is_near_duplicate(
             retry, recent_group_replies
         )
-        if retry_too_long or retry_video or retry_group_meta or retry_repetitive:
+        if (
+            retry_too_long
+            or retry_format_leak
+            or retry_simplified
+            or retry_video
+            or retry_group_meta
+            or retry_repetitive
+        ):
             reason = (
                 "group_meta"
                 if retry_group_meta
                 else "blocked_video"
                 if retry_video
+                else "format_leak"
+                if retry_format_leak
+                else "simplified_chars"
+                if retry_simplified
                 else "too_long"
                 if retry_too_long
                 else "near_duplicate"
@@ -2304,6 +2336,31 @@ class AccountWorker:
         if image:
             self.stats["images_understood"] += 1
         return retry
+
+    @staticmethod
+    def _has_format_leak(text: str) -> bool:
+        """輸出中不得殘留 XML 標籤、markdown 標記或提示詞格式標記。"""
+        if not text:
+            return False
+        return bool(
+            re.search(
+                r"</?[a-zA-Z][a-zA-Z0-9_]*>|```|\*\*|__|^\s*#{1,6}\s",
+                text,
+            )
+        )
+
+    @staticmethod
+    def _has_simplified_chars(text: str) -> bool:
+        """語言硬規則：絕對不用簡體字。"""
+        if not text:
+            return False
+        for ch in text:
+            if unicodedata.name(ch, "").startswith("CJK"):
+                try:
+                    ch.encode("big5")
+                except UnicodeEncodeError:
+                    return True
+        return False
 
     @staticmethod
     def _normalized_reply(text: str) -> str:

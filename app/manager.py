@@ -219,6 +219,14 @@ class AccountManager:
                 account_id, enabled=0, setup_complete=0
             )
             return
+        # 進程重啟後 last_human_activity 為空 → 主動話題會無視真人活躍直接開炮；
+        # 啟動任何帳號前先從持久化事件回填降頻記憶。
+        if not self.last_human_activity:
+            try:
+                backfill = await self.db.last_human_activity_by_group()
+                self.last_human_activity.update(backfill)
+            except Exception as exc:
+                print(f"[manager] last_human_activity backfill error: {exc}", flush=True)
         worker = AccountWorker(
             account_id=account_id,
             session_key=session_key,
