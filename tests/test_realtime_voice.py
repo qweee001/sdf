@@ -20,11 +20,19 @@ from app.worker import (
 
 
 GROUP_ID = -5428680940
+# Voice profile IDs (IndexTTS2 OmniVoice clone buckets) — used for evidence/headers.
 ACCOUNT_PROFILE_MAP = {
     "2ce525dfb0d4": "21",
     "faa9a202f96e": "25",
     "038632e4395b": "29",
     "e63e27a4340d": "34",
+}
+# Persona ages (real ages for integrity checking) — separate from voice buckets.
+_ACCOUNT_PERSONA_AGES = {
+    "2ce525dfb0d4": 28,
+    "faa9a202f96e": 27,
+    "038632e4395b": 29,
+    "e63e27a4340d": 31,
 }
 REQUEST_ID = "b" * 32
 AUDIO = b"OggS" + b"\x00" * 5000
@@ -114,7 +122,7 @@ def _rt_worker(
     worker.is_running = True
     worker.tg_client = SimpleNamespace(send_file=AsyncMock(), send_message=AsyncMock())
     worker.tg_user_id = 77
-    age = int(persona_age or ACCOUNT_PROFILE_MAP.get(account_id, "21"))
+    age = int(persona_age or _ACCOUNT_PERSONA_AGES.get(account_id, 28))
     worker.persona = dict(worker.persona, gender="女", age=age)
     db.persona = dict(worker.persona)
     worker._realtime_voice_due = lambda current: due  # noqa: SLF001
@@ -301,7 +309,7 @@ def test_all_authorized_accounts_bind_to_exact_profile(
     monkeypatch, account_id, profile_id
 ):
     async def main():
-        worker, _ = _rt_worker(account_id=account_id, persona_age=int(profile_id))
+        worker, _ = _rt_worker(account_id=account_id)
         evidence = _evidence(account_id=account_id, profile_id=profile_id)
         calls = _install_http(monkeypatch, evidence)
 

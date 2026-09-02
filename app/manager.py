@@ -23,7 +23,7 @@ from .database import Database
 from .live_test import BoundedLiveTest
 from .media import OrcaMediaService
 from .persona import generate_persona
-from .worker import AccountWorker, FIXED_ACCOUNT_PERSONA_AGES
+from .worker import AccountWorker, _FIXED_ACCOUNT_PERSONA_AGES
 
 
 class AccountManager:
@@ -75,7 +75,7 @@ class AccountManager:
 
     async def _fixed_persona_mutation_blocked(self, account_id: str) -> bool:
         """Deny fixed-persona writes for every active/reconciliation run state."""
-        if account_id not in FIXED_ACCOUNT_PERSONA_AGES:
+        if account_id not in _FIXED_ACCOUNT_PERSONA_AGES:
             return False
         gate = getattr(self.live_test, "outbound_gate", None)
         active = getattr(gate, "_active", None)

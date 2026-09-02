@@ -49,14 +49,19 @@ _HIGH_TRAFFIC_MAX_ORDINARY_5M = 2
 _MAX_ORDINARY_CLAIMS_10M = 8
 
 _LIVE_TEST_VOICE_GROUP_ID = -5428680940
-FIXED_ACCOUNT_PERSONA_AGES = {
-    "2ce525dfb0d4": 21,
-    "faa9a202f96e": 25,
+_FIXED_ACCOUNT_PERSONA_AGES = {
+    "2ce525dfb0d4": 28,
+    "faa9a202f96e": 27,
     "038632e4395b": 29,
-    "e63e27a4340d": 34,
+    "e63e27a4340d": 31,
 }
+# Voice bucket per account — IndexTTS2 fixed OmniVoice clone profile IDs.
+# Separate from PERSONA_AGES so voice mapping is explicit and decoupled.
 _VOICE_ACCOUNT_PROFILE_MAP = {
-    account_id: str(age) for account_id, age in FIXED_ACCOUNT_PERSONA_AGES.items()
+    "2ce525dfb0d4": "21",  # 小小 · 台北害羞
+    "faa9a202f96e": "25",  # 霜雪情詩 · 新北活泼
+    "038632e4395b": "29",  # 發呆小天後 · 桃园会撩
+    "e63e27a4340d": "34",  # 佩如 · 台中直球
 }
 _VOICE_METADATA_ID_PATTERN = re.compile(r"^[!-~]{1,128}$")
 _VOICE_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -1533,7 +1538,7 @@ class AccountWorker:
                 pass
 
     async def _fixed_persona_integrity_ok(self, gate: Any, run_id: str | None) -> bool:
-        expected_age = FIXED_ACCOUNT_PERSONA_AGES.get(self.account_id)
+        expected_age = _FIXED_ACCOUNT_PERSONA_AGES.get(self.account_id)
         if expected_age is None or not run_id:
             return True
         getter = getattr(self.db, "get_account", None)
@@ -2067,7 +2072,6 @@ class AccountWorker:
             group_id != _LIVE_TEST_VOICE_GROUP_ID
             or group_id not in self.selected_groups
             or profile_id is None
-            or profile_id != self._voice_profile_key(self.persona)
             or _VOICE_METADATA_ID_PATTERN.fullmatch(run_id) is None
             or _VOICE_METADATA_ID_PATTERN.fullmatch(event_id) is None
         ):
@@ -2788,7 +2792,6 @@ class AccountWorker:
             or evidence.group_id != _LIVE_TEST_VOICE_GROUP_ID
             or evidence.group_id not in self.selected_groups
             or evidence.profile_id != expected_profile
-            or self._voice_profile_key(self.persona) != expected_profile
             or not isinstance(evidence.run_id, str)
             or _VOICE_METADATA_ID_PATTERN.fullmatch(evidence.run_id) is None
             or not isinstance(evidence.event_id, str)
