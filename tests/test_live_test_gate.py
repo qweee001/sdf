@@ -21,7 +21,7 @@ ACCOUNT_IDS = [
     "e63e27a4340d",
 ]
 GROUP_ID = -5428680940
-PERSONA_AGES = dict(zip(ACCOUNT_IDS, (21, 25, 29, 34), strict=True))
+PERSONA_AGES = dict(zip(ACCOUNT_IDS, (28, 27, 29, 31), strict=True))
 
 
 def _fixed_schedule(events):
