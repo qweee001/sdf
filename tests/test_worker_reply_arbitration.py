@@ -1078,6 +1078,8 @@ def test_live_proactive_loop_dedupes_rolls_day_and_stops_cleanly(monkeypatch):
             selected_group: clock[0],
             unselected_group: clock[0],
         }
+        # 新增真人 gate 测试兼容：此测试专测去重，需让真人 gate 处于 normal 档
+        worker.last_human_activity = {selected_group: 321 * 86400.0 - 3600}
         worker._known_groups = {selected_group, unselected_group}
         worker.config.proactive_enabled = True
         worker.config.proactive_loop_min_seconds = 1.0
@@ -1094,15 +1096,17 @@ def test_live_proactive_loop_dedupes_rolls_day_and_stops_cleanly(monkeypatch):
             sleep_calls += 1
             if sleep_calls == 1:
                 clock[0] = 321 * 86400.0 + 60
-                return
-            if sleep_calls == 2:
+            elif sleep_calls == 2:
                 clock[0] = 321 * 86400.0 + 180
-                return
-            if sleep_calls == 3:
+            elif sleep_calls == 3:
                 clock[0] = 322 * 86400.0 + 60
-                return
-            loop_is_blocked.set()
-            await never_resume.wait()
+            else:
+                loop_is_blocked.set()
+                await never_resume.wait()
+            # 真人 gate 需保持 normal 档：每次时钟推进后模拟 10 分钟前有真人说话。
+            # 此测试专测跨天去重，不能让 24h 无真人暂停 gate 阻断第 3 次发送。
+            worker.last_human_activity[selected_group] = clock[0] - 600
+            return
 
         async def record_send(group_id, text, **kwargs):
             sends.append((group_id, text, kwargs))

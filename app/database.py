@@ -1163,6 +1163,23 @@ class Database:
         )
         return [str(row["content"]) for row in await cursor.fetchall()]
 
+    async def recent_bot_texts_by_group(
+        self, group_id: int, *, hours: float = 48, limit: int = 200
+    ) -> list[str]:
+        """跨所有帳號讀取群內近 N 小時實際送出的文案，供主動話題持久去重。
+
+        messages 表本來就持久保存所有 bot 發送（role='assistant'），
+        重啟後從這裡回填即可，無需新表。
+        """
+        cutoff = time.time() - float(hours) * 3600
+        cursor = await self._c.execute(
+            "SELECT content FROM messages "
+            "WHERE group_id = ? AND role = 'assistant' AND timestamp >= ? "
+            "ORDER BY timestamp DESC, id DESC LIMIT ?",
+            (int(group_id), float(cutoff), int(limit)),
+        )
+        return [str(row["content"]) for row in await cursor.fetchall()]
+
     # ---------- 去重流量與持久回覆診斷 ----------
 
     async def record_group_event(

@@ -227,6 +227,9 @@ class AccountManager:
                 self.last_human_activity.update(backfill)
             except Exception as exc:
                 print(f"[manager] last_human_activity backfill error: {exc}", flush=True)
+        # 反重复 P0-2：worker 的去重集合是内存级，重启清空后会在同群复读；
+        # AccountWorker.reload_proactive_memory() 在 worker 启动后自行回填
+        # （messages 表跨账号持久，48h 窗口），无需在 manager 层预载。
         worker = AccountWorker(
             account_id=account_id,
             session_key=session_key,

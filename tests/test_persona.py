@@ -196,6 +196,37 @@ def test_proactive_topic_not_empty():
         assert t and len(t) > 2
 
 
+def test_proactive_pools_have_minimum_variety():
+    """反重复 P0：池子太小必然循环。每型至少 12 句、通用池至少 30 句、晒成約至少 10 句。"""
+    for profile, pool in PERSONA_PROACTIVE.items():
+        assert len(pool) >= 12, f"{profile} 池只有 {len(pool)} 句"
+    assert len(GIRL_PROACTIVE) >= 30, f"GIRL_PROACTIVE 只有 {len(GIRL_PROACTIVE)} 句"
+    assert len(BOY_PROACTIVE) >= 30, f"BOY_PROACTIVE 只有 {len(BOY_PROACTIVE)} 句"
+    assert len(DAILY_TOPICS) >= 30, f"DAILY_TOPICS 只有 {len(DAILY_TOPICS)} 句"
+    assert len(SHOW_OFF_FEMALE) >= 10, f"SHOW_OFF_FEMALE 只有 {len(SHOW_OFF_FEMALE)} 句"
+    assert len(SHOW_OFF_MALE) >= 10, f"SHOW_OFF_MALE 只有 {len(SHOW_OFF_MALE)} 句"
+
+
+def test_proactive_pools_no_duplicates_within_or_across():
+    """池内与跨池不得有完全重复句（跨账号撞句的直接来源）。"""
+    seen: dict[str, str] = {}
+    for pool_name, pool in (
+        ("PERSONA_PROACTIVE.shy", PERSONA_PROACTIVE["shy"]),
+        ("PERSONA_PROACTIVE.lively", PERSONA_PROACTIVE["lively"]),
+        ("PERSONA_PROACTIVE.flirty", PERSONA_PROACTIVE["flirty"]),
+        ("PERSONA_PROACTIVE.direct", PERSONA_PROACTIVE["direct"]),
+        ("GIRL_PROACTIVE", GIRL_PROACTIVE),
+        ("BOY_PROACTIVE", BOY_PROACTIVE),
+        ("DAILY_TOPICS", DAILY_TOPICS),
+        ("SHOW_OFF_FEMALE", SHOW_OFF_FEMALE),
+        ("SHOW_OFF_MALE", SHOW_OFF_MALE),
+    ):
+        for text in pool:
+            key = "".join(text.split())
+            assert key not in seen, f"重复句「{text}」同时出现在 {seen.get(key)} 与 {pool_name}"
+            seen[key] = pool_name
+
+
 def test_shy_persona_proactive_topic_does_not_drift_into_profanity(monkeypatch):
     persona = {
         "gender": "女",

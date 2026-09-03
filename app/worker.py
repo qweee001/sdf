@@ -531,6 +531,17 @@ class AccountWorker:
             self._proactive_day = self._today_index()
             self._proactive_today = 0
             self._recent_proactive_topics.clear()
+            # 反重复 P0-2：启动即从 DB 回填全群 48h 已发文案（跨账号），
+            # 重启清零后不再复读旧话题。回填失败只降级为无回填，不阻塞启动。
+            try:
+                await asyncio.wait_for(
+                    self.reload_proactive_memory(), timeout=10
+                )
+            except Exception as exc:
+                print(
+                    f"[{self.name}] proactive memory reload error: {exc}",
+                    flush=True,
+                )
             self._proactive_task = asyncio.create_task(self._proactive_loop())
             self._cleanup_task = asyncio.create_task(self._memory_cleanup_loop())
             await self._notify_status(
@@ -2600,7 +2611,7 @@ class AccountWorker:
         ):
             return False
         if claim_text and not await self.db.claim_group_text(
-            int(chat_id), text, self.account_id
+            int(chat_id), text, self.account_id, window_seconds=21600
         ):
             return False
         permit = None
@@ -3008,6 +3019,59 @@ class AccountWorker:
         last_human = float(self.last_human_activity.get(int(group_id), 0) or 0)
         return last_human > 0 and time.time() - last_human < 10 * 60
 
+    # ---------- 反重复 P1-1：无真人降频/暂停 ----------
+
+    _PROACTIVE_REDUCED_HOURS = 6.0
+    _PROACTIVE_PAUSED_HOURS = 24.0
+    _PROACTIVE_REDUCED_DAILY_CAP = 2
+
+    def _proactive_rate_limit_ok(
+        self, group_id: int, *, hours_since_human: float | None = None
+    ) -> str:
+        """按群内最近真人活动时间分级：normal / reduced / paused。"""
+        if hours_since_human is None:
+            last_human = float(
+                self.last_human_activity.get(int(group_id), 0) or 0
+            )
+            if last_human <= 0:
+                hours_since_human = float("inf")  # 从未有真人 → fail-closed
+            else:
+                hours_since_human = (time.time() - last_human) / 3600
+        if hours_since_human < self._PROACTIVE_REDUCED_HOURS:
+            return "normal"
+        if hours_since_human < self._PROACTIVE_PAUSED_HOURS:
+            return "reduced"
+        return "paused"
+
+    def _proactive_gate_blocks(self, group_id: int) -> bool:
+        """无真人 gate：paused 恒拦；reduced 每天最多 2 条；normal 不拦。"""
+        tier = self._proactive_rate_limit_ok(int(group_id))
+        if tier == "paused":
+            return True
+        if tier == "reduced":
+            return self._proactive_today >= self._PROACTIVE_REDUCED_DAILY_CAP
+        return False
+
+    async def reload_proactive_memory(self) -> None:
+        """重啟後從 messages 表回填全群近期已發文案（跨帳號），避免重啟清零後复读。
+
+        與 last_human_activity 的回填同一模式：worker 啟動時調用一次。
+        """
+        self._reset_proactive_day()
+        for group_id in self.selected_groups:
+            try:
+                texts = await self.db.recent_bot_texts_by_group(int(group_id))
+            except Exception as exc:
+                print(
+                    f"[{self.name}] proactive memory backfill error: {exc}",
+                    flush=True,
+                )
+                return
+            for text in texts:
+                normalized = self._normalized_reply(text)
+                if normalized:
+                    self._recent_proactive_topics.add(normalized)
+
     def _reset_proactive_day(self) -> None:
         today = self._today_index()
         if today == self._proactive_day:
@@ -3191,6 +3255,7 @@ class AccountWorker:
     async def _proactive_loop(self):
         while self.is_running:
             try:
+                print("[DBG-loop-top]", flush=True)
                 if bool(getattr(self.config, "continuous_activity_mode", False)):
                     interval = max(
                         10.0,
@@ -3221,6 +3286,7 @@ class AccountWorker:
                 if self._is_sleeping():
                     continue
                 self._reset_proactive_day()
+                print("[DBG-sleep-pass]", flush=True)
                 if self._proactive_today >= self.config.proactive_max_per_day:
                     continue
                 if self._is_busy_hour() and random.random() < 0.5:
@@ -3238,6 +3304,9 @@ class AccountWorker:
                     continue
                 group_id = random.choice(groups)
                 if self._should_suppress_proactive(group_id):
+                    continue
+                # 反重复 P1-1：群内长时间无真人 → 降频（每天≤2条）/暂停（0条）
+                if self._proactive_gate_blocks(group_id):
                     continue
                 interval = max(
                     60.0,
@@ -3267,7 +3336,9 @@ class AccountWorker:
             except asyncio.CancelledError:
                 return
             except Exception as e:
+                import traceback
                 print(f"[{self.name}] proactive error: {e}", flush=True)
+                traceback.print_exc()
                 await asyncio.sleep(60)
 
     async def _memory_cleanup_loop(self):
