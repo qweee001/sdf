@@ -1,0 +1,29 @@
+# 統一換行符。容器裡的 shell 腳本一旦帶 CRLF，shebang 會變成
+# "#!/bin/sh\r"，runc 找不到 /bin/sh\r，容器起不來，症狀是
+# exec container process (missing dynamic library?) ... No such file or directory，
+# 而且會一路重啟到健康檢查超時（本專案 5 分鐘）才被判 FAILED。
+# Windows 上 core.autocrlf=true 會在檢出時把 LF 換成 CRLF，所以必須在這裡鎖死。
+* text=auto eol=lf
+
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+Dockerfile text eol=lf
+
+# 二進位素材不參與換行轉換
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ogg binary
+*.mp3 binary
+*.wav binary
+*.mp4 binary
+*.db binary
+*.sqlite binary
+*.zip binary
+*.gz binary
