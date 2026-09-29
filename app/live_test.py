@@ -31,6 +31,7 @@ _MAX_ASSET_BYTES = 50 * 1024 * 1024
 _HUMAN_PAUSE_SECONDS = 180.0
 _MONITOR_SECONDS = 60.0
 _FIXED_LIVE_TEST_GROUP_ID = -5428680940
+# 動態從 DB 讀取 managed 帳號；fallback 到 4 個固定 ID（舊 DB 兼容）
 _FIXED_LIVE_TEST_ACCOUNT_IDS = frozenset(
     {
         "2ce525dfb0d4",
@@ -46,6 +47,17 @@ _ACCOUNT_PROFILE_MAP = {
     "038632e4395b": 29,
     "e63e27a4340d": 34,
 }
+
+def get_fixed_live_test_account_ids(db) -> frozenset:
+    """動態讀取 DB 中所有 managed 帳號；若 DB 沒有就 fallback 到固定 ID。"""
+    try:
+        accounts = db.list_accounts()
+        managed_ids = frozenset(a["id"] for a in accounts if int(a.get("enabled") or 0))
+        if managed_ids:
+            return managed_ids
+    except Exception:
+        pass
+    return _FIXED_LIVE_TEST_ACCOUNT_IDS
 _JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _VISIBLE_ASCII = re.compile(r"^[!-~]{1,128}$")
@@ -1151,8 +1163,9 @@ class BoundedLiveTest:
         self, account_ids: list[str], group_id: int
     ) -> None:
         requested = set(account_ids)
-        if requested != _FIXED_LIVE_TEST_ACCOUNT_IDS:
-            raise LiveTestError("request must select the four fixed managed accounts")
+        fixed_ids = get_fixed_live_test_account_ids(self.db)
+        if requested != fixed_ids:
+            raise LiveTestError("request must select the managed live-test accounts")
         selected_sets: list[set[int]] = []
         ages: list[int] = []
         for account_id in account_ids:
@@ -1169,8 +1182,9 @@ class BoundedLiveTest:
                 persona, age, raw_groups = {}, 0, []
             if not isinstance(persona, dict) or persona.get("gender") != "女":
                 raise LiveTestError(f"account {account_id} persona must be female")
-            if age != int(_ACCOUNT_PROFILE_MAP[account_id]):
-                raise LiveTestError("fixed account profile mapping mismatch")
+            expected_age = _ACCOUNT_PROFILE_MAP.get(account_id)
+            if expected_age is not None and age != int(expected_age):
+                raise LiveTestError("account profile mapping mismatch")
             if not isinstance(raw_groups, list):
                 raw_groups = []
             selected_sets.append(
@@ -1192,8 +1206,9 @@ class BoundedLiveTest:
     ) -> None:
         requested = set(account_ids)
         workers = self.manager.workers
-        if requested != _FIXED_LIVE_TEST_ACCOUNT_IDS or set(workers) != requested:
-            raise LiveTestError("request must select the four fixed managed accounts")
+        fixed_ids = get_fixed_live_test_account_ids(self.db)
+        if requested != fixed_ids or set(workers) != requested:
+            raise LiveTestError("request must select the managed live-test accounts")
         ages: list[int] = []
         selected_sets: list[set[int]] = []
         for account_id in account_ids:

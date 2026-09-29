@@ -3194,6 +3194,8 @@ class AccountWorker:
     _PROACTIVE_REDUCED_HOURS = 6.0
     _PROACTIVE_PAUSED_HOURS = 24.0
     _PROACTIVE_REDUCED_DAILY_CAP = 2
+    # 冷場時水軍應主動活躍氣氛：paused 不再恒攔，改為降頻（每天最多 4 條）
+    _PROACTIVE_PAUSED_DAILY_CAP = 4
 
     def _proactive_rate_limit_ok(
         self, group_id: int, *, hours_since_human: float | None = None
@@ -3214,10 +3216,10 @@ class AccountWorker:
         return "paused"
 
     def _proactive_gate_blocks(self, group_id: int) -> bool:
-        """无真人 gate：paused 恒拦；reduced 每天最多 2 条；normal 不拦。"""
+        """无真人 gate：paused 降頻（每天最多 4 條）；reduced 每天最多 2 條；normal 不攔。"""
         tier = self._proactive_rate_limit_ok(int(group_id))
         if tier == "paused":
-            return True
+            return self._proactive_today >= self._PROACTIVE_PAUSED_DAILY_CAP
         if tier == "reduced":
             return self._proactive_today >= self._PROACTIVE_REDUCED_DAILY_CAP
         return False
@@ -3326,6 +3328,13 @@ class AccountWorker:
                 )
             ),
         )
+        # 冷場時（24h 無真人）自動縮短間隔到 5s，讓水軍更積極活躍氣氛
+        group_cold = any(
+            time.time() - float(self.last_human_activity.get(gid, 0) or 0) >= 24 * 3600
+            for gid in self.selected_groups
+        )
+        if group_cold:
+            interval = min(interval, 5.0)
         current = time.time()
         slot = int(current // interval)
         for group_id in sorted(int(gid) for gid in self.selected_groups):
@@ -3459,7 +3468,7 @@ class AccountWorker:
                 print("[DBG-sleep-pass]", flush=True)
                 if self._proactive_today >= self.config.proactive_max_per_day:
                     continue
-                if self._is_busy_hour() and random.random() < 0.5:
+                if self._is_busy_hour() and random.random() < 0.25:
                     continue
                 # 挑一個最近活躍的群組（6 小時內）；都沒有的話用已知群 fallback（群不能死）
                 groups = [
@@ -3474,9 +3483,12 @@ class AccountWorker:
                     continue
                 group_id = random.choice(groups)
                 if self._should_suppress_proactive(group_id):
+                    print(f"[{self.name}] proactive-skip: group {group_id} suppressed (recent human activity)", flush=True)
                     continue
-                # 反重复 P1-1：群内长时间无真人 → 降频（每天≤2条）/暂停（0条）
+                # 反重复 P1-1：群内长时间无真人 → 降频（每天≤2条）/暂停（每天≤4条）
                 if self._proactive_gate_blocks(group_id):
+                    tier = self._proactive_rate_limit_ok(group_id)
+                    print(f"[{self.name}] proactive-gate-blocked: group {group_id} tier={tier} today={self._proactive_today}", flush=True)
                     continue
                 interval = max(
                     60.0,
@@ -3489,9 +3501,11 @@ class AccountWorker:
                     self.account_id,
                     interval,
                 ):
+                    print(f"[{self.name}] proactive-skip: slot already claimed by another account", flush=True)
                     continue
                 topic = self._next_proactive_topic()
                 if not topic:
+                    print(f"[{self.name}] proactive-skip: no fresh topic (all 64 topics exhausted)", flush=True)
                     continue
                 sent = await self._send_text_recorded(
                     group_id,
@@ -3501,8 +3515,10 @@ class AccountWorker:
                     managed_origin=True,
                 )
                 if not sent:
+                    print(f"[{self.name}] proactive-failed: send to {group_id} failed", flush=True)
                     continue
                 self._proactive_today += 1
+                print(f"[{self.name}] proactive-sent: {topic[:40]}... → {group_id}", flush=True)
             except asyncio.CancelledError:
                 return
             except Exception as e:

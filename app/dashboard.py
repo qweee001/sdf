@@ -447,7 +447,7 @@ class Dashboard:
             await self.manager.db.update_account(
                 account["id"],
                 tg_user_id=verified.tg_user_id,
-                tg_username="",
+                tg_username=str(getattr(verified, "tg_name", "") or ""),
                 enabled=0,
             )
             return JSONResponse({
