@@ -100,6 +100,17 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_messages_account_group
             ON messages (account_id, group_id, timestamp DESC)
         """)
+        # 群維度去重查詢（WHERE group_id = ? AND role = 'assistant' ORDER BY timestamp DESC）
+        # 用不到上面的 account_id 前綴，補一條專用索引，否則每次主動去重都全表掃。
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_group_role_ts
+            ON messages (group_id, role, timestamp DESC)
+        """)
+        # cleanup_expired 按 timestamp 全域刪除，上面兩條索引都幫不上。
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_ts
+            ON messages (timestamp)
+        """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS private_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +121,11 @@ class Database:
                 timestamp REAL NOT NULL,
                 read INTEGER DEFAULT 0
             )
+        """)
+        # cleanup_expired 按 timestamp 刪除；這個表原本一條索引都沒有。
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_private_messages_ts
+            ON private_messages (timestamp)
         """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS activity (
@@ -179,6 +195,16 @@ class Database:
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_reply_events_pressure
             ON reply_events (group_id, stage, reason, at DESC)
+        """)
+        # cleanup_expired 的 WHERE at < ? 用不到上面那條（前綴是 group_id）。
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_reply_events_at
+            ON reply_events (at)
+        """)
+        # cleanup_expired 的 WHERE observed_at < ? 同理：idx_group_events_pressure 前綴是 group_id。
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_group_events_observed_at
+            ON group_events (observed_at)
         """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS live_test_runs (

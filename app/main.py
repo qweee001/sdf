@@ -56,13 +56,46 @@ async def async_main() -> None:
     except Exception as e:
         print(f"啟動水軍帳號失敗：{e}", flush=True)
 
-    await stop_event.wait()
-    print("收到停止訊號，正在關閉…", flush=True)
+    # 同時監看停止訊號與控制台服務：若 serve() 先結束（例如連接埠被占用而立即拋錯），
+    # 不能只等 stop_event，否則容器會活著但 HTTP 完全不可用。
+    stop_task = asyncio.create_task(stop_event.wait())
+    done, _ = await asyncio.wait(
+        {server_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+    )
+    server_failure: BaseException | None = None
+    if server_task in done and not server_task.cancelled():
+        # 讀出例外（含 SystemExit 之類的 BaseException），避免 never retrieved 警告。
+        server_failure = server_task.exception()
+        if server_failure is not None:
+            print(
+                f"控制台服務結束：{type(server_failure).__name__}: {server_failure}",
+                file=sys.stderr,
+                flush=True,
+            )
+    if not stop_task.done():
+        stop_task.cancel()
+    await asyncio.gather(stop_task, return_exceptions=True)
+
+    if server_failure is not None:
+        print("控制台已停止，正在關閉…", flush=True)
+    else:
+        print("收到停止訊號，正在關閉…", flush=True)
     server.should_exit = True
     await manager.aclose()
-    await server_task
+    try:
+        await server_task
+    except asyncio.CancelledError:
+        raise
+    except BaseException as e:
+        # 控制台已先結束：這裡不讓它中斷關閉流程，DB 仍必須關閉。
+        if server_failure is None:
+            server_failure = e
     await db.close()
     print("已關閉", flush=True)
+    if server_failure is not None:
+        # 控制台非正常結束：讓行程以非零碼退出，否則 railway.json 的
+        # restartPolicyType=ON_FAILURE 不會把容器拉起來（容器活著但 HTTP 全廢）。
+        raise server_failure
 
 
 def main() -> None:

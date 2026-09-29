@@ -27,6 +27,7 @@ import re
 import secrets
 import time
 import unicodedata
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -438,6 +439,8 @@ class AccountWorker:
         self._cleanup_task: asyncio.Task | None = None
         self._reply_tasks: set[asyncio.Task] = set()
         self._send_lock = asyncio.Lock()
+        # FloodWait 退避待辦秒數：在鎖內只記錄，出鎖後才睡（見 _send_slot）。
+        self._pending_flood_wait = 0.0
         self._last_activity: dict[int, float] = {}  # group_id -> ts
         self._known_groups: set[int] = set()  # 這個帳號知道的所有群（冷啟動 fallback）
         self._dialogs: dict[int, str] = {}  # group_id -> 群名稱（供控制台勾選）
@@ -469,6 +472,7 @@ class AccountWorker:
             "images_understood": 0,
             "image_understanding_errors": 0,
             "voice_blocked": 0,
+            "flood_waits": 0,
             "reply_drops": {},
         }
 
@@ -553,6 +557,26 @@ class AccountWorker:
             if self.tg_user_id:
                 self.active_ids.discard(int(self.tg_user_id))
             self.status_detail = str(e)
+            # 啟動失敗：連同已建立的連線與背景任務一起收乾淨，
+            # 否則 manager 會把 worker 從 self.workers 移除，連線與任務永久洩漏。
+            for task_attr in ("_proactive_task", "_cleanup_task"):
+                task = getattr(self, task_attr)
+                if task:
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                setattr(self, task_attr, None)
+            if self.tg_client is not None:
+                try:
+                    await self.tg_client.disconnect()
+                except Exception as disconnect_error:
+                    print(
+                        f"[{self.name}] start 失敗後斷線錯誤：{disconnect_error}",
+                        flush=True,
+                    )
+                self.tg_client = None
             await self._notify_status("disconnected", None, str(e))
 
     async def stop(self):
@@ -1877,6 +1901,8 @@ class AccountWorker:
                     rpc_started=rpc_started,
                     detail=f"{type(exc).__name__}: {exc}",
                 )
+            if isinstance(exc, FloodWaitError):
+                self._note_flood_wait(exc)
             raise
         if (
             permit is not None
@@ -1896,7 +1922,7 @@ class AccountWorker:
         media_evidence: MediaEvidence | None = None,
         bound_asset: BoundMediaAsset | None = None,
     ) -> bool:
-        async with self._send_lock:
+        async with self._send_slot():
             return await self._send_media_unlocked(
                 chat_id,
                 asset,
@@ -1920,7 +1946,7 @@ class AccountWorker:
         media_evidence: MediaEvidence | None = None,
         bound_asset: BoundMediaAsset | None = None,
     ) -> bool:
-        async with self._send_lock:
+        async with self._send_slot():
             if not await self._send_media_unlocked(
                 chat_id,
                 asset,
@@ -2569,13 +2595,50 @@ class AccountWorker:
             if content:
                 return content.strip()
             return ""
-        except FloodWaitError:
-            return ""
         except Exception as e:
             print(f"[{self.name}] AI error: {e}", flush=True)
             return ""
 
     # ---------- 發送 ----------
+
+    def _note_flood_wait(self, exc: FloodWaitError) -> None:
+        """記錄一次 FloodWait（計數＋日誌＋待退避時長），但不在這裡睡眠。
+
+        睡眠必須等 _send_lock 釋放後才做（見 _send_slot）：否則一次長 FloodWait
+        （Telegram 可能指示數千秒）會讓 stop() 裡的 `async with self._send_lock`
+        一起等到退避結束，部署停機被整段拖住。
+        只處理限流本身；「發什麼／不發什麼」的判斷完全交由呼叫方原本的邏輯。
+        """
+        self.stats["flood_waits"] = int(self.stats.get("flood_waits", 0)) + 1
+        try:
+            seconds = float(getattr(exc, "seconds", 0) or 0)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        if seconds <= 0:
+            seconds = 1.0
+        # 抖動上限：最多 25% 且不超過 5 秒，避免明顯超過 Telegram 指示時長。
+        wait_seconds = seconds + random.uniform(0.0, min(5.0, seconds * 0.25))
+        self._pending_flood_wait = max(self._pending_flood_wait, wait_seconds)
+        print(
+            f"[{self.name}] FloodWait：需等待 {seconds:.0f}s，"
+            f"將在釋放發送鎖後退避 {wait_seconds:.1f}s",
+            flush=True,
+        )
+
+    async def _sleep_pending_flood_wait(self) -> None:
+        """釋放發送鎖之後才真正退避；沒有待辦時是 no-op。"""
+        wait_seconds, self._pending_flood_wait = self._pending_flood_wait, 0.0
+        if wait_seconds > 0:
+            await asyncio.sleep(wait_seconds)
+
+    @asynccontextmanager
+    async def _send_slot(self):
+        """發送鎖的取得點：離開（含例外）時鎖已釋放，之後才執行 FloodWait 退避。"""
+        try:
+            async with self._send_lock:
+                yield
+        finally:
+            await self._sleep_pending_flood_wait()
 
     async def _send_message_unlocked(
         self,
@@ -2673,6 +2736,8 @@ class AccountWorker:
                     rpc_started=rpc_started,
                     detail=f"{type(exc).__name__}: {exc}",
                 )
+            if isinstance(exc, FloodWaitError):
+                self._note_flood_wait(exc)
             raise
         if (
             permit is not None
@@ -2691,7 +2756,7 @@ class AccountWorker:
         live_test_event_id: str | None = None,
         live_test_kind: str | None = None,
     ) -> bool:
-        async with self._send_lock:
+        async with self._send_slot():
             return await self._send_message_unlocked(
                 chat_id,
                 text,
@@ -2714,7 +2779,7 @@ class AccountWorker:
         live_test_event_id: str | None = None,
         live_test_kind: str | None = None,
     ) -> bool:
-        async with self._send_lock:
+        async with self._send_slot():
             if not await self._send_message_unlocked(
                 chat_id,
                 text,

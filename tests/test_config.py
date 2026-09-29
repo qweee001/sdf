@@ -7,7 +7,7 @@ from app.config import load_settings
 
 def test_load_settings_full():
     s = load_settings()
-    assert s.tg_api_id == 30279608
+    assert s.tg_api_id == 12345678
     assert s.tg_api_hash == "test_hash"
     assert s.dashboard_port == 8000
     assert s.ai_model == "test-model"

@@ -11,7 +11,7 @@ try:
 except Exception:
     _KEY = "dGVzdF9rZXlfdGVzdF9rZXlfdGVzdF9rZXlfdGVzdF9rZX"
 
-os.environ.setdefault("TG_API_ID", "30279608")
+os.environ.setdefault("TG_API_ID", "12345678")
 os.environ.setdefault("TG_API_HASH", "test_hash")
 os.environ.setdefault("ACCOUNT_ENCRYPTION_KEY", _KEY)
 os.environ.setdefault("DASHBOARD_USER", "admin")

@@ -2,12 +2,15 @@
 控制台 - FastAPI Web UI（深色、繁體中文、單文件前端）
 功能：登入/登出、帳號狀態、啟動/停止/刪除、新增帳號（TG 登入流程）、
       人設檢視/重新生成、私訊查看、統計
-安全：session cookie（HttpOnly + SameSite=Strict）、登入限流、登出路由
+安全：session cookie（HttpOnly + SameSite=Strict + Secure（HTTPS 時））、登入限流、登出路由
 """
 
 from __future__ import annotations
 
-import hashlib
+import hmac
+import json
+import os
+import secrets
 import time
 
 from fastapi import FastAPI, Request
@@ -21,6 +24,46 @@ from .telegram_login import (
     LoginRateLimit,
     TelegramLoginService,
 )
+
+SESSION_COOKIE = "sdf_session"
+_SESSION_TTL = 3600
+_LOGIN_MAX_ATTEMPTS = 10
+_LOGIN_WINDOW = 300.0
+# 追蹤的來源位址上限：超過就清掉已過期／最舊的鍵，避免記憶體被灌爆
+_MAX_TRACKED_LOGIN_KEYS = 4096
+
+
+def _trusted_proxy_hops() -> int:
+    """前面有幾層可信反向代理；預設 0 ＝不信任任何客戶端可自行填入的前綴標頭。"""
+    try:
+        hops = int(os.getenv("TRUSTED_PROXY_HOPS", "0").strip() or "0")
+    except ValueError:
+        return 0
+    return hops if hops > 0 else 0
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _cookie_secure(request: Request) -> bool:
+    """session cookie 是否加 Secure。
+
+    只有確認連線是 HTTPS 才加：直接是 HTTPS、或運維已聲明 TRUSTED_PROXY_HOPS>0
+    且可信反代回報 X-Forwarded-Proto: https、或以 DASHBOARD_COOKIE_SECURE=1 強制
+    （例如 Railway 邊緣終結 TLS 時）。純 HTTP 下硬加 Secure 會讓瀏覽器直接丟棄
+    整顆 cookie，等於完全無法登入，所以預設跟隨實際協定。
+    """
+    if _env_flag("DASHBOARD_COOKIE_SECURE"):
+        return True
+    if request.url.scheme == "https":
+        return True
+    if _trusted_proxy_hops() > 0:
+        proto = request.headers.get("x-forwarded-proto", "")
+        # 反代可能串接多層，取最右邊由可信反代寫入的那一段
+        if proto.split(",")[-1].strip().lower() == "https":
+            return True
+    return False
 
 
 class Dashboard:
@@ -37,29 +80,64 @@ class Dashboard:
     # ---------- 工具 ----------
 
     def _check_session(self, request: Request) -> bool:
-        sid = request.cookies.get("sdf_session", "")
+        sid = request.cookies.get(SESSION_COOKIE, "")
         if not sid or sid not in self._sessions:
             return False
         if time.time() > self._sessions[sid]:
             self._sessions.pop(sid, None)
             return False
-        self._sessions[sid] = time.time() + 3600
+        self._sessions[sid] = time.time() + _SESSION_TTL
         return True
 
     def _ip(self, request: Request) -> str:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        return (
-            request.headers.get("x-real-ip")
-            or (request.client.host if request.client else "unknown")
-        )
+        """登入限流用的來源識別：預設只用 TCP 連線位址。
 
-    def _rate_limited(self, key: str, max_n: int = 10, window: float = 300) -> bool:
+        絕不無條件相信 X-Forwarded-For／X-Real-IP：這些標頭客戶端可自填，
+        攻擊者只要每支請求換一段 XFF 首段就能讓 `_login_attempts` 每次都是
+        新鍵，等於完全繞過限流。只有在運維明確聲明 TRUSTED_PROXY_HOPS>0
+        （前面有幾層可信反代）時，才往左取過那些可信跳數後的位址。
+        """
+        peer = request.client.host if request.client else "unknown"
+        hops = _trusted_proxy_hops()
+        if hops <= 0:
+            return peer
+        forwarded = [
+            p.strip()
+            for p in request.headers.get("x-forwarded-for", "").split(",")
+            if p.strip()
+        ]
+        if not forwarded:
+            return peer
+        # 最右邊 hops 段是可信反代自己寫入的，其左邊那一段才是真實客戶端
+        return forwarded[max(0, len(forwarded) - hops)]
+
+    def _rate_limited(self, key: str, max_n: int = _LOGIN_MAX_ATTEMPTS,
+                      window: float = _LOGIN_WINDOW) -> bool:
         now = time.time()
         attempts = [t for t in self._login_attempts.get(key, []) if now - t < window]
-        self._login_attempts[key] = attempts
+        if attempts:
+            self._login_attempts[key] = attempts
+        else:
+            # 全數過期就移除鍵，避免只增不刪
+            self._login_attempts.pop(key, None)
+        if len(self._login_attempts) > _MAX_TRACKED_LOGIN_KEYS:
+            self._prune_login_attempts(now, window)
         return len(attempts) >= max_n
+
+    def _prune_login_attempts(self, now: float, window: float) -> None:
+        """鍵數量超上限時的清理：先清過期鍵，仍超量就清最舊的鍵。"""
+        for stale in [
+            k for k, ts in self._login_attempts.items()
+            if not ts or now - ts[-1] >= window
+        ]:
+            self._login_attempts.pop(stale, None)
+        overflow = len(self._login_attempts) - _MAX_TRACKED_LOGIN_KEYS
+        if overflow > 0:
+            oldest = sorted(
+                self._login_attempts, key=lambda k: self._login_attempts[k][-1]
+            )
+            for stale in oldest[:overflow]:
+                self._login_attempts.pop(stale, None)
 
     # ---------- 路由 ----------
 
@@ -72,38 +150,50 @@ class Dashboard:
 
         @app.get("/health")
         async def health():
-            return {"status": "ok", "accounts": len(self.manager.workers)}
+            # Railway healthcheckPath：只回最小公開狀態，不洩漏帳號數等內部資訊
+            return {"status": "ok"}
 
         @app.post("/api/login")
         async def login(request: Request):
             key = self._ip(request)
-            if self._rate_limited(key, 10, 300):
+            if self._rate_limited(key):
                 return JSONResponse(
                     {"error": "嘗試次數過多，請 5 分鐘後再試"}, status_code=429
                 )
             data = await request.json()
             user = str(data.get("username", "")).strip()
             pwd = str(data.get("password", ""))
-            if user != self.config.dashboard_user or pwd != self.config.dashboard_pass:
+            # 常數時間比較，避免字串比較的短路行為洩漏憑證前綴
+            user_ok = hmac.compare_digest(
+                user.encode("utf-8"),
+                str(self.config.dashboard_user).encode("utf-8"),
+            )
+            pwd_ok = hmac.compare_digest(
+                pwd.encode("utf-8"),
+                str(self.config.dashboard_pass).encode("utf-8"),
+            )
+            if not (user_ok and pwd_ok):
                 self._login_attempts.setdefault(key, []).append(time.time())
                 return JSONResponse({"error": "帳號或密碼錯誤"}, status_code=401)
-            sid = hashlib.sha256(
-                f"{user}{time.time()}".encode()
-            ).hexdigest()
-            self._sessions[sid] = time.time() + 3600
+            # 登入成功即清空此來源的失敗計數
+            self._login_attempts.pop(key, None)
+            # 會話令牌用 CSPRNG 產生，只存在服務端記憶體，不含任何可預測輸入
+            sid = secrets.token_urlsafe(32)
+            self._sessions[sid] = time.time() + _SESSION_TTL
             resp = JSONResponse({"ok": True, "user": user})
             resp.set_cookie(
-                "sdf_session", sid,
-                max_age=3600, httponly=True, samesite="strict",
+                SESSION_COOKIE, sid,
+                max_age=_SESSION_TTL, httponly=True, samesite="strict",
+                secure=_cookie_secure(request),
             )
             return resp
 
         @app.post("/api/logout")
         async def logout(request: Request):
-            sid = request.cookies.get("sdf_session", "")
+            sid = request.cookies.get(SESSION_COOKIE, "")
             self._sessions.pop(sid, None)
             resp = JSONResponse({"ok": True})
-            resp.delete_cookie("sdf_session")
+            resp.delete_cookie(SESSION_COOKIE)
             return resp
 
         # ---------- 需登入的 API ----------
@@ -202,7 +292,6 @@ class Dashboard:
         async def get_persona(account_id: str, request: Request):
             if not self._check_session(request):
                 return JSONResponse({"error": "未登入"}, status_code=401)
-            import json
             acc = await self.manager.db.get_account(account_id)
             if not acc:
                 return JSONResponse({"error": "帳號不存在"}, status_code=404)

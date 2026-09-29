@@ -1,5 +1,7 @@
 import asyncio
 import os
+import tempfile
+import uuid
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -11,15 +13,17 @@ from app.database import Database
 from app.manager import AccountManager
 from app.telegram_login import TelegramLoginService
 
-DB = "/tmp/sdf_test/dash_test.db"
+_DB_DIR = os.path.join(tempfile.gettempdir(), "sdf_test")
 
 
 def _make_dashboard():
-    if os.path.exists(DB):
-        os.remove(DB)
+    # 每個測試一個獨立檔名：Windows 上刪除還被前一條連線持有的檔會拋
+    # WinError 32，而固定檔名會讓兩個並行的 pytest 行程搶同一把鎖。
+    os.makedirs(_DB_DIR, exist_ok=True)
+    db_path = os.path.join(_DB_DIR, f"dash_test_{uuid.uuid4().hex}.db")
     s = load_settings()
     box = SecretBox(s.account_encryption_key)
-    db = Database(DB)
+    db = Database(db_path)
 
     # 同一個 event loop 貫穿 db 整個生命週期，避免 aiosqlite 背景線程卡住退出
     loop = asyncio.new_event_loop()
@@ -35,6 +39,12 @@ def _make_dashboard():
             loop.run_until_complete(db.close())
         finally:
             loop.close()
+            # 盡量清掉本測試的暫存庫（Windows 上檔案可能仍短暫被鎖住，失敗就留著）
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(db_path + suffix)
+                except OSError:
+                    pass
 
     client = TestClient(dash.app)
 
