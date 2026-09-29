@@ -51,6 +51,16 @@ def _hosts(name: str, default: str) -> tuple[str, ...]:
     )
 
 
+def _model_list(name: str) -> tuple[str, ...]:
+    """備援模型清單（逗號分隔）：去重並保持宣告順序，輪換才有可預期性。"""
+    seen: list[str] = []
+    for item in os.getenv(name, "").split(","):
+        model = item.strip()
+        if model and model not in seen:
+            seen.append(model)
+    return tuple(seen)
+
+
 @dataclass
 class Settings:
     acceptance_test_mode: bool
@@ -63,10 +73,13 @@ class Settings:
     # 加密（帳號 session 用）
     account_encryption_key: str
 
-    # AI（預設 RunPod 本機部署）
+    # AI（正式端點一律由 AI_BASE_URL 提供）
     ai_api_key: str
     ai_base_url: str
     ai_model: str
+    # 主模型拒答或回空時依序改用的備援模型。拒答來自權重裡的對齊，
+    # 不是提示詞沒講清楚，換措辭沒用，只能換模型。
+    ai_fallback_models: tuple[str, ...]
     ai_temperature: float
     ai_max_tokens: int
     ai_timeout: float
@@ -135,11 +148,17 @@ def load_settings() -> Settings:
         tg_api_hash=_required("TG_API_HASH"),
         account_encryption_key=_required("ACCOUNT_ENCRYPTION_KEY"),
         ai_api_key=os.getenv("AI_API_KEY", "").strip(),
+        # 預設只給本機位址。這個 repo 是公開的，把真實部署端點寫進來等於
+        # 連 pod 一起曝光（見 .env.example 的同一條說明）；正式環境一律由
+        # AI_BASE_URL 提供。
         ai_base_url=(
             os.getenv("AI_BASE_URL", "").strip()
-            or "https://9ghyzu98lbv2mf-8000.proxy.runpod.net/v1"
+            or "http://127.0.0.1:8000/v1"
         ).rstrip("/"),
         ai_model=ai_model,
+        ai_fallback_models=tuple(
+            model for model in _model_list("AI_FALLBACK_MODELS") if model != ai_model
+        ),
         ai_temperature=_float("AI_TEMPERATURE", 0.85),
         ai_max_tokens=_int("AI_MAX_TOKENS", 200),
         ai_timeout=_float("AI_TIMEOUT", 60),
