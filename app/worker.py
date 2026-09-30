@@ -3296,6 +3296,37 @@ class AccountWorker:
         self._proactive_today = 0
         self._recent_proactive_topics.clear()
 
+    async def _generate_context_topic(self, group_id: int) -> str:
+        """情境感知的主動話題：讀取群內最近的人類訊息，用 LLM 生成接得上當前話題的日常閒聊，
+        讓水軍主動發言能與真人「有來有回」，而非隨機脫節或水軍自說自話。
+        LLM 失敗或無人類訊息時回傳 ""，由呼叫方 fallback 到隨機話題清單。"""
+        try:
+            msgs = await self.db.get_group_messages(group_id, limit=12)
+        except Exception:
+            return ""
+        human_msgs = [m for m in msgs if m.get("role") != "assistant"]
+        if not human_msgs:
+            return ""
+        context = "\n".join(
+            f"[{m.get('sender_name','?')}] {str(m.get('content',''))[:60]}"
+            for m in human_msgs[-5:]
+        )
+        prompt = (
+            "群組裡最近的人類訊息如下。請以你的口吻生成 1-3 句日常閒聊，"
+            "要接得上群組當前話題（食物、天氣、工作、追劇、聚會等），自然口語、"
+            "繁體中文、60 字元內，不要談群務，不要成人或曖昧直球。"
+            f"\n{context}"
+        )
+        topic = await self._call_ai(get_system_prompt(self.persona), prompt)
+        topic = (topic or "").strip()
+        if not topic or self._is_refusal(topic):
+            return ""
+        normalized = self._normalized_reply(topic)
+        if not normalized or normalized in self._recent_proactive_topics:
+            return ""
+        self._recent_proactive_topics.add(normalized)
+        return topic
+
     def _next_proactive_topic(self) -> str:
         """一天內不重複正規化話題；集合固定上限，重啟可清空。"""
         self._reset_proactive_day()
@@ -3526,6 +3557,14 @@ class AccountWorker:
                 if not groups:
                     continue
                 group_id = random.choice(groups)
+                # 不疊水軍：群內最新一則若是水軍所發，這輪讓路，避免水軍自說自話
+                try:
+                    latest = await self.db.get_group_messages(group_id, limit=1)
+                    if latest and str(latest[-1].get("role")) == "assistant":
+                        print(f"[{self.name}] proactive-skip: last message from another water account", flush=True)
+                        continue
+                except Exception:
+                    pass
                 if self._should_suppress_proactive(group_id):
                     # 人類近 10 分鐘有活動：以 70% 讓路、30% 像正常人一樣偶爾插話
                     if random.random() < 0.7:
@@ -3550,7 +3589,10 @@ class AccountWorker:
                 ):
                     print(f"[{self.name}] proactive-skip: slot already claimed by another account", flush=True)
                     continue
-                topic = self._next_proactive_topic()
+                # 情境感知優先：讀群內最近人類訊息生成接話話題；失敗才 fallback 隨機清單
+                topic = await self._generate_context_topic(group_id)
+                if not topic:
+                    topic = self._next_proactive_topic()
                 if not topic:
                     print(f"[{self.name}] proactive-skip: no fresh topic (all 64 topics exhausted)", flush=True)
                     continue
