@@ -212,7 +212,7 @@ class Dashboard:
                 return JSONResponse({"error": "未登入"}, status_code=401)
             limit = request.query_params.get("limit", "100")
             try:
-                limit = max(1, min(300, int(limit)))
+                limit = max(1, min(5000, int(limit)))
             except ValueError:
                 limit = 100
             rows = await self.manager.db.get_group_messages(group_id, limit)
