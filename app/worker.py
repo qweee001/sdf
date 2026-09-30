@@ -664,14 +664,18 @@ class AccountWorker:
     def _today_index() -> int:
         return int(time.time() // 86400)
 
+    def _taipei_hour(self) -> float:
+        """台北時間（UTC+8）＋每人錯峰偏移"""
+        return (time.time() / 3600 + 8 + self._schedule_offset) % 24
+
     def _is_sleeping(self) -> bool:
-        """凌晨 4-7 點睡覺（每人錯峰偏移）"""
-        h = (time.time() / 3600 + self._schedule_offset) % 24
+        """台北時間凌晨 4-7 點睡覺（每人錯峰偏移）"""
+        h = self._taipei_hour()
         return (h + 20) % 24 < 3
 
     def _is_busy_hour(self) -> bool:
-        """工作時間 9-17 點，主動發言降頻"""
-        h = (time.time() / 3600 + self._schedule_offset) % 24
+        """台北時間工作時間 9-17 點，主動發言降頻"""
+        h = self._taipei_hour()
         return 9 <= h < 17
 
     def group_list(self) -> list[dict]:
