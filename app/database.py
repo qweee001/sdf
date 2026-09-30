@@ -71,10 +71,11 @@ class Database:
                 setup_complete INTEGER DEFAULT 0,
                 enabled INTEGER DEFAULT 0,
                 created_at REAL DEFAULT 0,
-                updated_at REAL DEFAULT 0
+                updated_at REAL DEFAULT 0,
+                avatar TEXT
             )
         """)
-        # 舊庫升級：補 groups / setup_complete 欄位
+        # 舊庫升級：補 groups / setup_complete / avatar 欄位
         cols = await db.execute("PRAGMA table_info(accounts)")
         col_names = {r[1] for r in await cols.fetchall()}
         if "groups" not in col_names:
@@ -84,6 +85,9 @@ class Database:
             await db.execute(
                 "ALTER TABLE accounts ADD COLUMN setup_complete INTEGER DEFAULT 1"
             )
+        if "avatar" not in col_names:
+            # 帳號頭像（以登錄帳號在 Telegram 設定的頭像為準），data URI
+            await db.execute("ALTER TABLE accounts ADD COLUMN avatar TEXT")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1118,7 +1122,7 @@ class Database:
     async def list_accounts(self) -> list[dict]:
         cursor = await self._c.execute(
             "SELECT id, name, session_key, tg_user_id, tg_username, persona, groups, "
-            "setup_complete, enabled FROM accounts ORDER BY created_at"
+            "setup_complete, enabled, avatar FROM accounts ORDER BY created_at"
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]

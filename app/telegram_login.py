@@ -53,6 +53,8 @@ class VerifiedSession:
     session_string: str
     tg_user_id: int
     tg_name: str
+    # 帳號頭像（base64 data URI），以登錄帳號在 Telegram 設定的頭像為準
+    avatar: str = ""
 
 
 @dataclass
@@ -116,6 +118,29 @@ class TelegramLoginService:
         p = self.pending.pop(auth_id, None)
         if p:
             await self._disconnect(p.client)
+
+    async def _fetch_avatar(self, client: TelegramClient, user_id: int) -> str:
+        """下載帳號在 Telegram 設定的頭像，回傳 base64 data URI。
+
+        失敗時回傳空字串（不阻斷登入流程）。
+        """
+        try:
+            # file=bytes → 記憶體下載，回傳 bytestring（而非寫檔回傳路徑字串）
+            data = await client.download_profile_photo(user_id, file=bytes)
+            if not data:
+                return ""
+            raw = data if isinstance(data, (bytes, bytearray)) else bytes(data)
+            if raw[:4] == b"\x89PNG":
+                mime = "image/png"
+            elif raw[:3] == b"\xff\xd8\xff":
+                mime = "image/jpeg"
+            else:
+                mime = "image/png"
+            import base64
+            b64 = base64.b64encode(raw).decode("ascii")
+            return f"data:{mime};base64,{b64}"
+        except Exception:
+            return ""
 
     async def start(self, phone_value: object) -> dict:
         phone = self._clean_phone(phone_value)
@@ -188,10 +213,13 @@ class TelegramLoginService:
         session_string = p.client.session.save()
         if not session_string:
             raise LoginExpired("Telegram Session 建立失敗")
+        # 以登錄帳號在 Telegram 設定的頭像為準：下載個人頭像，存為 data URI
+        avatar = await self._fetch_avatar(p.client, int(me.id))
         p.verified = VerifiedSession(
             session_string=session_string,
             tg_user_id=int(me.id),
             tg_name=get_display_name(me) or str(me.id),
+            avatar=avatar,
         )
         p.state = "authorized"
         p.phone = ""

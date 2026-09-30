@@ -567,6 +567,13 @@ class AccountWorker:
             self.tg_user_id = int(me.id)
             self.managed_ids.add(self.tg_user_id)
             self.active_ids.add(self.tg_user_id)
+            # 人物以帳號設定的頭像為準：啟動時下載自己的頭像寫回 DB（舊帳號也能補齊）
+            try:
+                avatar = await self._fetch_my_avatar()
+                if avatar:
+                    await self.db.update_account(self.account_id, avatar=avatar)
+            except Exception as exc:
+                print(f"[{self.name}] avatar sync error: {exc}", flush=True)
 
             self.tg_client.add_event_handler(self.on_message, events.NewMessage())
             self.tg_client.add_event_handler(self.on_chat_action, events.ChatAction())
@@ -663,6 +670,27 @@ class AccountWorker:
     @staticmethod
     def _today_index() -> int:
         return int(time.time() // 86400)
+
+    async def _fetch_my_avatar(self) -> str:
+        """下載自己帳號在 Telegram 設定的頭像，回傳 base64 data URI。"""
+        if not self.tg_client or not self.tg_user_id:
+            return ""
+        try:
+            data = await self.tg_client.download_profile_photo(self.tg_user_id, file=bytes)
+            if not data:
+                return ""
+            raw = data if isinstance(data, (bytes, bytearray)) else bytes(data)
+            if raw[:4] == b"\x89PNG":
+                mime = "image/png"
+            elif raw[:3] == b"\xff\xd8\xff":
+                mime = "image/jpeg"
+            else:
+                mime = "image/png"
+            import base64
+            b64 = base64.b64encode(raw).decode("ascii")
+            return f"data:{mime};base64,{b64}"
+        except Exception:
+            return ""
 
     def _taipei_hour(self) -> float:
         """台北時間（UTC+8）＋每人錯峰偏移"""

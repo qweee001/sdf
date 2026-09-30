@@ -455,12 +455,14 @@ class Dashboard:
             except (LoginExpired, LoginConflict, ValueError) as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
             account = await self.manager.add_account(
-                name, verified.session_string, enable=False
+                name, verified.session_string, enable=False,
+                display_name=str(getattr(verified, "tg_name", "") or ""),
             )
             await self.manager.db.update_account(
                 account["id"],
                 tg_user_id=verified.tg_user_id,
                 tg_username=str(getattr(verified, "tg_name", "") or ""),
+                avatar=str(getattr(verified, "avatar", "") or ""),
                 enabled=0,
             )
             return JSONResponse({
@@ -716,13 +718,16 @@ async function loadStatus() {
         return `
         <div class="card">
             <div class="row">
-                <div>
+                <div style="display:flex;align-items:center;gap:0.75rem">
+                    ${acc.avatar ? `<img src="${acc.avatar}" alt="頭像" style="width:48px;height:48px;border-radius:50%;object-fit:cover;flex-shrink:0">` : '<div style="width:48px;height:48px;border-radius:50%;background:#2a3a52;display:flex;align-items:center;justify-content:center;color:#7f93b0;font-size:1.1rem;flex-shrink:0">${esc(acc.name).charAt(0)}</div>'}
+                    <div>
                     <h3>${esc(acc.name)} <span class="status-badge ${stateCls}">${stateTxt}</span></h3>
                     <div class="meta">
                         ${persona.name || ''}・${persona.gender || '?'}生・${persona.age || '?'}歲・${city}（${persona.district || ''}）・${persona.industry || ''}
                         <br>回覆 ${acc.stats.replies_sent}｜主動 ${acc.stats.proactive_sent}｜錯誤 ${acc.stats.errors}
                         ${acc.detail ? '<br style="color:#f87171">' + esc(acc.detail) : ''}
                         ${!acc.setup_complete ? '<br>請先檢查人設並設定群組範圍，之後才能啟動。' : ''}
+                    </div>
                     </div>
                 </div>
                 <div>

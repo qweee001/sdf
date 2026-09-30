@@ -213,6 +213,10 @@ class AccountManager:
                 persona = json.loads(acc["persona"])
             except Exception:
                 persona = None
+        # 人設名字按照登錄賬號名字：以帳號在 Telegram 設定的顯示名（tg_username 欄存的是 tg_name）為準
+        display_name = str(acc.get("tg_username") or "").strip()
+        if persona and display_name and persona.get("name") != display_name:
+            persona["name"] = display_name
         selected_groups = self._parse_groups(acc.get("groups"))
         if not selected_groups:
             await self.db.update_account(
@@ -277,10 +281,16 @@ class AccountManager:
         return used
 
     async def add_account(self, name: str, session_key: str,
-                          enable: bool = True) -> dict:
-        """新增帳號（session 已驗證可用），生成地域分佈人設"""
+                          enable: bool = True, display_name: str = "") -> dict:
+        """新增帳號（session 已驗證可用），生成地域分佈人設。
+
+        display_name：登錄帳號在 Telegram 設定的顯示名。若提供，
+        人設名字以它為準（人設名字按照登錄賬號名字）。
+        """
         account_id = secrets.token_hex(6)
         persona = generate_persona(await self._used_cities())
+        if display_name:
+            persona["name"] = display_name
         async with self._lifecycle_lock(account_id):
             await self.db.create_account(
                 account_id, name, self.secret_box.encrypt(session_key),
@@ -391,6 +401,10 @@ class AccountManager:
             persona = generate_persona(
                 await self._used_cities(exclude_id=account_id)
             )
+            # 人設名字按照登錄賬號名字：重新生成後仍與登錄帳號顯示名保持一致
+            display_name = str(acc.get("tg_username") or "").strip()
+            if display_name and persona.get("name") != display_name:
+                persona["name"] = display_name
             if await self._fixed_persona_mutation_blocked(account_id):
                 return None
             await self.db.update_account(
@@ -565,6 +579,7 @@ class AccountManager:
                 "detail": st.get("detail", ""),
                 "tg_user_id": acc.get("tg_user_id"),
                 "tg_username": acc.get("tg_username"),
+                "avatar": acc.get("avatar"),
                 "stats": worker.stats if worker else {"replies_sent": 0, "errors": 0, "proactive_sent": 0},
             })
         return {
