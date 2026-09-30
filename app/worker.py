@@ -3195,6 +3195,10 @@ class AccountWorker:
         last_human = float(self.last_human_activity.get(int(group_id), 0) or 0)
         return last_human > 0 and time.time() - last_human < 10 * 60
 
+    # 人類熱聊時水軍不是 100% 讓路：保留讓路為主，但留一個小概率插話，
+    # 模擬正常人偶爾接話的自然感（太 100% 讓路會顯得完全不出聲）。
+    _HUMAN_ACTIVE_JOIN_PROBABILITY = 0.3
+
     # ---------- 反重复 P1-1：无真人降频/暂停 ----------
 
     _PROACTIVE_REDUCED_HOURS = 6.0
@@ -3489,8 +3493,11 @@ class AccountWorker:
                     continue
                 group_id = random.choice(groups)
                 if self._should_suppress_proactive(group_id):
-                    print(f"[{self.name}] proactive-skip: group {group_id} suppressed (recent human activity)", flush=True)
-                    continue
+                    # 人類近 10 分鐘有活動：以 70% 讓路、30% 像正常人一樣偶爾插話
+                    if random.random() < 0.7:
+                        print(f"[{self.name}] proactive-skip: group {group_id} suppressed (recent human activity)", flush=True)
+                        continue
+                    print(f"[{self.name}] proactive-join: group {group_id} 人類熱聊中，水軍選擇接話（30%）", flush=True)
                 # 反重复 P1-1：群内长时间无真人 → 降频（每天≤2条）/暂停（每天≤4条）
                 if self._proactive_gate_blocks(group_id):
                     tier = self._proactive_rate_limit_ok(group_id)
