@@ -574,6 +574,12 @@ class AccountWorker:
                     await self.db.update_account(self.account_id, avatar=avatar)
             except Exception as exc:
                 print(f"[{self.name}] avatar sync error: {exc}", flush=True)
+            # 補齊舊帳號缺失的 TG 顯示名（tg_username 欄），讓人設名字同步邏輯可用
+            try:
+                display = get_display_name(me) or ""
+                await self.db.update_account(self.account_id, tg_username=display)
+            except Exception as exc:
+                print(f"[{self.name}] tg_username sync error: {exc}", flush=True)
 
             self.tg_client.add_event_handler(self.on_message, events.NewMessage())
             self.tg_client.add_event_handler(self.on_chat_action, events.ChatAction())
