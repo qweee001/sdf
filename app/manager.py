@@ -217,6 +217,8 @@ class AccountManager:
         display_name = str(acc.get("tg_username") or "").strip()
         if persona and display_name and persona.get("name") != display_name:
             persona["name"] = display_name
+            # 持久化同步後的 persona，重啟後不會再回退
+            await self.db.update_account(account_id, persona=json.dumps(persona, ensure_ascii=False))
         selected_groups = self._parse_groups(acc.get("groups"))
         if not selected_groups:
             await self.db.update_account(
