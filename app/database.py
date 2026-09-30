@@ -1177,6 +1177,17 @@ class Database:
         rows = list(await cursor.fetchall())
         return [dict(r) for r in reversed(rows)]
 
+    async def get_group_messages(self, group_id: int, limit: int = 100) -> list[dict]:
+        """跨所有帳號讀取某群組的實際訊息串（含人類與水軍），按時間順序回傳，供互動分析。"""
+        cursor = await self._c.execute(
+            "SELECT sender_id, sender_name, role, content, timestamp "
+            "FROM messages WHERE group_id = ? "
+            "ORDER BY timestamp DESC, id DESC LIMIT ?",
+            (group_id, limit),
+        )
+        rows = list(await cursor.fetchall())
+        return [dict(r) for r in reversed(rows)]
+
     async def get_recent_group_replies(
         self, group_id: int, limit: int = 20
     ) -> list[str]:

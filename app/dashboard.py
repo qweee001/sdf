@@ -205,6 +205,19 @@ class Dashboard:
             await self.login_service.prune_expired()
             return JSONResponse(await self.manager.status())
 
+        @app.get("/api/groups/{group_id}/messages")
+        async def group_messages(group_id: int, request: Request):
+            """讀取某群跨所有帳號的實際訊息串（含人類與水軍），供互動分析。"""
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            limit = request.query_params.get("limit", "100")
+            try:
+                limit = max(1, min(300, int(limit)))
+            except ValueError:
+                limit = 100
+            rows = await self.manager.db.get_group_messages(group_id, limit)
+            return JSONResponse({"group_id": group_id, "count": len(rows), "messages": rows})
+
         @app.post("/api/features")
         async def update_features(request: Request):
             if not self._check_session(request):
