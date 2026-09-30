@@ -1180,7 +1180,8 @@ class Database:
     async def get_group_messages(self, group_id: int, limit: int = 100) -> list[dict]:
         """跨所有帳號讀取某群組的實際訊息串（含人類與水軍），按時間順序回傳，供互動分析。
 
-        同一條群訊息會被群內每個水軍帳號各記錄一份，這裡按 (sender_id, content, timestamp) 去重。
+        同一條群訊息會被群內每個水軍帳號各記錄一份（timestamp 差 <1s），
+        按 (sender_id, content, 秒級 timestamp) 去重。
         """
         cursor = await self._c.execute(
             "SELECT sender_id, sender_name, role, content, timestamp "
@@ -1192,7 +1193,7 @@ class Database:
         seen: set = set()
         deduped: list[dict] = []
         for r in rows:
-            key = (r["sender_id"], r["content"], r["timestamp"])
+            key = (r["sender_id"], r["content"], int(float(r["timestamp"]) // 1))
             if key in seen:
                 continue
             seen.add(key)
