@@ -523,6 +523,19 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 .feature-item { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 0.8rem; background: #0f172a; border-radius: 9px; }
 .switch { width: 44px; height: 24px; accent-color: #38bdf8; cursor: pointer; }
 .switch:disabled { cursor: not-allowed; opacity: 0.45; }
+/* 群組監控 */
+.feed { max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.6rem; padding: 0.3rem; }
+.feed-item { display: flex; gap: 0.6rem; align-items: flex-start; }
+.feed-item .who { width: 130px; flex-shrink: 0; font-size: 0.78rem; color: #94a3b8; line-height: 1.35; }
+.feed-item .body { flex: 1; min-width: 0; }
+.bubble { max-width: 80%; padding: 0.5rem 0.8rem; border-radius: 10px; font-size: 0.9rem; line-height: 1.4; word-break: break-word; }
+.bubble-human { background: #24344d; }
+.bubble-bot { background: #1c3a5c; border-left: 3px solid #38bdf8; }
+.feed-item .ts { font-size: 0.7rem; color: #64748b; margin-top: 0.15rem; }
+.badge { display: inline-block; padding: 0.05rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: bold; }
+.badge-human { background: #16a34a; color: #fff; }
+.badge-bot { background: #38bdf8; color: #0f172a; }
+.monitor-select { background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 0.45rem 0.7rem; }
 </style>
 </head>
 <body>
@@ -556,6 +569,14 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
         </div>
         <div style="margin-bottom:1rem">
             <button class="btn btn-primary" onclick="openAddModal()">＋ 新增水軍帳號</button>
+        </div>
+        <div class="card" id="monitorCard" style="margin-bottom:1rem">
+            <div class="row" style="margin-bottom:0.8rem">
+                <h3 style="margin:0">📊 群組監控（即時收集）</h3>
+                <select id="monitorGroup" class="monitor-select" onchange="loadMonitor()"></select>
+            </div>
+            <div class="stats" id="monitorStats" style="margin-bottom:0.8rem"></div>
+            <div class="feed" id="monitorFeed"><div class="meta">尚無資料，請先選擇群組</div></div>
         </div>
         <div id="accounts"></div>
     </div>
@@ -974,6 +995,75 @@ async function showPrivates(id) {
     document.getElementById('privModal').classList.add('active');
 }
 
+// ---------- 群組監控 ----------
+let monitorGroupId = null;
+
+function isBotRole(role) {
+    return String(role || '').toLowerCase() === 'assistant';
+}
+
+async function loadMonitorGroups() {
+    const r = await api('/api/status').catch(() => null);
+    const sel = document.getElementById('monitorGroup');
+    const opts = new Set();
+    const accounts = (r && r.ok ? r.data.accounts : []) || [];
+    accounts.forEach(a => (a.groups_available || []).forEach(g => { if (g && g.id) opts.add(g.id); }));
+    // 已指定的群組一併列入
+    accounts.forEach(a => (a.groups || []).forEach(gid => { if (gid) opts.add(gid); }));
+    const known = { '-1002229799107': '桃花源・約會' };
+    sel.innerHTML = Array.from(opts).map(gid =>
+        `<option value="${gid}">${known[gid] || ('群組 ' + gid)}</option>`
+    ).join('');
+    if (opts.has(-1002229799107)) sel.value = '-1002229799107';
+    if (opts.size) { monitorGroupId = sel.value; loadMonitor(); }
+}
+
+async function loadMonitor() {
+    const sel = document.getElementById('monitorGroup');
+    monitorGroupId = sel && sel.value;
+    if (!monitorGroupId) return;
+    const feed = document.getElementById('monitorFeed');
+    const stats = document.getElementById('monitorStats');
+    feed.innerHTML = '<div class="meta">載入中…</div>';
+    const r = await api('/api/groups/' + monitorGroupId + '/messages?limit=5000').catch(() => null);
+    if (!r || !r.ok) {
+        feed.innerHTML = '<div class="meta">載入失敗</div>';
+        stats.innerHTML = '';
+        return;
+    }
+    const msgs = (r.data.messages || []).slice().reverse(); // 舊 → 新
+    const bots = msgs.filter(m => isBotRole(m.role));
+    const humans = msgs.filter(m => !isBotRole(m.role));
+    // 有來有回率：水軍發言後 10 分鐘內有無人（非水軍）回話
+    let replied = 0;
+    bots.forEach(b => {
+        const t = b.timestamp;
+        const hasReply = humans.some(h => (h.timestamp - t) > 0 && (h.timestamp - t) <= 600);
+        if (hasReply) replied++;
+    });
+    const rate = bots.length ? Math.round(replied / bots.length * 100) : 0;
+    const tmin = msgs.length ? new Date(Math.min(...msgs.map(m => m.timestamp * 1000)) : null;
+    const tmax = msgs.length ? new Date(Math.max(...msgs.map(m => m.timestamp * 1000)) : null;
+    const winLabel = (tmin && tmax)
+        ? (tmin.toLocaleString('zh-TW') + ' → ' + tmax.toLocaleString('zh-TW'))
+        : '無訊息';
+    stats.innerHTML = `
+        <div class="stat-card"><div class="value">${msgs.length}</div><div class="label">訊息總數</div></div>
+        <div class="stat-card"><div class="value">${humans.length}</div><div class="label">人類訊息</div></div>
+        <div class="stat-card"><div class="value">${bots.length}</div><div class="label">水軍訊息</div></div>
+        <div class="stat-card"><div class="value">${rate}%</div><div class="label">有來有回率</div></div>
+        <div class="stat-card" style="grid-column:1 / -1"><div class="label" style="margin-top:0">收集區間</div><div class="value" style="font-size:0.9rem;color:#94a3b8">${winLabel}</div></div>
+    `;
+    feed.innerHTML = msgs.slice(-60).map(m => {
+        const bot = isBotRole(m.role);
+        const time = new Date(m.timestamp * 1000).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+        return `<div class="feed-item">
+            <div class="who"><span class="badge ${bot ? 'badge-bot' : 'badge-human'}">${bot ? '水軍' : '人類'}</span><br>${esc(m.sender_name || '匿名')}<br><span class="ts">${time}</span></div>
+            <div class="body"><div class="bubble ${bot ? 'bubble-bot' : 'bubble-human'}">${esc(m.content || '')}</div></div>
+        </div>`;
+    }).join('') || '<div class="meta">群組目前沒有訊息</div>';
+}
+
 // 自動載入 + 自動刷新
 (async () => {
     const r = await api('/api/status').catch(() => null);
@@ -994,7 +1084,13 @@ async function showPrivates(id) {
             else if (act === 'delete') deleteAccount(id);
         });
         loadStatus();
-        setInterval(() => { if (document.getElementById('mainBox').style.display !== 'none') loadStatus(); }, 15000);
+        loadMonitorGroups();
+        setInterval(() => {
+            if (document.getElementById('mainBox').style.display !== 'none') {
+                loadStatus();
+                if (monitorGroupId) loadMonitor();
+            }
+        }, 15000);
     }
 })();
 </script>
