@@ -301,6 +301,18 @@ class Dashboard:
                 return JSONResponse({"ok": False, "error": err}, status_code=404)
             return JSONResponse({"ok": True})
 
+        @app.post("/api/accounts/{account_id}/toggle")
+        async def toggle_account(account_id: str, request: Request):
+            """啟用/停用帳號：只改 DB 的 enabled 旗標，不影響目前運行中的 worker。"""
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            acc = await self.manager.db.get_account(account_id)
+            if not acc:
+                return JSONResponse({"error": "帳號不存在"}, status_code=404)
+            now_enabled = not bool(acc.get("enabled"))
+            await self.manager.db.update_account(account_id, enabled=1 if now_enabled else 0)
+            return JSONResponse({"ok": True, "enabled": now_enabled})
+
         @app.get("/api/accounts/{account_id}/persona")
         async def get_persona(account_id: str, request: Request):
             if not self._check_session(request):
@@ -536,6 +548,9 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 .badge-human { background: #16a34a; color: #fff; }
 .badge-bot { background: #38bdf8; color: #0f172a; }
 .monitor-select { background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 0.45rem 0.7rem; }
+.acc-tag { display: inline-block; padding: 0.05rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: bold; }
+.acc-tag-on { background: #16a34a; color: #fff; }
+.acc-tag-off { background: #475569; color: #cbd5e1; }
 </style>
 </head>
 <body>
@@ -761,7 +776,10 @@ async function loadStatus() {
                     <h3>${esc(acc.name)} <span class="status-badge ${stateCls}">${stateTxt}</span></h3>
                     <div class="meta">
                         ${persona.name || ''}・${persona.gender || '?'}生・${persona.age || '?'}歲・${city}（${persona.district || ''}）・${persona.industry || ''}
-                        <br>回覆 ${acc.stats.replies_sent}｜主動 ${acc.stats.proactive_sent}｜錯誤 ${acc.stats.errors}
+                        ${acc.tg_username ? `<br>顯示名：${esc(acc.tg_username)}` : ''}
+                        <br>
+                        <span class="acc-tag ${acc.enabled ? 'acc-tag-on' : 'acc-tag-off'}">${acc.enabled ? '已啟用' : '已停用'}</span>
+                        <br>回覆 ${acc.stats.replies_sent}｜主動 ${acc.stats.proactive_sent}｜語音 ${acc.stats.voice_realtime_sent}｜圖片 ${acc.stats.images_understood}/${acc.stats.images_seen}｜錯誤 ${acc.stats.errors}
                         ${acc.detail ? '<br style="color:#f87171">' + esc(acc.detail) : ''}
                         ${!acc.setup_complete ? '<br>請先檢查人設並設定群組範圍，之後才能啟動。' : ''}
                     </div>
@@ -769,6 +787,7 @@ async function loadStatus() {
                 </div>
                 <div>
                     <button class="btn ${acc.is_running ? 'btn-danger' : 'btn-primary'}" data-act="${acc.is_running ? 'stop' : 'start'}" data-id="${esc(acc.id)}" data-state="${acc.state || ''}" ${!acc.is_running && !acc.setup_complete ? 'disabled title="請先設定群組範圍"' : ''}>${acc.is_running ? '停止' : '啟動'}</button>
+                    <button class="btn btn-secondary" data-act="toggle" data-id="${esc(acc.id)}">${acc.enabled ? '停用' : '啟用'}</button>
                     <button class="btn btn-secondary" data-act="persona" data-id="${esc(acc.id)}">人設</button>
                     <button class="btn btn-secondary" data-act="groups" data-id="${esc(acc.id)}">群組${(acc.groups && acc.groups.length) ? '·' + acc.groups.length : ''}</button>
                     <button class="btn btn-secondary" data-act="privates" data-id="${esc(acc.id)}">私訊</button>
@@ -890,6 +909,21 @@ async function stopAccount(button) {
     if (!r.ok) {
         toast(r.data.error || '停止失敗');
     }
+    setTimeout(() => {
+        loadStatus();
+        button.disabled = false;
+        button.textContent = old;
+    }, 500);
+}
+async function toggleAccount(button) {
+    if (!button) return;
+    const id = button.dataset.id;
+    const old = button.textContent;
+    button.disabled = true;
+    button.textContent = '切換中';
+    const r = await api('/api/accounts/' + id + '/toggle', { method: 'POST' });
+    if (r.ok) toast(r.data.enabled ? '已啟用' : '已停用');
+    else toast(r.data.error || '切換失敗');
     setTimeout(() => {
         loadStatus();
         button.disabled = false;
@@ -1211,6 +1245,7 @@ async function loadLiveTestStatus() {
             const act = b.dataset.act, id = b.dataset.id;
             if (act === 'start') startAccount(b);
             else if (act === 'stop') stopAccount(b);
+            else if (act === 'toggle') toggleAccount(b);
             else if (act === 'persona') showPersona(id);
             else if (act === 'groups') showGroups(id);
             else if (act === 'privates') showPrivates(id);
