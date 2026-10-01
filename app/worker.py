@@ -3323,7 +3323,7 @@ class AccountWorker:
         prompt = (
             "群組裡最近的人類訊息如下。請以你的口吻生成 1-3 句日常閒聊，"
             "要接得上群組當前話題（食物、天氣、工作、追劇、聚會等），自然口語、"
-            "繁體中文、60 字元內，不要談群務，不要成人或曖昧直球。"
+            "繁體中文、60 字元內，不要談群務。可以帶點勾引或曖昧，但別硬凹。"
             f"\n{context}"
         )
         topic = await self._call_ai(get_system_prompt(self.persona), prompt)
