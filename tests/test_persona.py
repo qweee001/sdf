@@ -1,6 +1,7 @@
 import random
 
 from app.persona import (
+    ADULT_JOKES,
     BOY_PROACTIVE,
     CITY_SPOTS,
     DAILY_TOPICS,
@@ -239,6 +240,7 @@ def test_proactive_pools_no_duplicates_within_or_across():
         ("GIRL_PROACTIVE", GIRL_PROACTIVE),
         ("BOY_PROACTIVE", BOY_PROACTIVE),
         ("DAILY_TOPICS", DAILY_TOPICS),
+        ("ADULT_JOKES", ADULT_JOKES),
         ("SHOW_OFF_FEMALE", SHOW_OFF_FEMALE),
         ("SHOW_OFF_MALE", SHOW_OFF_MALE),
     ):

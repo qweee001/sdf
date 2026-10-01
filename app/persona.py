@@ -290,6 +290,18 @@ DAILY_TOPICS = [
     "晚風好舒服，適合散步不適合加班",
 ]
 
+# 成人玩笑開場（貼合「桃花源・約會」群組主流語氣）
+ADULT_JOKES = [
+    "你們說女生一個人住安不安全，我直接說沒問題哈哈",
+    "昨晚夢到約會的細節，醒來臉都紅了",
+    "誰懂，看到帥哥心跳加速的尷尬",
+    "最近迷上一種新的開場，你們覺得夠直接嗎",
+    "有人怕冷，我直接說包在我身上",
+    "說真的，約會前會緊張到忘記台詞",
+    "剛看到一對牽手路過，手都在抖",
+    "你們覺得第一面聊什麼不冷場，我直接說聊吃的",
+]
+
 # 曬成約（社會證明，低頻）
 SHOW_OFF_FEMALE = [
     "昨晚從 X 區出來了，人比照片正，值回票價",
@@ -513,14 +525,16 @@ def generate_proactive_topic(p: dict) -> str:
         profile = "lively"
 
     r = random.random()
-    # 日常閒聊為主：日常話題佔絕大部分，僅偶爾開約會口或日常開場
-    if r < 0.85:
+    # 依「桃花源・約會」實測節奏調配：群組主流為約會口（約三成）與成人玩笑（約兩成），日常為輔。
+    if r < 0.55:
         topic = random.choice(DAILY_TOPICS)
-    elif r < 0.95:
-        topic = random.choice(PERSONA_PROACTIVE[profile])
-    else:
+    elif r < 0.80:
         templates = GIRL_PROACTIVE if p["gender"] == "女" else BOY_PROACTIVE
         topic = random.choice(templates)
+    elif r < 0.95:
+        topic = random.choice(ADULT_JOKES)
+    else:
+        topic = random.choice(PERSONA_PROACTIVE[profile])
 
     # 慢熟／年輕人設不使用突兀髒話或過度老練的口吻。
     if profile == "shy" or age <= 21:

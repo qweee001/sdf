@@ -73,6 +73,7 @@ def test_proactive_topic_falls_back_when_pool_exhausted():
             async def recent_bot_texts_by_group(self, group_id, *, hours=48, limit=200):
                 # 返回全部池子内容 + 更多，逼上去重上限
                 from app.persona import (
+                    ADULT_JOKES,
                     BOY_PROACTIVE,
                     DAILY_TOPICS,
                     GIRL_PROACTIVE,
@@ -88,6 +89,7 @@ def test_proactive_topic_falls_back_when_pool_exhausted():
                     *GIRL_PROACTIVE,
                     *BOY_PROACTIVE,
                     *DAILY_TOPICS,
+                    *ADULT_JOKES,
                     *SHOW_OFF_FEMALE,
                     *SHOW_OFF_MALE,
                 ]
