@@ -578,6 +578,21 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
             <div class="stats" id="monitorStats" style="margin-bottom:0.8rem"></div>
             <div class="feed" id="monitorFeed"><div class="meta">尚無資料，請先選擇群組</div></div>
         </div>
+        <div class="card" style="margin-bottom:1rem">
+            <h3>🛡️ 回覆審計（近 24h）</h3>
+            <div id="replyAudit"><div class="meta">載入中…</div></div>
+        </div>
+        <div class="card" style="margin-bottom:1rem">
+            <h3>🧪 媒體實測（live test）</h3>
+            <div class="row" style="margin-bottom:0.6rem">
+                <span class="meta" id="liveTestState">無進行中實測</span>
+                <div>
+                    <button class="btn btn-primary" id="liveTestStartBtn" onclick="startLiveTest()">啟動實測</button>
+                    <button class="btn btn-danger" id="liveTestStopBtn" onclick="stopLiveTest()" style="display:none">停止</button>
+                </div>
+            </div>
+            <div class="meta" id="liveTestDetail"></div>
+        </div>
         <div id="accounts"></div>
     </div>
 </div>
@@ -669,6 +684,7 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 let tgAuthId = '';
 let currentPersonaId = '';
 let currentGroupsId = '';
+let currentPrivatesId = '';
 
 function toast(msg) {
     const t = document.getElementById('toast');
@@ -761,6 +777,49 @@ async function loadStatus() {
             </div>
         </div>`;
     }).join('') || '<div class="card meta">還沒有水軍帳號，先新增一個吧</div>';
+    // 回覆審計（近24h，stage × reason）
+    const audit = data.reply_audit || {};
+    const stageLabel = {
+        'claimed': '已聲明',
+        'sent': '已送出',
+        'policy': '策略攔截',
+        'vision': '視覺理解',
+        'media': '媒體額度',
+        'generation': '生成',
+    };
+    const reasonLabel = {
+        'group_meta': '群組 meta',
+        'blocked_video': '影片阻擋',
+        'too_long': '過長',
+        'near_duplicate': '近似重複',
+        'refusal': '拒絕',
+        'image_unavailable': '圖片不可用',
+        'image_understanding_empty': '圖片理解為空',
+        'image_understanding_error': '圖片理解錯誤',
+        'media_disabled': '媒體已關閉',
+        'ok': '成功',
+        'rate_limited': '限流',
+        'error': '錯誤',
+    };
+    const auditEl = document.getElementById('replyAudit');
+    const stages = Object.keys(audit);
+    if (!stages.length) {
+        auditEl.innerHTML = '<div class="meta">近 24h 無回覆審計紀錄</div>';
+    } else {
+        auditEl.innerHTML = stages.map(stage => {
+            const reasons = audit[stage] || {};
+            const rows = Object.keys(reasons).map(r =>
+                `<div class="row" style="padding:0.35rem 0;border-bottom:1px solid #2a3a52">
+                    <span class="meta">${reasonLabel[r] || r} <span class="meta">（${r}）</span></span>
+                    <b style="color:#38bdf8">${reasons[r]}</b>
+                </div>`
+            ).join('');
+            return `<div style="margin-bottom:0.8rem">
+                <div style="font-size:0.85rem;font-weight:bold;color:#e2e8f0;margin-bottom:0.3rem">${stageLabel[stage] || stage}（${stage}）</div>
+                ${rows}
+            </div>`;
+        }).join('');
+    }
 }
 
 async function saveFeatures() {
@@ -986,13 +1045,22 @@ async function saveGroups() {
 async function showPrivates(id) {
     const r = await api('/api/accounts/' + id + '/privates');
     if (!r.ok) return;
+    currentPrivatesId = id;
     document.getElementById('privList').innerHTML = (r.data.messages || []).map(m =>
         `<div class="card" style="margin-bottom:0.5rem;padding:0.8rem">
             <div class="meta"><b>${esc(m.sender_name)}</b>（${new Date(m.timestamp * 1000).toLocaleString('zh-TW')}）${m.read ? '' : ' 🔴未讀'}</div>
             <div style="font-size:0.9rem">${esc(m.preview)}</div>
+            ${!m.read ? `<button class="btn btn-secondary" style="margin-top:0.5rem" onclick="markPrivateRead(${m.id})">標記已讀</button>` : ''}
         </div>`
     ).join('') || '<div class="meta">沒有私訊紀錄</div>';
     document.getElementById('privModal').classList.add('active');
+}
+
+async function markPrivateRead(msgId) {
+    if (!currentPrivatesId) return;
+    const r = await api(`/api/accounts/${currentPrivatesId}/privates/${msgId}/read`, { method: 'POST' });
+    if (r.ok) { toast('已標記已讀'); showPrivates(currentPrivatesId); }
+    else toast(r.data.error || '標記失敗');
 }
 
 // ---------- 群組監控 ----------
@@ -1064,6 +1132,71 @@ async function loadMonitor() {
     }).join('') || '<div class="meta">群組目前沒有訊息</div>';
 }
 
+// ---------- 媒體實測 ----------
+const LT_ACCOUNT_IDS = ['2ce525dfb0d4', 'faa9a202f96e', '038632e4395b', 'e63e27a4340d'];
+const LT_GROUP_ID = -5428680940;
+
+function buildLiveTestSchedule() {
+    const events = [];
+    for (let i = 0; i < 18; i++) {
+        events.push({ event_id: 'text-' + i, offset_seconds: 0, account_id: LT_ACCOUNT_IDS[i % 4], kind: 'text', text: '測試文字 ' + i });
+    }
+    LT_ACCOUNT_IDS.forEach((id, i) => events.push({ event_id: 'voice-' + i, offset_seconds: 0, account_id: id, kind: 'voice' }));
+    LT_ACCOUNT_IDS.forEach((id, i) => events.push({ event_id: 'image-' + i, offset_seconds: 0, account_id: id, kind: 'image', path: 'adult-' + i + '.jpg' }));
+    [0, 1].forEach(i => events.push({ event_id: 'video-' + i, offset_seconds: 0, account_id: LT_ACCOUNT_IDS[i], kind: 'video' }));
+    [2, 3].forEach(i => events.push({ event_id: 'vision-' + (i - 2), offset_seconds: 0, account_id: LT_ACCOUNT_IDS[i], kind: 'vision_reply', path: 'adult-' + (i - 2) + '.jpg' }));
+    return events;
+}
+
+async function startLiveTest() {
+    const btn = document.getElementById('liveTestStartBtn');
+    btn.disabled = true; const old = btn.textContent; btn.textContent = '啟動中';
+    const r = await api('/api/live-test/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            account_ids: LT_ACCOUNT_IDS,
+            group_id: LT_GROUP_ID,
+            duration_seconds: 3600,
+            event_cap: 40,
+            video_enabled: true,
+            schedule: buildLiveTestSchedule(),
+        }),
+    }).catch(() => null);
+    btn.disabled = false; btn.textContent = old;
+    if (!r) { toast('啟動失敗（網路錯誤）'); return; }
+    if (!r.ok) { toast(r.data.error || '啟動失敗'); return; }
+    toast('媒體實測已啟動');
+    loadLiveTestStatus();
+}
+
+async function stopLiveTest() {
+    const r = await api('/api/live-test/stop', { method: 'POST' });
+    if (r.ok) { toast('已請求停止實測'); loadLiveTestStatus(); }
+    else toast(r.data.error || '停止失敗');
+}
+
+async function loadLiveTestStatus() {
+    const r = await api('/api/live-test/status').catch(() => null);
+    const state = document.getElementById('liveTestState');
+    const detail = document.getElementById('liveTestDetail');
+    const startBtn = document.getElementById('liveTestStartBtn');
+    const stopBtn = document.getElementById('liveTestStopBtn');
+    if (!r || !r.ok || !state) return;
+    const lt = r.data.live_test || {};
+    if (lt.status === 'idle' || !lt.run_id) {
+        state.textContent = '無進行中實測';
+        detail.textContent = '';
+        startBtn.style.display = '';
+        stopBtn.style.display = 'none';
+    } else {
+        state.textContent = `實測狀態：${lt.status}（run ${String(lt.run_id).slice(0, 8)}，運行中 ${lt.running || 0}/${(lt.account_ids || []).length} 帳號）`;
+        detail.textContent = `排程 ${lt.schedule_count || 0} 事件｜已送出 ${lt.reserved || 0}/${lt.event_cap || 40}｜剩餘 ${lt.remaining || 0}｜影片${lt.video_enabled ? '開啟' : '關閉'}`;
+        startBtn.style.display = 'none';
+        stopBtn.style.display = '';
+    }
+}
+
 // 自動載入 + 自動刷新
 (async () => {
     const r = await api('/api/status').catch(() => null);
@@ -1085,10 +1218,12 @@ async function loadMonitor() {
         });
         loadStatus();
         loadMonitorGroups();
+        loadLiveTestStatus();
         setInterval(() => {
             if (document.getElementById('mainBox').style.display !== 'none') {
                 loadStatus();
                 if (monitorGroupId) loadMonitor();
+                loadLiveTestStatus();
             }
         }, 15000);
     }
