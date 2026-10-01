@@ -1106,6 +1106,9 @@ class AccountWorker:
         continuous = bool(getattr(self.config, "continuous_activity_mode", False))
         if sender_id == self.tg_user_id:
             return False
+        # REPLY_ENABLED=false：只記錄群組訊息、完全不回覆（含熱回覆與水軍接話）
+        if not bool(getattr(self.config, "reply_enabled", True)):
+            return False
         if sender_id in self.managed_ids:
             return await self._should_follow_managed_origin(event)
         # 回覆別人或 @別人的訊息不插話；只有真正被指向的帳號可認領。

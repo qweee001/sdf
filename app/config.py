@@ -120,6 +120,7 @@ class Settings:
     memory_ttl_hours: int
 
     # 回覆行為
+    reply_enabled: bool
     base_reply_probability: float
     water_cross_talk_probability: float
 
@@ -227,6 +228,7 @@ def load_settings() -> Settings:
         memory_max_messages=_int("MEMORY_MAX_MESSAGES", 30),
         memory_ttl_hours=_int("MEMORY_TTL_HOURS", 24),
         base_reply_probability=_float("BASE_REPLY_PROBABILITY", 0.35),
+        reply_enabled=_bool("REPLY_ENABLED", True),
         water_cross_talk_probability=(
             1.0
             if acceptance_test_mode
