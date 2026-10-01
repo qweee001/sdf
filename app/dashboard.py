@@ -313,6 +313,35 @@ class Dashboard:
             await self.manager.db.update_account(account_id, enabled=1 if now_enabled else 0)
             return JSONResponse({"ok": True, "enabled": now_enabled})
 
+        @app.post("/api/accounts/{account_id}/features")
+        async def update_account_features(account_id: str, request: Request):
+            """帳號級別功能開關：reply_enabled（回覆）/ proactive_enabled（主動發言）。"""
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            acc = await self.manager.db.get_account(account_id)
+            if not acc:
+                return JSONResponse({"error": "帳號不存在"}, status_code=404)
+            try:
+                data = await request.json()
+            except Exception:
+                return JSONResponse({"error": "格式錯誤"}, status_code=400)
+            fields = {}
+            for key in ("reply_enabled", "proactive_enabled"):
+                if key in data:
+                    v = data[key]
+                    if type(v) is not bool:
+                        return JSONResponse({"error": f"{key} 必須是布林值"}, status_code=400)
+                    fields[key] = 1 if v else 0
+            if not fields:
+                return JSONResponse({"error": "沒有可更新的開關"}, status_code=400)
+            await self.manager.db.update_account(account_id, **fields)
+            acc2 = await self.manager.db.get_account(account_id)
+            return JSONResponse({
+                "ok": True,
+                "reply_enabled": bool(acc2.get("reply_enabled", 1)),
+                "proactive_enabled": bool(acc2.get("proactive_enabled", 1)),
+            })
+
         @app.get("/api/accounts/{account_id}/persona")
         async def get_persona(account_id: str, request: Request):
             if not self._check_session(request):
@@ -693,6 +722,27 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
     </div>
 </div>
 
+<!-- 帳號功能開關 -->
+<div class="modal" id="featuresModal">
+    <div class="modal-box" style="max-width:420px">
+        <h3>功能開關（帳號級別）</h3>
+        <p class="meta" style="margin-bottom:0.8rem">此開關只影響這個水軍帳號；與全域環境變數（REPLY_ENABLED / PROACTIVE_ENABLED）取「且」關係——兩者都開才會生效。</p>
+        <label class="meta" style="display:block;margin-bottom:0.5rem">
+            <input type="checkbox" id="feat_reply">
+            <b>回覆功能</b>（看到群組訊息後回覆）
+        </label>
+        <label class="meta" style="display:block;margin-bottom:0.5rem">
+            <input type="checkbox" id="feat_proactive">
+            <b>主動發言</b>（自己開話題、接話）
+        </label>
+        <p class="meta">⚠️ 修改後需重啟該帳號才生效。</p>
+        <div style="margin-top:1rem">
+            <button class="btn btn-primary" onclick="saveAccountFeatures()">儲存開關</button>
+            <button class="btn btn-secondary" onclick="closeModals()">關閉</button>
+        </div>
+    </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -700,6 +750,8 @@ let tgAuthId = '';
 let currentPersonaId = '';
 let currentGroupsId = '';
 let currentPrivatesId = '';
+let currentFeaturesId = '';
+let latestStatusData = null;
 
 function toast(msg) {
     const t = document.getElementById('toast');
@@ -747,6 +799,7 @@ async function doLogout() {
 async function loadStatus() {
     const { ok, data } = await api('/api/status');
     if (!ok) return;
+    latestStatusData = data;
     document.getElementById('stats').innerHTML = `
         <div class="stat-card"><div class="value">${data.total}</div><div class="label">總帳號數</div></div>
         <div class="stat-card"><div class="value">${data.running}</div><div class="label">運行中</div></div>
@@ -790,6 +843,7 @@ async function loadStatus() {
                     <button class="btn btn-secondary" data-act="toggle" data-id="${esc(acc.id)}">${acc.enabled ? '停用' : '啟用'}</button>
                     <button class="btn btn-secondary" data-act="persona" data-id="${esc(acc.id)}">人設</button>
                     <button class="btn btn-secondary" data-act="groups" data-id="${esc(acc.id)}">群組${(acc.groups && acc.groups.length) ? '·' + acc.groups.length : ''}</button>
+                    <button class="btn btn-secondary" data-act="features" data-id="${esc(acc.id)}">功能</button>
                     <button class="btn btn-secondary" data-act="privates" data-id="${esc(acc.id)}">私訊</button>
                     <button class="btn btn-danger" data-act="delete" data-id="${esc(acc.id)}">刪除</button>
                 </div>
@@ -1097,6 +1151,30 @@ async function markPrivateRead(msgId) {
     else toast(r.data.error || '標記失敗');
 }
 
+function showFeatures(id, replyOn, proactiveOn) {
+    currentFeaturesId = id;
+    document.getElementById('feat_reply').checked = !!replyOn;
+    document.getElementById('feat_proactive').checked = !!proactiveOn;
+    document.getElementById('featuresModal').classList.add('active');
+}
+
+async function saveAccountFeatures() {
+    if (!currentFeaturesId) return;
+    const r = await api(`/api/accounts/${currentFeaturesId}/features`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            reply_enabled: document.getElementById('feat_reply').checked,
+            proactive_enabled: document.getElementById('feat_proactive').checked,
+        }),
+    });
+    if (r.ok) {
+        toast('開關已儲存，重啟帳號後生效');
+        closeModals();
+        loadStatus();
+    } else toast(r.data.error || '儲存失敗');
+}
+
 // ---------- 群組監控 ----------
 let monitorGroupId = null;
 
@@ -1248,6 +1326,10 @@ async function loadLiveTestStatus() {
             else if (act === 'toggle') toggleAccount(b);
             else if (act === 'persona') showPersona(id);
             else if (act === 'groups') showGroups(id);
+            else if (act === 'features') {
+                const a = (latestStatusData && latestStatusData.accounts || []).find(x => x.id === id);
+                showFeatures(id, a && a.reply_enabled, a && a.proactive_enabled);
+            }
             else if (act === 'privates') showPrivates(id);
             else if (act === 'delete') deleteAccount(id);
         });

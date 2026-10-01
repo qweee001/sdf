@@ -435,8 +435,12 @@ class AccountWorker:
                  reply_claim_signals: dict[tuple[int, int], asyncio.Event] | None = None,
                  failed_reply_claimants: dict[tuple[int, int], set[int]] | None = None,
                  voice_library: Any | None = None,
-                 outbound_gate: Any | None = None):
+                 outbound_gate: Any | None = None,
+                 reply_enabled: bool = True,
+                 proactive_enabled: bool = True):
         self.account_id = account_id
+        self.reply_enabled = bool(reply_enabled)
+        self.proactive_enabled = bool(proactive_enabled)
         self.session_key = session_key
         self.tg_api_id = tg_api_id
         self.tg_api_hash = tg_api_hash
@@ -1106,7 +1110,9 @@ class AccountWorker:
         continuous = bool(getattr(self.config, "continuous_activity_mode", False))
         if sender_id == self.tg_user_id:
             return False
-        # REPLY_ENABLED=false：只記錄群組訊息、完全不回覆（含熱回覆與水軍接話）
+        # 帳號級開關優先；帳號未設定時 fallback 到全域 REPLY_ENABLED
+        if not self.reply_enabled:
+            return False
         if not bool(getattr(self.config, "reply_enabled", True)):
             return False
         if sender_id in self.managed_ids:
@@ -3527,7 +3533,8 @@ class AccountWorker:
                     await asyncio.sleep(min(1.0, interval / 4.0))
                     if not self.is_running:
                         return
-                    if self.config.proactive_enabled:
+                    # 帳號級主動開關優先，全域 PROACTIVE_ENABLED 為 fallback
+                    if self.proactive_enabled and bool(getattr(self.config, "proactive_enabled", True)):
                         await self._continuous_activity_tick()
                     continue
                 # 隨機間隔 4-12 分鐘（錯峰）
@@ -3538,7 +3545,10 @@ class AccountWorker:
                 await asyncio.sleep(random.uniform(loop_min, loop_max))
                 if not self.is_running:
                     return
-                if not self.config.proactive_enabled:
+                # 帳號級主動開關優先，全域 PROACTIVE_ENABLED 為 fallback
+                if not self.proactive_enabled:
+                    continue
+                if not bool(getattr(self.config, "proactive_enabled", True)):
                     continue
                 if self._is_sleeping():
                     continue

@@ -263,6 +263,8 @@ class AccountManager:
                 if getattr(self, "live_test", None) is not None
                 else None
             ),
+            reply_enabled=bool(acc.get("reply_enabled", 1)),
+            proactive_enabled=bool(acc.get("proactive_enabled", 1)),
         )
         self.workers[account_id] = worker
         await worker.start()
@@ -582,6 +584,8 @@ class AccountManager:
                 "tg_user_id": acc.get("tg_user_id"),
                 "tg_username": acc.get("tg_username"),
                 "avatar": acc.get("avatar"),
+                "reply_enabled": bool(acc.get("reply_enabled", 1)),
+                "proactive_enabled": bool(acc.get("proactive_enabled", 1)),
                 "stats": worker.stats if worker else {"replies_sent": 0, "errors": 0, "proactive_sent": 0},
             })
         return {
