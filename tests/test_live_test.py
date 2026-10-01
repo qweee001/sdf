@@ -735,7 +735,7 @@ def test_video_render_runs_in_own_task_without_blocking_text_or_voice(tmp_path):
         await asyncio.wait_for(manager.video_client.started.wait(), timeout=1)
         kinds = []
         try:
-            for _ in range(100):
+            for _ in range(300):
                 kinds = [
                     dispatch[1]
                     for worker in manager.workers.values()

@@ -42,7 +42,7 @@ from openai import AsyncOpenAI
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
-from telethon.tl.types import MessageMediaPhoto
+from telethon.tl.types import MessageEntityMention, MessageMediaPhoto
 from telethon.utils import get_display_name
 
 from .media import MediaAsset, OrcaMediaService
@@ -51,6 +51,14 @@ from .persona import generate_persona, generate_proactive_topic, get_system_prom
 _MAX_REPLY_CHARS = 60
 _REPLY_TASK_WINDOW_SECONDS = 45.0
 _MAX_RECENT_PROACTIVE_TOPICS = 64
+# 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
+_MAX_TOPIC_TURNS = 3
+# 冷場（无真人）時，水軍主動發言的漸進降頻窗口（秒）
+_COLD_ROOM_BASE_INTERVAL = 10.0
+_COLD_ROOM_REDUCED_INTERVAL = 15.0
+_COLD_ROOM_PAUSED_INTERVAL = 30.0
+_COLD_ROOM_REDUCED_HOURS = 6.0
+_COLD_ROOM_PAUSED_HOURS = 24.0
 _HIGH_TRAFFIC_HUMANS_5M = 14
 _HIGH_TRAFFIC_MAX_ORDINARY_5M = 2
 _MAX_ORDINARY_CLAIMS_10M = 8
@@ -434,6 +442,8 @@ class AccountWorker:
                  last_human_activity: dict | None = None,
                  reply_claim_signals: dict[tuple[int, int], asyncio.Event] | None = None,
                  failed_reply_claimants: dict[tuple[int, int], set[int]] | None = None,
+                 personas: dict | None = None,
+                 topic_turn_counts: dict | None = None,
                  voice_library: Any | None = None,
                  outbound_gate: Any | None = None,
                  reply_enabled: bool = True,
@@ -474,6 +484,10 @@ class AccountWorker:
         self.failed_reply_claimants = (
             failed_reply_claimants if failed_reply_claimants is not None else {}
         )
+        # 全水軍帳號的 TG id → 人設（供「興趣關聯選人」用，manager 共享）
+        self.personas = personas if personas is not None else {}
+        # 話題回合計數（群組 → 本回合 AI 已發言數），manager 共享
+        self.topic_turn_counts = topic_turn_counts if topic_turn_counts is not None else {}
         self.on_status_change = on_status_change
         # 指定群組：空集合 = 全部禁止；非空 = 只在這幾個群活動。
         self.selected_groups: set[int] = set(selected_groups or [])
@@ -731,6 +745,11 @@ class AccountWorker:
         task = asyncio.create_task(
             self._reply_later(event, delay, managed_followup=managed_followup)
         )
+        # 記錄該待辦回覆屬於哪個群組，供真人插話時精準取消（重新判斷）
+        try:
+            task._sdf_group_id = int(getattr(event, "chat_id", 0) or 0)
+        except Exception:
+            task._sdf_group_id = 0
         self._reply_tasks.add(task)
         task.add_done_callback(self._reply_tasks.discard)
 
@@ -748,15 +767,42 @@ class AccountWorker:
             self._known_groups.add(group_id)
             self._last_activity[group_id] = time.time()
             sender_id = int(event.sender_id or 0)
+            stored_content = str(event.raw_text or "").strip()
+            if isinstance(getattr(event, "media", None), MessageMediaPhoto):
+                stored_content = f"{stored_content} [圖片]".strip()
             if sender_id not in self.managed_ids:
                 self.last_human_activity[group_id] = time.time()
+                # 真人開題：重置該群的話題回合計數，角色互聊從這裡重新計
+                self.topic_turn_counts[group_id] = 0
+                # 真人插話：取消尚未送出的待辦回覆，避免繼續演舊話題（重新判斷）
+                cancelled = 0
+                for task in list(self._reply_tasks):
+                    try:
+                        if getattr(task, "_sdf_group_id", None) == group_id:
+                            task.cancel()
+                            cancelled += 1
+                    except Exception:
+                        continue
+                if cancelled:
+                    self.stats["human_interrupt_cancelled"] = (
+                        int(self.stats.get("human_interrupt_cancelled", 0)) + cancelled
+                    )
+                # 群友記憶：按「群組＋成員＋帳號」三層隔離保存，群友甲的資訊不會混到群友乙
+                note = stored_content[:60]
+                if note:
+                    try:
+                        await self.db.upsert_group_member_note(
+                            group_id, sender_id, self.account_id, note
+                        )
+                        # 群內共同記憶：最近話題／共同活動，供後續接話與主動發言引用
+                        await self.db.upsert_group_shared_note(group_id, self.account_id, note)
+                    except Exception as exc:
+                        self.stats["errors"] += 1
+                        print(f"[{self.name}] group_memory write error: {exc}", flush=True)
             await self._record_group_event(
                 event,
                 "managed" if sender_id in self.managed_ids else "human",
             )
-            stored_content = str(event.raw_text or "").strip()
-            if isinstance(getattr(event, "media", None), MessageMediaPhoto):
-                stored_content = f"{stored_content} [圖片]".strip()
             await self.db.add_message(
                 self.account_id, group_id,
                 sender_id,
@@ -1072,6 +1118,9 @@ class AccountWorker:
         )
         if not candidates or int(self.tg_user_id or 0) not in candidates:
             return False
+        # 話題回合已滿：本回合 AI 已發言夠多 → 留空間給真人，不繼續接龍
+        if int(self.topic_turn_counts.get(group_id, 0)) >= _MAX_TOPIC_TURNS:
+            return False
         probability = max(
             0.0,
             min(1.0, float(self.config.water_cross_talk_probability)),
@@ -1178,7 +1227,7 @@ class AccountWorker:
         )
         if message_id <= 0:
             return False
-        winner = self._ordinary_reply_winner(event)
+        winner = await self._pick_group_responder(event)
         if not winner:
             return False
         return await self._claim_human_reply(
@@ -1294,6 +1343,139 @@ class AccountWorker:
             "big",
         ) / float(2**64)
         return score < probability
+
+    async def _pick_group_responder(self, event) -> int:
+        """群聊「誰適合接話」：依序判斷，命中即選定，否則回退雜湊抽選。
+
+        1) 被 @ / 被回覆指向某水軍 → 該水軍接話
+        2) 最近在本群發言過的水軍（話題參與者）接續
+        3) 依人設興趣與話題關聯打分選人
+        4) 近期發言過多的水軍暫時讓位
+        5) 話題回合已滿（_MAX_TOPIC_TURNS）→ 0，留空間給真人
+        """
+        group_id = int(event.chat_id or 0)
+        message_id = int(
+            getattr(event, "id", 0)
+            or getattr(getattr(event, "message", None), "id", 0)
+            or 0
+        )
+        eligible_ids = (
+            self.active_group_ids.get(group_id, set())
+            if self._group_eligibility_enabled
+            else self.active_ids
+        )
+        candidates = sorted(
+            int(uid) for uid in eligible_ids
+            if int(uid) > 0 and int(uid) in self.active_ids
+        )
+        if not candidates or message_id <= 0:
+            return 0
+
+        # 5) 話題回合已滿：本回合 AI 已發言夠多 → 留空間給真人
+        if int(self.topic_turn_counts.get(group_id, 0)) >= _MAX_TOPIC_TURNS:
+            return 0
+
+        msg = getattr(event, "message", None)
+
+        # 1) 被 @ / 被回覆指向某水軍 → 該水軍接話
+        mentioned_ids = self._mentioned_user_ids(msg)
+        directed = [uid for uid in mentioned_ids if uid in candidates]
+        if directed:
+            return self._hash_pick(directed, f"mention:{group_id}:{message_id}")
+        reply_target = self._reply_target_user_id(msg)
+        if reply_target in candidates:
+            return int(reply_target)
+
+        # 2) 話題參與者：最近在本群發過言的水軍接續
+        last_water_sender = 0
+        recent_texts: list[str] = []
+        group_msgs: list[dict] = []
+        try:
+            group_msgs = await self.db.get_group_messages(group_id, limit=12)
+            for m in group_msgs:
+                if str(m.get("role")) == "assistant":
+                    last_water_sender = int(m.get("sender_id") or 0)
+                    recent_texts.append(str(m.get("content") or ""))
+        except Exception:
+            pass
+        if last_water_sender in candidates:
+            return int(last_water_sender)
+
+        # 3) 依人設興趣與話題關聯打分
+        topic_text = " ".join(recent_texts[-5:]) + " " + str(
+            getattr(event, "raw_text", "") or ""
+        ).strip()
+        if self.personas and topic_text:
+            scored = []
+            for uid in candidates:
+                persona = self.personas.get(uid) or {}
+                hobbies = [str(h) for h in (persona.get("hobbies") or [])]
+                score = sum(1 for h in hobbies if h and h in topic_text)
+                # 4) 發言過多的水軍讓位：該群近 12 則內 assistant 發言數
+                sent_recent = sum(
+                    1
+                    for m in group_msgs
+                    if str(m.get("role")) == "assistant"
+                    and int(m.get("sender_id") or 0) == uid
+                )
+                if sent_recent >= 3:
+                    continue  # 讓位
+                scored.append((score, uid))
+            if any(s > 0 for s, _ in scored):
+                scored.sort(key=lambda t: (-t[0], t[1]))
+                if scored[0][0] > 0:
+                    return scored[0][1]
+
+        # 5) 回退：雜湊抽選（保留既有防搶答機制）
+        return self._ordinary_reply_winner(event)
+
+    @staticmethod
+    def _mentioned_user_ids(message) -> set[int]:
+        """從訊息 entities 解析被 @ 的用戶 id。"""
+        ids: set[int] = set()
+        if message is None:
+            return ids
+        for ent in (getattr(message, "entities", None) or []):
+            if isinstance(ent, MessageEntityMention):
+                if getattr(ent, "user_id", 0):
+                    ids.add(int(ent.user_id))
+        # UpdateShortMessage 路徑：message.mentioned 為 bool，無 id 列表時至少知道有 @
+        return ids
+
+    @staticmethod
+    def _reply_target_user_id(message) -> int:
+        """回覆指向的用戶 id（reply_to.reply_from.from_id / reply_to_peer_id）。"""
+        if message is None:
+            return 0
+        reply_to = getattr(message, "reply_to", None)
+        if reply_to is None:
+            return 0
+        fwd = getattr(reply_to, "reply_from", None)
+        from_peer = getattr(fwd, "from_id", None)
+        if from_peer is not None:
+            try:
+                from telethon import utils as _tg_utils
+                return int(_tg_utils.get_peer_id(from_peer))
+            except Exception:
+                return 0
+        peer = getattr(reply_to, "reply_to_peer_id", None)
+        if peer is not None:
+            try:
+                from telethon import utils as _tg_utils
+                return int(_tg_utils.get_peer_id(peer))
+            except Exception:
+                return 0
+        return 0
+
+    @staticmethod
+    def _hash_pick(candidates: list[int], salt: str) -> int:
+        """同一 salt 下穩定抽選（保留既有防搶答的雜湊機制）。"""
+        return max(
+            candidates,
+            key=lambda uid: hashlib.blake2b(
+                f"{salt}:{uid}".encode(), digest_size=8
+            ).digest(),
+        )
 
     def _ordinary_reply_winner(self, event) -> int:
         group_id, message_id = self._reply_claim_key(event)
@@ -1501,6 +1683,18 @@ class AccountWorker:
                 failure_reason,
             )
             print(f"[{self.name}] reply error: {e}", flush=True)
+        except asyncio.CancelledError:
+            # 真人插話取消了該群待辦回覆：釋放已認領的 claim，避免鎖死其他水軍
+            try:
+                if not telegram_dispatched:
+                    await self.db.release_message_response_claim(
+                        *self._reply_claim_key(event), self.account_id
+                    )
+                self.stats["reply_cancelled"] = int(self.stats.get("reply_cancelled", 0)) + 1
+                await self._audit_reply(event, "cancel", "human_interrupt")
+            except Exception:
+                pass
+            raise
         finally:
             if telegram_dispatched:
                 if is_human_reply and not human_counted:
@@ -2329,6 +2523,28 @@ class AccountWorker:
                 "\n近期群內已發過以下文案，絕不能照抄、近似改寫或沿用相同開頭：\n"
                 f"{examples}\n請改用符合你個人人設的新角度。"
             )
+        # 群聊記憶：群組＋成員＋帳號三層隔離的群友記憶，讓接話有根據
+        sender_id = int(event.sender_id or 0)
+        if sender_id and sender_id not in self.managed_ids:
+            try:
+                member_notes = await self.db.get_group_member_notes(
+                    group_id, sender_id, self.account_id
+                )
+            except Exception:
+                member_notes = []
+            if member_notes:
+                notes = "\n".join(f"- {n}" for n in member_notes[:5])
+                user_message += (
+                    f"\n與該群友（{int(sender_id)}）之前的互動記錄（僅限這位群友，別混到其他人）：\n{notes}"
+                )
+        # 群內共同記憶：最近話題／共同活動，接話與主動發言的依據
+        try:
+            shared_notes = await self.db.get_group_shared_notes(group_id, self.account_id)
+        except Exception:
+            shared_notes = []
+        if shared_notes:
+            shared = "\n".join(f"- {n}" for n in shared_notes[:5])
+            user_message += f"\n本群最近聊過的內容（供接話參考）：\n{shared}"
 
         async def call_reply(message: str) -> str:
             if image and self.media_service:
@@ -2967,6 +3183,11 @@ class AccountWorker:
                 "assistant",
                 text,
             )
+            # 話題回合：本群 AI 發言計數＋1（真人開題時歸零）
+            if int(chat_id) < 0:
+                self.topic_turn_counts[int(chat_id)] = (
+                    int(self.topic_turn_counts.get(int(chat_id), 0)) + 1
+                )
             await self.db.touch_activity(
                 self.account_id, chat_id, activity_kind
             )
@@ -3318,15 +3539,29 @@ class AccountWorker:
         if not human_msgs:
             return ""
         context = "\n".join(
-            f"[{m.get('sender_name','?')}] {str(m.get('content',''))[:60]}"
+            f"[{m.get('sender_name','?')} {str(m.get('content',''))[:60]}"
             for m in human_msgs[-5:]
         )
+        # 主動互動有根據：從群友公開聊過的事情延伸（例如「你昨天說的面試，今天結果怎樣？」）
+        # 只取群內共同記憶（member_id=0，跨群隔離）；個別群友記憶在回覆時按群友精確取用。
+        try:
+            shared_notes = await self.db.get_group_shared_notes(group_id, self.account_id)
+        except Exception:
+            shared_notes = []
+        notes_block = ""
+        if shared_notes:
+            notes_block = (
+                "本群最近聊過的內容（供接續、追問）：\n"
+                + "\n".join(f"- {n}" for n in shared_notes[:5])
+            )
         prompt = (
             "群組裡最近的人類訊息如下。請以你的口吻生成 1-3 句日常閒聊，"
             "要接得上群組當前話題（食物、天氣、工作、追劇、聚會等），自然口語、"
             "繁體中文、60 字元內，不要談群務。可以帶點勾引或曖昧，但別硬凹。"
             f"\n{context}"
         )
+        if notes_block:
+            prompt += f"\n{notes_block}"
         topic = await self._call_ai(get_system_prompt(self.persona), prompt)
         topic = (topic or "").strip()
         if not topic or self._is_refusal(topic):
@@ -3403,33 +3638,39 @@ class AccountWorker:
         return await self._generate_reply(event)
 
     async def _continuous_activity_tick(self) -> None:
-        interval = max(
-            10.0,
-            float(
-                getattr(
-                    self.config,
-                    "continuous_activity_interval_seconds",
-                    10.0,
-                )
-            ),
-        )
-        # 冷場時（24h 無真人）自動縮短間隔到 5s，讓水軍更積極活躍氣氛
-        group_cold = any(
-            time.time() - float(self.last_human_activity.get(gid, 0) or 0) >= 24 * 3600
-            for gid in self.selected_groups
-        )
-        if group_cold:
-            interval = min(interval, 5.0)
         current = time.time()
-        slot = int(current // interval)
         for group_id in sorted(int(gid) for gid in self.selected_groups):
+            # 每個群分開計時：依該群最近真人活動時間決定本群間隔（冷場逐步降頻）
+            last_human = float(self.last_human_activity.get(group_id, 0) or 0)
+            hours_since_human = (
+                (current - last_human) / 3600 if last_human else float("inf")
+            )
+            base_interval = max(
+                _COLD_ROOM_BASE_INTERVAL,
+                float(
+                    getattr(
+                        self.config,
+                        "continuous_activity_interval_seconds",
+                        _COLD_ROOM_BASE_INTERVAL,
+                    )
+                ),
+            )
+            if hours_since_human < _COLD_ROOM_REDUCED_HOURS:
+                # 真人活躍：正常節奏（真人回來時優先接真人內容）
+                interval = base_interval
+            elif hours_since_human < _COLD_ROOM_PAUSED_HOURS:
+                # 冷場 6h：逐步降頻（間隔拉長）
+                interval = _COLD_ROOM_REDUCED_INTERVAL
+            else:
+                # 冷場 24h+：再降頻
+                interval = _COLD_ROOM_PAUSED_INTERVAL
+            slot = int(current // interval)
             if self._continuous_turn_winner(group_id, slot) != int(
                 self.tg_user_id or 0
             ):
                 continue
-            last_human = float(self.last_human_activity.get(group_id, 0) or 0)
             if last_human and current - last_human < interval:
-                # 先给真人唯一赢家一个发送窗口，下一槽再继续延展。
+                # 先给真人一個發送窗口：真人在說話時水軍讓路，優先接真人內容
                 continue
             pending_seconds = max(120.0, interval * 12.0)
             if not await self.db.reserve_continuous_slot(

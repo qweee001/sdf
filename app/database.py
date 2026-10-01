@@ -238,6 +238,16 @@ class Database:
             ON live_test_runs (status, started_at DESC)
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS group_memory (
+                group_id INTEGER NOT NULL,
+                member_id INTEGER NOT NULL,
+                account_id TEXT NOT NULL,
+                note TEXT NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (group_id, member_id, account_id)
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS live_test_events (
                 run_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,
@@ -1998,9 +2008,68 @@ class Database:
 
     # ---------- 維護 ----------
 
+    async def get_group_member_notes(
+        self, group_id: int, member_id: int, account_id: str, limit: int = 10
+    ) -> list[str]:
+        """該帳號與該群友最近的互動備註（群組＋成員＋帳號三層隔離，絕不跨群跨人混用）。"""
+        if not group_id or not member_id or not account_id:
+            return []
+        cursor = await self._c.execute(
+            "SELECT note FROM group_memory "
+            "WHERE group_id = ? AND member_id = ? AND account_id = ? "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (int(group_id), int(member_id), account_id, int(limit)),
+        )
+        rows = await cursor.fetchall()
+        return [str(r[0]) for r in rows]
+
+    async def upsert_group_member_note(
+        self, group_id: int, member_id: int, account_id: str, note: str
+    ) -> bool:
+        """把一條群友備註寫入（同 key 覆蓋最新，舊的過期由 cleanup_expired 清）。"""
+        if not group_id or not member_id or not account_id:
+            return False
+        await self._c.execute(
+            "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(group_id, member_id, account_id) DO UPDATE SET "
+            "note = excluded.note, updated_at = excluded.updated_at",
+            (int(group_id), int(member_id), account_id, note, time.time()),
+        )
+        await self._c.commit()
+        return True
+
+    async def upsert_group_shared_note(self, group_id: int, account_id: str, note: str) -> bool:
+        """把一條群組共同記憶寫入（member_id=0，跨群組隔離；舊的過期由 cleanup_expired 清）。"""
+        if not group_id or not account_id or not note or not note.strip():
+            return False
+        await self._c.execute(
+            "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
+            "VALUES (?, 0, ?, ?, ?) "
+            "ON CONFLICT(group_id, member_id, account_id) DO UPDATE SET "
+            "note = excluded.note, updated_at = excluded.updated_at",
+            (int(group_id), account_id, note.strip(), time.time()),
+        )
+        await self._c.commit()
+        return True
+
+    async def get_group_shared_notes(self, group_id: int, account_id: str, limit: int = 10) -> list[str]:
+        """讀取群組共同記憶（最近話題、共同活動、故事進度），按群組隔離。"""
+        if not group_id or not account_id:
+            return []
+        cursor = await self._c.execute(
+            "SELECT note FROM group_memory "
+            "WHERE group_id = ? AND member_id = 0 AND account_id = ? "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (int(group_id), account_id, int(limit)),
+        )
+        rows = await cursor.fetchall()
+        return [str(r[0]) for r in rows]
+
     async def cleanup_expired(self, ttl_hours: int) -> None:
         cutoff = time.time() - ttl_hours * 3600
         await self._c.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
+        await self._c.execute("DELETE FROM group_memory WHERE updated_at < ?", (cutoff,))
         await self._c.execute("DELETE FROM private_messages WHERE timestamp < ?", (cutoff,))
         await self._c.execute("DELETE FROM group_events WHERE observed_at < ?", (cutoff,))
         await self._c.execute("DELETE FROM reply_events WHERE at < ?", (cutoff,))

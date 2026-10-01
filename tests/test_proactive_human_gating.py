@@ -1,10 +1,10 @@
-"""反重复 P1-1：群内长时间无真人时，主动话题降频/暂停。
+"""反重复 P1-1：群内长时间无真人时，主动话题降频/限频。
 
 规则（按用户定案「群是给真人看的，真人不在就别自嗨」）：
 - <6h 有真人活动：正常节奏（现有逻辑不变）
-- 6-24h 无真人：每账号每天最多 2 条主动话题（大幅降频）
-- >24h 无真人：完全暂停主动话题
-- 从未有过真人活动（last_human_activity 空）：按 24h 档处理（保守暂停）
+- 6-24h 无真人：每账号每天最多 2 条主动话题（降频）
+- >24h 无真人：每天最多 4 条（冷场限频，非完全暂停）
+- 从未有过真人活动（last_human_activity 空）：按 >24h 档处理（限频 4 条）
 """
 
 import asyncio
@@ -52,11 +52,13 @@ def test_proactive_paused_when_never_any_human():
 
 
 def test_proactive_loop_respects_pause():
-    """>24h 无真人时 _proactive_loop 直接跳过发送。"""
+    """>24h 无真人时主动发言降频（每天最多 4 条），而非完全暂停。"""
     async def main():
         worker = _worker(202, db=_ClaimDB(), last_human_activity={-5428680940: _ts(48)})
         assert worker._proactive_rate_limit_ok(-5428680940) == "paused"
-        # 应被 gate 挡下
+        # paused 档：当天未达上限(4)时放行，达到上限后挡下
+        assert worker._proactive_gate_blocks(-5428680940) is False
+        worker._proactive_today = 4
         assert worker._proactive_gate_blocks(-5428680940) is True
 
     asyncio.run(main())

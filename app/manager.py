@@ -42,6 +42,8 @@ class AccountManager:
         self.human_owners: dict[tuple[int, int], tuple[int, float]] = {}
         self.recent_proactive_owners: dict[int, tuple[int, float]] = {}
         self.last_human_activity: dict[int, float] = {}
+        self.personas: dict[int, dict] = {}
+        self.topic_turn_counts: dict[int, int] = {}
         self.reply_claim_signals: dict[tuple[int, int], asyncio.Event] = {}
         self.failed_reply_claimants: dict[tuple[int, int], set[int]] = {}
         self._status: dict[str, dict] = {}
@@ -213,7 +215,30 @@ class AccountManager:
                 persona = json.loads(acc["persona"])
             except Exception:
                 persona = None
-        # 人設名字按照登錄賬號名字：以帳號在 Telegram 設定的顯示名（tg_username 欄存的是 tg_name）為準
+        # 全水軍帳號 TG id → 人設（供「誰適合接話」的興趣關聯打分）
+        try:
+            all_accounts = await self.db.list_accounts()
+        except Exception as exc:
+            print(f"[manager] personas build error: {exc}", flush=True)
+            all_accounts = [acc]
+        personas: dict[int, dict] = {}
+        for a in all_accounts:
+            tid = int(a.get("tg_user_id") or 0)
+            p = None
+            if a.get("persona"):
+                try:
+                    p = json.loads(a["persona"])
+                except Exception:
+                    p = None
+            if tid and p is not None:
+                # 人設名字與帳號名同步（同 _start_account_unlocked 的邏輯）
+                dn = str(a.get("tg_username") or "").strip()
+                if dn and p.get("name") != dn:
+                    p["name"] = dn
+                personas[tid] = p
+        # 話題回合計數（群組 → 本回合 AI 發言數），所有水軍 worker 共享
+        self.topic_turn_counts = getattr(self, "topic_turn_counts", None) or {}
+        self.personas = personas
         display_name = str(acc.get("tg_username") or "").strip()
         if persona and display_name and persona.get("name") != display_name:
             persona["name"] = display_name
@@ -257,6 +282,8 @@ class AccountManager:
             last_human_activity=self.last_human_activity,
             reply_claim_signals=self.reply_claim_signals,
             failed_reply_claimants=self.failed_reply_claimants,
+            personas=self.personas,
+            topic_turn_counts=self.topic_turn_counts,
             voice_library=None,
             outbound_gate=(
                 self.live_test.outbound_gate

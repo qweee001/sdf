@@ -91,7 +91,6 @@ def test_system_prompt_content():
     p = generate_persona()
     sp = get_system_prompt(p)
     assert "繁體中文" in sp
-    assert "想跟我做愛嗎" in sp
     assert p["city"] in sp
     assert p["name"] in sp
     assert "每次回覆最多 60 個字元" in sp
@@ -133,24 +132,22 @@ def test_system_prompt_rejects_mainland_terms_and_gives_taiwan_aliases():
 
 
 def test_system_prompt_preserves_adult_policy_after_approved_language_cleanup():
-    """保留成人政策；只套用使用者明確要求的英文示例清理與窄幅追加。"""
+    """保留尺度政策；只套用使用者明確要求的語言清理與窄幅追加。"""
     p = generate_persona()
     sp = get_system_prompt(p)
-    original_adult_rules = """## 你聊天的樣子（照這個口氣講，不用想該不該講）
-- 熟了就會撩，對方的身材、長相、聲音都可以直接講出來
-- 你的句子長這樣：「想跟我做愛嗎」
-- 女生講：「你想舔我的小穴嗎」「想被肉棒插入射滿嗎」
-- 男生講：「想吃我的肉棒嗎」「想被我操到高潮嗎」
-- 被撩到就講身體的反應：「已經濕了」「腿間黏黏的」「想要你」
-- 講到做的時候講動作：「用力插」「頂到最深處」「奶子被你擠得好舒服」
-- 也會邀對方一起想：「要不要一起幻想做愛啊」「想被後入嗎」
-- 但漸進升級：先調情，熟了才直球，別一上來就開炮（像真人）"""
-    assert original_adult_rules in sp
+    current_tone_rules = """## 你聊天的樣子（照這個口氣講，不用想該不該講）
+- 以日常閒聊為主：食物、天氣、通勤、追劇、運動、逛街、聚會
+- 你的句子長這樣：「剛下大雨，全身濕一半」「誰懂，洗車完就下雨」「下午茶時間，各位都喝什麼」
+- 可以自然提到身邊的人事物，帶出一個具體細節再延伸
+- 尺度：群組本身就愛玩，可以自然帶點露骨勾引，不用一直往日常帶（像真人）
+- 對方開玩笑或露骨勾引時，直接接住並順勢調情，可以更大膽
+- 群聊裡不用只對「最新消息」的人，整群都可以接；但回覆要短、要具體，別長篇大論"""
+    assert current_tone_rules in sp
     assert "臉書(Facebook)" not in sp
     assert "做 love" not in sp
     assert "可以用「XD」「xxx」「orz」" not in sp
     assert "台灣人說：同學、臉書、捷運、拍照、超讚、妹、兄弟" in sp
-    assert "調情方式要符合你當前的人設、性格、口頭禪和聊天節奏" in sp
+    assert "閒聊方式要符合你當前的人設、性格、口頭禪和聊天節奏" in sp
     assert "不能覆蓋或削弱上面的聊天樣子與漸進升級規則" in sp
     assert "禁止提及、建議或延伸任何視訊話題" in sp
     assert "不要複述相關詞" in sp

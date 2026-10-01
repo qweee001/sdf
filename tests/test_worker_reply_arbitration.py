@@ -1407,6 +1407,7 @@ def test_continuous_tick_completes_dispatched_slot_when_recording_fails(monkeypa
         )
         worker.config.continuous_activity_mode = True
         worker.config.continuous_activity_interval_seconds = 10.0
+        worker.last_human_activity[group_id] = 105.0
         worker._generate_continuous_reply = AsyncMock(return_value="已送出但記錄失敗")
 
         async def send_then_record_fails(*_args, **kwargs):
@@ -1457,6 +1458,7 @@ def test_continuous_tick_completes_unknown_send_on_cancellation(monkeypatch):
         )
         worker.config.continuous_activity_mode = True
         worker.config.continuous_activity_interval_seconds = 10.0
+        worker.last_human_activity[group_id] = 105.0
         worker._generate_continuous_reply = AsyncMock(return_value="發送結果未知")
         worker._send_text_recorded = AsyncMock(side_effect=asyncio.CancelledError)
         monkeypatch.setattr("app.worker.time.time", lambda: 120.0)
