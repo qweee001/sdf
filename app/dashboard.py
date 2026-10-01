@@ -1042,8 +1042,8 @@ async function loadMonitor() {
         if (hasReply) replied++;
     });
     const rate = bots.length ? Math.round(replied / bots.length * 100) : 0;
-    const tmin = msgs.length ? new Date(Math.min(...msgs.map(m => m.timestamp * 1000)) : null;
-    const tmax = msgs.length ? new Date(Math.max(...msgs.map(m => m.timestamp * 1000)) : null;
+    const tmin = msgs.length ? new Date(Math.min(...msgs.map(m => m.timestamp * 1000))) : null;
+    const tmax = msgs.length ? new Date(Math.max(...msgs.map(m => m.timestamp * 1000))) : null;
     const winLabel = (tmin && tmax)
         ? (tmin.toLocaleString('zh-TW') + ' → ' + tmax.toLocaleString('zh-TW'))
         : '無訊息';
