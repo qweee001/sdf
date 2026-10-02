@@ -2917,7 +2917,12 @@ class AccountWorker:
             context = "最近對話：\n"
             for msg in recent:
                 role = "我" if msg["role"] == "assistant" else msg["sender_name"]
-                context += f"[{role}] {msg['content']}\n"
+                # 截斷超長訊息（如管理員公告）並壓平換行——避免 LLM 模仿長文格式或編號列表
+                content = str(msg.get("content", ""))
+                content = content.replace("\r", " ").replace("\n", " ")
+                if len(content) > 80:
+                    content = content[:80] + "…"
+                context += f"[{role}] {content}\n"
         sender_name = ""
         try:
             sender_name = get_display_name(event.sender) or ""

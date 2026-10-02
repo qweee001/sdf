@@ -1105,3 +1105,21 @@ def test_dissimilar_reply_is_accepted_without_retry():
         assert worker._call_ai.await_count == 1
 
     asyncio.run(main())
+
+
+def test_build_user_message_truncates_long_context_messages():
+    """管理員長公告應被截斷並壓平換行，避免 LLM 模仿其格式。"""
+    worker = _worker()
+
+    long_announcement = "🎊恭喜哥哥成功解鎖約會!\n" * 10 + "結尾"
+    history = [
+        {"role": "user", "sender_name": "管理員", "content": long_announcement},
+    ]
+    prompt = worker._build_user_message(_FakeEvent(), history)
+
+    seg = prompt.split("最近對話：")[1].split("最新消息")[0].strip()
+    # 每條歷史訊息應壓平為單行且長度受控
+    admin_lines = [l for l in seg.splitlines() if l.startswith("[管理員]")]
+    assert admin_lines, "應包含管理員訊息"
+    for line in admin_lines:
+        assert len(line) <= 90  # 80 字截斷 + 截斷號 + 前綴
