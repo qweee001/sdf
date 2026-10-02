@@ -215,7 +215,7 @@ def test_reply_over_sixty_characters_is_regenerated_once():
         assert reply == valid_retry
         assert worker._call_ai.await_count == 2
         retry_prompt = worker._call_ai.await_args_list[1].args[1]
-        assert "最多 60 個字元" in retry_prompt
+        assert "最多 25 個字元" in retry_prompt
 
     asyncio.run(main())
 
@@ -254,7 +254,7 @@ def test_generation_prompt_requires_at_most_sixty_characters():
 
     prompt = worker._build_user_message(_FakeEvent(), [])
 
-    assert "最多 60 個字元" in prompt
+    assert "最多 25 個字元" in prompt
     assert "標點、空格也算" in prompt
 
 
@@ -981,7 +981,7 @@ def test_group_meta_shares_existing_single_retry_with_length_video_and_repetitio
         assert worker._call_ai.await_count == 2
         assert classifier.await_count == 2
         correction = worker._call_ai.await_args_list[1].args[1]
-        assert "最多 60 個字元" in correction
+        assert "最多 25 個字元" in correction
         assert "不要提及或複述禁止話題" in correction
         assert "群務" in correction
         assert "換開頭、句型和語氣" in correction
