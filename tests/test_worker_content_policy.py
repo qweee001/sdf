@@ -189,26 +189,26 @@ def test_video_topic_reply_is_regenerated_instead_of_rewritten():
     asyncio.run(main())
 
 
-def test_reply_at_exactly_sixty_characters_is_accepted_without_retry():
+def test_reply_at_exactly_twenty_five_characters_is_accepted_without_retry():
     async def main():
         worker = _worker()
-        text = "字" * 60
+        text = "字" * 25
         worker._call_ai = AsyncMock(return_value=text)
 
         reply = await worker._generate_reply(_FakeEvent())
 
         assert reply == text
-        assert len(reply) == 60
+        assert len(reply) == 25
         assert worker._call_ai.await_count == 1
 
     asyncio.run(main())
 
 
-def test_reply_over_sixty_characters_is_regenerated_once():
+def test_reply_over_twenty_five_characters_is_regenerated_once():
     async def main():
         worker = _worker()
         valid_retry = "這次控制在六十個字元內"
-        worker._call_ai = AsyncMock(side_effect=["字" * 61, valid_retry])
+        worker._call_ai = AsyncMock(side_effect=["字" * 26, valid_retry])
 
         reply = await worker._generate_reply(_FakeEvent())
 
@@ -220,10 +220,10 @@ def test_reply_over_sixty_characters_is_regenerated_once():
     asyncio.run(main())
 
 
-def test_reply_is_dropped_when_retry_is_still_over_sixty_characters():
+def test_reply_is_dropped_when_retry_is_still_over_twenty_five_characters():
     async def main():
         worker = _worker()
-        worker._call_ai = AsyncMock(side_effect=["甲" * 61, "乙" * 61])
+        worker._call_ai = AsyncMock(side_effect=["甲" * 26, "乙" * 26])
 
         reply = await worker._generate_reply(_FakeEvent())
 
@@ -237,7 +237,7 @@ def test_length_and_video_policies_share_one_retry():
     async def main():
         worker = _worker()
         worker._call_ai = AsyncMock(side_effect=[
-            "要不要開鏡頭聊聊" + "字" * 61,
+            "要不要開鏡頭聊聊" + "字" * 26,
             "丙" * 61,
         ])
 
@@ -249,7 +249,7 @@ def test_length_and_video_policies_share_one_retry():
     asyncio.run(main())
 
 
-def test_generation_prompt_requires_at_most_sixty_characters():
+def test_generation_prompt_requires_at_most_twenty_five_characters():
     worker = _worker()
 
     prompt = worker._build_user_message(_FakeEvent(), [])
@@ -323,7 +323,7 @@ def test_second_policy_violation_is_audited_by_policy_stage():
         worker.tg_client = cast(Any, client)
         worker.tg_user_id = 456
         worker.is_running = True
-        worker._call_ai = AsyncMock(side_effect=["甲" * 61, "乙" * 61])
+        worker._call_ai = AsyncMock(side_effect=["甲" * 26, "乙" * 26])
 
         await worker._reply_later(_FakeEvent(), 0)
 
@@ -590,7 +590,7 @@ def test_send_layer_never_rewrites_text():
     asyncio.run(main())
 
 
-def test_send_layer_fails_closed_for_text_over_sixty_characters():
+def test_send_layer_fails_closed_for_text_over_twenty_five_characters():
     """所有帳號共用發送層；任何繞過生成器的超長文字也不能送出。"""
     async def main():
         worker = _worker()
@@ -598,7 +598,7 @@ def test_send_layer_fails_closed_for_text_over_sixty_characters():
         worker.tg_client = cast(Any, client)
         worker.is_running = True
 
-        sent = await worker._send_message(-1001, "字" * 61)
+        sent = await worker._send_message(-1001, "字" * 26)
 
         assert sent is False
         assert client.sent == []
@@ -971,7 +971,7 @@ def test_group_meta_shares_existing_single_retry_with_length_video_and_repetitio
     async def main():
         worker = _worker()
         classifier = _set_classifier_effects(worker, "BLOCK", "BLOCK")
-        first = "本群管理員很負責，要不要開視訊" + "字" * 61
+        first = "本群管理員很負責，要不要開視訊" + "字" * 26
         worker.db.recent_group_replies = [first]
         worker._call_ai = AsyncMock(side_effect=[first, "這群絕對不會被騙"])
 

@@ -48,7 +48,7 @@ from telethon.utils import get_display_name
 from .media import MediaAsset, OrcaMediaService
 from .persona import generate_persona, generate_proactive_topic, get_system_prompt
 
-_MAX_REPLY_CHARS = 60
+_MAX_REPLY_CHARS = 25
 _REPLY_TASK_WINDOW_SECONDS = 45.0
 _MAX_RECENT_PROACTIVE_TOPICS = 64
 # 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
