@@ -770,7 +770,24 @@ class AccountWorker:
             stored_content = str(event.raw_text or "").strip()
             if isinstance(getattr(event, "media", None), MessageMediaPhoto):
                 stored_content = f"{stored_content} [圖片]".strip()
-            if sender_id not in self.managed_ids:
+            # 管理員/機器人公告不互動：不回覆、不計真人活動、不存記憶
+            sender_obj = None
+            try:
+                sender_obj = await event.get_sender()
+            except Exception:
+                sender_obj = None
+            display_now = ""
+            try:
+                display_now = get_display_name(sender_obj) or ""
+            except Exception:
+                display_now = ""
+            is_admin = (
+                bool(getattr(event, "is_bot", False))
+                or bool(getattr(sender_obj, "bot", False) if sender_obj else False)
+                or "管理員" in display_now
+                or "管理员" in display_now
+            )
+            if not is_admin and sender_id not in self.managed_ids:
                 self.last_human_activity[group_id] = time.time()
                 # 真人開題：重置該群的話題回合計數，角色互聊從這裡重新計
                 self.topic_turn_counts[group_id] = 0
@@ -1158,6 +1175,25 @@ class AccountWorker:
         sender_id = int(event.sender_id or 0)
         continuous = bool(getattr(self.config, "continuous_activity_mode", False))
         if sender_id == self.tg_user_id:
+            return False
+        # 管理員/機器人公告不互動：它是群務廣播，真人也不會回它
+        sender_obj = None
+        try:
+            sender_obj = await event.get_sender()
+        except Exception:
+            sender_obj = None
+        display_name_admin = ""
+        try:
+            display_name_admin = get_display_name(sender_obj) or ""
+        except Exception:
+            display_name_admin = ""
+        is_admin_sender = (
+            bool(getattr(event, "is_bot", False))
+            or bool(getattr(sender_obj, "bot", False) if sender_obj else False)
+            or "管理員" in display_name_admin
+            or "管理员" in display_name_admin
+        )
+        if is_admin_sender:
             return False
         # 帳號級開關優先；帳號未設定時 fallback 到全域 REPLY_ENABLED
         if not self.reply_enabled:
