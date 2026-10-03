@@ -64,6 +64,12 @@ GENERIC_PROACTIVE_FRAGMENTS = (
 )
 
 
+def test_system_prompt_does_not_encourage_duplicate_sends():
+    sp = get_system_prompt(generate_persona())
+    assert "允許同一則連續發 2-3 次同樣的話" not in sp
+    assert "一次只輸出一則，不重複近期發言" in sp
+
+
 def test_persona_fields():
     p = generate_persona()
     for key in ("name", "gender", "age", "city", "district", "industry",
@@ -98,8 +104,9 @@ def test_system_prompt_content():
     assert "你的固定聊天風格" in sp
     assert p["chat_style"] in sp
     assert "先回應最新消息中的具體內容" in sp
-    assert "至少帶到一個具體細節" in sp
-    assert "觀點、感受、經驗或相關問題" in sp
+    assert "一句短回覆為主" in sp
+    assert "可以簡短接梗或附和，不必每次追問、延伸或自我分享" in sp
+    assert "至少帶到一個具體細節" not in sp
     assert "只能延伸與當前內容相關的話題" in sp
     assert "沒有正在聊的內容" in sp
     assert "不得討論群務、加入條件或替群體背書" in sp
@@ -107,6 +114,32 @@ def test_system_prompt_content():
     assert "只叫對方繼續說" in sp
     for fragment in FORBIDDEN_GROUP_META:
         assert fragment not in sp
+
+
+def test_prompt_keeps_speaker_photo_and_memory_ownership_separate():
+    sp = get_system_prompt(generate_persona())
+    for rule in ("照片人物不等於發圖者或你自己", "共享筆記不是你的親身經歷", "不把「你」「妹妹」自動當成在叫你", "對象不明時不要自我代入", "對方拒絕、不舒服或結束話題時，不再追問或起鬨"):
+        assert rule in sp
+    assert "群裡在 mock 兜兜，就一起 mock" not in sp
+
+
+def test_spacing_rule_does_not_force_artificial_word_breaks():
+    sp = get_system_prompt(generate_persona())
+    assert "不要刻意插空格斷詞" in sp
+    assert "真人是連續打完再加空格" not in sp
+    assert "標點越少越像真人" not in sp
+
+
+def test_style_markers_are_optional_not_population_quotas():
+    p = generate_persona()
+    p["chat_style"] = "冷淡短句"
+    sp = get_system_prompt(p)
+    assert "沒有固定比例" in sp
+    assert "固定風格的禁用要求優先" in sp
+    assert "不為了湊比例而加入" in sp
+    assert "大約三成回覆" not in sp
+    assert "真人平均只打 10 字" not in sp
+    assert "問句不必強加問號" in sp
 
 
 def test_chat_style_changes_hard_tone_rules():

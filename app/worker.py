@@ -848,7 +848,7 @@ class AccountWorker:
         """新人入群 → 自然歡迎（攬客）"""
         if not event.user_joined:
             return
-        if not self.is_running or not self.tg_client:
+        if not self.is_running or not self.tg_client or not self._activity_enabled("proactive"):
             return
         try:
             if not event.is_group or event.chat_id is None:
@@ -1434,6 +1434,17 @@ class AccountWorker:
                     recent_texts.append(str(m.get("content") or ""))
         except Exception:
             pass
+        # Apply the recent-speaker cap before either continuity or fallback selection.
+        candidates = [
+            uid for uid in candidates
+            if sum(
+                1 for m in group_msgs
+                if str(m.get("role")) == "assistant"
+                and int(m.get("sender_id") or 0) == uid
+            ) < 3
+        ]
+        if not candidates:
+            return 0
         if last_water_sender in candidates:
             return int(last_water_sender)
 
@@ -1447,15 +1458,6 @@ class AccountWorker:
                 persona = self.personas.get(uid) or {}
                 hobbies = [str(h) for h in (persona.get("hobbies") or [])]
                 score = sum(1 for h in hobbies if h and h in topic_text)
-                # 4) 發言過多的水軍讓位：該群近 12 則內 assistant 發言數
-                sent_recent = sum(
-                    1
-                    for m in group_msgs
-                    if str(m.get("role")) == "assistant"
-                    and int(m.get("sender_id") or 0) == uid
-                )
-                if sent_recent >= 3:
-                    continue  # 讓位
                 scored.append((score, uid))
             if any(s > 0 for s, _ in scored):
                 scored.sort(key=lambda t: (-t[0], t[1]))
@@ -1463,7 +1465,7 @@ class AccountWorker:
                     return scored[0][1]
 
         # 5) 回退：雜湊抽選（保留既有防搶答機制）
-        return self._ordinary_reply_winner(event)
+        return self._ordinary_reply_winner(event, candidates=candidates)
 
     @staticmethod
     def _mentioned_user_ids(message) -> set[int]:
@@ -1513,18 +1515,19 @@ class AccountWorker:
             ).digest(),
         )
 
-    def _ordinary_reply_winner(self, event) -> int:
+    def _ordinary_reply_winner(self, event, *, candidates: list[int] | None = None) -> int:
         group_id, message_id = self._reply_claim_key(event)
         eligible_ids = (
             self.active_group_ids.get(group_id, set())
             if self._group_eligibility_enabled
             else self.active_ids
         )
-        candidates = sorted(
-            int(uid)
-            for uid in eligible_ids
-            if int(uid) > 0 and int(uid) in self.active_ids
-        )
+        if candidates is None:
+            candidates = sorted(
+                int(uid)
+                for uid in eligible_ids
+                if int(uid) > 0 and int(uid) in self.active_ids
+            )
         if not candidates or not group_id or message_id <= 0:
             return 0
         return max(
@@ -2550,7 +2553,16 @@ class AccountWorker:
             group_id, limit=12
         )
         system_prompt = get_system_prompt(self.persona)
-        user_message = self._build_user_message(event, history)
+        reply_message = None
+        if getattr(event, "is_reply", False):
+            getter = getattr(event, "get_reply_message", None)
+            if callable(getter):
+                try:
+                    reply_message = await getter()
+                except Exception:
+                    # Missing/deleted/inaccessible parents stay unknown, never inferred.
+                    pass
+        user_message = self._build_user_message(event, history, reply_message=reply_message)
         if recent_group_replies:
             examples = "\n".join(
                 f"- {text}" for text in recent_group_replies[:8]
@@ -2946,40 +2958,63 @@ class AccountWorker:
 
         return False
 
-    def _build_user_message(self, event, history: list[dict]) -> str:
+    def _build_user_message(self, event, history: list[dict], *, reply_message=None) -> str:
         recent = history[-10:] if history else []
         context = ""
         if recent:
             context = "最近對話：\n"
             for msg in recent:
-                role = "我" if msg["role"] == "assistant" else msg["sender_name"]
+                sender_id = msg.get("sender_id") or "未知"
+                role = (
+                    "我" if self.tg_user_id and sender_id == self.tg_user_id
+                    else msg.get("sender_name") or "有人"
+                )
                 # 截斷超長訊息（如管理員公告）並壓平換行——避免 LLM 模仿長文格式或編號列表
                 content = str(msg.get("content", ""))
                 content = content.replace("\r", " ").replace("\n", " ")
                 if len(content) > 80:
                     content = content[:80] + "…"
-                context += f"[{role}] {content}\n"
+                context += f"[{role} sender_id={sender_id}] {content}\n"
         sender_name = ""
         try:
             sender_name = get_display_name(event.sender) or ""
         except Exception:
             pass
         is_water = (int(event.sender_id or 0) in self.managed_ids)
-        water_hint = "（對方是群組裡另一位成員）" if is_water else ""
+        water_hint = "（受管理自動帳號）" if is_water else "（身分未驗證）"
         incoming = str(event.raw_text or "").strip()
         if isinstance(getattr(event, "media", None), MessageMediaPhoto):
             incoming = f"{incoming} [圖片]".strip()
+        reply_context = "回覆對象：未知（沒有已確認的父訊息內容）\n"
+        if getattr(event, "is_reply", False):
+            header = getattr(event, "reply_to", None) or getattr(
+                getattr(event, "message", None), "reply_to", None
+            )
+            parent_id = getattr(reply_message, "id", None) or getattr(header, "reply_to_msg_id", None)
+            reply_context += f"父訊息 message_id={parent_id or '未知'}\n"
+            if reply_message is not None:
+                parent_sender_id = getattr(reply_message, "sender_id", None) or "未知"
+                parent_name = get_display_name(getattr(reply_message, "sender", None)) or "未知"
+                parent_text = " ".join(str(getattr(reply_message, "raw_text", "") or "").splitlines())
+                reply_context = (
+                    f"回覆對象：[{parent_name} sender_id={parent_sender_id}]\n"
+                    f"父訊息 message_id={parent_id or '未知'}：{parent_text[:80] or '內容未知'}\n"
+                )
         return (
+            f"目前帳號 sender_id={self.tg_user_id or '未知'}\n"
             f"{context}"
-            f"最新消息：[{sender_name or '有人'}]{water_hint} {incoming}\n"
+            f"最新消息：[{sender_name or '有人'} sender_id={event.sender_id or '未知'}]{water_hint} {incoming}\n"
+            f"{reply_context}"
+            "來源不確定時明示未知；顯示名不代表同一人，也不代表已驗證真人。"
+            "「你／妹妹」不一定指目前帳號，不要自行對號入座；"
+            "圖片人物不等於目前帳號或發圖者；共享筆記不是你的親身經歷。\n"
             "最新消息可能是其他人打的，可能含錯別字、語法不順；"
             "你回覆時一律用正確繁體中文，不要模仿對方的錯別字。\n"
             "回覆時不要稱呼對方的名字——像真人群聊一樣直接說話就好；"
             "除非對方先叫你，否則不要點名。\n"
-            "請先回應最新消息中的至少一個具體細節，再視需要延伸相關話題；"
-            "不能只叫對方繼續說。對方開玩笑或露骨勾引時，可以直接接住並調情，"
-            "像真人那樣自然接梗、不往日常帶。"
-            "生成自然回覆（1-3 句，台灣繁體口語；最多 25 個字元，標點、空格也算；結尾不要句號）。"
+            "優先回應對方明確的問題或意思，一句短回覆為主，不必追問或自我分享；"
+            "不能只叫對方繼續說，不要硬延伸或編造個人經歷。"
+            "生成自然回覆（台灣繁體口語；最多 25 個字元，標點、空格也算；結尾不要句號）。"
         )
 
     async def _call_ai(
@@ -3054,6 +3089,10 @@ class AccountWorker:
         finally:
             await self._sleep_pending_flood_wait()
 
+    def _activity_enabled(self, activity_kind: str) -> bool:
+        flag = "proactive_enabled" if activity_kind == "proactive" else "reply_enabled"
+        return bool(getattr(self, flag)) and bool(getattr(self.config, flag, True))
+
     async def _send_message_unlocked(
         self,
         chat_id,
@@ -3063,11 +3102,12 @@ class AccountWorker:
         require_media_enabled: bool = False,
         live_test_event_id: str | None = None,
         live_test_kind: str | None = None,
+        activity_kind: str = "reply",
     ) -> bool:
         if len(text) > _MAX_REPLY_CHARS:
             return False
         client = self.tg_client
-        if not client or not self.is_running:
+        if not client or not self.is_running or not self._activity_enabled(activity_kind):
             return False
         delay = (
             random.uniform(1.0, 3.0) if short_delay
@@ -3081,6 +3121,7 @@ class AccountWorker:
             not self.is_running
             or self.tg_client is not client
             or int(chat_id) not in self.selected_groups
+            or not self._activity_enabled(activity_kind)
             or (
                 require_media_enabled
                 and not bool(getattr(self.config, "media_enabled", False))
@@ -3140,6 +3181,11 @@ class AccountWorker:
                 )
                 return False
             rpc_started = True
+        # Re-read switches after every awaited preparation, immediately before RPC.
+        if not self._activity_enabled(activity_kind):
+            if permit is not None and gate is not None:
+                await gate.complete(permit, sent=False, detail="activity disabled before send_message RPC")
+            return False
         try:
             await client.send_message(chat_id, text)
         except BaseException as exc:
@@ -3167,6 +3213,7 @@ class AccountWorker:
         text: str,
         short_delay: bool = False,
         *,
+        activity_kind: str = "reply",
         live_test_event_id: str | None = None,
         live_test_kind: str | None = None,
     ) -> bool:
@@ -3175,6 +3222,7 @@ class AccountWorker:
                 chat_id,
                 text,
                 short_delay=short_delay,
+                activity_kind=activity_kind,
                 live_test_event_id=live_test_event_id,
                 live_test_kind=live_test_kind,
             )
@@ -3199,6 +3247,7 @@ class AccountWorker:
                 text,
                 short_delay=short_delay,
                 claim_text=True,
+                activity_kind=activity_kind,
                 require_media_enabled=require_media_enabled,
                 live_test_event_id=live_test_event_id,
                 live_test_kind=live_test_kind,
@@ -3582,7 +3631,7 @@ class AccountWorker:
         if not human_msgs:
             return ""
         context = "\n".join(
-            f"[{m.get('sender_name','?')} {str(m.get('content',''))[:60]}"
+            f"[{m.get('sender_name','?')} sender_id={m.get('sender_id') or '未知'}] {str(m.get('content',''))[:60]}"
             for m in human_msgs[-5:]
         )
         # 主動互動有根據：從群友公開聊過的事情延伸（例如「你昨天說的面試，今天結果怎樣？」）
@@ -3594,13 +3643,14 @@ class AccountWorker:
         notes_block = ""
         if shared_notes:
             notes_block = (
-                "本群最近聊過的內容（供接續、追問）：\n"
+                "本群最近聊過的內容（來源未驗證，僅供參考；共享筆記不是你的親身經歷）：\n"
                 + "\n".join(f"- {n}" for n in shared_notes[:5])
             )
         prompt = (
-            "群組裡最近的人類訊息如下。請以你的口吻生成 1-3 句日常閒聊，"
+            "群組裡最近其他成員的訊息如下（身分未驗證，不能當作已確認真人）。"
+            "一句短回覆為主，不必追問或自我分享，不要編造個人經歷，"
             "要接得上群組當前話題（食物、天氣、工作、追劇、聚會等），自然口語、"
-            "繁體中文、60 字元內，不要談群務。可以帶點勾引或曖昧，但別硬凹。"
+            "繁體中文、25 字元內（標點、空格也算），不要談群務或硬延伸。"
             f"\n{context}"
         )
         if notes_block:
@@ -3703,10 +3753,10 @@ class AccountWorker:
                 interval = base_interval
             elif hours_since_human < _COLD_ROOM_PAUSED_HOURS:
                 # 冷場 6h：逐步降頻（間隔拉長）
-                interval = _COLD_ROOM_REDUCED_INTERVAL
+                interval = max(base_interval, _COLD_ROOM_REDUCED_INTERVAL)
             else:
                 # 冷場 24h+：再降頻
-                interval = _COLD_ROOM_PAUSED_INTERVAL
+                interval = max(base_interval, _COLD_ROOM_PAUSED_INTERVAL)
             slot = int(current // interval)
             if self._continuous_turn_winner(group_id, slot) != int(
                 self.tg_user_id or 0

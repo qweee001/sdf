@@ -237,7 +237,8 @@ class AccountManager:
                     p["name"] = dn
                 personas[tid] = p
         # 話題回合計數（群組 → 本回合 AI 發言數），所有水軍 worker 共享
-        self.topic_turn_counts = getattr(self, "topic_turn_counts", None) or {}
+        if getattr(self, "topic_turn_counts", None) is None:
+            self.topic_turn_counts = {}
         self.personas = personas
         display_name = str(acc.get("tg_username") or "").strip()
         if persona and display_name and persona.get("name") != display_name:

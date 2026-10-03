@@ -258,13 +258,15 @@ def test_generation_prompt_requires_at_most_twenty_five_characters():
     assert "標點、空格也算" in prompt
 
 
-def test_generation_prompt_requires_a_concrete_detail_before_related_extension():
+def test_generation_prompt_prefers_one_short_reply_without_forced_extension():
     worker = _worker()
 
     prompt = worker._build_user_message(_FakeEvent(), [])
 
-    assert "至少一個具體細節" in prompt
-    assert "再視需要延伸相關話題" in prompt
+    assert "一句短回覆為主" in prompt
+    assert "不必追問或自我分享" in prompt
+    assert "至少一個具體細節" not in prompt
+    assert "1-3 句" not in prompt
     assert "不能只叫對方繼續說" in prompt
 
 
@@ -1119,7 +1121,7 @@ def test_build_user_message_truncates_long_context_messages():
 
     seg = prompt.split("最近對話：")[1].split("最新消息")[0].strip()
     # 每條歷史訊息應壓平為單行且長度受控
-    admin_lines = [l for l in seg.splitlines() if l.startswith("[管理員]")]
+    admin_lines = [l for l in seg.splitlines() if l.startswith("[管理員 sender_id=未知]")]
     assert admin_lines, "應包含管理員訊息"
     for line in admin_lines:
-        assert len(line) <= 90  # 80 字截斷 + 截斷號 + 前綴
+        assert len(line.split("] ", 1)[1]) <= 81  # 原有 80 字截斷 + 截斷號，不計來源標籤
