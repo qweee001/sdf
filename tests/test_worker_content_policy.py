@@ -560,6 +560,42 @@ def test_normal_text_is_not_blocked():
     assert all(not AccountWorker._mentions_video_topic(text) for text in normal_texts)
 
 
+def test_split_human_burst_keeps_short_lines_single():
+    """真人節奏：6~16 字的短訊不拆，保持單則發送。"""
+    assert AccountWorker._split_human_burst("兜兜我硬了") == ["兜兜我硬了"]
+    assert AccountWorker._split_human_burst("你的奶大不大？") == ["你的奶大不大？"]
+    assert AccountWorker._split_human_burst("") == []
+
+
+def test_split_human_burst_splits_long_reply_into_short_lines():
+    """長回覆按句末標點拆成 2~3 則短訊連發。"""
+    parts = AccountWorker._split_human_burst("好新的藉口，這話題太露骨了，換個安全的聊吧")
+    assert parts == ["好新的藉口", "這話題太露骨了", "換個安全的聊吧"]
+    assert all(len(p) <= 40 for p in parts)
+
+    parts = AccountWorker._split_human_burst("今天穿那件會透的出門了。有點小刺激")
+    assert parts == ["今天穿那件會透的出門了", "有點小刺激"]
+
+
+def test_split_human_burst_caps_at_three_parts():
+    """最多 3 則：第 4 段被丟棄，不無限連發。"""
+    parts = AccountWorker._split_human_burst("第一句短訊。第二句短訊。第三句短訊。第四句短訊")
+    assert len(parts) == 3
+
+
+def test_split_human_burst_falls_back_to_single_when_unsplittable():
+    """切不出多段（無標點長單句）或某段超硬上限時，保留原單則。"""
+    unsplittable = "這是一個沒有標點的長單句測試用例啊"
+    assert len(unsplittable) > 16
+    assert AccountWorker._split_human_burst(unsplittable) == [unsplittable]
+    over_40 = "一二三四五六七八九十" * 4 + "一二三四"
+    assert len(over_40) > 40
+    assert (
+        AccountWorker._split_human_burst(f"{over_40}。尾巴短訊")
+        == [f"{over_40}。尾巴短訊"]
+    )
+
+
 def test_video_topic_reply_is_dropped_if_retry_still_violates_policy():
     async def main():
         worker = _worker()

@@ -49,6 +49,11 @@ from .media import MediaAsset, OrcaMediaService
 from .persona import generate_persona, generate_proactive_topic, get_system_prompt
 
 _MAX_REPLY_CHARS = 40
+# 桃花源・約會 實測（37 分鐘 333 則真人訊息）：中位 8 字、p90 12 字，
+# 80% 的訊息間隔小於 10 秒——真人是一連串短訊，不是單則完整句。
+_HUMAN_LINE_MIN, _HUMAN_LINE_MAX = 6, 14
+_MAX_BURST_PARTS = 3
+_BURST_PAUSE_SECONDS = (0.8, 3.5)
 _REPLY_TASK_WINDOW_SECONDS = 45.0
 _MAX_RECENT_PROACTIVE_TOPICS = 64
 # 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
@@ -1690,16 +1695,26 @@ class AccountWorker:
                 return
             # Evidence-bound realtime TTS is reserved for bounded live tests.
             # Ordinary replies always use text; they have no run/event/snapshot envelope.
-            sent = await self._send_text_recorded(
-                int(event.chat_id),
-                text,
-                activity_kind="followup" if managed_followup else "reply",
-                stats_key="replies_sent",
-                require_media_enabled=isinstance(
-                    getattr(event, "media", None), MessageMediaPhoto
-                ),
-                on_dispatched=mark_telegram_dispatched,
-            )
+            # 真人節奏：模型輸出長句時拆成 2~3 則短訊連發（實測 80% 真人訊息間隔 <10s）
+            burst = self._split_human_burst(text)
+            sent = False
+            for i, part in enumerate(burst):
+                ok = await self._send_text_recorded(
+                    int(event.chat_id),
+                    part,
+                    activity_kind="followup" if managed_followup else "reply",
+                    stats_key="replies_sent",
+                    require_media_enabled=isinstance(
+                        getattr(event, "media", None), MessageMediaPhoto
+                    ),
+                    short_delay=i > 0,
+                    on_dispatched=mark_telegram_dispatched if i == 0 else None,
+                )
+                sent = sent or ok
+                if not ok:
+                    break
+                if i < len(burst) - 1:
+                    await asyncio.sleep(random.uniform(*_BURST_PAUSE_SECONDS))
             if sent and is_human_reply:
                 self.stats["human_sent"] += 1
                 human_counted = True
@@ -2691,7 +2706,10 @@ class AccountWorker:
 
         # 不在發送層做逐詞替換，避免改壞語意和造成 Telegram / DB 記憶不一致。
         # 空白或內容違規共用一次重生；仍違規就不發送。
-        correction = "上一版不符合要求。回覆最多 40 個字元（標點、空格也算），絕不能超過。"
+        correction = (
+            f"上一版不符合要求。{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊為主，"
+            "回覆最多 40 個字元（標點、空格也算），絕不能超過；結尾不要句號、不用感嘆號。"
+        )
         if refusal:
             # 對拒答不能只說「不符合要求」——那只會換來另一句更客氣的拒絕。
             # 要把它從「我能不能做這件事」的框架拉回「這個角色會打什麼字」。
@@ -2876,6 +2894,33 @@ class AccountWorker:
         except Exception:
             return True
 
+    @staticmethod
+    def _split_human_burst(text: str) -> list[str]:
+        """把過長的回覆拆成真人式短訊連發（2~3 則短訊接連發出）。
+
+        模型仍寫長句時按句末標點切；切不出 ≥2 段、或任何一段超過硬上限
+        就保留原單則（後面的長度檢查照樣把關）。
+        """
+        t = str(text or "").strip()
+        if not t or len(t) <= _HUMAN_LINE_MAX + 2:
+            return [t] if t else []
+        strip_chars = " ，,。．!?！？;；~～… "
+        parts = [
+            p.strip(strip_chars)
+            for p in re.split(r"[。．！!？?；;\n]+", t)
+            if p.strip(strip_chars)
+        ]
+        if len(parts) < 2:
+            parts = [
+                p.strip(strip_chars)
+                for p in re.split(r"[，,、]+", t)
+                if p.strip(strip_chars)
+            ]
+        parts = [p for p in parts if p]
+        if len(parts) < 2 or any(len(p) > _MAX_REPLY_CHARS for p in parts):
+            return [t]
+        return parts[:_MAX_BURST_PARTS]
+
     @classmethod
     def _is_near_duplicate(cls, text: str, recent: list[str]) -> bool:
         candidate = cls._normalized_reply(text)
@@ -3014,7 +3059,9 @@ class AccountWorker:
             "除非對方先叫你，否則不要點名。\n"
             "優先回應對方明確的問題或意思，一句短回覆為主，不必追問或自我分享；"
             "不能只叫對方繼續說，不要硬延伸或編造人設事實以外的經歷。"
-            "生成自然回覆（台灣繁體口語；最多 40 個字元，標點、空格也算；結尾不要句號；挑逗時可以兩句，不要長篇）。"
+            f"生成自然回覆（台灣繁體口語；{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊，"
+            "最多 40 個字元，標點、空格也算；一句就好，結尾不要句號、不用感嘆號、不用@；"
+            "要說兩句就拆成兩則短訊，挑逗時可以直接露骨，不要長篇）。"
         )
 
     async def _call_ai(
@@ -3648,9 +3695,10 @@ class AccountWorker:
             )
         prompt = (
             "群組裡最近其他成員的訊息如下（身分未驗證，不能當作已確認真人）。"
-            "一句短回覆為主，不必追問或自我分享，不要編造人設事實以外的經歷，"
+            f"一句短回覆為主（{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊），"
+            "不必追問或自我分享，不要編造人設事實以外的經歷，"
             "要接得上群組當前話題（食物、天氣、工作、追劇、聚會等），自然口語、"
-            "繁體中文、40 字元內（標點、空格也算），不要談群務或硬延伸。"
+            "繁體中文、40 字元內（標點、空格也算），結尾不要句號，不要談群務或硬延伸。"
             f"\n{context}"
         )
         if notes_block:
@@ -3944,13 +3992,22 @@ class AccountWorker:
                 if not topic:
                     print(f"[{self.name}] proactive-skip: no fresh topic (all 64 topics exhausted)", flush=True)
                     continue
-                sent = await self._send_text_recorded(
-                    group_id,
-                    topic,
-                    activity_kind="proactive",
-                    stats_key="proactive_sent",
-                    managed_origin=True,
-                )
+                burst = self._split_human_burst(topic)
+                sent = False
+                for i, part in enumerate(burst):
+                    ok = await self._send_text_recorded(
+                        group_id,
+                        part,
+                        activity_kind="proactive",
+                        stats_key="proactive_sent",
+                        managed_origin=True,
+                        short_delay=i > 0,
+                    )
+                    sent = sent or ok
+                    if not ok:
+                        break
+                    if i < len(burst) - 1:
+                        await asyncio.sleep(random.uniform(*_BURST_PAUSE_SECONDS))
                 if not sent:
                     print(f"[{self.name}] proactive-failed: send to {group_id} failed", flush=True)
                     continue
