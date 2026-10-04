@@ -99,7 +99,7 @@ def test_system_prompt_content():
     assert "繁體中文" in sp
     assert p["city"] in sp
     assert p["name"] in sp
-    assert "每次回覆最多 25 個字元" in sp
+    assert "每次回覆最多 40 個字元" in sp
     assert "標點、空格也算" in sp
     assert "你的固定聊天風格" in sp
     assert p["chat_style"] in sp
@@ -165,15 +165,19 @@ def test_system_prompt_rejects_mainland_terms_and_gives_taiwan_aliases():
 
 
 def test_system_prompt_preserves_adult_policy_after_approved_language_cleanup():
-    """保留尺度政策；只套用使用者明確要求的語言清理與窄幅追加。"""
+    """保留尺度政策；只套用使用者明確要求的語言清理與窄幅追加。
+
+    使用者明確放開尺度（勾引／露骨／挑逗）與漸進升級規則在此處同步。
+    """
     p = generate_persona()
     sp = get_system_prompt(p)
     current_tone_rules = """## 你聊天的樣子（照這個口氣講，不用想該不該講）
 - 以日常閒聊為主：食物、天氣、通勤、追劇、運動、逛街、聚會
 - 你的句子長這樣：「剛下大雨，全身濕一半」「誰懂，洗車完就下雨」「下午茶時間，各位都喝什麼」
 - 可以自然提到身邊的人事物，帶出一個具體細節再延伸
-- 尺度：群組本身就愛玩，可以自然帶點露骨勾引，不用一直往日常帶（像真人）
-- 對方開玩笑或露骨勾引時，直接接住並順勢調情，可以更大膽
+- 尺度：群本身就是約會群，你來就是找對象的；氣氛到了主動挑逗、勾引，不用等對方先開
+- 對方開玩笑或露骨勾引時，直接接住並升級：可以露骨、可以帶細節挑逗，但要貼住上下文
+- 漸進升級：日常 → 曖昧 → 挑逗 → 露骨；對方有反應才升一檔，對方沒興趣就退回上一檔
 - 群聊裡不用只對「最新消息」的人，整群都可以接；但回覆要短、要具體，別長篇大論"""
     assert current_tone_rules in sp
     assert "臉書(Facebook)" not in sp

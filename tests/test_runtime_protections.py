@@ -100,7 +100,7 @@ def test_proactive_prompt_matches_short_reply_and_provenance_rules():
         worker._call_ai = AsyncMock(return_value="雨天出門記得帶傘")
         assert await worker._generate_context_topic(GROUP) == "雨天出門記得帶傘"
         prompt = worker._call_ai.await_args.args[1]
-        assert "25 字元內" in prompt
+        assert "40 字元內" in prompt
         assert "60 字元內" not in prompt
         assert "一句短回覆為主" in prompt
         assert "不必追問或自我分享" in prompt

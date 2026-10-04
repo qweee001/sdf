@@ -48,7 +48,7 @@ from telethon.utils import get_display_name
 from .media import MediaAsset, OrcaMediaService
 from .persona import generate_persona, generate_proactive_topic, get_system_prompt
 
-_MAX_REPLY_CHARS = 25
+_MAX_REPLY_CHARS = 40
 _REPLY_TASK_WINDOW_SECONDS = 45.0
 _MAX_RECENT_PROACTIVE_TOPICS = 64
 # 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
@@ -2691,7 +2691,7 @@ class AccountWorker:
 
         # 不在發送層做逐詞替換，避免改壞語意和造成 Telegram / DB 記憶不一致。
         # 空白或內容違規共用一次重生；仍違規就不發送。
-        correction = "上一版不符合要求。回覆最多 25 個字元（標點、空格也算），絕不能超過。"
+        correction = "上一版不符合要求。回覆最多 40 個字元（標點、空格也算），絕不能超過。"
         if refusal:
             # 對拒答不能只說「不符合要求」——那只會換來另一句更客氣的拒絕。
             # 要把它從「我能不能做這件事」的框架拉回「這個角色會打什麼字」。
@@ -3013,8 +3013,8 @@ class AccountWorker:
             "回覆時不要稱呼對方的名字——像真人群聊一樣直接說話就好；"
             "除非對方先叫你，否則不要點名。\n"
             "優先回應對方明確的問題或意思，一句短回覆為主，不必追問或自我分享；"
-            "不能只叫對方繼續說，不要硬延伸或編造個人經歷。"
-            "生成自然回覆（台灣繁體口語；最多 25 個字元，標點、空格也算；結尾不要句號）。"
+            "不能只叫對方繼續說，不要硬延伸或編造人設事實以外的經歷。"
+            "生成自然回覆（台灣繁體口語；最多 40 個字元，標點、空格也算；結尾不要句號；挑逗時可以兩句，不要長篇）。"
         )
 
     async def _call_ai(
@@ -3648,9 +3648,9 @@ class AccountWorker:
             )
         prompt = (
             "群組裡最近其他成員的訊息如下（身分未驗證，不能當作已確認真人）。"
-            "一句短回覆為主，不必追問或自我分享，不要編造個人經歷，"
+            "一句短回覆為主，不必追問或自我分享，不要編造人設事實以外的經歷，"
             "要接得上群組當前話題（食物、天氣、工作、追劇、聚會等），自然口語、"
-            "繁體中文、25 字元內（標點、空格也算），不要談群務或硬延伸。"
+            "繁體中文、40 字元內（標點、空格也算），不要談群務或硬延伸。"
             f"\n{context}"
         )
         if notes_block:
