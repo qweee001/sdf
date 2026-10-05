@@ -1,19 +1,34 @@
-"""反重复 P0-2/P1-2：去重持久化与跨账号撞句拦截。
+"""去重持久化與跨帳號撞句攔截（沒有預設池之後，去重全壓在即時生成的話題上）。
 
-- P0-2: proactive 去重集合跨账号共享并持久化；重启后从 DB 回填。
-- P1-2: 发送前查全账号最近发送历史，撞句重抽。
+- reload: proactive 去重集合跨帳號共享並持久化；重啟後從 DB 回填。
+- 生成: 同一群其他帳號講過的句子，本帳號不得再發；撞句就回空字串（寧可不發）。
 """
 
 import asyncio
-import time
 
-import pytest
+from test_worker_reply_arbitration import _ClaimDB, _worker
 
-from test_worker_reply_arbitration import MANAGED, _ClaimDB, _worker
+
+class _TopicDB(_ClaimDB):
+    """提供即時話題生成需要的讀取介面。"""
+
+    def __init__(self, history=(), msgs=()):
+        super().__init__()
+        self.history = list(history)
+        self.msgs = list(msgs)
+
+    async def recent_bot_texts_by_group(self, group_id, *, hours=48, limit=200):
+        return list(self.history)
+
+    async def get_group_messages(self, group_id, limit=100):
+        return list(self.msgs)
+
+    async def get_group_shared_notes(self, group_id, account_id, limit=10):
+        return []
 
 
 def test_worker_backfills_recent_proactive_topics_from_db():
-    """重启后 worker 必须从 DB 回填最近已发话题（含其他账号发的），否则重启清零必然复读。"""
+    """重啟後 worker 必須從 DB 回填最近已發話題（含其他帳號發的），否則重啟清零必然復讀。"""
 
     async def main():
         seen = [
@@ -22,16 +37,10 @@ def test_worker_backfills_recent_proactive_topics_from_db():
         ]
 
         class BackfillDB(_ClaimDB):
-            def __init__(self):
-                super().__init__()
-                self.recorded = []
-
             async def recent_bot_texts_by_group(self, group_id, *, hours=48, limit=200):
                 return list(seen)
 
-        db = BackfillDB()
-        worker = _worker(101, db=db)
-        # 模拟 manager 启动时的回填调用
+        worker = _worker(101, db=BackfillDB())
         await worker.reload_proactive_memory()
         normalized = worker._recent_proactive_topics
         assert len(normalized) == 2, normalized
@@ -41,71 +50,46 @@ def test_worker_backfills_recent_proactive_topics_from_db():
     asyncio.run(main())
 
 
-def test_next_proactive_topic_avoids_cross_account_history():
-    """同一群内其他账号发过的句子，本账号不得再抽中。"""
+def test_context_topic_skips_text_another_account_already_sent():
+    """同一群內其他帳號講過的句子，即時生成時必須被攔下（回空字串，不塞罐頭句）。"""
 
     async def main():
-        class HistoryDB(_ClaimDB):
-            def __init__(self):
-                super().__init__()
-                self.history = ["今天超有精神，有人想出去晃晃嗎？"]
+        from unittest.mock import AsyncMock
 
-            async def recent_bot_texts_by_group(self, group_id, *, hours=48, limit=200):
-                return list(self.history)
-
-        db = HistoryDB()
-        worker = _worker(202, db=db)
+        already = "今天超有精神，有人想出去晃晃嗎？"
+        worker = _worker(202, db=_TopicDB(history=[already]))
         await worker.reload_proactive_memory()
-        topic = await worker._next_proactive_topic(-5428680940)
-        assert topic
-        assert "今天超有精神" not in topic
-        # 抽题查过跨账号历史（回填内容已进去重集合）
-        assert any("今天超有精神" in t for t in worker._recent_proactive_topics)
+        assert worker._normalized_reply(already) in worker._recent_proactive_topics
+
+        # 模型吐出同一句 → 拒絕（跨帳號去重）
+        worker._call_ai = AsyncMock(return_value=already)
+        assert await worker._generate_context_topic(-5428680940) == ""
+
+        # 模型換一句新的 → 放行
+        worker._call_ai = AsyncMock(return_value="今天想吃牛肉麵，有人要一起嗎")
+        fresh = await worker._generate_context_topic(-5428680940)
+        assert fresh == "今天想吃牛肉麵，有人要一起嗎"
+        assert worker._normalized_reply(fresh) in worker._recent_proactive_topics
 
     asyncio.run(main())
 
 
-def test_proactive_topic_falls_back_when_pool_exhausted():
-    """池子全部用过时返回空串（宁可不发也不复读）。"""
+def test_context_topic_returns_empty_when_model_keeps_repeating():
+    """模型只會復讀時回空字串：這一輪不開口，不塞預設句。"""
 
     async def main():
-        class FullDB(_ClaimDB):
-            async def recent_bot_texts_by_group(self, group_id, *, hours=48, limit=200):
-                # 返回全部池子内容 + 更多，逼上去重上限
-                from app.persona import (
-                    ADULT_JOKES,
-                    BOY_PROACTIVE,
-                    DAILY_TOPICS,
-                    GIRL_PROACTIVE,
-                    PERSONA_PROACTIVE,
-                    SHOW_OFF_FEMALE,
-                    SHOW_OFF_MALE,
-                )
-                pools = [
-                    *PERSONA_PROACTIVE["shy"],
-                    *PERSONA_PROACTIVE["lively"],
-                    *PERSONA_PROACTIVE["flirty"],
-                    *PERSONA_PROACTIVE["direct"],
-                    *GIRL_PROACTIVE,
-                    *BOY_PROACTIVE,
-                    *DAILY_TOPICS,
-                    *ADULT_JOKES,
-                    *SHOW_OFF_FEMALE,
-                    *SHOW_OFF_MALE,
-                ]
-                return pools
+        from unittest.mock import AsyncMock
 
-        db = FullDB()
-        worker = _worker(303, db=db)
-        await worker.reload_proactive_memory()
-        # 池子所有句子都在最近历史里 → 拒绝生成复读
-        assert await worker._next_proactive_topic() == ""
+        worker = _worker(303, db=_TopicDB())
+        worker._call_ai = AsyncMock(return_value="週末想唱歌")
+        assert await worker._generate_context_topic(-5428680940) == "週末想唱歌"
+        assert await worker._generate_context_topic(-5428680940) == ""
 
     asyncio.run(main())
 
 
 def test_claim_group_text_blocks_cross_account_duplicate():
-    """同群同文案 1 小时内只允许第一个账号发出（DB 层跨账号拦截）。"""
+    """同群同文案 1 小時內只允許第一個帳號發出（DB 層跨帳號攔截）。"""
     import os
     import tempfile
 
@@ -120,7 +104,7 @@ def test_claim_group_text_blocks_cross_account_duplicate():
             ok3 = await db.claim_group_text(-100, "不同的一句話", "acct-b")
             await db.close()
             assert ok1 is True
-            assert ok2 is False, "跨账号同句必须被拦"
+            assert ok2 is False, "跨帳號同句必須被攔"
             assert ok3 is True
 
     asyncio.run(main())

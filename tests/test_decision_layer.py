@@ -249,6 +249,62 @@ def test_decide_action_returns_none_on_error(monkeypatch):
     assert w.stats.get("decision_errors") == 1
 
 
+def test_decide_action_mode_offers_tease_and_wait(monkeypatch):
+    """① 的回應方式要含「色情挑逗誘惑勾引」與「等待」（使用者指定的候選）。"""
+    w = _worker("k")
+    captured = {}
+
+    async def fake(state, questions, **kw):
+        captured["questions"] = questions
+        return {
+            "action": {"choice": "reply"},
+            "mode": {"choice": "tease"},
+            "flirty": {"score": 3.0},
+        }
+
+    monkeypatch.setattr(worker_mod, "system_one", fake)
+    decision = asyncio.run(w._decide_action(_event()))
+    assert decision["mode"] == "tease"
+    criteria = captured["questions"]["mode"]["criteria"]
+    assert set(criteria) == {"answer", "comfort", "tease", "followup", "wait"}
+    assert "挑逗" in criteria["tease"] and "勾引" in criteria["tease"]
+    assert "不開口" in criteria["wait"]
+    # tease 的指示會原樣進②的生成指令（露骨程度最高檔）
+    directive = w._decision_directive(decision)
+    assert "色情挑逗誘惑勾引" in directive
+    assert "無底線" in directive
+
+
+def test_decide_action_wait_mode_holds_reply(monkeypatch):
+    """mode=wait＝這輪先不開口（合法決策），但被 @ 時仍然要回。"""
+    w = _worker("k")
+
+    async def decide_wait(state, questions, **kw):
+        return {
+            "action": {"choice": "reply"},
+            "mode": {"choice": "wait"},
+            "flirty": {"score": 1.0},
+        }
+
+    monkeypatch.setattr(worker_mod, "system_one", decide_wait)
+    route, payload = asyncio.run(w._apply_decision(_event(), forced_text=False))
+    assert route == "skip" and payload["mode"] == "wait"
+    route, payload = asyncio.run(w._apply_decision(_event(), forced_text=True))
+    assert route == "reply"
+
+
+def test_decide_action_unknown_mode_is_ignored(monkeypatch):
+    """決策模型吐出不在候選裡的值時，mode 記 None（不讓未知值進生成指令）。"""
+    w = _worker("k")
+
+    async def fake(state, questions, **kw):
+        return {"action": {"choice": "reply"}, "mode": {"choice": "whatever"}, "flirty": {"score": 0}}
+
+    monkeypatch.setattr(worker_mod, "system_one", fake)
+    decision = asyncio.run(w._decide_action(_event()))
+    assert decision["mode"] is None
+
+
 def test_decide_action_disabled_returns_none():
     w = _worker("")
     assert asyncio.run(w._decide_action(_event())) is None

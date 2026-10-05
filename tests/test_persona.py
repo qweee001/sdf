@@ -1,42 +1,8 @@
-import random
-
 from app.persona import (
-    ADULT_JOKES,
-    BOY_PROACTIVE,
     CITY_SPOTS,
-    DAILY_TOPICS,
-    GIRL_PROACTIVE,
-    PERSONA_PROACTIVE,
-    SHOW_OFF_FEMALE,
-    SHOW_OFF_MALE,
-    TW_CITIES_MAJOR,
     generate_persona,
-    generate_proactive_topic,
     get_system_prompt,
 )
-
-# 簡體專用字（繁體中文不會用這些字形）→ 繁體對應
-SIMP_ONLY = {
-    "个": "個", "这": "這", "为": "為", "专": "專", "么": "麼", "吗": "嗎",
-    "诶": "欸", "请": "請", "谢": "謝", "问": "問", "间": "間", "门": "門",
-    "开": "開", "关": "關", "东": "東", "车": "車", "马": "馬", "鱼": "魚",
-    "鸟": "鳥", "风": "風", "飞": "飛", "电": "電", "云": "雲", "长": "長",
-    "张": "張", "强": "強", "头": "頭", "见": "見", "观": "觀", "觉": "覺",
-    "爱": "愛", "说": "說", "话": "話", "语": "語", "谁": "誰", "调": "調",
-    "认": "認", "议": "議", "记": "記", "让": "讓", "该": "該", "过": "過",
-    "还": "還", "来": "來", "对": "對", "点": "點", "写": "寫", "买": "買",
-    "卖": "賣", "题": "題", "识": "識", "这": "這", "请": "請",
-}
-
-# 所有寫死的「會講出口」的群組文字池
-CONTENT_POOLS = [
-    DAILY_TOPICS,
-    GIRL_PROACTIVE,
-    BOY_PROACTIVE,
-    SHOW_OFF_FEMALE,
-    SHOW_OFF_MALE,
-    *PERSONA_PROACTIVE.values(),
-]
 
 FORBIDDEN_GROUP_META = (
     "1000",
@@ -52,16 +18,34 @@ FORBIDDEN_GROUP_META = (
     "這群真的可以",
 )
 
-FORBIDDEN_MAINLAND_TERMS = (
-    "拼單",
-    "外賣",
-    "視頻",
-)
 
-GENERIC_PROACTIVE_FRAGMENTS = (
-    "想慢慢認識新朋友",
-    "想認識新朋友",
-)
+def test_static_proactive_pool_is_removed():
+    """預設話題池已刪除：主動發言一律由文字模型即時生成，不再有罐頭句。
+
+    這條守著使用者明確要求「刪掉預設池」不被重新加回來。
+    """
+    import app.persona as persona_module
+    import app.worker as worker_module
+
+    for removed in (
+        "DAILY_TOPICS",
+        "GIRL_PROACTIVE",
+        "BOY_PROACTIVE",
+        "PERSONA_PROACTIVE",
+        "ADULT_JOKES",
+        "SHOW_OFF_FEMALE",
+        "SHOW_OFF_MALE",
+        "generate_proactive_topic",
+    ):
+        assert not hasattr(persona_module, removed), f"{removed} 應該已被刪除"
+    # worker 不得再用罐頭池或池子函式
+    for gone in ("_next_proactive_topic", "_pools", "generate_proactive_topic"):
+        assert not hasattr(worker_module.AccountWorker, gone), f"{gone} 應該已被刪除"
+    source = (
+        __import__("pathlib").Path(worker_module.__file__).read_text(encoding="utf-8")
+    )
+    for token in ("generate_proactive_topic", "_next_proactive_topic", "self._pools"):
+        assert token not in source, f"worker.py 仍殘留 {token}"
 
 
 def test_system_prompt_does_not_encourage_duplicate_sends():
@@ -218,90 +202,3 @@ def test_system_prompt_carries_no_meta_jailbreak_declaration():
     assert "## 絕對不要出現的話" in sp
     assert "不要聲明任何限制" in sp
 
-
-def test_no_simplified_chinese_in_content_pools():
-    """語言硬規則：所有寫死的群組文字不得含簡體字"""
-    for pool in CONTENT_POOLS:
-        for s in pool:
-            simp = [ch for ch in s if ch in SIMP_ONLY]
-            assert not simp, f"簡體字 {simp} in: {s}"
-
-
-def test_static_content_pools_exclude_mainland_terms():
-    """繁體字形也可能是大陸用語，不能只靠簡體字檢查。"""
-    for pool in CONTENT_POOLS:
-        for text in pool:
-            found = [term for term in FORBIDDEN_MAINLAND_TERMS if term in text]
-            assert not found, f"大陸用語 {found} in: {text}"
-
-
-def test_static_proactive_topics_use_concrete_life_details():
-    """主動話題要像生活碎念，不要像交友機器人的自我介紹。"""
-    for pool in CONTENT_POOLS:
-        for text in pool:
-            found = [fragment for fragment in GENERIC_PROACTIVE_FRAGMENTS if fragment in text]
-            assert not found, f"模板化交友開場 {found} in: {text}"
-
-
-def test_every_static_proactive_pool_excludes_group_meta_speech():
-    """逐句掃完整池，不靠隨機抽樣碰運氣。"""
-    for pool in CONTENT_POOLS:
-        for text in pool:
-            found = [fragment for fragment in FORBIDDEN_GROUP_META if fragment in text]
-            assert not found, f"群務話術 {found} in: {text}"
-
-
-def test_proactive_topic_not_empty():
-    p = generate_persona()
-    for _ in range(20):
-        t = generate_proactive_topic(p)
-        assert t and len(t) > 2
-
-
-def test_proactive_pools_have_minimum_variety():
-    """反重复 P0：池子太小必然循环。每型至少 12 句、通用池至少 30 句、晒成約至少 10 句。"""
-    for profile, pool in PERSONA_PROACTIVE.items():
-        assert len(pool) >= 12, f"{profile} 池只有 {len(pool)} 句"
-    assert len(GIRL_PROACTIVE) >= 30, f"GIRL_PROACTIVE 只有 {len(GIRL_PROACTIVE)} 句"
-    assert len(BOY_PROACTIVE) >= 30, f"BOY_PROACTIVE 只有 {len(BOY_PROACTIVE)} 句"
-    assert len(DAILY_TOPICS) >= 30, f"DAILY_TOPICS 只有 {len(DAILY_TOPICS)} 句"
-    assert len(SHOW_OFF_FEMALE) >= 10, f"SHOW_OFF_FEMALE 只有 {len(SHOW_OFF_FEMALE)} 句"
-    assert len(SHOW_OFF_MALE) >= 10, f"SHOW_OFF_MALE 只有 {len(SHOW_OFF_MALE)} 句"
-
-
-def test_proactive_pools_no_duplicates_within_or_across():
-    """池内与跨池不得有完全重复句（跨账号撞句的直接来源）。"""
-    seen: dict[str, str] = {}
-    for pool_name, pool in (
-        ("PERSONA_PROACTIVE.shy", PERSONA_PROACTIVE["shy"]),
-        ("PERSONA_PROACTIVE.lively", PERSONA_PROACTIVE["lively"]),
-        ("PERSONA_PROACTIVE.flirty", PERSONA_PROACTIVE["flirty"]),
-        ("PERSONA_PROACTIVE.direct", PERSONA_PROACTIVE["direct"]),
-        ("GIRL_PROACTIVE", GIRL_PROACTIVE),
-        ("BOY_PROACTIVE", BOY_PROACTIVE),
-        ("DAILY_TOPICS", DAILY_TOPICS),
-        ("ADULT_JOKES", ADULT_JOKES),
-        ("SHOW_OFF_FEMALE", SHOW_OFF_FEMALE),
-        ("SHOW_OFF_MALE", SHOW_OFF_MALE),
-    ):
-        for text in pool:
-            key = "".join(text.split())
-            assert key not in seen, f"重复句「{text}」同时出现在 {seen.get(key)} 与 {pool_name}"
-            seen[key] = pool_name
-
-
-def test_shy_persona_proactive_topic_does_not_drift_into_profanity(monkeypatch):
-    persona = {
-        "gender": "女",
-        "age": 21,
-        "personality": "害羞慢熟、容易緊張",
-        "chat_style": "溫柔慢熱",
-        "meetups_done": 0,
-    }
-    monkeypatch.setattr(random, "random", lambda: 0.0)
-    monkeypatch.setattr(random, "choice", lambda _items: "捷運又延誤了幹")
-
-    topic = generate_proactive_topic(persona)
-
-    assert isinstance(topic, str) and topic
-    assert "幹" not in topic

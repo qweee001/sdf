@@ -1041,25 +1041,24 @@ def test_recent_human_activity_suppresses_proactive_message():
 
 
 def test_proactive_topic_does_not_repeat_normalized_text_within_account_day(monkeypatch):
+    """即時生成的主動話題在同一天內不得復讀：重試三次仍撞句就回空字串。"""
+
     async def main():
         worker = _worker(101)
-        day = 321
-        monkeypatch.setattr(worker, "_today_index", lambda: day)
-        monkeypatch.setattr(
-            "app.worker.generate_proactive_topic",
-            Mock(side_effect=[
-                "週末想唱歌",
-                "週末想唱歌！",
-                "今天想吃牛肉麵",
-                "週末想唱歌",
-            ]),
-        )
+        monkeypatch.setattr(worker, "_today_index", lambda: 321)
+        worker._call_ai = AsyncMock(return_value="週末想唱歌")
+        worker.db.get_group_messages = AsyncMock(return_value=[])
+        worker.db.get_group_shared_notes = AsyncMock(return_value=[])
 
-        assert await worker._next_proactive_topic() == "週末想唱歌"
-        assert await worker._next_proactive_topic() == "今天想吃牛肉麵"
+        assert await worker._generate_context_topic(-5428680940) == "週末想唱歌"
+        # 同一句（正規化後相同）重試三次都撞 → 不發，回空字串
+        assert await worker._generate_context_topic(-5428680940) == ""
+        assert worker._call_ai.await_count == 4  # 1 次成功 + 3 次重試
 
-        day = 322
-        assert await worker._next_proactive_topic() == "週末想唱歌"
+        # 跨日重置後同一句可以再講
+        monkeypatch.setattr(worker, "_today_index", lambda: 322)
+        worker._reset_proactive_day()
+        assert await worker._generate_context_topic(-5428680940) == "週末想唱歌"
 
     asyncio.run(main())
 
@@ -1125,15 +1124,24 @@ def test_live_proactive_loop_dedupes_rolls_day_and_stops_cleanly(monkeypatch):
         monkeypatch.setattr("app.worker.time.time", lambda: clock[0])
         monkeypatch.setattr(worker, "_today_index", lambda: int(clock[0] // 86400))
         monkeypatch.setattr("app.worker.random.choice", Mock(side_effect=select_only_group))
-        monkeypatch.setattr(
-            "app.worker.generate_proactive_topic",
-            Mock(side_effect=[
-                "週末想唱歌",
-                "週末想唱歌！",
-                "今天想吃牛肉麵",
-                "週末想唱歌",
-            ]),
-        )
+
+        # 沒有預設池了：主動話題走即時生成。這裡模擬真實契約
+        # （重試時跳過近期發過的句子，全部撞句就回空字串），驗證迴圈層級不會復讀。
+        candidates = iter(["週末想唱歌", "週末想唱歌！", "今天想吃牛肉麵", "週末想唱歌"])
+
+        async def fake_context_topic(group_id, *, extra_hint=""):
+            for _ in range(4):
+                try:
+                    text = next(candidates)
+                except StopIteration:
+                    return ""
+                normalized = worker._normalized_reply(text)
+                if normalized and normalized not in worker._recent_proactive_topics:
+                    worker._recent_proactive_topics.add(normalized)
+                    return text
+            return ""
+
+        monkeypatch.setattr(worker, "_generate_context_topic", fake_context_topic)
         monkeypatch.setattr(worker, "_send_text_recorded", record_send)
 
         worker._proactive_task = asyncio.create_task(worker._proactive_loop())

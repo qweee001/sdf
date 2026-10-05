@@ -1,12 +1,10 @@
-"""人味系列：reaction／sticker、時段提示、事實記憶、私有話題池、跨帳號去重。"""
+"""人味系列：reaction／sticker、時段提示、事實記憶、即時話題生成、跨帳號去重。"""
 import asyncio
 import os
-import random
 from types import SimpleNamespace
 from typing import Any, cast
 
 from app import worker as worker_mod
-from app.persona import ADULT_JOKES, generate_proactive_topic
 from app.worker import AccountWorker
 
 
@@ -76,71 +74,50 @@ def test_pick_reaction_laugh_text_prefers_haha():
         assert w._pick_reaction("哈哈笑死", False) == "😂"
 
 
-def test_private_pools_shuffled_differently_per_account():
-    a = _worker("acc-a")
-    b = _worker("acc-b")
-    assert a._pools["adult"] != b._pools["adult"]
-    # 私有池只是公池的亂序副本，內容一致
-    assert sorted(a._pools["adult"]) == sorted(ADULT_JOKES)
-
-
-def test_private_pool_order_deterministic_per_account():
+def test_per_account_rng_is_deterministic_and_private():
+    """每個帳號一把私有 RNG：同 id 重跑序列一致，不同 id 序列不同（reaction／貼圖錯開）。"""
     a1 = _worker("acc-x")
     a2 = _worker("acc-x")
-    assert a1._pools["adult"] == a2._pools["adult"]
-    assert a1._pools["daily"] == a2._pools["daily"]
+    b = _worker("acc-y")
+    seq_a1 = [a1._rng.random() for _ in range(5)]
+    seq_a2 = [a2._rng.random() for _ in range(5)]
+    seq_b = [b._rng.random() for _ in range(5)]
+    assert seq_a1 == seq_a2
+    assert seq_a1 != seq_b
 
 
-def test_generate_proactive_topic_injected_pool_only():
-    persona = {
-        "gender": "女",
-        "age": 30,
-        "personality": "大膽風騷",
-        "chat_style": "俏皮少量表情",
-    }
-    pools = {
-        "daily": ["池A日常"],
-        "girl": ["池B約會"],
-        "boy": ["池B約會男"],
-        "adult": ["池C露骨"],
-        "persona": {"lively": ["池D人設"]},
-    }
-    rng = random.Random(42)
-    seen = set()
-    for _ in range(600):
-        seen.add(generate_proactive_topic(persona, pools=pools, rng=rng))
-    assert seen == {"池A日常", "池B約會", "池C露骨", "池D人設"}
+def test_context_topic_uses_recent_group_messages_and_dedupes():
+    """主動話題即時生成：prompt 要帶上群裡真正的上文，且同一句不重複發。"""
 
+    class _CtxDB(_FakeDB):
+        def __init__(self):
+            super().__init__()
+            self.msgs = [
+                {"sender_id": 5, "sender_name": "阿宏", "role": "user", "content": "今天加班到十點"},
+                {"sender_id": 6, "sender_name": "美玲", "role": "user", "content": "你也太拼了吧"},
+            ]
 
-def test_next_proactive_topic_skips_other_accounts_recent_texts(monkeypatch):
-    w = _worker()
-    w.persona = {
-        "name": "t",
-        "gender": "女",
-        "age": 28,
-        "personality": "大膽風騷",
-        "chat_style": "俏皮少量表情",
-    }
-    w.db = _FakeDB()
-    w.db.recent_bot_texts = [
-        "姐妹A發過的開場",
-        "姐妹B發過的開場",
-    ]
-    sequence = iter(
-        [
-            "姐妹A發過的開場",
-            "姐妹B發過的開場",
-            "一條全新開場",
-        ]
-    )
-    monkeypatch.setattr(
-        worker_mod,
-        "generate_proactive_topic",
-        lambda p, pools=None, rng=None: next(sequence),
-    )
-    topic = asyncio.run(w._next_proactive_topic(-1001))
-    assert topic == "一條全新開場"
-    assert w._normalized_reply(topic) in w._recent_proactive_topics
+        async def get_group_messages(self, *_args, **_kwargs):
+            return list(self.msgs)
+
+        async def get_group_shared_notes(self, *_args, **_kwargs):
+            return []
+
+    w = _worker("acc-ctx")
+    w.db = _CtxDB()
+    prompts = []
+
+    async def fake_call(system_prompt, message, **kwargs):
+        prompts.append(message)
+        return "你也早點休息啦"
+
+    w._call_ai = fake_call
+    topic = asyncio.run(w._generate_context_topic(-1001))
+    assert topic == "你也早點休息啦"
+    assert "今天加班到十點" in prompts[0]
+    assert "你也太拼了吧" in prompts[0]
+    # 同一句再生成一次 → 去重擋下
+    assert asyncio.run(w._generate_context_topic(-1001)) == ""
 
 
 def test_sticker_assets_loaded():

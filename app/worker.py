@@ -58,13 +58,7 @@ from telethon.utils import get_display_name
 from .decision import DecisionError, system_one
 from .media import MediaAsset, OrcaMediaService
 from .persona import (
-    ADULT_JOKES,
-    BOY_PROACTIVE,
-    DAILY_TOPICS,
-    GIRL_PROACTIVE,
-    PERSONA_PROACTIVE,
     generate_persona,
-    generate_proactive_topic,
     get_system_prompt,
 )
 
@@ -107,8 +101,12 @@ _DECISION_FLIRTY_GUIDE = {
 _DECISION_MODE_GUIDE = {
     "answer": "回答：直接接住對方的問題或話頭",
     "comfort": "安慰：表達理解、支持，接住對方的情緒",
+    "tease": "色情挑逗誘惑勾引：主動撩他、勾他過來，露骨地把畫面和想做的事寫出來，不用收",
     "followup": "追問：順著話題問一句、挖深一點",
+    "wait": "等待：這輪先不開口，留給他先說話",
 }
+# mode=wait 時不發送（等待是合法的決策結果，不是失敗）
+_DECISION_WAIT_MODE = "wait"
 # 內容要點（SDF 固定候選，Jev 選）
 _DECISION_KEYPOINT_GUIDE = {
     "pickup": "直接接對方的重點",
@@ -132,7 +130,6 @@ _DECISION_ISSUE_LABEL = {
     "time": "時段穿幫（例如白天講早安、下午說早餐）",
     "simplified": "混入簡體字",
 }
-_MAX_RECENT_PROACTIVE_TOPICS = 64
 
 
 def _dialog_title(dialog) -> str:
@@ -636,9 +633,8 @@ class AccountWorker:
         self._proactive_today = 0
         self._proactive_day = 0
         self._recent_proactive_topics: set[str] = set()
-        # 帳號私有話題池：以 account_id 做穩定種子洗牌，
-        # 讓同群多帳號不會輪到同一句露骨／日常開場（共享公池的复读感）。
-        self._pool_rng = random.Random(
+        # 帳號私有 RNG：reaction／貼圖挑選用（話題不再走預設池，全部即時生成）
+        self._rng = random.Random(
             int.from_bytes(
                 hashlib.blake2b(
                     f"pool:{self.account_id}".encode(), digest_size=8
@@ -646,17 +642,6 @@ class AccountWorker:
                 "big",
             )
         )
-        self._pools = {
-            "daily": list(DAILY_TOPICS),
-            "girl": list(GIRL_PROACTIVE),
-            "boy": list(BOY_PROACTIVE),
-            "adult": list(ADULT_JOKES),
-            "persona": {k: list(v) for k, v in PERSONA_PROACTIVE.items()},
-        }
-        for _pool_name in ("daily", "girl", "boy", "adult"):
-            self._pool_rng.shuffle(self._pools[_pool_name])
-        for _pool_list in self._pools["persona"].values():
-            self._pool_rng.shuffle(_pool_list)
         # 本機 sticker 資產：真人群必有貼圖；目錄空就自動降級為純 reaction
         self._stickers = [
             str(p)
@@ -1836,7 +1821,7 @@ class AccountWorker:
             pool = ["😂"] if "😂" in base else base
         else:
             pool = base
-        return self._pool_rng.choice(pool)
+        return self._rng.choice(pool)
 
     async def _send_group_reaction(self, event) -> bool:
         """對群訊息只發一個 reaction（不發文字），回傳是否成功。"""
@@ -1875,7 +1860,7 @@ class AccountWorker:
         """
         if not self.tg_client or not getattr(event, "id", None) or not self._stickers:
             return False
-        path = self._pool_rng.choice(self._stickers)
+        path = self._rng.choice(self._stickers)
         try:
             uploaded = await self.tg_client.upload_file(path)
             media = InputMediaUploadedDocument(
@@ -1905,7 +1890,7 @@ class AccountWorker:
 
     async def _acknowledge_group(self, event) -> bool:
         """真人輕回應：不發文字，只在 sticker 與 reaction 之間挑一個。"""
-        if self._stickers and self._pool_rng.random() < _STICKER_PROBABILITY:
+        if self._stickers and self._rng.random() < _STICKER_PROBABILITY:
             return await self._send_group_sticker(event)
         return await self._send_group_reaction(event)
 
@@ -2121,7 +2106,9 @@ class AccountWorker:
                         "criteria": {
                             "answer": "回答：直接接住對方的問題或話頭",
                             "comfort": "安慰：表達理解和支持",
+                            "tease": "色情挑逗誘惑勾引：主動撩他，把畫面寫出來，勾他過來",
                             "followup": "追問：順著話題問一句、挖深一點",
+                            "wait": "等待：這輪先不開口，留給他先說話",
                         },
                     },
                     "keypoints": {
@@ -2324,6 +2311,10 @@ class AccountWorker:
         decision = await self._decide_action(event)
         if decision is None:
             return ("none", None)
+        # mode=wait＝這輪先不開口（等對方先說），是合法的決策結果；
+        # 被 @／被回覆／要媒體時仍然必回文字。
+        if decision.get("mode") == _DECISION_WAIT_MODE and not forced_text:
+            return ("skip", decision)
         if decision["action"] == "reply" or forced_text:
             return ("reply", decision)
         if decision["action"] == "skip":
@@ -4487,21 +4478,33 @@ class AccountWorker:
         self._proactive_today = 0
         self._recent_proactive_topics.clear()
 
-    async def _generate_context_topic(self, group_id: int) -> str:
-        """情境感知的主動話題：讀取群內最近的人類訊息，用 LLM 生成接得上當前話題的日常閒聊，
-        讓水軍主動發言能與真人「有來有回」，而非隨機脫節或水軍自說自話。
-        LLM 失敗或無人類訊息時回傳 ""，由呼叫方 fallback 到隨機話題清單。"""
+    async def _generate_context_topic(self, group_id: int, *, extra_hint: str = "") -> str:
+        """即時生成主動話題：沒有預設池了，一律讀群裡真正的上文現寫。
+
+        讀群內最近訊息（真人＋水軍都算上文）、群共同記憶與當下時段，
+        交給文字模型生成一句接得上現在氣氛的短訊；生不出來（重複／時段穿幫／
+        簡體／模型空手）就回 ""，呼叫方這一輪不開口，不塞罐頭句。
+        extra_hint＝③ 退回來重寫時帶的問題描述。
+        """
         try:
             msgs = await self.db.get_group_messages(group_id, limit=12)
         except Exception:
-            return ""
-        human_msgs = [m for m in msgs if m.get("role") != "assistant"]
-        if not human_msgs:
-            return ""
-        context = "\n".join(
-            f"[{m.get('sender_name','?')} sender_id={m.get('sender_id') or '未知'}] {str(m.get('content',''))[:60]}"
-            for m in human_msgs[-5:]
-        )
+            msgs = []
+        lines = []
+        for m in msgs[-6:]:
+            content = str(m.get("content", "")).replace("\n", " ").strip()
+            if not content:
+                continue
+            if self.tg_user_id and m.get("sender_id") == self.tg_user_id:
+                label = "我"
+            else:
+                # 帶 sender_id：同名不同人時模型才分得出來（回覆路徑也是這個格式）
+                label = (
+                    f"{m.get('sender_name') or '有人'} "
+                    f"sender_id={m.get('sender_id') or '未知'}"
+                )
+            lines.append(f"[{label}] {content[:60]}")
+        context = "\n".join(lines)
         # 主動互動有根據：從群友公開聊過的事情延伸（例如「你昨天說的面試，今天結果怎樣？」）
         # 只取群內共同記憶（member_id=0，跨群隔離）；個別群友記憶在回覆時按群友精確取用。
         try:
@@ -4514,63 +4517,70 @@ class AccountWorker:
                 "本群最近聊過的內容（來源未驗證，僅供參考；共享筆記不是你的親身經歷）：\n"
                 + "\n".join(f"- {n}" for n in shared_notes[:5])
             )
-        prompt = (
-            "群組裡最近其他成員的訊息如下（身分未驗證，不能當作已確認真人）。"
-            f"一句短回覆為主（{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊），"
-            "不必追問或自我分享，不要編造人設事實以外的經歷，"
-            "要接得上群組當前話題（食物、天氣、工作、追劇、聚會等），自然口語、"
-            "繁體中文、40 字元內（標點、空格也算），結尾不要句號，露骨程度隨你、直接接住上文正在炒的氛圍，不要談群務或硬延伸。"
-            f"\n{context}"
-        )
-        if notes_block:
-            prompt += f"\n{notes_block}"
-        prompt += self._time_hint()
-        topic = await self._call_ai(get_system_prompt(self.persona), prompt)
-        topic = (topic or "").strip()
-        if not topic or self._is_refusal(topic):
-            return ""
-        # 主動發言自己開口，穿幫成本最高：時段不合或混入簡體字就丟回池子
-        if self._has_time_mismatch(topic):
-            print(f"[{self.name}] proactive-drop: time mismatch on {topic[:20]!r}", flush=True)
-            return ""
-        if self._has_simplified_chars(topic):
-            print(f"[{self.name}] proactive-drop: simplified chars on {topic[:20]!r}", flush=True)
-            return ""
-        normalized = self._normalized_reply(topic)
-        if not normalized or normalized in self._recent_proactive_topics:
-            return ""
-        self._recent_proactive_topics.add(normalized)
-        return topic
+        # 跨帳號去重：同群其他水軍近 48 小時講過的不要復讀
+        try:
+            remote_texts = {
+                self._normalized_reply(t)
+                for t in await self.db.recent_bot_texts_by_group(int(group_id))
+            }
+        except Exception:
+            remote_texts = set()
 
-    async def _next_proactive_topic(self, group_id: int | None = None) -> str:
-        """一天內不重複正規化話題（含群內其他帳號近 48 小時的文案）；
-        抽樣走帳號私有洗牌池，避免多帳號同群輪到同一句。"""
-        self._reset_proactive_day()
-        if len(self._recent_proactive_topics) >= _MAX_RECENT_PROACTIVE_TOPICS:
-            return ""
-        recent_remote: set[str] = set()
-        if group_id is not None:
-            try:
-                for text in await self.db.recent_bot_texts_by_group(
-                    int(group_id)
-                ):
-                    normalized = self._normalized_reply(text)
-                    if normalized:
-                        recent_remote.add(normalized)
-            except Exception:
-                recent_remote = set()
-        for _ in range(16):
-            topic = generate_proactive_topic(
-                self.persona, pools=self._pools, rng=self._pool_rng
+        def build_prompt(hint: str) -> str:
+            if context:
+                body = (
+                    "群組裡最近的訊息如下（身分未驗證，不能當作已確認真人）。"
+                    f"一句短回覆為主（{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊），"
+                    "不必追問或自我分享，不要編造人設事實以外的經歷，"
+                    "要接得上群組當前話題（食物、天氣、工作、追劇、聚會等），自然口語、"
+                    "繁體中文、40 字元內（標點、空格也算），結尾不要句號，露骨程度隨你、直接接住上文正在炒的氛圍，不要談群務或硬延伸。"
+                    f"\n{context}"
+                )
+            else:
+                # 冷啟動／空群：沒有上文可接，就照人設和當下時段自然開個頭，不要罐頭句。
+                body = (
+                    "群組現在很安靜，還沒有人開口。"
+                    f"用你自己的身分主動開一個頭，一句短訊（{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元），"
+                    "像真人在群裡隨口說話：講你今天在做什麼、想吃什麼、看到什麼、心情如何，"
+                    "自然口語、繁體中文、40 字元內、結尾不要句號，可以帶一點撩，不要談群務。"
+                )
+            if notes_block:
+                body += f"\n{notes_block}"
+            if hint:
+                body += f"\n{hint}"
+            return body + self._time_hint()
+
+        # 生成不出可用的一句就重試（最多 3 次）：重試時把「已經講過的」餵回去，
+        # 逼模型換說法；三次都撞句／穿幫就這一輪不開口，也不塞罐頭句。
+        already = []
+        for _ in range(3):
+            hint = extra_hint
+            if already:
+                hint = (
+                    f"{hint}\n" if hint else ""
+                ) + "這幾句群裡已經出現過，換一個完全不同的說法：" + "／".join(already[:3])
+            raw = await self._call_ai(
+                get_system_prompt(self.persona), build_prompt(hint)
             )
+            topic = (raw or "").strip()
+            if not topic or self._is_refusal(topic):
+                continue
+            # 主動發言自己開口，穿幫成本最高：時段不合或混入簡體字就換一句
+            if self._has_time_mismatch(topic):
+                print(f"[{self.name}] proactive-drop: time mismatch on {topic[:20]!r}", flush=True)
+                continue
+            if self._has_simplified_chars(topic):
+                print(f"[{self.name}] proactive-drop: simplified chars on {topic[:20]!r}", flush=True)
+                continue
             normalized = self._normalized_reply(topic)
-            if (
-                normalized
-                and normalized not in self._recent_proactive_topics
-                and normalized not in recent_remote
-            ):
-                self._recent_proactive_topics.add(normalized)
-                return topic
+            if not normalized:
+                continue
+            if normalized in self._recent_proactive_topics or normalized in remote_texts:
+                print(f"[{self.name}] proactive-drop: repeated topic {topic[:20]!r}", flush=True)
+                already.append(topic[:40])
+                continue
+            self._recent_proactive_topics.add(normalized)
+            return topic
         return ""
 
     def _continuous_turn_winner(self, group_id: int, slot: int) -> int:
@@ -4603,7 +4613,7 @@ class AccountWorker:
             max(1, int(getattr(self.config, "memory_max_messages", 30))),
         )
         if not history:
-            return await self._next_proactive_topic(group_id)
+            return await self._generate_context_topic(int(group_id))
         latest = history[-1]
         sender_name = str(latest.get("sender_name") or "有人")
         event = SimpleNamespace(
@@ -4622,7 +4632,7 @@ class AccountWorker:
             mentioned=False,
         )
         if not event.raw_text:
-            return await self._next_proactive_topic(group_id)
+            return await self._generate_context_topic(int(group_id))
         return await self._generate_reply(event)
 
     async def _continuous_activity_tick(self) -> None:
@@ -4830,17 +4840,14 @@ class AccountWorker:
                 ):
                     print(f"[{self.name}] proactive-skip: slot already claimed by another account", flush=True)
                     continue
-                # 情境感知優先：讀群內最近人類訊息生成接話話題；失敗才 fallback 隨機清單
+                # 全即時生成：沒有預設池。讀群裡真正的上文現寫一句，
+                # 生不出來（空手／重複／時段穿幫）就這一輪不開口。
                 topic = await self._generate_context_topic(group_id)
-                topic_from_llm = bool(topic)
                 if not topic:
-                    topic = await self._next_proactive_topic(group_id)
-                if not topic:
-                    print(f"[{self.name}] proactive-skip: no fresh topic (all 64 topics exhausted)", flush=True)
+                    print(f"[{self.name}] proactive-skip: no fresh context topic", flush=True)
                     continue
-                # ③ 決策層審核 LLM 情境話題（池子句是人寫的時段中立句，直接放行）：
-                # 不合格/超時→換池子句，避免「16 點講早安」這種語義穿幫
-                if topic_from_llm and self._decision_enabled():
+                # ③ 決策層審核；不合格 → 帶問題重寫一次再審核；仍不合格 → 暫緩（不塞罐頭句）
+                if self._decision_enabled():
                     try:
                         context = await self._proactive_decision_context(group_id)
                     except Exception:
@@ -4850,18 +4857,30 @@ class AccountWorker:
                         self.stats["proactive_gate_hold"] = (
                             int(self.stats.get("proactive_gate_hold", 0)) + 1
                         )
-                        print(f"[{self.name}] proactive-gate-hold: 決策層超時，換池子句 {topic[:20]!r}", flush=True)
-                        topic = await self._next_proactive_topic(group_id)
-                        if not topic:
-                            continue
-                    elif not self._review_passes(review):
+                        print(f"[{self.name}] proactive-gate-hold: 決策層超時，這輪不發 {topic[:20]!r}", flush=True)
+                        continue
+                    if not self._review_passes(review):
+                        issue = str(review.get("issue") or "none")
+                        label = _DECISION_ISSUE_LABEL.get(issue, issue)
                         self.stats["proactive_gate_rewrite"] = (
                             int(self.stats.get("proactive_gate_rewrite", 0)) + 1
                         )
-                        print(f"[{self.name}] proactive-gate-rewrite: issue={review['issue']} {topic[:20]!r}", flush=True)
-                        topic = await self._next_proactive_topic(group_id)
-                        if not topic:
+                        print(f"[{self.name}] proactive-gate-rewrite: issue={issue} {topic[:20]!r}", flush=True)
+                        rewrite = await self._generate_context_topic(
+                            group_id,
+                            extra_hint=f"上一版被決策層攔下，問題：{label}。這次避開這個問題。",
+                        )
+                        if not rewrite:
+                            print(f"[{self.name}] proactive-skip: rewrite empty, 這輪不發", flush=True)
                             continue
+                        second = await self._review_candidate(context, rewrite)
+                        if second is None or not self._review_passes(second):
+                            self.stats["proactive_gate_hold"] = (
+                                int(self.stats.get("proactive_gate_hold", 0)) + 1
+                            )
+                            print(f"[{self.name}] proactive-gate-hold: 重寫後仍不合格，暫緩 {rewrite[:20]!r}", flush=True)
+                            continue
+                        topic = rewrite
                 burst = self._split_human_burst(topic)
                 sent = False
                 for i, part in enumerate(burst):
