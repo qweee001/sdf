@@ -33,6 +33,7 @@ import re
 import secrets
 import time
 import unicodedata
+from pathlib import Path
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -80,25 +81,10 @@ _LAUGH_MARKS = ("哈哈", "🤣", "😂", "笑死", "lol", "xd", "嘿嘿")
 # 真人「看見但不說」：被 @／直接回覆很少漏接，普通訊息常只是默認
 _SILENT_REPLY_PROBABILITY_DIRECTED = 0.10
 _SILENT_REPLY_PROBABILITY_ORDINARY = 0.35
-
-# 真人錯字率：短訊偶爾打錯一個字，隔一秒多補一則更正
-_TYPO_PROBABILITY = 0.12
-_TYPO_MIN_LEN = 8
-# 形近／同音字替換表（全部繁體，避免被簡體檢查擋下）
-_TYPO_SWAPS = {
-    "的": "地", "地": "的",
-    "有": "又", "又": "有",
-    "在": "再", "再": "在",
-    "做": "作", "作": "做",
-    "帶": "戴", "戴": "帶",
-    "他": "她", "她": "他",
-    "裡": "裏", "裏": "裡",
-}
-_TYPO_CORRECTIONS = (
-    "欸打錯字了，是",
-    "啊打錯，是",
-    "打錯字了，是",
-)
+# 睡著的人（凌晨 4-7 點錯峰窗口）基本沒看手機：被@也只有兩成機率接住
+_SLEEP_REPLY_PROBABILITY = 0.20
+# reaction 輕回應改成 sticker 的機率（sticker 比重點表情多一分「用心」）
+_STICKER_PROBABILITY = 0.35
 _MAX_RECENT_PROACTIVE_TOPICS = 64
 # 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
 _MAX_TOPIC_TURNS = 3
@@ -584,6 +570,13 @@ class AccountWorker:
             self._pool_rng.shuffle(self._pools[_pool_name])
         for _pool_list in self._pools["persona"].values():
             self._pool_rng.shuffle(_pool_list)
+        # 本機 sticker 資產：真人群必有貼圖；目錄空就自動降級為純 reaction
+        self._stickers = [
+            str(p)
+            for p in sorted(
+                (Path(__file__).resolve().parent / "assets" / "stickers").glob("*.webp")
+            )
+        ]
         self._realtime_voice_day = 0
         self._realtime_voice_today = 0
         self._last_realtime_voice = 0.0
@@ -909,6 +902,13 @@ class AccountWorker:
                 else _SILENT_REPLY_PROBABILITY_ORDINARY
             )
             if random.random() < silent_p:
+                self.stats["silent_skips"] = (
+                    int(self.stats.get("silent_skips", 0)) + 1
+                )
+                return
+            # 睡著的人（凌晨 4-7 錯峰窗）基本沒看手機：被@也只有兩成接得住，
+            # 治「半夜三點秒回」的機器感
+            if self._is_sleeping() and random.random() >= _SLEEP_REPLY_PROBABILITY:
                 self.stats["silent_skips"] = (
                     int(self.stats.get("silent_skips", 0)) + 1
                 )
@@ -1728,6 +1728,32 @@ class AccountWorker:
             print(f"[{self.name}] reaction error: {e}", flush=True)
             return False
 
+    async def _send_group_sticker(self, event) -> bool:
+        """對群訊息只發一張本機 sticker（不发文字），回傳是否成功。"""
+        if not self.tg_client or not getattr(event, "id", None) or not self._stickers:
+            return False
+        path = self._pool_rng.choice(self._stickers)
+        try:
+            await self.tg_client.send_sticker(int(event.chat_id), path)
+            self.stats["stickers_sent"] = (
+                int(self.stats.get("stickers_sent", 0)) + 1
+            )
+            print(
+                f"[{self.name}] sticker-sent: {Path(path).name} → msg {int(event.id)}",
+                flush=True,
+            )
+            return True
+        except Exception as e:
+            self.stats["errors"] += 1
+            print(f"[{self.name}] sticker error: {e}", flush=True)
+            return False
+
+    async def _acknowledge_group(self, event) -> bool:
+        """真人輕回應：不發文字，只在 sticker 與 reaction 之間挑一個。"""
+        if self._stickers and self._pool_rng.random() < _STICKER_PROBABILITY:
+            return await self._send_group_sticker(event)
+        return await self._send_group_reaction(event)
+
     def _time_hint(self) -> str:
         """現在台北時段的語氣提示：真人晚上聊天的口氣跟中午完全不同。"""
         hour = int(self._taipei_hour())
@@ -1746,20 +1772,6 @@ class AccountWorker:
         else:
             band, hint = "深夜", "語氣可以更親密一點"
         return f"\n現在台北時間 {hour:02d} 點（{band}）：{hint}。"
-
-    def _maybe_typo_part(self, part: str) -> tuple[str, str | None]:
-        """偶爾把一句話裡的一個字打成形近字，回傳 (可能改錯的文字, 原文或 None)。"""
-        if len(part) < _TYPO_MIN_LEN:
-            return part, None
-        if self._pool_rng.random() >= _TYPO_PROBABILITY:
-            return part, None
-        positions = [i for i, ch in enumerate(part) if ch in _TYPO_SWAPS]
-        if not positions:
-            return part, None
-        pos = self._pool_rng.choice(positions)
-        original = part
-        typo = part[:pos] + _TYPO_SWAPS[part[pos]] + part[pos + 1:]
-        return typo, original
 
     @staticmethod
     def _note_is_trivial(note: str) -> bool:
@@ -1798,7 +1810,7 @@ class AccountWorker:
                 if managed_followup
                 else self._requested_media_kind(event.raw_text or "")
             )
-            # 真人 reaction 比例：非指向自己的訊息，一半機率只點 emoji 不打字
+            # 真人輕回應比例：非指向自己的訊息，近半機率只點 sticker/reaction 不打字
             # （對方明確要圖/語音時不算「指向」，仍需文字交付）
             if (
                 not media_kind
@@ -1809,7 +1821,7 @@ class AccountWorker:
                 )
                 and random.random() < _REACTION_PROBABILITY
             ):
-                if await self._send_group_reaction(event):
+                if await self._acknowledge_group(event):
                     if is_human_reply:
                         self.stats["human_sent"] += 1
                         human_counted = True
@@ -1871,17 +1883,8 @@ class AccountWorker:
             # Ordinary replies always use text; they have no run/event/snapshot envelope.
             # 真人節奏：模型輸出長句時拆成 2~3 則短訊連發（實測 80% 真人訊息間隔 <10s）
             burst = self._split_human_burst(text)
-            # 錯字層：整段回覆最多一個字打錯，發完該則後隔一秒多補一則更正
-            typo_at = (
-                self._pool_rng.randrange(len(burst))
-                if burst and self._pool_rng.random() < _TYPO_PROBABILITY
-                else -1
-            )
             sent = False
             for i, part in enumerate(burst):
-                original_part: str | None = None
-                if i == typo_at:
-                    part, original_part = self._maybe_typo_part(part)
                 ok = await self._send_text_recorded(
                     int(event.chat_id),
                     part,
@@ -1896,15 +1899,6 @@ class AccountWorker:
                 sent = sent or ok
                 if not ok:
                     break
-                if ok and original_part is not None:
-                    await asyncio.sleep(random.uniform(1.2, 2.8))
-                    await self._send_text_recorded(
-                        int(event.chat_id),
-                        f"{self._pool_rng.choice(_TYPO_CORRECTIONS)}「{original_part}」",
-                        activity_kind="followup" if managed_followup else "reply",
-                        stats_key="replies_sent",
-                        short_delay=True,
-                    )
                 if i < len(burst) - 1:
                     await asyncio.sleep(random.uniform(*_BURST_PAUSE_SECONDS))
             if sent and is_human_reply:

@@ -1,5 +1,6 @@
-"""人味三件套：reaction 挑選、帳號私有話題池、跨帳號話題去重。"""
+"""人味系列：reaction／sticker、時段提示、事實記憶、私有話題池、跨帳號去重。"""
 import asyncio
+import os
 import random
 from types import SimpleNamespace
 from typing import Any, cast
@@ -142,34 +143,68 @@ def test_next_proactive_topic_skips_other_accounts_recent_texts(monkeypatch):
     assert w._normalized_reply(topic) in w._recent_proactive_topics
 
 
-def test_maybe_typo_part_swaps_single_char(monkeypatch):
-    monkeypatch.setattr(worker_mod, "_TYPO_PROBABILITY", 1.0)
+def test_sticker_assets_loaded():
     w = _worker()
-    original = "我今天超想吃火鍋的"
-    typo, orig = w._maybe_typo_part(original)
-    assert orig == original
-    assert typo != original
-    assert len(typo) == len(original)
-    diff = [i for i in range(len(original)) if typo[i] != original[i]]
-    assert len(diff) == 1
-    assert typo[diff[0]] == worker_mod._TYPO_SWAPS[original[diff[0]]]
+    assert len(w._stickers) >= 1
+    for path in w._stickers:
+        assert path.endswith(".webp")
+        assert os.path.exists(path)
 
 
-def test_maybe_typo_part_without_swappable_char_untouched(monkeypatch):
-    monkeypatch.setattr(worker_mod, "_TYPO_PROBABILITY", 1.0)
+def test_acknowledge_group_routes_to_sticker(monkeypatch):
+    import asyncio
+
+    from types import SimpleNamespace
+
     w = _worker()
-    text = "哈哈哈哈哈哈哈哈"
-    typo, orig = w._maybe_typo_part(text)
-    assert typo == text
-    assert orig is None
+    # 強制走 sticker 分支
+    monkeypatch.setattr(worker_mod, "_STICKER_PROBABILITY", 1.0)
+    sent = []
+
+    class _FakeClient:
+        async def send_sticker(self, chat_id, path):
+            sent.append(("sticker", chat_id, path))
+
+        async def send_reaction(self, chat_id, msg_id, reaction):
+            sent.append(("reaction", chat_id, msg_id, reaction))
+
+    w.tg_client = _FakeClient()
+    event = SimpleNamespace(chat_id=-1001, id=77, raw_text="早安")
+    ok = asyncio.run(w._acknowledge_group(event))
+    assert ok is True
+    assert len(sent) == 1
+    kind, chat_id, path = sent[0]
+    assert kind == "sticker"
+    assert chat_id == -1001
+    assert path in w._stickers
+    assert w.stats["stickers_sent"] == 1
 
 
-def test_maybe_typo_part_short_text_untouched(monkeypatch):
-    monkeypatch.setattr(worker_mod, "_TYPO_PROBABILITY", 1.0)
+def test_acknowledge_group_falls_back_to_reaction(monkeypatch):
+    import asyncio
+
+    from types import SimpleNamespace
+
     w = _worker()
-    typo, orig = w._maybe_typo_part("短一句")
-    assert typo == "短一句"
-    assert orig is None
+    # 沒有 sticker 資產時退回 reaction
+    monkeypatch.setattr(w, "_stickers", [])
+    monkeypatch.setattr(worker_mod, "_STICKER_PROBABILITY", 1.0)
+    sent = []
+
+    class _FakeClient:
+        async def send_sticker(self, chat_id, path):
+            sent.append(("sticker", chat_id, path))
+
+        async def send_reaction(self, chat_id, msg_id, reaction):
+            sent.append(("reaction", chat_id, msg_id, reaction))
+
+    w.tg_client = _FakeClient()
+    event = SimpleNamespace(chat_id=-1001, id=77, raw_text="早安")
+    ok = asyncio.run(w._acknowledge_group(event))
+    assert ok is True
+    assert len(sent) == 1
+    assert sent[0][0] == "reaction"
+    assert w.stats["reactions_sent"] == 1
 
 
 def test_time_hint_bands():

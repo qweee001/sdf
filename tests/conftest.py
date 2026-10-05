@@ -40,7 +40,8 @@ def _deterministic_human_touch(monkeypatch):
     monkeypatch.setattr(
         worker_mod, "_SILENT_REPLY_PROBABILITY_ORDINARY", 0.0
     )
-    monkeypatch.setattr(worker_mod, "_TYPO_PROBABILITY", 0.0)
+    # 睡窗門關掉（sleeping 也照回），避免測試被台北凌晨 4-7 點的真实時鐘影響
+    monkeypatch.setattr(worker_mod, "_SLEEP_REPLY_PROBABILITY", 1.0)
 
 
 _EXIT = {"code": 0}

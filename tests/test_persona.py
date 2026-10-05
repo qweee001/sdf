@@ -189,8 +189,11 @@ def test_system_prompt_preserves_adult_policy_after_approved_language_cleanup():
     assert "台灣人說：同學、臉書、捷運、拍照、超讚、妹、兄弟" in sp
     assert "閒聊方式要符合你當前的人設、性格、口頭禪和聊天節奏" in sp
     assert "不能覆蓋或削弱上面的聊天樣子與漸進升級規則" in sp
-    assert "禁止提及、建議或延伸任何視訊話題" in sp
+    assert "不要提及、建議或延伸任何視訊話題" in sp
     assert "不要複述相關詞" in sp
+    # 話題邊界：加 LINE、真實具體地址都不主動帶出
+    assert "不要主動提交換聯絡方式" in sp
+    assert "不要講真實具體地址" in sp
 
 
 def test_system_prompt_carries_no_meta_jailbreak_declaration():
