@@ -248,6 +248,13 @@ class Database:
             )
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS group_labels (
+                group_id INTEGER PRIMARY KEY,
+                label TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS live_test_events (
                 run_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,
@@ -2065,6 +2072,54 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [str(r[0]) for r in rows]
+
+    async def upsert_group_label(self, group_id: int, label: str) -> bool:
+        """控制台給群組取的備註名（Telegram 群名太像或叫不出來時用）。空字串＝刪除。"""
+        try:
+            gid = int(group_id)
+        except (TypeError, ValueError):
+            return False
+        text = (label or "").strip()
+        if not text:
+            await self._c.execute("DELETE FROM group_labels WHERE group_id = ?", (gid,))
+            await self._c.commit()
+            return True
+        await self._c.execute(
+            "INSERT INTO group_labels (group_id, label, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(group_id) DO UPDATE SET "
+            "label = excluded.label, updated_at = excluded.updated_at",
+            (gid, text[:60], time.time()),
+        )
+        await self._c.commit()
+        return True
+
+    async def get_group_labels(self) -> dict[int, str]:
+        cursor = await self._c.execute("SELECT group_id, label FROM group_labels")
+        rows = await cursor.fetchall()
+        return {int(r[0]): str(r[1]) for r in rows}
+
+    async def group_overview(self) -> list[dict]:
+        """每個群一行的活動概況（控制台群組總管用）。
+
+        只掃 messages 一張表：訊息數、去重後真人數、最後訊息/最後真人訊息時間。
+        """
+        cursor = await self._c.execute(
+            "SELECT group_id, COUNT(*) AS msg_count, MAX(timestamp) AS last_ts, "
+            "MAX(CASE WHEN role <> 'assistant' THEN timestamp END) AS last_human_ts, "
+            "COUNT(DISTINCT CASE WHEN role <> 'assistant' THEN sender_id END) AS human_senders "
+            "FROM messages GROUP BY group_id"
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "group_id": int(r["group_id"]),
+                "msg_count": int(r["msg_count"] or 0),
+                "last_ts": float(r["last_ts"] or 0.0),
+                "last_human_ts": float(r["last_human_ts"] or 0.0),
+                "human_senders": int(r["human_senders"] or 0),
+            }
+            for r in rows
+        ]
 
     async def cleanup_expired(self, ttl_hours: int) -> None:
         cutoff = time.time() - ttl_hours * 3600

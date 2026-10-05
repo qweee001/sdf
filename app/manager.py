@@ -475,6 +475,14 @@ class AccountManager:
 
         worker = self.workers.get(account_id)
         if worker:
+            # 先把新加入的群抓進來（60 秒內不重複抓），否則剛被拉進去的群
+            # 要等帳號重啟才會出現在控制台清單裡。
+            refresher = getattr(worker, "refresh_dialogs", None)
+            if callable(refresher):
+                try:
+                    await asyncio.wait_for(refresher(), timeout=15)
+                except Exception:
+                    pass
             groups = worker.group_list()
             if groups:
                 return groups, ""

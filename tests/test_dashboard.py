@@ -98,10 +98,11 @@ def test_index_serves_zh_tw():
 
 
 def test_groups_ui_uses_read_only_discovery_before_start():
-    """群組設定畫面必須呼叫唯讀探索接口，不得要求先啟動互動。"""
+    """群組管理畫面必須使用唯讀探索接口（不啟動互動就能看到群組）。"""
     with _make_dashboard() as client:
         r = client.get("/")
-        assert "/groups/available" in r.text
+        assert "/api/groups/directory" in r.text
+        assert "/api/groups/membership" in r.text
         assert "先啟動帳號，再回來勾選" not in r.text
 
 

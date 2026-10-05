@@ -133,6 +133,45 @@ _DECISION_ISSUE_LABEL = {
     "simplified": "混入簡體字",
 }
 _MAX_RECENT_PROACTIVE_TOPICS = 64
+
+
+def _dialog_title(dialog) -> str:
+    """群組顯示名稱。
+
+    Telethon 的 get_display_name 只認 User / Chat / Channel，傳 Dialog 進去
+    一律回空字串——舊版就是這樣讓控制台每個群都變成「群組 -100xxxx」。
+    先取 Dialog.title，再落到 entity，最後才退成 ID。
+    """
+    entity = getattr(dialog, "entity", None)
+    candidates = [
+        getattr(dialog, "title", None),
+        get_display_name(entity) if entity is not None else None,
+        getattr(entity, "title", None) if entity is not None else None,
+        getattr(dialog, "name", None),
+    ]
+    for candidate in candidates:
+        if candidate:
+            return str(candidate).strip()
+    username = getattr(entity, "username", None) if entity is not None else None
+    if username:
+        return f"@{username}"
+    return f"群組 {getattr(dialog, 'id', 0)}"
+
+
+def _dialog_member_count(dialog) -> int:
+    """群組成員數（拿不到就 0，不影響流程）。"""
+    entity = getattr(dialog, "entity", None)
+    for source in (entity, dialog):
+        if source is None:
+            continue
+        try:
+            count = int(getattr(source, "participants_count", 0) or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count > 0:
+            return count
+    return 0
+
 # 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
 _MAX_TOPIC_TURNS = 3
 # 冷場（无真人）時，水軍主動發言的漸進降頻窗口（秒）
@@ -592,7 +631,8 @@ class AccountWorker:
         self._pending_flood_wait = 0.0
         self._last_activity: dict[int, float] = {}  # group_id -> ts
         self._known_groups: set[int] = set()  # 這個帳號知道的所有群（冷啟動 fallback）
-        self._dialogs: dict[int, str] = {}  # group_id -> 群名稱（供控制台勾選）
+        self._dialogs: dict[int, dict] = {}  # group_id -> {"title", "members"}（供控制台勾選）
+        self._dialogs_refreshed_at = 0.0  # 上次重抓群組清單的時間，防連點
         self._proactive_today = 0
         self._proactive_day = 0
         self._recent_proactive_topics: set[str] = set()
@@ -717,7 +757,10 @@ class AccountWorker:
                 async for d in self.tg_client.iter_dialogs():
                     if d.is_group:
                         self._known_groups.add(d.id)
-                        self._dialogs[d.id] = get_display_name(d) or f"群組 {d.id}"
+                        self._dialogs[d.id] = {
+                            "title": _dialog_title(d),
+                            "members": _dialog_member_count(d),
+                        }
             except Exception:
                 pass
 
@@ -842,10 +885,52 @@ class AccountWorker:
 
     def group_list(self) -> list[dict]:
         """這個帳號所在的群組（供控制台勾選指定群組）"""
-        items = [
-            {"id": gid, "title": title} for gid, title in self._dialogs.items()
-        ]
+        items = []
+        for gid, info in self._dialogs.items():
+            if isinstance(info, dict):
+                title = str(info.get("title") or f"群組 {gid}")
+                members = int(info.get("members") or 0)
+            else:
+                # 相容舊格式（純字串標題）
+                title = str(info or f"群組 {gid}")
+                members = 0
+            items.append(
+                {
+                    "id": gid,
+                    "title": title,
+                    "members": members,
+                    "selected": gid in self.selected_groups,
+                }
+            )
+        items.sort(key=lambda item: item["id"])
         return items
+
+    async def refresh_dialogs(self, *, max_age: float = 60.0) -> bool:
+        """重抓一次這個帳號所在的群組，讓控制台不必重啟就看到新加入的群。
+
+        60 秒內重複呼叫直接跳過（連點保護）；抓取失敗不清掉舊清單，
+        下次呼叫因為時間戳沒有推進會自動重試。
+        """
+        if not self.is_running or not self.tg_client:
+            return False
+        now = time.time()
+        if max_age > 0 and now - self._dialogs_refreshed_at < max_age:
+            return False
+        self._dialogs_refreshed_at = now
+        try:
+            async for d in self.tg_client.iter_dialogs():
+                if not getattr(d, "is_group", False):
+                    continue
+                self._known_groups.add(d.id)
+                self._dialogs[d.id] = {
+                    "title": _dialog_title(d),
+                    "members": _dialog_member_count(d),
+                }
+            return True
+        except Exception as exc:
+            self._dialogs_refreshed_at = 0.0
+            print(f"[{self.name}] dialog refresh error: {exc}", flush=True)
+            return False
 
     # ---------- 事件處理 ----------
 

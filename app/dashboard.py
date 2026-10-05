@@ -218,6 +218,184 @@ class Dashboard:
             rows = await self.manager.db.get_group_messages(group_id, limit)
             return JSONResponse({"group_id": group_id, "count": len(rows), "messages": rows})
 
+        def _persona_name(acc: dict) -> str:
+            persona = acc.get("persona")
+            if isinstance(persona, str):
+                try:
+                    persona = json.loads(persona)
+                except Exception:
+                    persona = None
+            if isinstance(persona, dict) and persona.get("name"):
+                return str(persona["name"])
+            return str(acc.get("name") or acc.get("id") or "")
+
+        @app.get("/api/groups/directory")
+        async def groups_directory(request: Request):
+            """群組總管：把三個帳號的群組清單、活動量、備註名合成一張表。"""
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            refresh = request.query_params.get("refresh", "").lower() in {"1", "true", "yes"}
+            accounts = await self.manager.db.list_accounts()
+            account_meta = []
+            per_account: dict[str, dict] = {}
+            for acc in accounts:
+                acc_id = str(acc["id"])
+                selected = []
+                if acc.get("groups"):
+                    try:
+                        selected = [int(g) for g in json.loads(acc["groups"])]
+                    except Exception:
+                        selected = []
+                worker = self.manager.workers.get(acc_id)
+                if refresh:
+                    # 停機帳號也要能探索：list_available_groups 會開唯讀連線
+                    try:
+                        await self.manager.list_available_groups(acc_id)
+                    except Exception:
+                        pass
+                    worker = self.manager.workers.get(acc_id)
+                available = worker.group_list() if worker else []
+                per_account[acc_id] = {
+                    "selected": set(selected),
+                    "available": available,
+                }
+                account_meta.append(
+                    {
+                        "id": acc_id,
+                        "name": str(acc.get("name") or acc_id),
+                        "persona_name": _persona_name(acc),
+                        "is_running": bool(worker.is_running) if worker else False,
+                    }
+                )
+
+            labels = await self.manager.db.get_group_labels()
+            overview = {
+                row["group_id"]: row for row in await self.manager.db.group_overview()
+            }
+
+            table: dict[int, dict] = {}
+            for acc_id, info in per_account.items():
+                for item in info["available"]:
+                    if not isinstance(item, dict) or isinstance(item.get("id"), bool):
+                        continue
+                    try:
+                        gid = int(item.get("id") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if gid >= 0:
+                        continue
+                    entry = table.setdefault(
+                        gid, {"id": gid, "title": "", "members": 0, "accounts": []}
+                    )
+                    title = str(item.get("title") or "")
+                    if title and (not entry["title"] or entry["title"].startswith("群組 ")):
+                        entry["title"] = title
+                    try:
+                        members = int(item.get("members") or 0)
+                    except (TypeError, ValueError):
+                        members = 0
+                    entry["members"] = max(entry["members"], members)
+                    if gid in info["selected"]:
+                        entry["accounts"].append(acc_id)
+            # 只有歷史訊息、目前不在任何帳號清單裡的群也要看得到（不然找不到舊群）
+            for gid in overview:
+                table.setdefault(gid, {"id": gid, "title": "", "members": 0, "accounts": []})
+
+            groups = []
+            for gid, entry in table.items():
+                row = overview.get(gid, {})
+                label = labels.get(gid, "")
+                groups.append(
+                    {
+                        "id": gid,
+                        "title": entry["title"] or f"群組 {gid}",
+                        "label": label,
+                        "display": label or entry["title"] or f"群組 {gid}",
+                        "members": entry["members"],
+                        "accounts": sorted(entry["accounts"]),
+                        "selected_count": len(entry["accounts"]),
+                        "msg_count": int(row.get("msg_count") or 0),
+                        "last_ts": float(row.get("last_ts") or 0.0),
+                        "last_human_ts": float(row.get("last_human_ts") or 0.0),
+                        "human_senders": int(row.get("human_senders") or 0),
+                    }
+                )
+            groups.sort(key=lambda g: (-g["last_ts"], g["id"]))
+            return JSONResponse({"groups": groups, "accounts": account_meta})
+
+        @app.post("/api/groups/label")
+        async def set_group_label(request: Request):
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            try:
+                data = await request.json()
+            except Exception:
+                return JSONResponse({"error": "格式錯誤"}, status_code=400)
+            if not isinstance(data, dict):
+                return JSONResponse({"error": "格式錯誤"}, status_code=400)
+            try:
+                group_id = int(data.get("group_id"))
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "群組 ID 格式錯誤"}, status_code=400)
+            label = data.get("label")
+            if label is None:
+                label = ""
+            if not isinstance(label, str):
+                return JSONResponse({"error": "備註名稱格式錯誤"}, status_code=400)
+            ok = await self.manager.db.upsert_group_label(group_id, label)
+            if not ok:
+                return JSONResponse({"error": "備註名稱儲存失敗"}, status_code=400)
+            return JSONResponse({"ok": True, "group_id": group_id, "label": label.strip()})
+
+        @app.post("/api/groups/membership")
+        async def update_group_membership(request: Request):
+            """一次把某個群加入／移出多個帳號（群組總管的一鍵三號）。"""
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            try:
+                data = await request.json()
+            except Exception:
+                return JSONResponse({"error": "格式錯誤"}, status_code=400)
+            if not isinstance(data, dict):
+                return JSONResponse({"error": "格式錯誤"}, status_code=400)
+            try:
+                group_id = int(data.get("group_id"))
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "群組 ID 格式錯誤"}, status_code=400)
+            raw_accounts = data.get("account_ids")
+            if not isinstance(raw_accounts, list) or not raw_accounts:
+                return JSONResponse({"error": "請選擇帳號"}, status_code=400)
+            selected = bool(data.get("selected"))
+            results: dict[str, str] = {}
+            for acc_id in [str(a) for a in raw_accounts]:
+                acc = await self.manager.db.get_account(acc_id)
+                if not acc:
+                    results[acc_id] = "帳號不存在"
+                    continue
+                current: list[int] = []
+                if acc.get("groups"):
+                    try:
+                        current = [int(g) for g in json.loads(acc["groups"])]
+                    except Exception:
+                        current = []
+                target = [g for g in current if g != group_id]
+                if selected:
+                    target.append(group_id)
+                if not target:
+                    err = await self.manager.save_groups(acc_id, [])
+                    results[acc_id] = err or "已停用（沒有任何群組）"
+                    continue
+                err = await self.manager.save_groups(acc_id, target)
+                results[acc_id] = err or "ok"
+            return JSONResponse(
+                {
+                    "ok": all(v == "ok" for v in results.values()),
+                    "group_id": group_id,
+                    "selected": selected,
+                    "results": results,
+                }
+            )
+
         @app.post("/api/features")
         async def update_features(request: Request):
             if not self._check_session(request):
@@ -580,6 +758,36 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 .acc-tag { display: inline-block; padding: 0.05rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: bold; }
 .acc-tag-on { background: #16a34a; color: #fff; }
 .acc-tag-off { background: #475569; color: #cbd5e1; }
+/* 群組總管 */
+.hub-toolbar { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.8rem; }
+.hub-toolbar input[type=text], .hub-toolbar select {
+    background: #0f172a; border: 1px solid #334155; border-radius: 8px;
+    color: #e2e8f0; padding: 0.45rem 0.7rem; font-size: 0.85rem;
+}
+.hub-toolbar input[type=text] { flex: 1; min-width: 180px; }
+.hub-filter { display: flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: #94a3b8; white-space: nowrap; }
+.hub-summary { font-size: 0.8rem; color: #94a3b8; margin-bottom: 0.6rem; }
+.hub-list { max-height: 56vh; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }
+.hub-row { background: #0f172a; border: 1px solid #24334d; border-radius: 10px; padding: 0.7rem 0.8rem; }
+.hub-row.hub-row-on { border-color: #16a34a; }
+.hub-row.hub-row-focus { box-shadow: 0 0 0 1px #38bdf8; }
+.hub-row-top { display: flex; justify-content: space-between; gap: 0.7rem; align-items: flex-start; flex-wrap: wrap; }
+.hub-name { font-size: 0.95rem; font-weight: bold; color: #e2e8f0; word-break: break-all; }
+.hub-id { font-size: 0.72rem; color: #64748b; cursor: pointer; }
+.hub-id:hover { color: #38bdf8; }
+.hub-info { font-size: 0.76rem; color: #94a3b8; line-height: 1.6; margin-top: 0.2rem; }
+.hub-actions { display: flex; gap: 0.35rem; flex-wrap: wrap; align-items: center; }
+.hub-chip {
+    border: 1px solid #334155; background: #1e293b; color: #94a3b8; cursor: pointer;
+    border-radius: 999px; padding: 0.18rem 0.6rem; font-size: 0.74rem; white-space: nowrap;
+}
+.hub-chip.hub-chip-on { background: #16a34a; border-color: #16a34a; color: #fff; font-weight: bold; }
+.hub-chip-static { cursor: default; }
+.hub-label-input {
+    background: #0f172a; border: 1px dashed #334155; border-radius: 8px;
+    color: #e2e8f0; padding: 0.25rem 0.5rem; font-size: 0.78rem; width: 150px;
+}
+.hub-empty { color: #94a3b8; font-size: 0.85rem; padding: 1rem; text-align: center; }
 </style>
 </head>
 <body>
@@ -617,7 +825,10 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
         <div class="card" id="monitorCard" style="margin-bottom:1rem">
             <div class="row" style="margin-bottom:0.8rem">
                 <h3 style="margin:0">📊 群組監控（即時收集）</h3>
-                <select id="monitorGroup" class="monitor-select" onchange="loadMonitor()"></select>
+                <div>
+                    <select id="monitorGroup" class="monitor-select" onchange="loadMonitor()"></select>
+                    <button class="btn btn-secondary" onclick="showGroups('')">🗂️ 群組總管</button>
+                </div>
             </div>
             <div class="stats" id="monitorStats" style="margin-bottom:0.8rem"></div>
             <div class="feed" id="monitorFeed"><div class="meta">尚無資料，請先選擇群組</div></div>
@@ -710,14 +921,29 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
     </div>
 </div>
 
-<!-- 指定群組 -->
+<!-- 群組總管 -->
 <div class="modal" id="groupsModal">
-    <div class="modal-box" style="max-width:520px">
-        <h3>指定群組（只讓此水軍在勾選的群活動）</h3>
-        <p class="meta" style="margin-bottom:0.8rem">不勾任何群 = 帳號無法啟動；清空既有選擇會停用帳號。開啟此畫面時會短暫唯讀連線取得群組，不會啟動水軍互動。</p>
-        <div id="groupsList" style="max-height:45vh;overflow-y:auto"></div>
-        <div style="margin-top:1rem">
-            <button class="btn btn-primary" onclick="saveGroups()">儲存指定群組</button>
+    <div class="modal-box" style="max-width:760px">
+        <div class="row" style="margin-bottom:0.8rem">
+            <h3 style="margin:0">🗂️ 群組總管</h3>
+            <div class="meta" id="hubFocusHint"></div>
+        </div>
+        <div class="hub-toolbar">
+            <input type="text" id="hubSearch" placeholder="搜尋群名、備註、群 ID…（打幾個字就篩選）" oninput="renderGroupsHub()">
+            <select id="hubSort" onchange="renderGroupsHub()">
+                <option value="activity">最近有訊息</option>
+                <option value="name">名稱</option>
+                <option value="id">群 ID</option>
+                <option value="selected">已選帳號數</option>
+            </select>
+            <label class="hub-filter"><input type="checkbox" id="hubOnlySelected" onchange="renderGroupsHub()">只看已選</label>
+            <button class="btn btn-secondary" onclick="loadGroupDirectory({refresh:true})">重新取得群組</button>
+        </div>
+        <div class="hub-summary" id="hubSummary">載入中…</div>
+        <div class="hub-list" id="groupsList"><div class="hub-empty">正在取得群組清單…</div></div>
+        <div style="margin-top:1rem" class="row">
+            <div class="meta">點名字旁的帳號膠囊＝把那隻水軍加入／移出這個群；「三號全選」＝一次勾好三隻。<br>
+                不勾任何群 = 帳號無法啟動；清空既有選擇會停用帳號。</div>
             <button class="btn btn-secondary" onclick="closeModals()">關閉</button>
         </div>
     </div>
@@ -758,7 +984,6 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 <script>
 let tgAuthId = '';
 let currentPersonaId = '';
-let currentGroupsId = '';
 let currentPrivatesId = '';
 let currentFeaturesId = '';
 let latestStatusData = null;
@@ -852,7 +1077,7 @@ async function loadStatus() {
                     <button class="btn ${acc.is_running ? 'btn-danger' : 'btn-primary'}" data-act="${acc.is_running ? 'stop' : 'start'}" data-id="${esc(acc.id)}" data-state="${acc.state || ''}" ${!acc.is_running && !acc.setup_complete ? 'disabled title="請先設定群組範圍"' : ''}>${acc.is_running ? '停止' : '啟動'}</button>
                     <button class="btn btn-secondary" data-act="toggle" data-id="${esc(acc.id)}">${acc.enabled ? '停用' : '啟用'}</button>
                     <button class="btn btn-secondary" data-act="persona" data-id="${esc(acc.id)}">人設</button>
-                    <button class="btn btn-secondary" data-act="groups" data-id="${esc(acc.id)}">群組${(acc.groups && acc.groups.length) ? '·' + acc.groups.length : ''}</button>
+                    <button class="btn btn-secondary" data-act="groups" data-id="${esc(acc.id)}">群組管理${(acc.groups && acc.groups.length) ? '·' + acc.groups.length : ''}</button>
                     <button class="btn btn-secondary" data-act="features" data-id="${esc(acc.id)}">功能</button>
                     <button class="btn btn-secondary" data-act="privates" data-id="${esc(acc.id)}">私訊</button>
                     <button class="btn btn-danger" data-act="delete" data-id="${esc(acc.id)}">刪除</button>
@@ -1107,40 +1332,185 @@ async function regenPersona() {
     if (r.ok) fillPersonaForm(r.data.persona);
 }
 
-async function showGroups(id) {
-    currentGroupsId = id;
-    document.getElementById('groupsList').innerHTML = '<div class="meta">正在取得群組清單…</div>';
-    document.getElementById('groupsModal').classList.add('active');
+// ---------- 群組總管 ----------
+let hubData = null;
+let hubFocusId = '';
 
-    const [statusResult, groupsResult] = await Promise.all([
-        api('/api/status'),
-        api('/api/accounts/' + id + '/groups/available'),
-    ]);
-    if (!statusResult.ok || !groupsResult.ok) {
-        document.getElementById('groupsList').innerHTML = '<div class="meta">無法取得群組清單</div>';
-        toast(groupsResult.data.error || '取得群組失敗');
+async function showGroups(accId) {
+    hubFocusId = accId || '';
+    document.getElementById('groupsModal').classList.add('active');
+    await loadGroupDirectory();
+    document.getElementById('hubFocusHint').innerHTML = hubFocusId
+        ? `聚焦帳號：<b>${esc(hubAccountLabel(hubFocusId))}</b>`
+        : '';
+    const search = document.getElementById('hubSearch');
+    if (search) search.focus();
+}
+
+function hubAccountLabel(accId) {
+    const list = (hubData && hubData.accounts) || [];
+    const acc = list.find(a => a.id === accId);
+    if (!acc) return accId;
+    return acc.persona_name || acc.name || accId;
+}
+
+function hubSearchText() {
+    const el = document.getElementById('hubSearch');
+    return (el && el.value ? el.value : '').trim().toLowerCase();
+}
+
+async function loadGroupDirectory(opts = {}) {
+    document.getElementById('groupsList').innerHTML = '<div class="hub-empty">正在取得群組清單…</div>';
+    const r = await api('/api/groups/directory' + (opts.refresh ? '?refresh=1' : '')).catch(() => null);
+    if (!r || !r.ok) {
+        document.getElementById('groupsList').innerHTML = '<div class="hub-empty">取得群組失敗，稍後再試</div>';
+        document.getElementById('hubSummary').textContent = '';
         return;
     }
-    const acc = (statusResult.data.accounts || []).find(a => a.id === id);
-    if (!acc) return;
-    const selected = new Set(acc.groups || []);
-    const avail = groupsResult.data.groups || [];
-    document.getElementById('groupsList').innerHTML = avail.length
-        ? avail.map(g => `
-            <label style="display:flex;align-items:center;gap:0.5rem;padding:0.4rem 0;font-size:0.9rem">
-                <input type="checkbox" class="grp-cb" value="${g.id}" ${selected.has(g.id) ? 'checked' : ''}>
-                <span>${esc(g.title)}</span> <span class="meta">（${g.id}）</span>
-            </label>`).join('')
-        : '<div class="meta">此帳號目前沒有可選群組。</div>';
+    hubData = r.data;
+    // 清單空的（例如帳號剛登入、還沒連線過）就自動做一次唯讀探索，免得要自己按重新取得
+    if (!opts.refresh && !(hubData.groups || []).length) {
+        return loadGroupDirectory({refresh: true});
+    }
+    renderGroupsHub();
+    if (opts.refresh) toast('已重新取得群組清單');
 }
-async function saveGroups() {
-    const ids = [...document.querySelectorAll('#groupsList .grp-cb:checked')].map(c => Number(c.value));
-    const r = await api('/api/accounts/' + currentGroupsId + '/groups', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ groups: ids }),
+
+function hubFmtTime(ts) {
+    if (!ts) return '—';
+    const diff = Date.now() / 1000 - ts;
+    if (diff < 60) return '剛剛';
+    if (diff < 3600) return Math.floor(diff / 60) + ' 分鐘前';
+    if (diff < 86400) return Math.floor(diff / 3600) + ' 小時前';
+    return new Date(ts * 1000).toLocaleString('zh-TW', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'});
+}
+
+function renderGroupsHub() {
+    if (!hubData) return;
+    const accs = hubData.accounts || [];
+    const kw = hubSearchText();
+    const onlySelected = document.getElementById('hubOnlySelected').checked;
+    const sort = document.getElementById('hubSort').value;
+    let rows = (hubData.groups || []).filter(g => {
+        if (onlySelected && !g.selected_count) return false;
+        if (!kw) return true;
+        return [g.display, g.title, g.label, String(g.id)]
+            .some(v => String(v || '').toLowerCase().includes(kw));
     });
-    if (r.ok) { closeModals(); toast('指定群組已儲存'); loadStatus(); }
-    else toast(r.data.error || '儲存失敗');
+    rows = rows.slice().sort((a, b) => {
+        if (sort === 'name') return String(a.display).localeCompare(String(b.display), 'zh-Hant');
+        if (sort === 'id') return a.id - b.id;
+        if (sort === 'selected') return (b.selected_count - a.selected_count) || (b.last_ts - a.last_ts);
+        return (b.last_ts - a.last_ts) || (a.id - b.id);
+    });
+
+    const total = (hubData.groups || []).length;
+    const selectedGroups = (hubData.groups || []).filter(g => g.selected_count).length;
+    document.getElementById('hubSummary').innerHTML =
+        `共 <b>${total}</b> 個群｜水軍已指定 <b>${selectedGroups}</b> 個｜篩選後 <b>${rows.length}</b> 個`
+        + `｜帳號：${accs.map(a => esc(a.persona_name || a.name) + (a.is_running ? '' : '（停）')).join('、')}`;
+
+    document.getElementById('groupsList').innerHTML = rows.length ? rows.map(g => {
+        const chips = accs.map(a => {
+            const on = (g.accounts || []).includes(a.id);
+            const focus = hubFocusId === a.id;
+            return `<button class="hub-chip ${on ? 'hub-chip-on' : ''}"
+                title="${esc(a.persona_name || a.name)}：${on ? '已加入，點一下移出' : '未加入，點一下加入'}"
+                onclick="toggleGroupAccount(${g.id}, '${esc(a.id)}', ${on ? 'false' : 'true'})"
+                ${focus ? 'style="outline:2px solid #38bdf8"' : ''}>${esc(a.persona_name || a.name)}${on ? ' ✓' : ''}</button>`;
+        }).join('');
+        const human = g.last_human_ts ? hubFmtTime(g.last_human_ts) : '無紀錄';
+        return `
+        <div class="hub-row ${g.selected_count ? 'hub-row-on' : ''}">
+            <div class="hub-row-top">
+                <div style="min-width:0;flex:1">
+                    <span class="hub-name">${esc(g.display)}</span>
+                    ${g.label ? '' : `<span class="meta">（Telegram 名稱：${esc(g.title)}）</span>`}
+                    <div class="hub-info">
+                        <span class="hub-id" onclick="hubCopyId(${g.id})" title="點一下複製群 ID">${g.id}</span>
+                        ${g.members ? `・成員 ${g.members}` : ''}
+                        ｜訊息 ${g.msg_count} 則｜真人 ${g.human_senders} 人
+                        ｜最後訊息 ${hubFmtTime(g.last_ts)}（真人 ${human}）
+                    </div>
+                </div>
+                <div class="hub-actions">
+                    ${chips}
+                    <button class="hub-chip hub-chip-static" style="border-style:dashed" onclick="allAccountsGroup(${g.id}, true)">三號全選</button>
+                    <button class="hub-chip hub-chip-static" style="border-style:dashed" onclick="allAccountsGroup(${g.id}, false)">全部移出</button>
+                    <button class="hub-chip hub-chip-static" onclick="jumpToMonitor(${g.id})">看訊息</button>
+                    <input class="hub-label-input" placeholder="＋備註名" value="${esc(g.label)}"
+                        onkeydown="if(event.key==='Enter'){this.blur();}"
+                        onblur="saveGroupLabel(${g.id}, this.value)">
+                </div>
+            </div>
+        </div>`;
+    }).join('') : '<div class="hub-empty">沒有符合條件的群組。若是剛被拉進去的群，按「重新取得群組」。</div>';
+}
+
+function hubCopyId(gid) {
+    const text = String(gid);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => toast('已複製群 ID：' + text)).catch(() => toast(text));
+    } else {
+        toast(text);
+    }
+}
+
+async function toggleGroupAccount(groupId, accId, selected) {
+    const r = await api('/api/groups/membership', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({group_id: groupId, account_ids: [accId], selected}),
+    }).catch(() => null);
+    if (!r) { toast('設定失敗'); return; }
+    const msg = r.data && r.data.results ? r.data.results[accId] : '';
+    if (!r.ok && !msg) { toast(r.data.error || '設定失敗'); return; }
+    toast(msg && msg !== 'ok' ? msg : (selected ? '已加入' : '已移出'));
+    await loadGroupDirectory();
+    loadStatus();
+    loadMonitorGroups();
+}
+
+async function allAccountsGroup(groupId, selected) {
+    const ids = ((hubData && hubData.accounts) || []).map(a => a.id);
+    if (!ids.length) return;
+    const r = await api('/api/groups/membership', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({group_id: groupId, account_ids: ids, selected}),
+    }).catch(() => null);
+    if (!r) { toast('設定失敗'); return; }
+    const results = (r.data && r.data.results) || {};
+    const bad = Object.values(results).filter(v => v !== 'ok');
+    toast(bad.length ? bad.join('；') : (selected ? '三隻水軍都加入這個群了' : '三隻水軍都移出這個群了'));
+    await loadGroupDirectory();
+    loadStatus();
+    loadMonitorGroups();
+}
+
+async function saveGroupLabel(groupId, value) {
+    const label = (value || '').trim();
+    const current = ((hubData && hubData.groups) || []).find(g => g.id === groupId);
+    if (current && (current.label || '') === label) return;
+    const r = await api('/api/groups/label', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({group_id: groupId, label}),
+    }).catch(() => null);
+    if (!r || !r.ok) { toast((r && r.data.error) || '備註儲存失敗'); return; }
+    toast(label ? '備註名已儲存：' + label : '已清除備註名');
+    await loadGroupDirectory();
+}
+
+function jumpToMonitor(gid) {
+    closeModals();
+    const sel = document.getElementById('monitorGroup');
+    if (![...sel.options].some(o => Number(o.value) === Number(gid))) {
+        sel.insertAdjacentHTML('afterbegin', `<option value="${gid}">群組 ${gid}</option>`);
+    }
+    sel.value = String(gid);
+    monitorGroupId = sel.value;
+    try { localStorage.setItem('sdf_monitor_group', sel.value); } catch (e) {}
+    loadMonitor();
+    const card = document.getElementById('monitorCard');
+    if (card && card.scrollIntoView) card.scrollIntoView({behavior: 'smooth', block: 'start'});
 }
 
 async function showPrivates(id) {
@@ -1196,25 +1566,47 @@ function isBotRole(role) {
 }
 
 async function loadMonitorGroups() {
-    const r = await api('/api/status').catch(() => null);
+    const r = await api('/api/groups/directory').catch(() => null);
     const sel = document.getElementById('monitorGroup');
-    const opts = new Set();
-    const accounts = (r && r.ok ? r.data.accounts : []) || [];
-    accounts.forEach(a => (a.groups_available || []).forEach(g => { if (g && g.id) opts.add(g.id); }));
-    // 已指定的群組一併列入
-    accounts.forEach(a => (a.groups || []).forEach(gid => { if (gid) opts.add(gid); }));
-    const known = { '-1002229799107': '桃花源・約會' };
-    sel.innerHTML = Array.from(opts).map(gid =>
-        `<option value="${gid}">${known[gid] || ('群組 ' + gid)}</option>`
-    ).join('');
-    if (opts.has(-1002229799107)) sel.value = '-1002229799107';
-    if (opts.size) { monitorGroupId = sel.value; loadMonitor(); }
+    if (!sel) return;
+    const groups = (r && r.ok && r.data.groups) || [];
+    if (groups.length) {
+        sel.innerHTML = groups.map(g => {
+            const flags = [];
+            if (g.selected_count) flags.push(`水軍 ${g.selected_count}`);
+            if (g.human_senders) flags.push(`真人 ${g.human_senders}`);
+            const suffix = flags.length ? '｜' + flags.join('・') : '';
+            return `<option value="${g.id}">${esc(g.display)}${suffix}</option>`;
+        }).join('');
+    } else {
+        // 後端目錄拿不到時，退回 /api/status 的舊資料，避免整條監控掛掉
+        const s = await api('/api/status').catch(() => null);
+        const opts = new Set();
+        const accounts = (s && s.ok ? s.data.accounts : []) || [];
+        accounts.forEach(a => (a.groups_available || []).forEach(g => { if (g && g.id) opts.add(g.id); }));
+        accounts.forEach(a => (a.groups || []).forEach(gid => { if (gid) opts.add(gid); }));
+        sel.innerHTML = Array.from(opts).map(gid =>
+            `<option value="${gid}">群組 ${gid}</option>`
+        ).join('');
+    }
+    let saved = null;
+    try { saved = localStorage.getItem('sdf_monitor_group'); } catch (e) {}
+    const values = [...sel.options].map(o => o.value);
+    if (saved && values.includes(String(saved))) {
+        sel.value = String(saved);
+    } else if (values.length && groups.length) {
+        // 預設看「最近有訊息且水軍有在裡面」的群，找不到就退回第一個
+        const active = groups.find(g => g.selected_count && g.last_ts) || groups.find(g => g.last_ts) || groups[0];
+        sel.value = String(active.id);
+    }
+    if (values.length) { monitorGroupId = sel.value; loadMonitor(); }
 }
 
 async function loadMonitor() {
     const sel = document.getElementById('monitorGroup');
     monitorGroupId = sel && sel.value;
     if (!monitorGroupId) return;
+    try { localStorage.setItem('sdf_monitor_group', monitorGroupId); } catch (e) {}
     const feed = document.getElementById('monitorFeed');
     const stats = document.getElementById('monitorStats');
     feed.innerHTML = '<div class="meta">載入中…</div>';
