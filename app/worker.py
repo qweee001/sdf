@@ -44,7 +44,15 @@ from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import MessageEntityMention, MessageMediaPhoto, ReactionEmoji
+from telethon.tl.types import (
+    DocumentAttributeFilename,
+    DocumentAttributeSticker,
+    InputMediaUploadedDocument,
+    InputStickerSetEmpty,
+    MessageEntityMention,
+    MessageMediaPhoto,
+    ReactionEmoji,
+)
 from telethon.utils import get_display_name
 
 from .media import MediaAsset, OrcaMediaService
@@ -1735,12 +1743,29 @@ class AccountWorker:
             return False
 
     async def _send_group_sticker(self, event) -> bool:
-        """對群訊息只發一張本機 sticker（不发文字），回傳是否成功。"""
+        """對群訊息只發一張本機 sticker（不发文字），回傳是否成功。
+
+        Telethon 1.44 沒有 send_sticker 便利方法，用 TL 原語送：
+        InputMediaUploadedDocument + DocumentAttributeSticker，讓 TG 當成
+        真 sticker 顯示（不是圖片）。
+        """
         if not self.tg_client or not getattr(event, "id", None) or not self._stickers:
             return False
         path = self._pool_rng.choice(self._stickers)
         try:
-            await self.tg_client.send_sticker(int(event.chat_id), path)
+            uploaded = await self.tg_client.upload_file(path)
+            media = InputMediaUploadedDocument(
+                file=uploaded,
+                mime_type="image/webp",
+                attributes=[
+                    DocumentAttributeFilename(file_name=Path(path).name),
+                    DocumentAttributeSticker(
+                        alt=Path(path).stem,
+                        stickerset=InputStickerSetEmpty(),
+                    ),
+                ],
+            )
+            await self.tg_client.send_message(int(event.chat_id), media=media)
             self.stats["stickers_sent"] = (
                 int(self.stats.get("stickers_sent", 0)) + 1
             )

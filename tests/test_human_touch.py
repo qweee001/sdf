@@ -162,11 +162,18 @@ def test_acknowledge_group_routes_to_sticker(monkeypatch):
     sent = []
 
     class _FakeClient:
-        async def send_sticker(self, chat_id, path):
-            sent.append(("sticker", chat_id, path))
+        def __init__(self):
+            self._uploaded = None
 
-        async def send_reaction(self, chat_id, msg_id, reaction):
-            sent.append(("reaction", chat_id, msg_id, reaction))
+        async def upload_file(self, path):
+            self._uploaded = path
+            return f"<file:{path}>"
+
+        async def send_message(self, chat_id, media=None):
+            sent.append(("sticker", chat_id, self._uploaded))
+
+        async def __call__(self, request):
+            sent.append(("reaction", getattr(request, "peer", None)))
 
     w.tg_client = _FakeClient()
     event = SimpleNamespace(chat_id=-1001, id=77, raw_text="早安")
