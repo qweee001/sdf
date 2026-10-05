@@ -62,3 +62,101 @@ def test_generation_rejects_answer_tag_and_simplified():
         assert reason in {"format_leak", "simplified_chars", "policy"}
 
     asyncio.run(main())
+
+
+def test_generation_rewrites_time_mismatched_reply():
+    """回覆路徑也要擋時段穿幫：實測抓到 20:04 發出「早安～」。
+
+    夜裡生成早安 → 帶問題重生一次 → 重生後正常就放行。
+    """
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        replies = iter(["早安～大腸麵線超推🍜", "大腸麵線超推，你帶我去吃呀"])
+        worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: next(replies))
+        event = AsyncMock(
+            sender_id=999,
+            chat_id=-5428680940,
+            id=78,
+            mentioned=False,
+            is_reply=False,
+            reply_to=None,
+            raw_text="好想去吃那家大腸麵線",
+            media=None,
+        )
+        # 固定「台北時間 20 點」：早安不在允許時段（5-11）
+        worker._taipei_hour = lambda: 20.0
+        text = await worker._generate_reply(event)
+        assert text == "大腸麵線超推，你帶我去吃呀"
+
+    asyncio.run(main())
+
+
+def test_generation_drops_reply_when_time_mismatch_survives_retry():
+    """兩次都講早安 → 不發送，drop 原因記為 time_mismatch。"""
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker._call_ai = AsyncMock(
+            side_effect=lambda *_a, **_k: "早安～今天天氣好好"
+        )
+        event = AsyncMock(
+            sender_id=999,
+            chat_id=-5428680940,
+            id=79,
+            mentioned=False,
+            is_reply=False,
+            reply_to=None,
+            raw_text="好想吃早餐",
+            media=None,
+        )
+        worker._taipei_hour = lambda: 20.0
+        text = await worker._generate_reply(event)
+        assert text == ""
+        reason = worker._generation_reasons.get(worker._generation_key(event))
+        assert reason == "time_mismatch"
+
+    asyncio.run(main())
+
+
+def test_reply_with_meal_word_is_not_treated_as_time_mismatch():
+    """回覆裡接對方話題的「午餐／晚餐」不算穿幫，只有問候語才擋。
+
+    （實際放行還得過語意政策分類器，這裡只鎖定時段判定本身的分野。）
+    """
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker._taipei_hour = lambda: 20.0
+        assert worker._has_time_mismatch("付兩百買午餐") is True
+        assert worker._has_time_mismatch("付兩百買午餐", greetings_only=True) is False
+        # 問候語兩條路都要擋
+        assert worker._has_time_mismatch("早安～今天天氣好好", greetings_only=True) is True
+        # 白天講早安則放行
+        worker._taipei_hour = lambda: 8.0
+        assert worker._has_time_mismatch("早安～今天天氣好好", greetings_only=True) is False
+
+    asyncio.run(main())
+
+
+def test_reply_generation_allows_time_appropriate_greeting():
+    """時段相符的問候不能被誤擋（20 點說晚安可以）。"""
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: "晚安，早點睡囉")
+        event = AsyncMock(
+            sender_id=999,
+            chat_id=-5428680940,
+            id=80,
+            mentioned=False,
+            is_reply=False,
+            reply_to=None,
+            raw_text="先睡囉",
+            media=None,
+        )
+        worker._taipei_hour = lambda: 20.0
+        text = await worker._generate_reply(event)
+        assert text == "晚安，早點睡囉"
+
+    asyncio.run(main())

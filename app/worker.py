@@ -1498,6 +1498,7 @@ class AccountWorker:
             "too_long",
             "near_duplicate",
             "refusal",
+            "time_mismatch",
         }:
             return "policy"
         if reason in {
@@ -1952,11 +1953,16 @@ class AccountWorker:
             )
         return f"\n現在台北時間 {hour:02d} 點（{band}）：{hint}。"
 
-    def _has_time_mismatch(self, text: str) -> bool:
+    def _has_time_mismatch(self, text: str, *, greetings_only: bool = False) -> bool:
         """時段穿幫偵測：主動發言自帶跟現在時段不合的詞（17 點講早安、吃早餐）。
 
         光靠 prompt 尾端的時段提示，35B 模型不穩定；這裡做確定性兜底，
         不合就丟掉換池子（池子全是時段中立句）。
+
+        greetings_only=True 只驗問候語，給「回覆」路徑用：回覆裡出現
+        「早餐／午餐／晚餐」通常是在接對方的話題（例如「付兩百買午餐」），
+        不該當成穿幫；但「早安」是自曝生活時區的招呼語，任何路徑都要擋
+        （實測：20:04 主動線回覆說出「早安～大腸麵線超推」）。
         """
         t = str(text or "")
         if not t:
@@ -1973,7 +1979,10 @@ class AccountWorker:
             ("晚上好", set(range(17, 23))),
             ("晚安", set(range(20, 24)) | night),
         )
+        greetings = {"早安", "剛起床", "午安", "晚上好", "晚安"}
         for word, ok_hours in checks:
+            if greetings_only and word not in greetings:
+                continue
             if word in t and h not in ok_hours:
                 return True
         return False
@@ -3457,6 +3466,10 @@ class AccountWorker:
         mentions_video = self._mentions_video_topic(reply)
         mentions_group_meta = await self._candidate_mentions_current_group_meta(reply)
         repetitive = self._is_near_duplicate(reply, recent_group_replies)
+        # 回覆也要有時段兜底：實測抓到 20:04 主動線說出「早安～」，
+        # 只有主動話題那條路有檢查，回覆／水軍互接這條路漏掉。
+        # 只驗問候語：回覆裡的「午餐／晚餐」多半在接對方的話題，不算穿幫。
+        time_mismatch = self._has_time_mismatch(reply, greetings_only=True)
         if (
             not too_long
             and not format_leak
@@ -3465,6 +3478,7 @@ class AccountWorker:
             and not mentions_video
             and not mentions_group_meta
             and not repetitive
+            and not time_mismatch
         ):
             if image:
                 self.stats["images_understood"] += 1
@@ -3483,6 +3497,8 @@ class AccountWorker:
                 if format_leak
                 else "simplified_chars"
                 if simplified
+                else "time_mismatch"
+                if time_mismatch
                 else "too_long"
                 if too_long
                 else "near_duplicate"
@@ -3523,6 +3539,11 @@ class AccountWorker:
                 "上一版與近期文案太像；必須換開頭、句型和語氣，"
                 "不要只替換同義詞。"
             )
+        if time_mismatch:
+            correction += (
+                "上一版講了跟現在時段不合的話（例如晚上說早安、下午聊早餐）；"
+                "改成符合現在時間的說法，或直接回應對方講的具體內容。"
+            )
         retry_message = (
             f"{user_message}\n"
             f"{correction}"
@@ -3549,6 +3570,7 @@ class AccountWorker:
         retry_repetitive = self._is_near_duplicate(
             retry, recent_group_replies
         )
+        retry_time_mismatch = self._has_time_mismatch(retry, greetings_only=True)
         if (
             retry_too_long
             or retry_format_leak
@@ -3557,6 +3579,7 @@ class AccountWorker:
             or retry_video
             or retry_group_meta
             or retry_repetitive
+            or retry_time_mismatch
         ):
             reason = (
                 "refusal"
@@ -3569,6 +3592,8 @@ class AccountWorker:
                 if retry_format_leak
                 else "simplified_chars"
                 if retry_simplified
+                else "time_mismatch"
+                if retry_time_mismatch
                 else "too_long"
                 if retry_too_long
                 else "near_duplicate"

@@ -1100,6 +1100,7 @@ async function loadStatus() {
         'blocked_video': '影片阻擋',
         'too_long': '過長',
         'near_duplicate': '近似重複',
+        'time_mismatch': '時段穿幫',
         'refusal': '拒絕',
         'image_unavailable': '圖片不可用',
         'image_understanding_empty': '圖片理解為空',
