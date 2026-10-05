@@ -80,6 +80,25 @@ _LAUGH_MARKS = ("哈哈", "🤣", "😂", "笑死", "lol", "xd", "嘿嘿")
 # 真人「看見但不說」：被 @／直接回覆很少漏接，普通訊息常只是默認
 _SILENT_REPLY_PROBABILITY_DIRECTED = 0.10
 _SILENT_REPLY_PROBABILITY_ORDINARY = 0.35
+
+# 真人錯字率：短訊偶爾打錯一個字，隔一秒多補一則更正
+_TYPO_PROBABILITY = 0.12
+_TYPO_MIN_LEN = 8
+# 形近／同音字替換表（全部繁體，避免被簡體檢查擋下）
+_TYPO_SWAPS = {
+    "的": "地", "地": "的",
+    "有": "又", "又": "有",
+    "在": "再", "再": "在",
+    "做": "作", "作": "做",
+    "帶": "戴", "戴": "帶",
+    "他": "她", "她": "他",
+    "裡": "裏", "裏": "裡",
+}
+_TYPO_CORRECTIONS = (
+    "欸打錯字了，是",
+    "啊打錯，是",
+    "打錯字了，是",
+)
 _MAX_RECENT_PROACTIVE_TOPICS = 64
 # 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
 _MAX_TOPIC_TURNS = 3
@@ -859,9 +878,12 @@ class AccountWorker:
                 note = stored_content[:60]
                 if note:
                     try:
-                        await self.db.upsert_group_member_note(
-                            group_id, sender_id, self.account_id, note
-                        )
+                        # 事實記憶：「哈哈」這種敷衍只刷群共同記憶（最近話題），
+                        # 不蓋掉這位群友上一句有內容的自我披露（含「我」=自我披露）
+                        if not self._note_is_trivial(note):
+                            await self.db.upsert_group_member_note(
+                                group_id, sender_id, self.account_id, note
+                            )
                         # 群內共同記憶：最近話題／共同活動，供後續接話與主動發言引用
                         await self.db.upsert_group_shared_note(group_id, self.account_id, note)
                     except Exception as exc:
@@ -1706,6 +1728,44 @@ class AccountWorker:
             print(f"[{self.name}] reaction error: {e}", flush=True)
             return False
 
+    def _time_hint(self) -> str:
+        """現在台北時段的語氣提示：真人晚上聊天的口氣跟中午完全不同。"""
+        hour = int(self._taipei_hour())
+        if hour < 6:
+            band, hint = "凌晨", "語氣可以帶點睡意、更親昵，句子短一點"
+        elif hour < 9:
+            band, hint = "早晨", "語氣清爽，可以順口問早安或早餐"
+        elif hour < 12:
+            band, hint = "上午", "正常的白天口氣"
+        elif hour < 14:
+            band, hint = "中午", "可以順口聊吃飯"
+        elif hour < 17:
+            band, hint = "下午", "可以帶點犯懶或下午茶話題"
+        elif hour < 22:
+            band, hint = "晚上", "心情放鬆，可以聊吃飽沒有、晚上安排"
+        else:
+            band, hint = "深夜", "語氣可以更親密一點"
+        return f"\n現在台北時間 {hour:02d} 點（{band}）：{hint}。"
+
+    def _maybe_typo_part(self, part: str) -> tuple[str, str | None]:
+        """偶爾把一句話裡的一個字打成形近字，回傳 (可能改錯的文字, 原文或 None)。"""
+        if len(part) < _TYPO_MIN_LEN:
+            return part, None
+        if self._pool_rng.random() >= _TYPO_PROBABILITY:
+            return part, None
+        positions = [i for i, ch in enumerate(part) if ch in _TYPO_SWAPS]
+        if not positions:
+            return part, None
+        pos = self._pool_rng.choice(positions)
+        original = part
+        typo = part[:pos] + _TYPO_SWAPS[part[pos]] + part[pos + 1:]
+        return typo, original
+
+    @staticmethod
+    def _note_is_trivial(note: str) -> bool:
+        """輕飄飄的敷衍（<8 字且沒有自我披露）：不該蓋掉群友上一句有內容的話。"""
+        return len(note) < 8 and "我" not in note
+
     async def _reply_later(
         self, event, delay: float, *, managed_followup: bool = False
     ):
@@ -1811,8 +1871,17 @@ class AccountWorker:
             # Ordinary replies always use text; they have no run/event/snapshot envelope.
             # 真人節奏：模型輸出長句時拆成 2~3 則短訊連發（實測 80% 真人訊息間隔 <10s）
             burst = self._split_human_burst(text)
+            # 錯字層：整段回覆最多一個字打錯，發完該則後隔一秒多補一則更正
+            typo_at = (
+                self._pool_rng.randrange(len(burst))
+                if burst and self._pool_rng.random() < _TYPO_PROBABILITY
+                else -1
+            )
             sent = False
             for i, part in enumerate(burst):
+                original_part: str | None = None
+                if i == typo_at:
+                    part, original_part = self._maybe_typo_part(part)
                 ok = await self._send_text_recorded(
                     int(event.chat_id),
                     part,
@@ -1827,6 +1896,15 @@ class AccountWorker:
                 sent = sent or ok
                 if not ok:
                     break
+                if ok and original_part is not None:
+                    await asyncio.sleep(random.uniform(1.2, 2.8))
+                    await self._send_text_recorded(
+                        int(event.chat_id),
+                        f"{self._pool_rng.choice(_TYPO_CORRECTIONS)}「{original_part}」",
+                        activity_kind="followup" if managed_followup else "reply",
+                        stats_key="replies_sent",
+                        short_delay=True,
+                    )
                 if i < len(burst) - 1:
                     await asyncio.sleep(random.uniform(*_BURST_PAUSE_SECONDS))
             if sent and is_human_reply:
@@ -2722,6 +2800,7 @@ class AccountWorker:
         if shared_notes:
             shared = "\n".join(f"- {n}" for n in shared_notes[:5])
             user_message += f"\n本群最近聊過的內容（供接話參考）：\n{shared}"
+        user_message += self._time_hint()
 
         async def call_reply(message: str) -> str:
             if image and self.media_service:
@@ -3817,6 +3896,7 @@ class AccountWorker:
         )
         if notes_block:
             prompt += f"\n{notes_block}"
+        prompt += self._time_hint()
         topic = await self._call_ai(get_system_prompt(self.persona), prompt)
         topic = (topic or "").strip()
         if not topic or self._is_refusal(topic):

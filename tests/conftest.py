@@ -40,6 +40,7 @@ def _deterministic_human_touch(monkeypatch):
     monkeypatch.setattr(
         worker_mod, "_SILENT_REPLY_PROBABILITY_ORDINARY", 0.0
     )
+    monkeypatch.setattr(worker_mod, "_TYPO_PROBABILITY", 0.0)
 
 
 _EXIT = {"code": 0}

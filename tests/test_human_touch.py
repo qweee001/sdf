@@ -142,6 +142,56 @@ def test_next_proactive_topic_skips_other_accounts_recent_texts(monkeypatch):
     assert w._normalized_reply(topic) in w._recent_proactive_topics
 
 
+def test_maybe_typo_part_swaps_single_char(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_TYPO_PROBABILITY", 1.0)
+    w = _worker()
+    original = "我今天超想吃火鍋的"
+    typo, orig = w._maybe_typo_part(original)
+    assert orig == original
+    assert typo != original
+    assert len(typo) == len(original)
+    diff = [i for i in range(len(original)) if typo[i] != original[i]]
+    assert len(diff) == 1
+    assert typo[diff[0]] == worker_mod._TYPO_SWAPS[original[diff[0]]]
+
+
+def test_maybe_typo_part_without_swappable_char_untouched(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_TYPO_PROBABILITY", 1.0)
+    w = _worker()
+    text = "哈哈哈哈哈哈哈哈"
+    typo, orig = w._maybe_typo_part(text)
+    assert typo == text
+    assert orig is None
+
+
+def test_maybe_typo_part_short_text_untouched(monkeypatch):
+    monkeypatch.setattr(worker_mod, "_TYPO_PROBABILITY", 1.0)
+    w = _worker()
+    typo, orig = w._maybe_typo_part("短一句")
+    assert typo == "短一句"
+    assert orig is None
+
+
+def test_time_hint_bands():
+    w = _worker()
+    w._taipei_hour = lambda: 3.5
+    assert "凌晨" in w._time_hint()
+    w._taipei_hour = lambda: 8.0
+    assert "早晨" in w._time_hint()
+    w._taipei_hour = lambda: 15.0
+    assert "下午" in w._time_hint()
+    w._taipei_hour = lambda: 23.5
+    assert "深夜" in w._time_hint()
+
+
+def test_note_is_trivial():
+    assert AccountWorker._note_is_trivial("哈哈")
+    assert AccountWorker._note_is_trivial("6666666")
+    # 含「我」＝自我披露，再短也值得記
+    assert not AccountWorker._note_is_trivial("我愛吃辣")
+    assert not AccountWorker._note_is_trivial("今天天氣真的好好哦")
+
+
 def test_send_group_reaction_uses_client_and_stats():
     w = _worker()
     w.persona = {"name": "t", "chat_style": "內斂反問"}
