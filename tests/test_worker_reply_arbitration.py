@@ -1041,24 +1041,27 @@ def test_recent_human_activity_suppresses_proactive_message():
 
 
 def test_proactive_topic_does_not_repeat_normalized_text_within_account_day(monkeypatch):
-    worker = _worker(101)
-    day = 321
-    monkeypatch.setattr(worker, "_today_index", lambda: day)
-    monkeypatch.setattr(
-        "app.worker.generate_proactive_topic",
-        Mock(side_effect=[
-            "週末想唱歌",
-            "週末想唱歌！",
-            "今天想吃牛肉麵",
-            "週末想唱歌",
-        ]),
-    )
+    async def main():
+        worker = _worker(101)
+        day = 321
+        monkeypatch.setattr(worker, "_today_index", lambda: day)
+        monkeypatch.setattr(
+            "app.worker.generate_proactive_topic",
+            Mock(side_effect=[
+                "週末想唱歌",
+                "週末想唱歌！",
+                "今天想吃牛肉麵",
+                "週末想唱歌",
+            ]),
+        )
 
-    assert worker._next_proactive_topic() == "週末想唱歌"
-    assert worker._next_proactive_topic() == "今天想吃牛肉麵"
+        assert await worker._next_proactive_topic() == "週末想唱歌"
+        assert await worker._next_proactive_topic() == "今天想吃牛肉麵"
 
-    day = 322
-    assert worker._next_proactive_topic() == "週末想唱歌"
+        day = 322
+        assert await worker._next_proactive_topic() == "週末想唱歌"
+
+    asyncio.run(main())
 
 
 def test_live_proactive_loop_dedupes_rolls_day_and_stops_cleanly(monkeypatch):

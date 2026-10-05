@@ -56,7 +56,7 @@ def test_next_proactive_topic_avoids_cross_account_history():
         db = HistoryDB()
         worker = _worker(202, db=db)
         await worker.reload_proactive_memory()
-        topic = worker._next_proactive_topic()
+        topic = await worker._next_proactive_topic(-5428680940)
         assert topic
         assert "今天超有精神" not in topic
         # 抽题查过跨账号历史（回填内容已进去重集合）
@@ -99,7 +99,7 @@ def test_proactive_topic_falls_back_when_pool_exhausted():
         worker = _worker(303, db=db)
         await worker.reload_proactive_memory()
         # 池子所有句子都在最近历史里 → 拒绝生成复读
-        assert worker._next_proactive_topic() == ""
+        assert await worker._next_proactive_topic() == ""
 
     asyncio.run(main())
 

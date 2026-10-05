@@ -1,6 +1,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 動態產生合法 Fernet 金鑰（避免硬編碼憑證被遮蔽）
@@ -20,6 +22,24 @@ os.environ.setdefault("DB_PATH", "/tmp/sdf_test/chat.db")
 os.environ.setdefault("AI_MODEL", "test-model")
 os.environ.setdefault("AI_BASE_URL", "https://api.test/v1")
 os.environ.setdefault("AI_API_KEY", "***")
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_human_touch(monkeypatch):
+    """人味隨機門（reaction／沉默）預設關閉，讓既有確定性測試不受抽樣影響。
+
+    專測這些門的測試直接調用 _pick_reaction／_send_group_reaction，
+    或自己重新設回常數即可。
+    """
+    from app import worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_REACTION_PROBABILITY", 0.0)
+    monkeypatch.setattr(
+        worker_mod, "_SILENT_REPLY_PROBABILITY_DIRECTED", 0.0
+    )
+    monkeypatch.setattr(
+        worker_mod, "_SILENT_REPLY_PROBABILITY_ORDINARY", 0.0
+    )
 
 
 _EXIT = {"code": 0}

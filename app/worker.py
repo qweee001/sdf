@@ -46,7 +46,16 @@ from telethon.tl.types import MessageEntityMention, MessageMediaPhoto
 from telethon.utils import get_display_name
 
 from .media import MediaAsset, OrcaMediaService
-from .persona import generate_persona, generate_proactive_topic, get_system_prompt
+from .persona import (
+    ADULT_JOKES,
+    BOY_PROACTIVE,
+    DAILY_TOPICS,
+    GIRL_PROACTIVE,
+    PERSONA_PROACTIVE,
+    generate_persona,
+    generate_proactive_topic,
+    get_system_prompt,
+)
 
 _MAX_REPLY_CHARS = 40
 # 桃花源・約會 實測（37 分鐘 333 則真人訊息）：中位 8 字、p90 12 字，
@@ -55,6 +64,22 @@ _HUMAN_LINE_MIN, _HUMAN_LINE_MAX = 6, 14
 _MAX_BURST_PARTS = 3
 _BURST_PAUSE_SECONDS = (0.8, 3.5)
 _REPLY_TASK_WINDOW_SECONDS = 45.0
+# 真人「點 reaction」的比例遠高於打字：非指向自己的訊息，部分只點 emoji 不開口
+_REACTION_PROBABILITY = 0.45
+_REACTION_SETS = {
+    "俏皮少量表情": ["😂", "🔥", "😛", "❤️"],
+    "直球務實": ["🔥", "😛", "😍", "😂"],
+    "內斂反問": ["👍", "😌", "🤭"],
+    "冷淡短句": ["👍", "😌", "🤔"],
+    "溫柔慢熱": ["🥰", "❤️", "😌"],
+    "生活碎念": ["😂", "👍", "🥲"],
+}
+_REACTION_FALLBACK = ["👍", "😂", "❤️"]
+_REACTION_PHOTO = ["❤️", "🔥", "😍"]
+_LAUGH_MARKS = ("哈哈", "🤣", "😂", "笑死", "lol", "xd", "嘿嘿")
+# 真人「看見但不說」：被 @／直接回覆很少漏接，普通訊息常只是默認
+_SILENT_REPLY_PROBABILITY_DIRECTED = 0.10
+_SILENT_REPLY_PROBABILITY_ORDINARY = 0.35
 _MAX_RECENT_PROACTIVE_TOPICS = 64
 # 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
 _MAX_TOPIC_TURNS = 3
@@ -519,6 +544,27 @@ class AccountWorker:
         self._proactive_today = 0
         self._proactive_day = 0
         self._recent_proactive_topics: set[str] = set()
+        # 帳號私有話題池：以 account_id 做穩定種子洗牌，
+        # 讓同群多帳號不會輪到同一句露骨／日常開場（共享公池的复读感）。
+        self._pool_rng = random.Random(
+            int.from_bytes(
+                hashlib.blake2b(
+                    f"pool:{self.account_id}".encode(), digest_size=8
+                ).digest(),
+                "big",
+            )
+        )
+        self._pools = {
+            "daily": list(DAILY_TOPICS),
+            "girl": list(GIRL_PROACTIVE),
+            "boy": list(BOY_PROACTIVE),
+            "adult": list(ADULT_JOKES),
+            "persona": {k: list(v) for k, v in PERSONA_PROACTIVE.items()},
+        }
+        for _pool_name in ("daily", "girl", "boy", "adult"):
+            self._pool_rng.shuffle(self._pools[_pool_name])
+        for _pool_list in self._pools["persona"].values():
+            self._pool_rng.shuffle(_pool_list)
         self._realtime_voice_day = 0
         self._realtime_voice_today = 0
         self._last_realtime_voice = 0.0
@@ -833,8 +879,19 @@ class AccountWorker:
             )
             if not await self._should_reply(event):
                 return
-            # 人味延遲：被@/回覆 → 5-20 秒；普通 → 8-45 秒
             is_hot = event.mentioned or (event.is_reply and event.reply_to)
+            # 真人「看見但不說」：被@偶爾漏接，普通訊息常常只默認
+            silent_p = (
+                _SILENT_REPLY_PROBABILITY_DIRECTED
+                if is_hot
+                else _SILENT_REPLY_PROBABILITY_ORDINARY
+            )
+            if random.random() < silent_p:
+                self.stats["silent_skips"] = (
+                    int(self.stats.get("silent_skips", 0)) + 1
+                )
+                return
+            # 人味延遲：被@/回覆 → 5-20 秒；普通 → 8-45 秒
             delay = (
                 random.uniform(5, 20)
                 if is_hot
@@ -1613,6 +1670,42 @@ class AccountWorker:
             group_id, message_id, self.account_id
         )
 
+    def _pick_reaction(self, text: str, is_photo: bool) -> str:
+        """依人設聊天風格＋訊息語境挑一個 reaction emoji。"""
+        base = _REACTION_SETS.get(
+            str(self.persona.get("chat_style") or ""), _REACTION_FALLBACK
+        )
+        if is_photo:
+            pool = [e for e in _REACTION_PHOTO if e in base] or _REACTION_PHOTO
+        elif any(mark in (text or "") for mark in _LAUGH_MARKS):
+            pool = ["😂"] if "😂" in base else base
+        else:
+            pool = base
+        return self._pool_rng.choice(pool)
+
+    async def _send_group_reaction(self, event) -> bool:
+        """對群訊息只發一個 reaction（不發文字），回傳是否成功。"""
+        if not self.tg_client or not getattr(event, "id", None):
+            return False
+        is_photo = isinstance(getattr(event, "media", None), MessageMediaPhoto)
+        emoji = self._pick_reaction(str(event.raw_text or ""), is_photo)
+        try:
+            await self.tg_client.send_reaction(
+                int(event.chat_id), int(event.id), reaction=emoji
+            )
+            self.stats["reactions_sent"] = (
+                int(self.stats.get("reactions_sent", 0)) + 1
+            )
+            print(
+                f"[{self.name}] reaction-sent: {emoji} → msg {int(event.id)}",
+                flush=True,
+            )
+            return True
+        except Exception as e:
+            self.stats["errors"] += 1
+            print(f"[{self.name}] reaction error: {e}", flush=True)
+            return False
+
     async def _reply_later(
         self, event, delay: float, *, managed_followup: bool = False
     ):
@@ -1645,6 +1738,27 @@ class AccountWorker:
                 if managed_followup
                 else self._requested_media_kind(event.raw_text or "")
             )
+            # 真人 reaction 比例：非指向自己的訊息，一半機率只點 emoji 不打字
+            # （對方明確要圖/語音時不算「指向」，仍需文字交付）
+            if (
+                not media_kind
+                and not bool(getattr(event, "mentioned", False))
+                and not (
+                    bool(getattr(event, "is_reply", False))
+                    and getattr(event, "reply_to", None)
+                )
+                and random.random() < _REACTION_PROBABILITY
+            ):
+                if await self._send_group_reaction(event):
+                    if is_human_reply:
+                        self.stats["human_sent"] += 1
+                        human_counted = True
+                    await self._audit_reply(
+                        event,
+                        "reacted",
+                        "managed" if managed_followup else "human",
+                    )
+                    return
             if media_kind and self.media_service:
                 asset = await self._generate_requested_media(event, media_kind)
                 if asset:
@@ -3713,15 +3827,33 @@ class AccountWorker:
         self._recent_proactive_topics.add(normalized)
         return topic
 
-    def _next_proactive_topic(self) -> str:
-        """一天內不重複正規化話題；集合固定上限，重啟可清空。"""
+    async def _next_proactive_topic(self, group_id: int | None = None) -> str:
+        """一天內不重複正規化話題（含群內其他帳號近 48 小時的文案）；
+        抽樣走帳號私有洗牌池，避免多帳號同群輪到同一句。"""
         self._reset_proactive_day()
         if len(self._recent_proactive_topics) >= _MAX_RECENT_PROACTIVE_TOPICS:
             return ""
+        recent_remote: set[str] = set()
+        if group_id is not None:
+            try:
+                for text in await self.db.recent_bot_texts_by_group(
+                    int(group_id)
+                ):
+                    normalized = self._normalized_reply(text)
+                    if normalized:
+                        recent_remote.add(normalized)
+            except Exception:
+                recent_remote = set()
         for _ in range(16):
-            topic = generate_proactive_topic(self.persona)
+            topic = generate_proactive_topic(
+                self.persona, pools=self._pools, rng=self._pool_rng
+            )
             normalized = self._normalized_reply(topic)
-            if normalized and normalized not in self._recent_proactive_topics:
+            if (
+                normalized
+                and normalized not in self._recent_proactive_topics
+                and normalized not in recent_remote
+            ):
                 self._recent_proactive_topics.add(normalized)
                 return topic
         return ""
@@ -3756,7 +3888,7 @@ class AccountWorker:
             max(1, int(getattr(self.config, "memory_max_messages", 30))),
         )
         if not history:
-            return self._next_proactive_topic()
+            return await self._next_proactive_topic(group_id)
         latest = history[-1]
         sender_name = str(latest.get("sender_name") or "有人")
         event = SimpleNamespace(
@@ -3775,7 +3907,7 @@ class AccountWorker:
             mentioned=False,
         )
         if not event.raw_text:
-            return self._next_proactive_topic()
+            return await self._next_proactive_topic(group_id)
         return await self._generate_reply(event)
 
     async def _continuous_activity_tick(self) -> None:
@@ -3988,7 +4120,7 @@ class AccountWorker:
                 # 情境感知優先：讀群內最近人類訊息生成接話話題；失敗才 fallback 隨機清單
                 topic = await self._generate_context_topic(group_id)
                 if not topic:
-                    topic = self._next_proactive_topic()
+                    topic = await self._next_proactive_topic(group_id)
                 if not topic:
                     print(f"[{self.name}] proactive-skip: no fresh topic (all 64 topics exhausted)", flush=True)
                     continue

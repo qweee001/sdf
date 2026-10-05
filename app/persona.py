@@ -543,8 +543,14 @@ def get_system_prompt(p: dict) -> str:
 """
 
 
-def generate_proactive_topic(p: dict) -> str:
-    """按人設生成普通主動話題，不談群務或群體背書。"""
+def generate_proactive_topic(
+    p: dict, pools: dict | None = None, rng: random.Random | None = None
+) -> str:
+    """按人設生成普通主動話題，不談群務或群體背書。
+
+    pools/rng 可注入帳號私有話題池與隨機源（worker 以 account_id 洗牌），
+    同群多帳號因此不會輪到同一句開場；不指定時沿用模組級公池。
+    """
     personality = str(p.get("personality") or "")
     style = str(p.get("chat_style") or "")
     age = int(p.get("age") or 21)
@@ -559,17 +565,24 @@ def generate_proactive_topic(p: dict) -> str:
     else:
         profile = "lively"
 
-    r = random.random()
+    _random = rng or random
+    pool_daily = (pools or {}).get("daily") or DAILY_TOPICS
+    pool_girl = (pools or {}).get("girl") or GIRL_PROACTIVE
+    pool_boy = (pools or {}).get("boy") or BOY_PROACTIVE
+    pool_adult = (pools or {}).get("adult") or ADULT_JOKES
+    pool_persona = (pools or {}).get("persona") or PERSONA_PROACTIVE
+
+    r = _random.random()
     # 依「桃花源・約會」實測節奏調配：日常約四成五、約會口約兩成五、成人玩笑約兩成、挑逗人設約一成。
     if r < 0.45:
-        topic = random.choice(DAILY_TOPICS)
+        topic = _random.choice(pool_daily)
     elif r < 0.70:
-        templates = GIRL_PROACTIVE if p["gender"] == "女" else BOY_PROACTIVE
-        topic = random.choice(templates)
+        templates = pool_girl if p["gender"] == "女" else pool_boy
+        topic = _random.choice(templates)
     elif r < 0.90:
-        topic = random.choice(ADULT_JOKES)
+        topic = _random.choice(pool_adult)
     else:
-        topic = random.choice(PERSONA_PROACTIVE[profile])
+        topic = _random.choice(pool_persona.get(profile) or PERSONA_PROACTIVE[profile])
 
     # 慢熟／年輕人設不使用突兀髒話或過度老練的口吻。
     if profile == "shy" or age <= 21:
