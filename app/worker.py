@@ -43,7 +43,8 @@ from openai import AsyncOpenAI
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
-from telethon.tl.types import MessageEntityMention, MessageMediaPhoto
+from telethon.tl.functions.messages import SendReactionRequest
+from telethon.tl.types import MessageEntityMention, MessageMediaPhoto, ReactionEmoji
 from telethon.utils import get_display_name
 
 from .media import MediaAsset, OrcaMediaService
@@ -1712,8 +1713,13 @@ class AccountWorker:
         is_photo = isinstance(getattr(event, "media", None), MessageMediaPhoto)
         emoji = self._pick_reaction(str(event.raw_text or ""), is_photo)
         try:
-            await self.tg_client.send_reaction(
-                int(event.chat_id), int(event.id), reaction=emoji
+            # Telethon 1.44 沒有 send_reaction 便利方法，直接送原始 TL 請求
+            await self.tg_client(
+                SendReactionRequest(
+                    peer=int(event.chat_id),
+                    msg_id=int(event.id),
+                    reaction=[ReactionEmoji(emoticon=emoji)],
+                )
             )
             self.stats["reactions_sent"] = (
                 int(self.stats.get("reactions_sent", 0)) + 1
@@ -1755,22 +1761,47 @@ class AccountWorker:
         return await self._send_group_reaction(event)
 
     def _time_hint(self) -> str:
-        """現在台北時段的語氣提示：真人晚上聊天的口氣跟中午完全不同。"""
+        """現在台北時段的語氣提示：真人晚上聊天的口氣跟中午完全不同。
+
+        每段都帶「別說」清單：時段穿幫（下午講早安、吃早餐）是最容易被
+        認出不是真人的細節之一，光說「現在是下午」模型不會自動避雷。
+        """
         hour = int(self._taipei_hour())
         if hour < 6:
-            band, hint = "凌晨", "語氣可以帶點睡意、更親昵，句子短一點"
+            band, hint = (
+                "凌晨",
+                "語氣帶點睡意、更親昵，句子短一點；可以說「還沒睡」「好累」，別說「早安」「早餐」",
+            )
         elif hour < 9:
-            band, hint = "早晨", "語氣清爽，可以順口問早安或早餐"
+            band, hint = (
+                "早晨",
+                "語氣清爽，可以順口問早安或早餐；別說「晚安」「晚餐」「下午茶」",
+            )
         elif hour < 12:
-            band, hint = "上午", "正常的白天口氣"
+            band, hint = (
+                "上午",
+                "正常的白天口氣；別說「早安」「早餐」（都過點了）「晚安」",
+            )
         elif hour < 14:
-            band, hint = "中午", "可以順口聊吃飯"
+            band, hint = (
+                "中午",
+                "可以順口聊吃飯、午餐；別說「早餐」「早安」",
+            )
         elif hour < 17:
-            band, hint = "下午", "可以帶點犯懶或下午茶話題"
+            band, hint = (
+                "下午",
+                "可以帶點犯懶或下午茶話題；別說「早安」「早餐」「剛起床」",
+            )
         elif hour < 22:
-            band, hint = "晚上", "心情放鬆，可以聊吃飽沒有、晚上安排"
+            band, hint = (
+                "晚上",
+                "心情放鬆，可以聊吃飽沒有、晚上安排；別說「早安」「早餐」",
+            )
         else:
-            band, hint = "深夜", "語氣可以更親密一點"
+            band, hint = (
+                "深夜",
+                "語氣可以更親密一點，可以說「晚了」「該睡了」；別說「早安」「早餐」",
+            )
         return f"\n現在台北時間 {hour:02d} 點（{band}）：{hint}。"
 
     @staticmethod
@@ -3089,9 +3120,17 @@ class AccountWorker:
         就保留原單則（後面的長度檢查照樣把關）。
         """
         t = str(text or "").strip()
-        if not t or len(t) <= _HUMAN_LINE_MAX + 2:
-            return [t] if t else []
+        if not t:
+            return []
         strip_chars = " ，,。．!?！？;；~～… "
+        # 真人一則一句：有換行就按行拆，別把兩行塞進同一則氣泡
+        if "\n" in t:
+            parts = [p.strip(strip_chars) for p in t.split("\n")]
+            parts = [p for p in parts if p]
+            if len(parts) >= 2:
+                return parts[:_MAX_BURST_PARTS]
+        if len(t) <= _HUMAN_LINE_MAX + 2:
+            return [t]
         parts = [
             p.strip(strip_chars)
             for p in re.split(r"[。．！!？?；;\n]+", t)

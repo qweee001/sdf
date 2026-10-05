@@ -195,8 +195,8 @@ def test_acknowledge_group_falls_back_to_reaction(monkeypatch):
         async def send_sticker(self, chat_id, path):
             sent.append(("sticker", chat_id, path))
 
-        async def send_reaction(self, chat_id, msg_id, reaction):
-            sent.append(("reaction", chat_id, msg_id, reaction))
+        async def __call__(self, request):
+            sent.append(("reaction", getattr(request, "peer", None)))
 
     w.tg_client = _FakeClient()
     event = SimpleNamespace(chat_id=-1001, id=77, raw_text="早安")
@@ -232,17 +232,22 @@ def test_send_group_reaction_uses_client_and_stats():
     w.persona = {"name": "t", "chat_style": "內斂反問"}
     sent = []
 
-    async def send_reaction(chat_id, message_id, reaction=None):
-        sent.append((chat_id, message_id, reaction))
+    class _CallableClient:
+        # Telethon 1.44 走「client(TLRequest)」，fake 要可呼叫並收下請求物件
+        async def __call__(self, request):
+            sent.append(request)
 
-    w.tg_client = SimpleNamespace(send_reaction=send_reaction)
+    w.tg_client = _CallableClient()
     event = SimpleNamespace(
         id=99, chat_id=-1001, raw_text="剛下班", media=None
     )
     ok = asyncio.run(w._send_group_reaction(event))
     assert ok is True
     assert len(sent) == 1
-    assert sent[0][0] == -1001
-    assert sent[0][1] == 99
-    assert sent[0][2] in worker_mod._REACTION_SETS["內斂反問"]
+    req = sent[0]
+    assert req.peer == -1001
+    assert req.msg_id == 99
+    emojis = [r.emoticon for r in (req.reaction or [])]
+    assert len(emojis) == 1
+    assert emojis[0] in worker_mod._REACTION_SETS["內斂反問"]
     assert w.stats["reactions_sent"] == 1

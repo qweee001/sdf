@@ -567,6 +567,15 @@ def test_split_human_burst_keeps_short_lines_single():
     assert AccountWorker._split_human_burst("") == []
 
 
+def test_split_human_burst_splits_newlines_even_when_short():
+    """一則兩行＝機器的破綻：總長再短也要按行拆成兩則連發。"""
+    parts = AccountWorker._split_human_burst("早安餓死了\n士林那家滷肉飯推嗎🤤")
+    assert parts == ["早安餓死了", "士林那家滷肉飯推嗎🤤"]
+    # 多行超過三行時照樣只取前三則
+    parts = AccountWorker._split_human_burst("第一行\n第二行\n第三行\n第四行")
+    assert parts == ["第一行", "第二行", "第三行"]
+
+
 def test_split_human_burst_splits_long_reply_into_short_lines():
     """長回覆按句末標點拆成 2~3 則短訊連發。"""
     parts = AccountWorker._split_human_burst("好新的藉口，這話題太露骨了，換個安全的聊吧")
