@@ -102,7 +102,7 @@ def test_proactive_prompt_matches_short_reply_and_provenance_rules():
         prompt = worker._call_ai.await_args.args[1]
         assert "40 字元內" in prompt
         assert "60 字元內" not in prompt
-        assert "一句短回覆為主" in prompt
+        assert "一到兩則短訊為主" in prompt
         assert "不必追問或自我分享" in prompt
         assert "身分未驗證" in prompt
         assert "sender_id=999" in prompt

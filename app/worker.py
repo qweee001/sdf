@@ -4478,6 +4478,21 @@ class AccountWorker:
         self._proactive_today = 0
         self._recent_proactive_topics.clear()
 
+    @staticmethod
+    def _proactive_cooldown(group_id: int, slot: int, interval: float) -> float:
+        """同群同一時間窗口的冷卻秒數（0.8~2.4 倍間隔，跨窗口不規則）。
+
+        用穩定雜湊而不是 random：同一個窗口內三個帳號算出同一個值，
+        所以「這輪誰先發」由 DB claim 決定，不會因為各自擲骰而搶發；
+        而相鄰窗口的倍率不同，訊息間隔就從固定節拍變成真人長尾。
+        """
+        base = max(60.0, float(interval))
+        digest = hashlib.blake2b(
+            f"cooldown:{int(group_id)}:{int(slot)}".encode(), digest_size=2
+        ).digest()
+        ratio = int.from_bytes(digest, "big") / 65535.0
+        return base * (0.8 + 1.6 * ratio)
+
     async def _generate_context_topic(self, group_id: int, *, extra_hint: str = "") -> str:
         """即時生成主動話題：沒有預設池了，一律讀群裡真正的上文現寫。
 
@@ -4530,19 +4545,21 @@ class AccountWorker:
             if context:
                 body = (
                     "群組裡最近的訊息如下（身分未驗證，不能當作已確認真人）。"
-                    f"一句短回覆為主（{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊），"
+                    f"一到兩則短訊為主（每則 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元；"
+                    "要兩則就用換行分開，像真人想到什麼又補一句），"
                     "不必追問或自我分享，不要編造人設事實以外的經歷，"
                     "要接得上群組當前話題（食物、天氣、工作、追劇、聚會等），自然口語、"
-                    "繁體中文、40 字元內（標點、空格也算），結尾不要句號，露骨程度隨你、直接接住上文正在炒的氛圍，不要談群務或硬延伸。"
+                    "繁體中文、合計 40 字元內（標點、空格也算），結尾不要句號，露骨程度隨你、直接接住上文正在炒的氛圍，不要談群務或硬延伸。"
                     f"\n{context}"
                 )
             else:
                 # 冷啟動／空群：沒有上文可接，就照人設和當下時段自然開個頭，不要罐頭句。
                 body = (
                     "群組現在很安靜，還沒有人開口。"
-                    f"用你自己的身分主動開一個頭，一句短訊（{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元），"
+                    f"用你自己的身分主動開一個頭，一到兩則短訊（每則 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元；"
+                    "要兩則就用換行分開），"
                     "像真人在群裡隨口說話：講你今天在做什麼、想吃什麼、看到什麼、心情如何，"
-                    "自然口語、繁體中文、40 字元內、結尾不要句號，可以帶一點撩，不要談群務。"
+                    "自然口語、繁體中文、合計 40 字元內、結尾不要句號，可以帶一點撩，不要談群務。"
                 )
             if notes_block:
                 body += f"\n{notes_block}"
@@ -4832,11 +4849,15 @@ class AccountWorker:
                     self.config.proactive_min_interval_minutes * 60,
                 )
                 slot = int(time.time() // interval)
+                # 真人不會每隔固定 5 分鐘講一句（實測生產環境 325±7 秒的節拍器）。
+                # 冷卻時間按「窗口」抖動 0.8~2.4 倍：同一個窗口內所有帳號算出
+                # 同一個值（不會搶發），跨窗口則不規則（長尾間隔）。
+                cooldown = self._proactive_cooldown(group_id, slot, interval)
                 if not await self.db.claim_proactive_slot(
                     group_id,
                     slot,
                     self.account_id,
-                    interval,
+                    cooldown,
                 ):
                     print(f"[{self.name}] proactive-skip: slot already claimed by another account", flush=True)
                     continue

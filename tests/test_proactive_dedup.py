@@ -88,6 +88,31 @@ def test_context_topic_returns_empty_when_model_keeps_repeating():
     asyncio.run(main())
 
 
+def test_proactive_cooldown_is_shared_within_slot_and_jitters_across_slots():
+    """冷卻時間要抖動（反節拍器），但同一窗口內三個帳號必須算出同一個值。
+
+    生產實測：固定 5 分鐘冷卻 → 訊息間隔 325±7 秒的節拍器，一眼看出不是真人。
+    """
+
+    async def main():
+        worker = _worker(101)
+        interval = 300.0
+        group = -5565520321
+        # 同窗口同值（同一 slot 三個帳號不會各自擲骰搶發）
+        same = [worker._proactive_cooldown(group, 12345, interval) for _ in range(5)]
+        assert len(set(same)) == 1
+        # 落在 0.8~2.4 倍之間
+        assert interval * 0.8 <= same[0] <= interval * 2.4
+        # 跨窗口不規則：值要分散，而不是全部黏在同一個數字
+        values = [worker._proactive_cooldown(group, slot, interval) for slot in range(12345, 12375)]
+        assert len(set(values)) > 20
+        assert max(values) - min(values) > interval * 0.5
+        # 不同群各自獨立
+        assert worker._proactive_cooldown(-1001, 12345, interval) != same[0]
+
+    asyncio.run(main())
+
+
 def test_claim_group_text_blocks_cross_account_duplicate():
     """同群同文案 1 小時內只允許第一個帳號發出（DB 層跨帳號攔截）。"""
     import os
