@@ -55,6 +55,7 @@ from telethon.tl.types import (
 )
 from telethon.utils import get_display_name
 
+from .decision import DecisionError, system_one
 from .media import MediaAsset, OrcaMediaService
 from .persona import (
     ADULT_JOKES,
@@ -94,6 +95,20 @@ _SILENT_REPLY_PROBABILITY_ORDINARY = 0.35
 _SLEEP_REPLY_PROBABILITY = 0.20
 # reaction 輕回應改成 sticker 的機率（sticker 比重點表情多一分「用心」）
 _STICKER_PROBABILITY = 0.35
+# 決策層（System One）：① 決策結果要寫進生成 prompt 的露骨檔位指示
+_DECISION_FLIRTY_GUIDE = {
+    0: "純日常接話，不帶撩",
+    1: "稍微暗示，若即若離地撩",
+    2: "明顯勾引，露骨主動",
+}
+# ③ 審核不通過時的重寫指示標籤
+_DECISION_ISSUE_LABEL = {
+    "none": "沒有問題",
+    "time": "時段穿幫（例如白天講早安、下午說早餐）",
+    "tone": "語氣不像本人設",
+    "weird": "內容尷尬或不合群組話題",
+    "simplified": "混入簡體字",
+}
 _MAX_RECENT_PROACTIVE_TOPICS = 64
 # 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
 _MAX_TOPIC_TURNS = 3
@@ -1855,6 +1870,237 @@ class AccountWorker:
                 return True
         return False
 
+    # ------------------------------------------------------------------
+    # 決策層（System One）：
+    # ① 決策模型判斷怎麼回 → ② 文字模型照決策生成 → ③ 決策模型審核候選
+    # ③ 通過→發送；重寫→重生成一次再審核；超時/仍不合格→暫緩發送。
+    # 決策層停用（無 key）或呼叫失敗時一律降級回舊概率門，不是硬依賴。
+    # ------------------------------------------------------------------
+    def _decision_enabled(self) -> bool:
+        return bool(getattr(self.config, "decision_api_key", ""))
+
+    async def _decision_state(self, event) -> str:
+        """決策狀態：近期對話＋最新訊息＋相關記憶＋時段。"""
+        group_id = int(event.chat_id or 0)
+        persona = self.persona
+        lines = [
+            f"你是 {persona.get('name','?')}，{persona.get('age','?')} 歲，"
+            f"住{persona.get('city','?')}，聊天風格：{persona.get('chat_style','?')}。"
+        ]
+        try:
+            history = await self.db.get_recent_messages(
+                self.account_id, group_id, self.config.memory_max_messages
+            )
+        except Exception:
+            history = []
+        recent = history[-8:]
+        if recent:
+            lines.append("最近對話：")
+            for msg in recent:
+                role = (
+                    "我"
+                    if self.tg_user_id and msg.get("sender_id") == self.tg_user_id
+                    else msg.get("sender_name") or "有人"
+                )
+                content = str(msg.get("content", "")).replace("\n", " ")
+                lines.append(f"[{role}] {content[:60]}")
+        incoming = str(getattr(event, "raw_text", "") or "").strip().replace("\n", " ")
+        try:
+            sender_name = get_display_name(event.sender) or ""
+        except Exception:
+            sender_name = ""
+        lines.append(f"最新消息：[{sender_name or '有人'}] {incoming[:60]}")
+        try:
+            shared_notes = await self.db.get_group_shared_notes(
+                group_id, self.account_id
+            )
+        except Exception:
+            shared_notes = []
+        if shared_notes:
+            lines.append("本群最近聊過：" + "；".join(shared_notes[:5]))
+        lines.append(self._time_hint().strip())
+        return "\n".join(lines)
+
+    async def _proactive_decision_context(self, group_id: int) -> str:
+        """③ 主動話題的審核狀態：群裡最近的人類訊息＋時段。"""
+        lines = [
+            f"你是 {self.persona.get('name','?')}，"
+            f"聊天風格：{self.persona.get('chat_style','?')}。"
+        ]
+        try:
+            msgs = await self.db.get_group_messages(group_id, limit=12)
+        except Exception:
+            msgs = []
+        human = [m for m in msgs if m.get("role") != "assistant"]
+        if human:
+            lines.append("最近對話：")
+            for m in human[-5:]:
+                lines.append(
+                    f"[{m.get('sender_name','?')}] {str(m.get('content',''))[:60]}"
+                )
+        lines.append(self._time_hint().strip())
+        return "\n".join(lines)
+
+    async def _decide_action(self, event):
+        """① 判斷怎麼回應：reply/react/sticker/skip＋露骨檔位；失敗回 None。"""
+        if not self._decision_enabled():
+            return None
+        try:
+            state = await self._decision_state(event)
+        except Exception:
+            return None
+        cfg = self.config
+        try:
+            answers = await system_one(
+                state,
+                {
+                    "action": {
+                        "type": "choice",
+                        "instructions": "她應該怎麼回應最新這條訊息",
+                        "criteria": {
+                            "reply": "用一句短訊息接話回應",
+                            "react": "只點一個反應表情，不開口",
+                            "sticker": "發一個貼圖，不打字",
+                            "skip": "看見了但保持沉默",
+                        },
+                    },
+                    "flirty": {
+                        "type": "score",
+                        "instructions": "這次互動可以多露骨地撩",
+                        "criteria": [
+                            "純日常，不撩",
+                            "稍微暗示，若即若離",
+                            "明顯勾引，露骨主動",
+                        ],
+                    },
+                },
+                base_url=cfg.decision_base_url,
+                api_key=cfg.decision_api_key,
+                model=cfg.decision_model,
+                timeout_seconds=cfg.decision_timeout_seconds,
+            )
+        except DecisionError as exc:
+            self.stats["decision_errors"] = int(self.stats.get("decision_errors", 0)) + 1
+            print(f"[{self.name}] decision-1 error: {exc}", flush=True)
+            return None
+        self.stats["decision_calls"] = int(self.stats.get("decision_calls", 0)) + 1
+        action = (answers.get("action") or {}).get("choice")
+        if action not in ("reply", "react", "sticker", "skip"):
+            return None
+        try:
+            flirty = int(round(float((answers.get("flirty") or {}).get("score", 0))))
+        except (TypeError, ValueError):
+            flirty = 0
+        return {"action": action, "flirty": min(max(flirty, 0), 2)}
+
+    async def _review_candidate(self, context: str, text: str):
+        """③ 審核候選回覆：回 {"sendable","issue"}；超時/失敗回 None。"""
+        cfg = self.config
+        state = f"{context}\n你要發出的回覆：「{str(text).strip()}」"
+        try:
+            answers = await system_one(
+                state,
+                {
+                    "sendable": {
+                        "type": "noul",
+                        "instructions": "這條回覆符合現在時段、人設和群組語境，可以直接發出",
+                    },
+                    "issue": {
+                        "type": "choice",
+                        "instructions": "這條回覆最大的問題",
+                        "criteria": {
+                            "none": "沒有問題",
+                            "time": "時段穿幫（如白天說早安、下午說早餐）",
+                            "tone": "語氣不像本人設",
+                            "weird": "內容尷尬或不合群組話題",
+                            "simplified": "混入簡體字",
+                        },
+                    },
+                },
+                base_url=cfg.decision_base_url,
+                api_key=cfg.decision_api_key,
+                model=cfg.decision_model,
+                timeout_seconds=cfg.decision_timeout_seconds,
+            )
+        except DecisionError as exc:
+            self.stats["decision_errors"] = int(self.stats.get("decision_errors", 0)) + 1
+            print(f"[{self.name}] decision-3 error: {exc}", flush=True)
+            return None
+        self.stats["decision_calls"] = int(self.stats.get("decision_calls", 0)) + 1
+        sendable = (answers.get("sendable") or {}).get("noul")
+        issue = (answers.get("issue") or {}).get("choice", "none")
+        if sendable is None:
+            return None
+        return {"sendable": float(sendable), "issue": issue}
+
+    def _review_passes(self, review: dict) -> bool:
+        threshold = float(getattr(self.config, "decision_gate_threshold", 0.5))
+        return review["issue"] == "none" and review["sendable"] >= threshold
+
+    async def _gate_reply(self, event, text: str) -> str:
+        """③ 審核→重寫一次→暫緩：回 "" 表示這條不發。決策層停用時原樣通過。"""
+        if not text or not self._decision_enabled():
+            return text
+        try:
+            context = await self._decision_state(event)
+        except Exception:
+            return text
+        review = await self._review_candidate(context, text)
+        if review is None:
+            self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
+            print(f"[{self.name}] gate-hold: 決策層超時/失敗，暫緩 {text[:20]!r}", flush=True)
+            return ""
+        if self._review_passes(review):
+            self.stats["gate_pass"] = int(self.stats.get("gate_pass", 0)) + 1
+            return text
+        self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
+        label = _DECISION_ISSUE_LABEL.get(review["issue"], review["issue"])
+        print(
+            f"[{self.name}] gate-rewrite: issue={review['issue']} "
+            f"sendable={review['sendable']:.2f} {text[:20]!r}",
+            flush=True,
+        )
+        retry = await self._generate_reply(
+            event,
+            extra_hint=f"上一版被決策層攔下，問題：{label}。這次避開這個問題。",
+        )
+        if not retry:
+            self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
+            return ""
+        review2 = await self._review_candidate(context, retry)
+        if review2 is not None and self._review_passes(review2):
+            self.stats["gate_pass_after_rewrite"] = (
+                int(self.stats.get("gate_pass_after_rewrite", 0)) + 1
+            )
+            return retry
+        self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
+        print(f"[{self.name}] gate-hold: 重寫後仍不合格，暫緩 {retry[:20]!r}", flush=True)
+        return ""
+
+    async def _apply_decision(self, event, *, forced_text: bool):
+        """① 決策路由：回 (route, payload)。
+
+        route="none"→決策層沒意見（走舊概率門）；
+        route="reply"→payload 是決策 dict（帶露骨檔位進生成）；
+        route="skip"→直接沉默；
+        route="react"/"sticker"→payload 是發送成功 bool，失敗就落回文字路徑。
+        forced_text（被@/被回覆/明確要媒體）＝必回文字，決策只做露骨檔位參考。
+        """
+        decision = await self._decide_action(event)
+        if decision is None:
+            return ("none", None)
+        if decision["action"] == "reply" or forced_text:
+            return ("reply", decision)
+        if decision["action"] == "skip":
+            return ("skip", decision)
+        if decision["action"] == "react":
+            ok = await self._send_group_reaction(event)
+        else:
+            ok = await self._send_group_sticker(event) if self._stickers else False
+            if not ok:
+                ok = await self._send_group_reaction(event)
+        return (decision["action"], ok)
+
     @staticmethod
     def _note_is_trivial(note: str) -> bool:
         """輕飄飄的敷衍（<8 字且沒有自我披露）：不該蓋掉群友上一句有內容的話。"""
@@ -1892,15 +2138,46 @@ class AccountWorker:
                 if managed_followup
                 else self._requested_media_kind(event.raw_text or "")
             )
-            # 真人輕回應比例：非指向自己的訊息，近半機率只點 sticker/reaction 不打字
-            # （對方明確要圖/語音時不算「指向」，仍需文字交付）
-            if (
-                not media_kind
-                and not bool(getattr(event, "mentioned", False))
-                and not (
+            # 被@/被回覆/明確要媒體＝「指向」：必回文字，決策層只當露骨檔位參考
+            forced_text = (
+                bool(media_kind)
+                or bool(getattr(event, "mentioned", False))
+                or (
                     bool(getattr(event, "is_reply", False))
-                    and getattr(event, "reply_to", None)
+                    and bool(getattr(event, "reply_to", None))
                 )
+            )
+            # ① 決策層：先判斷怎麼回（回話/點reaction/發貼圖/沉默＋露骨檔位）
+            route, payload = await self._apply_decision(event, forced_text=forced_text)
+            if route == "skip":
+                self.stats["decision_skip"] = int(self.stats.get("decision_skip", 0)) + 1
+                self.stats["silent_skips"] = int(self.stats.get("silent_skips", 0)) + 1
+                await self._audit_reply(event, "cancel", "decision_skip")
+                return
+            if route in ("react", "sticker"):
+                if payload:
+                    if is_human_reply:
+                        self.stats["human_sent"] += 1
+                        human_counted = True
+                    self.stats["decision_react"] = (
+                        int(self.stats.get("decision_react", 0)) + 1
+                    )
+                    await self._audit_reply(
+                        event,
+                        "reacted",
+                        "managed" if managed_followup else "human",
+                    )
+                    return
+                # 發送失敗落回文字路徑，避免這一則完全沒回應
+            if route == "reply" and payload is not None:
+                try:
+                    event._sdf_decision = payload
+                except Exception:
+                    pass
+            # 舊概率門：決策層沒意見（停用/超時）才用
+            if (
+                route == "none"
+                and not forced_text
                 and random.random() < _REACTION_PROBABILITY
             ):
                 if await self._acknowledge_group(event):
@@ -1953,6 +2230,12 @@ class AccountWorker:
             if text:
                 if managed_followup:
                     self.stats["managed_generated"] += 1
+                # ③ 決策層審核候選：通過→發；重寫→重生成一次再審核；仍不合格/超時→暫緩
+                text = await self._gate_reply(event, text)
+                if not text:
+                    self._record_reply_drop("gate_held")
+                    await self._audit_reply(event, "policy", "gate_held")
+                    return
             else:
                 self._record_reply_drop(generation_reason)
                 await self._audit_reply(
@@ -2814,7 +3097,7 @@ class AccountWorker:
         self._pending_live_video_evidence[event_id] = evidence
         return evidence
 
-    async def _generate_reply(self, event) -> str:
+    async def _generate_reply(self, event, *, extra_hint: str = "") -> str:
         self._successful_vision_events.discard(self._generation_key(event))
         self._set_generation_reason(event, "generation_empty")
         group_id = int(event.chat_id or 0)
@@ -2877,6 +3160,14 @@ class AccountWorker:
             shared = "\n".join(f"- {n}" for n in shared_notes[:5])
             user_message += f"\n本群最近聊過的內容（供接話參考）：\n{shared}"
         user_message += self._time_hint()
+        # ② 決策層給的露骨檔位指示：文字模型照這個分寸生成
+        decision = getattr(event, "_sdf_decision", None)
+        if isinstance(decision, dict):
+            guide = _DECISION_FLIRTY_GUIDE.get(int(decision.get("flirty", 0)))
+            if guide:
+                user_message += f"\n這次互動決策（照這個分寸來）：{guide}。"
+        if extra_hint:
+            user_message += f"\n{extra_hint}"
 
         async def call_reply(message: str) -> str:
             if image and self.media_service:
@@ -4290,11 +4581,36 @@ class AccountWorker:
                     continue
                 # 情境感知優先：讀群內最近人類訊息生成接話話題；失敗才 fallback 隨機清單
                 topic = await self._generate_context_topic(group_id)
+                topic_from_llm = bool(topic)
                 if not topic:
                     topic = await self._next_proactive_topic(group_id)
                 if not topic:
                     print(f"[{self.name}] proactive-skip: no fresh topic (all 64 topics exhausted)", flush=True)
                     continue
+                # ③ 決策層審核 LLM 情境話題（池子句是人寫的時段中立句，直接放行）：
+                # 不合格/超時→換池子句，避免「16 點講早安」這種語義穿幫
+                if topic_from_llm and self._decision_enabled():
+                    try:
+                        context = await self._proactive_decision_context(group_id)
+                    except Exception:
+                        context = ""
+                    review = await self._review_candidate(context, topic)
+                    if review is None:
+                        self.stats["proactive_gate_hold"] = (
+                            int(self.stats.get("proactive_gate_hold", 0)) + 1
+                        )
+                        print(f"[{self.name}] proactive-gate-hold: 決策層超時，換池子句 {topic[:20]!r}", flush=True)
+                        topic = await self._next_proactive_topic(group_id)
+                        if not topic:
+                            continue
+                    elif not self._review_passes(review):
+                        self.stats["proactive_gate_rewrite"] = (
+                            int(self.stats.get("proactive_gate_rewrite", 0)) + 1
+                        )
+                        print(f"[{self.name}] proactive-gate-rewrite: issue={review['issue']} {topic[:20]!r}", flush=True)
+                        topic = await self._next_proactive_topic(group_id)
+                        if not topic:
+                            continue
                 burst = self._split_human_burst(topic)
                 sent = False
                 for i, part in enumerate(burst):

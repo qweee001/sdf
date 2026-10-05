@@ -119,6 +119,13 @@ class Settings:
     memory_max_messages: int
     memory_ttl_hours: int
 
+    # 決策層（System One：TypeSafe Jev / Laya 同協議，api_key 空＝停用走舊概率門）
+    decision_api_key: str
+    decision_base_url: str
+    decision_model: str
+    decision_timeout_seconds: float
+    decision_gate_threshold: float
+
     # 回覆行為
     reply_enabled: bool
     base_reply_probability: float
@@ -227,6 +234,18 @@ def load_settings() -> Settings:
         db_path=os.getenv("DB_PATH", "/data/chat.db").strip(),
         memory_max_messages=_int("MEMORY_MAX_MESSAGES", 30),
         memory_ttl_hours=_int("MEMORY_TTL_HOURS", 24),
+        decision_api_key=os.getenv("DECISION_API_KEY", "").strip(),
+        decision_base_url=(
+            os.getenv("DECISION_BASE_URL", "").strip()
+            or "https://api.typesafe.ai"
+        ).rstrip("/"),
+        decision_model=os.getenv("DECISION_MODEL", "").strip() or "jev-latest",
+        decision_timeout_seconds=_bounded_float(
+            "DECISION_TIMEOUT_SECONDS", 3.0, 0.5, 15.0
+        ),
+        decision_gate_threshold=_bounded_float(
+            "DECISION_GATE_THRESHOLD", 0.5, 0.1, 0.95
+        ),
         base_reply_probability=_float("BASE_REPLY_PROBABILITY", 0.35),
         reply_enabled=_bool("REPLY_ENABLED", True),
         water_cross_talk_probability=(
