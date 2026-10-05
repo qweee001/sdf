@@ -85,6 +85,12 @@ _LAUGH_MARKS = ("哈哈", "🤣", "😂", "笑死", "lol", "xd", "嘿嘿")
 # emoji 疲勞偵測：實測三號連發五句都以 🤭 收尾，真人不會每句掛同一個表情
 _EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]")
 _EMOJI_HISTORY_LIMIT = 6
+# Big5 也收錄、但組起來是大陸寫法的片語（逐字檢查抓不到）
+_SIMPLIFIED_PHRASE_PATTERNS = (
+    re.compile(r"什么|怎么|这么|那么|多么|为什么|什幺"),
+    re.compile(r"干净|干燥|干杯|干什么"),
+    re.compile(r"家里|这里|那里|哪里|心里|里头"),
+)
 # 真人「看見但不說」：被 @／直接回覆很少漏接，普通訊息常只是默認
 _SILENT_REPLY_PROBABILITY_DIRECTED = 0.10
 _SILENT_REPLY_PROBABILITY_ORDINARY = 0.35
@@ -615,8 +621,10 @@ class AccountWorker:
 
         self.persona = persona or generate_persona()
         self.name = self.persona["name"]
-        # 作息錯峰：每人隨機偏移 0-24 小時，避免同時醒睡
-        self._schedule_offset = random.uniform(0, 24)
+        # 作息錯峰：±45 分鐘，只讓睡醒邊界不要三隻同時切換。
+        # 曾經是 random.uniform(0, 24)——那等於給每個號一個隨機亂掉的內部時鐘，
+        # 實測 21:48 有號自以為是早上，主動發「早安」「想吃早餐嗎🥐」。
+        self._schedule_offset = random.uniform(-0.75, 0.75)
 
         self.tg_client: TelegramClient | None = None
         self.tg_user_id: int | None = None
@@ -3617,9 +3625,17 @@ class AccountWorker:
 
     @staticmethod
     def _has_simplified_chars(text: str) -> bool:
-        """語言硬規則：絕對不用簡體字。"""
+        """語言硬規則：絕對不用簡體字。
+
+        Big5 編得出來的字不一定是繁體用法：「么」在 Big5 裡有（么女、么兒），
+        但「什么／怎么／这么」是大陸寫法，實測生成過「想吃什么我陪你」。
+        所以除了逐字 Big5 檢查，再補一層字形共用詞的片語黑名單。
+        """
         if not text:
             return False
+        normalized = unicodedata.normalize("NFKC", text)
+        if any(p.search(normalized) for p in _SIMPLIFIED_PHRASE_PATTERNS):
+            return True
         for ch in text:
             if unicodedata.name(ch, "").startswith("CJK"):
                 try:

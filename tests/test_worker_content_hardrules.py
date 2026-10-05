@@ -39,6 +39,38 @@ def test_reply_with_simplified_chars_is_blocked():
     asyncio.run(main())
 
 
+def test_big5_shared_char_phrases_are_blocked():
+    """「么」在 Big5 有收錄，但「什么／怎么」是大陸寫法（實測生成過「想吃什么我陪你」）。"""
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        assert worker._has_simplified_chars("想吃什么我陪你🤤") is True
+        assert worker._has_simplified_chars("我在家里等你") is True
+        assert worker._has_simplified_chars("你怎麼這麼晚") is False
+        assert worker._has_simplified_chars("這麼晚了還不睡") is False
+        # 台灣也在用的字不誤殺：里（里長）、么（么女）
+        assert worker._has_simplified_chars("我是家裡的么女") is False
+        assert worker._has_simplified_chars("他是我們里長") is False
+
+    asyncio.run(main())
+
+
+def test_taipei_hour_tracks_wall_clock():
+    """內部時鐘必須跟著真實台北時間：曾經偏移 0~24 小時，導致 21:48 說出「早安」。"""
+
+    async def main():
+        import time as _time
+
+        worker = _worker(sorted(MANAGED)[0])
+        real = (_time.time() / 3600 + 8) % 24
+        perceived = worker._taipei_hour()
+        # 只允許 ±45 分鐘的作息錯峰
+        delta = min((perceived - real) % 24, (real - perceived) % 24)
+        assert delta <= 0.76, f"內部時鐘偏了 {delta:.2f} 小時"
+
+    asyncio.run(main())
+
+
 def test_generation_rejects_answer_tag_and_simplified():
     """_generate_reply 校驗鏈必須包含格式洩漏與簡體檢查，違規時重生一次仍違規則拒發。"""
 
