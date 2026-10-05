@@ -95,20 +95,41 @@ _SILENT_REPLY_PROBABILITY_ORDINARY = 0.35
 _SLEEP_REPLY_PROBABILITY = 0.20
 # reaction 輕回應改成 sticker 的機率（sticker 比重點表情多一分「用心」）
 _STICKER_PROBABILITY = 0.35
-# 決策層（System One）：① 決策結果要寫進生成 prompt 的露骨檔位指示。
-# 尺度完全放開由 Jev 決定：頂檔＝無底線，寫到哪裡算哪裡。
+# 決策層（System One）：① 選中的內容與要求，寫進生成 prompt 的指示。
+# 露骨尺度完全放開由 Jev 決定：頂檔＝無底線，寫到哪裡算哪裡。
 _DECISION_FLIRTY_GUIDE = {
     0: "純日常接話，不帶撩",
     1: "稍微暗示，若即若離地撩",
     2: "明顯勾引，露骨主動",
     3: "尺度完全放開，無底線，照氛圍直接寫，不用收",
 }
+# 回應方式：選中的就是②要照著生成的內容方向
+_DECISION_MODE_GUIDE = {
+    "answer": "回答：直接接住對方的問題或話頭",
+    "comfort": "安慰：表達理解、支持，接住對方的情緒",
+    "followup": "追問：順著話題問一句、挖深一點",
+}
+# 內容要點（SDF 固定候選，Jev 選）
+_DECISION_KEYPOINT_GUIDE = {
+    "pickup": "直接接對方的重點",
+    "self": "表達自己的狀態或感受",
+    "askback": "回應後把問題丟回去",
+    "extend": "延伸到相關的日常話題",
+}
+# 長度（SDF 固定候選，Jev 選）
+_DECISION_LENGTH_GUIDE = {
+    "one": "一句短話（14 字元內）",
+    "two": "兩則短訊（合計 40 字元內）",
+}
 # ③ 審核不通過時的重寫指示標籤
 _DECISION_ISSUE_LABEL = {
     "none": "沒有問題",
+    "offtopic": "離題：偏離上下文或選定的話題",
+    "contradict": "矛盾：跟上下文或這次互動決策衝突",
+    "fabricate": "編造：捏造人設和上下文裡沒有的細節",
+    "repeat": "重複：跟前面已經說過的內容重複",
+    "tone": "語氣：不像本人設或不符合規劃的露骨程度",
     "time": "時段穿幫（例如白天講早安、下午說早餐）",
-    "tone": "語氣不像本人設",
-    "weird": "內容尷尬或不合群組話題",
     "simplified": "混入簡體字",
 }
 _MAX_RECENT_PROACTIVE_TOPICS = 64
@@ -1881,8 +1902,13 @@ class AccountWorker:
     def _decision_enabled(self) -> bool:
         return bool(getattr(self.config, "decision_api_key", ""))
 
-    async def _decision_state(self, event) -> str:
-        """決策狀態：近期對話＋最新訊息＋相關記憶＋時段。"""
+    async def _decision_input(self, event):
+        """回 (state, topic_options)。
+
+        state＝決策狀態：近期對話＋最新訊息＋相關記憶＋時段。
+        topic_options＝動態話題候選：群裡其他人最近幾則訊息（① 的「回覆哪則」
+        選項由 SDF 動態提供，Jev 負責選擇與評分）。
+        """
         group_id = int(event.chat_id or 0)
         persona = self.persona
         lines = [
@@ -1921,7 +1947,24 @@ class AccountWorker:
         if shared_notes:
             lines.append("本群最近聊過：" + "；".join(shared_notes[:5]))
         lines.append(self._time_hint().strip())
-        return "\n".join(lines)
+        # 動態話題候選：其他人最近 3 則不重複的訊息
+        topic_options = []
+        seen = set()
+        for msg in history:
+            if self.tg_user_id and msg.get("sender_id") == self.tg_user_id:
+                continue
+            content = str(msg.get("content", "")).replace("\n", " ").strip()
+            if not content or content in seen:
+                continue
+            seen.add(content)
+            topic_options.append(content[:40])
+        topic_options = topic_options[-3:]
+        return "\n".join(lines), topic_options
+
+    async def _decision_state(self, event) -> str:
+        """決策狀態文字（③ 審核用）。"""
+        state, _ = await self._decision_input(event)
+        return state
 
     async def _proactive_decision_context(self, group_id: int) -> str:
         """③ 主動話題的審核狀態：群裡最近的人類訊息＋時段。"""
@@ -1944,14 +1987,21 @@ class AccountWorker:
         return "\n".join(lines)
 
     async def _decide_action(self, event):
-        """① 判斷怎麼回應：reply/react/sticker/skip＋露骨檔位；失敗回 None。"""
+        """① 決策選內容：怎麼回＋延續哪個話題＋回應方式＋內容要點＋長度＋露骨檔位。
+
+        候選選項由 SDF 提供（話題候選是動態的，取自群裡最近訊息），
+        Jev/Laya 負責選擇與評分；失敗回 None 走舊概率門。
+        """
         if not self._decision_enabled():
             return None
         try:
-            state = await self._decision_state(event)
+            state, topic_options = await self._decision_input(event)
         except Exception:
             return None
         cfg = self.config
+        topic_criteria = {"free": "不綁定特定訊息，自然接話"}
+        for i, content in enumerate(topic_options):
+            topic_criteria[f"t{i}"] = f"延續這個話題：「{content}」"
         try:
             answers = await system_one(
                 state,
@@ -1960,10 +2010,42 @@ class AccountWorker:
                         "type": "choice",
                         "instructions": "她應該怎麼回應最新這條訊息",
                         "criteria": {
-                            "reply": "用一句短訊息接話回應",
+                            "reply": "用短訊息接話回應",
                             "react": "只點一個反應表情，不開口",
                             "sticker": "發一個貼圖，不打字",
-                            "skip": "看見了但保持沉默",
+                            "skip": "等待觀察，看見了但先不開口",
+                        },
+                    },
+                    "topic": {
+                        "type": "choice",
+                        "instructions": "她要延續哪則訊息的話題",
+                        "criteria": topic_criteria,
+                    },
+                    "mode": {
+                        "type": "choice",
+                        "instructions": "她用什麼方式回應",
+                        "criteria": {
+                            "answer": "回答：直接接住對方的問題或話頭",
+                            "comfort": "安慰：表達理解和支持",
+                            "followup": "追問：順著話題問一句、挖深一點",
+                        },
+                    },
+                    "keypoints": {
+                        "type": "choice",
+                        "instructions": "這次表達哪些內容要點",
+                        "criteria": {
+                            "pickup": "直接接對方的重點",
+                            "self": "表達自己的狀態或感受",
+                            "askback": "回應後把問題丟回去",
+                            "extend": "延伸到相關的日常話題",
+                        },
+                    },
+                    "length": {
+                        "type": "choice",
+                        "instructions": "這次回覆的長度",
+                        "criteria": {
+                            "one": "一句短話（14 字元內）",
+                            "two": "兩則短訊（合計 40 字元內）",
                         },
                     },
                     "flirty": {
@@ -1994,28 +2076,82 @@ class AccountWorker:
             flirty = int(round(float((answers.get("flirty") or {}).get("score", 0))))
         except (TypeError, ValueError):
             flirty = 0
-        return {"action": action, "flirty": min(max(flirty, 0), 3)}
+        decision = {
+            "action": action,
+            "flirty": min(max(flirty, 0), 3),
+            "topic": None,
+            "mode": None,
+            "keypoints": None,
+            "length": None,
+        }
+        topic_key = (answers.get("topic") or {}).get("choice")
+        if topic_key and topic_key != "free" and topic_key.startswith("t"):
+            try:
+                decision["topic"] = topic_options[int(topic_key[1:])]
+            except (ValueError, IndexError):
+                pass
+        mode = (answers.get("mode") or {}).get("choice")
+        if mode in _DECISION_MODE_GUIDE:
+            decision["mode"] = mode
+        keypoints = (answers.get("keypoints") or {}).get("choice")
+        if keypoints in _DECISION_KEYPOINT_GUIDE:
+            decision["keypoints"] = keypoints
+        length = (answers.get("length") or {}).get("choice")
+        if length in _DECISION_LENGTH_GUIDE:
+            decision["length"] = length
+        return decision
 
-    async def _review_candidate(self, context: str, text: str):
-        """③ 審核候選回覆：回 {"sendable","issue"}；超時/失敗回 None。"""
+    @staticmethod
+    def _decision_directive(decision: dict) -> str:
+        """② 要交給文字模型的「選中的內容與要求」；③ 審核時原樣回傳核對。"""
+        parts = []
+        topic = str(decision.get("topic") or "").strip()
+        if topic:
+            parts.append(f"延續話題：「{topic}」")
+        mode = _DECISION_MODE_GUIDE.get(decision.get("mode") or "")
+        if mode:
+            parts.append(mode)
+        keypoints = _DECISION_KEYPOINT_GUIDE.get(decision.get("keypoints") or "")
+        if keypoints:
+            parts.append(f"內容要點：{keypoints}")
+        length = _DECISION_LENGTH_GUIDE.get(decision.get("length") or "")
+        if length:
+            parts.append(f"長度：{length}")
+        flirty = _DECISION_FLIRTY_GUIDE.get(int(decision.get("flirty") or 0))
+        if flirty:
+            parts.append(f"露骨程度：{flirty}")
+        if not parts:
+            return ""
+        return "這次互動決策（照著生成）：\n" + "\n".join(f"- {p}" for p in parts)
+
+    async def _review_candidate(self, context: str, text: str, directive: str = ""):
+        """③ 審核候選回覆：上下文＋前置決策＋生成文字一起送審。
+
+        核對離題、矛盾、編造、重複及內容規則；回 {"sendable","issue"}，
+        超時/失敗回 None（＝不確定→暫緩）。
+        """
         cfg = self.config
-        state = f"{context}\n你要發出的回覆：「{str(text).strip()}」"
+        decision_block = f"前置決策（這次原本要怎麼回）：\n{directive}\n" if directive else ""
+        state = f"{context}\n{decision_block}你要發出的回覆：「{str(text).strip()}」"
         try:
             answers = await system_one(
                 state,
                 {
                     "sendable": {
                         "type": "noul",
-                        "instructions": "這條回覆符合現在時段、人設和群組語境，可以直接發出",
+                        "instructions": "這條回覆符合現在時段、人設、群組語境和前置決策，可以直接發出",
                     },
                     "issue": {
                         "type": "choice",
-                        "instructions": "這條回覆最大的問題",
+                        "instructions": "這條回覆最大的問題（對照上下文和前置決策核對）",
                         "criteria": {
                             "none": "沒有問題",
+                            "offtopic": "離題：偏離上下文或選定的話題",
+                            "contradict": "矛盾：跟上下文或前置決策衝突",
+                            "fabricate": "編造：捏造人設和上下文裡沒有的細節",
+                            "repeat": "重複：跟前面已經說過的內容重複",
+                            "tone": "語氣：不像本人設或不符合規劃的露骨程度",
                             "time": "時段穿幫（如白天說早安、下午說早餐）",
-                            "tone": "語氣不像本人設",
-                            "weird": "內容尷尬或不合群組話題",
                             "simplified": "混入簡體字",
                         },
                     },
@@ -2048,7 +2184,9 @@ class AccountWorker:
             context = await self._decision_state(event)
         except Exception:
             return text
-        review = await self._review_candidate(context, text)
+        decision = getattr(event, "_sdf_decision", None)
+        directive = self._decision_directive(decision) if isinstance(decision, dict) else ""
+        review = await self._review_candidate(context, text, directive)
         if review is None:
             self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
             print(f"[{self.name}] gate-hold: 決策層超時/失敗，暫緩 {text[:20]!r}", flush=True)
@@ -2070,7 +2208,7 @@ class AccountWorker:
         if not retry:
             self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
             return ""
-        review2 = await self._review_candidate(context, retry)
+        review2 = await self._review_candidate(context, retry, directive)
         if review2 is not None and self._review_passes(review2):
             self.stats["gate_pass_after_rewrite"] = (
                 int(self.stats.get("gate_pass_after_rewrite", 0)) + 1
@@ -3163,12 +3301,12 @@ class AccountWorker:
             shared = "\n".join(f"- {n}" for n in shared_notes[:5])
             user_message += f"\n本群最近聊過的內容（供接話參考）：\n{shared}"
         user_message += self._time_hint()
-        # ② 決策層給的露骨檔位指示：文字模型照這個分寸生成
+        # ② 原始上下文（上面）＋選中的內容與要求：文字模型照這個生成完整回覆
         decision = getattr(event, "_sdf_decision", None)
         if isinstance(decision, dict):
-            guide = _DECISION_FLIRTY_GUIDE.get(int(decision.get("flirty", 0)))
-            if guide:
-                user_message += f"\n這次互動決策（照這個分寸來）：{guide}。"
+            directive = self._decision_directive(decision)
+            if directive:
+                user_message += f"\n{directive}"
         if extra_hint:
             user_message += f"\n{extra_hint}"
 

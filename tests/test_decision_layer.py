@@ -196,14 +196,48 @@ def test_decide_action_reply_flirty_rounds(monkeypatch):
             "flirty": {"score": 1.4},
         }
     monkeypatch.setattr(worker_mod, "system_one", fake)
-    assert asyncio.run(w._decide_action(_event())) == {"action": "reply", "flirty": 1}
+    result = asyncio.run(w._decide_action(_event()))
+    assert result["action"] == "reply" and result["flirty"] == 1
+    assert result["topic"] is None and result["mode"] is None
+    assert result["keypoints"] is None and result["length"] is None
     assert w.stats.get("decision_calls") == 1
 
     # 頂檔無底線：score 3.x 圓整到 3 不被截掉
     async def fake_top(state, questions, **kw):
         return {"action": {"choice": "reply"}, "flirty": {"score": 3.4}}
     monkeypatch.setattr(worker_mod, "system_one", fake_top)
-    assert asyncio.run(w._decide_action(_event())) == {"action": "reply", "flirty": 3}
+    assert asyncio.run(w._decide_action(_event()))["flirty"] == 3
+
+
+def test_decide_action_full_content(monkeypatch):
+    w = _worker("k")
+    captured = {}
+
+    async def fake(state, questions, **kw):
+        captured["questions"] = questions
+        return {
+            "action": {"choice": "reply"},
+            "topic": {"choice": "t1"},
+            "mode": {"choice": "comfort"},
+            "keypoints": {"choice": "self"},
+            "length": {"choice": "one"},
+            "flirty": {"score": 1.0},
+        }
+    monkeypatch.setattr(worker_mod, "system_one", fake)
+    result = asyncio.run(w._decide_action(_event()))
+    assert result == {
+        "action": "reply",
+        "flirty": 1,
+        "topic": "有人去散步嗎",
+        "mode": "comfort",
+        "keypoints": "self",
+        "length": "one",
+    }
+    # 話題候選由 SDF 從群裡最近訊息動態提供
+    criteria = captured["questions"]["topic"]["criteria"]
+    assert "延續這個話題：「剛吃完飯」" in criteria.values()
+    assert "延續這個話題：「有人去散步嗎」" in criteria.values()
+    assert criteria["free"] == "不綁定特定訊息，自然接話"
 
 
 def test_decide_action_returns_none_on_error(monkeypatch):
@@ -267,6 +301,24 @@ def test_generate_reply_injects_flirty_guide(monkeypatch):
     asyncio.run(w._generate_reply(ev3))
     assert "尺度完全放開，無底線" in captured["message"]
 
+    # ② 完整決策：選中的內容與要求全部進生成 prompt
+    ev4 = _event()
+    ev4._sdf_decision = {
+        "action": "reply",
+        "flirty": 2,
+        "topic": "有人去散步嗎",
+        "mode": "comfort",
+        "keypoints": "self",
+        "length": "one",
+    }
+    asyncio.run(w._generate_reply(ev4))
+    msg = captured["message"]
+    assert "延續話題：「有人去散步嗎」" in msg
+    assert "安慰：表達理解、支持，接住對方的情緒" in msg
+    assert "內容要點：表達自己的狀態或感受" in msg
+    assert "長度：一句短話（14 字元內）" in msg
+    assert "露骨程度：明顯勾引，露骨主動" in msg
+
     # 沒有決策 → 不注入
     ev2 = _event()
 
@@ -304,6 +356,31 @@ def test_gate_reply_pass(monkeypatch):
     out = asyncio.run(w._gate_reply(_event(), "今天好熱喔"))
     assert out == "今天好熱喔"
     assert w.stats.get("gate_pass") == 1
+
+
+def test_gate_review_includes_prior_decision(monkeypatch):
+    w = _worker("k")
+    captured_states = []
+
+    async def fake(state, questions, **kw):
+        captured_states.append(state)
+        return {"sendable": {"noul": 0.9}, "issue": {"choice": "none"}}
+    monkeypatch.setattr(worker_mod, "system_one", fake)
+    ev = _event()
+    ev._sdf_decision = {
+        "action": "reply",
+        "flirty": 1,
+        "topic": "有人去散步嗎",
+        "mode": "comfort",
+        "keypoints": "self",
+        "length": "one",
+    }
+    out = asyncio.run(w._gate_reply(ev, "你也累了吧"))
+    assert out == "你也累了吧"
+    # ③ 狀態＝上下文＋前置決策＋候選回覆
+    assert "前置決策" in captured_states[-1]
+    assert "延續話題：「有人去散步嗎」" in captured_states[-1]
+    assert "你要發出的回覆：「你也累了吧」" in captured_states[-1]
 
 
 def test_gate_rewrite_then_pass(monkeypatch):
