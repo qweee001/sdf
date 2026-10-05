@@ -3279,6 +3279,8 @@ class AccountWorker:
                 return content.strip()
             return ""
         except Exception as e:
+            # API 層錯誤（如 402 欠費）與「模型回空」分開計數，控制台一眼看得出
+            self.stats["ai_api_errors"] = int(self.stats.get("ai_api_errors", 0)) + 1
             print(f"[{self.name}] AI error: {e}", flush=True)
             return ""
 
@@ -4107,7 +4109,6 @@ class AccountWorker:
     async def _proactive_loop(self):
         while self.is_running:
             try:
-                print("[DBG-loop-top]", flush=True)
                 if bool(getattr(self.config, "continuous_activity_mode", False)):
                     interval = max(
                         10.0,
@@ -4142,7 +4143,6 @@ class AccountWorker:
                 if self._is_sleeping():
                     continue
                 self._reset_proactive_day()
-                print("[DBG-sleep-pass]", flush=True)
                 if self._proactive_today >= self.config.proactive_max_per_day:
                     continue
                 if self._is_busy_hour() and random.random() < 0.25:
