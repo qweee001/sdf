@@ -82,6 +82,9 @@ _REACTION_SETS = {
 _REACTION_FALLBACK = ["👍", "😂", "❤️"]
 _REACTION_PHOTO = ["❤️", "🔥", "😍"]
 _LAUGH_MARKS = ("哈哈", "🤣", "😂", "笑死", "lol", "xd", "嘿嘿")
+# emoji 疲勞偵測：實測三號連發五句都以 🤭 收尾，真人不會每句掛同一個表情
+_EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]")
+_EMOJI_HISTORY_LIMIT = 6
 # 真人「看見但不說」：被 @／直接回覆很少漏接，普通訊息常只是默認
 _SILENT_REPLY_PROBABILITY_DIRECTED = 0.10
 _SILENT_REPLY_PROBABILITY_ORDINARY = 0.35
@@ -633,6 +636,7 @@ class AccountWorker:
         self._proactive_today = 0
         self._proactive_day = 0
         self._recent_proactive_topics: set[str] = set()
+        self._recent_emojis_by_group: dict[int, list[str]] = {}  # group_id -> 最近用過的 emoji
         # 帳號私有 RNG：reaction／貼圖挑選用（話題不再走預設池，全部即時生成）
         self._rng = random.Random(
             int.from_bytes(
@@ -3394,6 +3398,9 @@ class AccountWorker:
                 user_message += f"\n{directive}"
         if extra_hint:
             user_message += f"\n{extra_hint}"
+        emoji_hint = self._emoji_fatigue_hint(int(event.chat_id or 0))
+        if emoji_hint:
+            user_message += f"\n{emoji_hint}"
 
         async def call_reply(message: str) -> str:
             if image and self.media_service:
@@ -4142,6 +4149,7 @@ class AccountWorker:
             await self.db.touch_activity(
                 self.account_id, chat_id, activity_kind
             )
+            self._record_sent_emojis(chat_id, text)
             return True
 
     # ---------- 主動發言 ----------
@@ -4478,6 +4486,34 @@ class AccountWorker:
         self._proactive_today = 0
         self._recent_proactive_topics.clear()
 
+    def _record_sent_emojis(self, group_id: int, text: str) -> None:
+        """記住這個群最近用過的 emoji（emoji 疲勞偵測用）。"""
+        found = _EMOJI_RE.findall(str(text or ""))
+        if not found:
+            return
+        bucket = self._recent_emojis_by_group.setdefault(int(group_id), [])
+        bucket.extend(found)
+        del bucket[:-_EMOJI_HISTORY_LIMIT]
+
+    def _emoji_fatigue_hint(self, group_id: int) -> str:
+        """同一個 emoji 短時間內重複太多次時，提示模型換一個或不用。
+
+        實測：三號在群 111 連發五句都以 🤭 收尾——這是明顯的機器節奏。
+        """
+        bucket = self._recent_emojis_by_group.get(int(group_id)) or []
+        if len(bucket) < 3:
+            return ""
+        counts: dict[str, int] = {}
+        for emoji in bucket:
+            counts[emoji] = counts.get(emoji, 0) + 1
+        top, count = max(counts.items(), key=lambda item: item[1])
+        if count < 3:
+            return ""
+        return (
+            f"你最近在這個群連續用了 {count} 次 {top}，"
+            "這次換一個 emoji，或者干脆不要放表情（真人不會每句都掛同一個）"
+        )
+
     @staticmethod
     def _proactive_cooldown(group_id: int, slot: int, interval: float) -> float:
         """同群同一時間窗口的冷卻秒數（0.8~2.4 倍間隔，跨窗口不規則）。
@@ -4565,6 +4601,9 @@ class AccountWorker:
                 body += f"\n{notes_block}"
             if hint:
                 body += f"\n{hint}"
+            emoji_hint = self._emoji_fatigue_hint(group_id)
+            if emoji_hint:
+                body += f"\n{emoji_hint}"
             return body + self._time_hint()
 
         # 生成不出可用的一句就重試（最多 3 次）：重試時把「已經講過的」餵回去，
