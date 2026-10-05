@@ -949,6 +949,12 @@ class AccountWorker:
         if not self.is_running or not self.tg_client:
             return
         try:
+            # 這則訊息「被看到」的時間：發送前的新鮮度檢查會用它判斷
+            # 我們要回的內容有沒有被後來的真人訊息追過。
+            event._sdf_seen_at = time.time()
+        except Exception:
+            pass
+        try:
             if event.is_private:
                 return
             if not event.is_group or event.chat_id is None:
@@ -1993,12 +1999,85 @@ class AccountWorker:
     def _decision_enabled(self) -> bool:
         return bool(getattr(self.config, "decision_api_key", ""))
 
+    async def _reply_context_snapshot(self, event) -> dict:
+        """①②③ 共用一份上下文快照（同一次 DB 讀取，三個階段不再各讀各的）。
+
+        原本 ① 讀一次歷史／筆記、② 又讀一次，中間若有人插話，判斷看的是 A、
+        生成看的是 B。這裡一次抓定，掛在 event 上，後面全部沿用。
+        """
+        group_id = int(event.chat_id or 0)
+        try:
+            history = await self.db.get_recent_messages(
+                self.account_id, group_id, self.config.memory_max_messages
+            )
+        except Exception:
+            history = []
+        try:
+            recent_group_replies = await self.db.get_recent_group_replies(
+                group_id, limit=12
+            )
+        except Exception:
+            recent_group_replies = []
+        try:
+            shared_notes = await self.db.get_group_shared_notes(
+                group_id, self.account_id
+            )
+        except Exception:
+            shared_notes = []
+        member_notes = []
+        sender_id = int(getattr(event, "sender_id", 0) or 0)
+        if sender_id and sender_id not in self.managed_ids:
+            try:
+                member_notes = await self.db.get_group_member_notes(
+                    group_id, sender_id, self.account_id
+                )
+            except Exception:
+                member_notes = []
+        return {
+            "built_at": time.time(),
+            "group_id": group_id,
+            "target_message_id": int(getattr(event, "id", 0) or 0),
+            "history": history,
+            "recent_group_replies": recent_group_replies,
+            "shared_notes": shared_notes,
+            "member_notes": member_notes,
+            "time_hint": self._time_hint(),
+        }
+
+    async def _context_still_fresh(self, event) -> bool:
+        """發送前最後一道：這則之後有沒有「真人」搶先講了新話。
+
+        有 → 我們要回的那句已經過時（實測會出現回著三句前話題的鬼打牆）。
+        真人插話取消待辦回覆已在 on_message 做掉；這裡補的是生成／審核期間
+        才出現新真人訊息的情況。查不到就放行（寧可少擋，不誤殺）。
+        """
+        group_id = int(getattr(event, "chat_id", 0) or 0)
+        seen_at = float(getattr(event, "_sdf_seen_at", 0) or 0)
+        if not group_id or seen_at <= 0:
+            return True
+        try:
+            recent = await self.db.get_group_messages(group_id, limit=4)
+        except Exception:
+            return True
+        target = str(getattr(event, "raw_text", "") or "").strip()
+        for row in recent:
+            if str(row.get("role")) == "assistant":
+                continue
+            content = str(row.get("content") or "").strip()
+            if not content or content == target:
+                continue
+            # 只看「我們看到目標訊息之後」才出現的真人訊息
+            if float(row.get("timestamp") or 0) > seen_at + 1.0:
+                return False
+        return True
+
     async def _decision_input(self, event):
         """回 (state, topic_options)。
 
         state＝決策狀態：近期對話＋最新訊息＋相關記憶＋時段。
         topic_options＝動態話題候選：群裡其他人最近幾則訊息（① 的「回覆哪則」
         選項由 SDF 動態提供，Jev 負責選擇與評分）。
+        有共用快照（event._sdf_ctx）時直接用，確保 ①②③ 看的是同一份上下文。
         """
         group_id = int(event.chat_id or 0)
         persona = self.persona
@@ -2006,12 +2085,25 @@ class AccountWorker:
             f"你是 {persona.get('name','?')}，{persona.get('age','?')} 歲，"
             f"住{persona.get('city','?')}，聊天風格：{persona.get('chat_style','?')}。"
         ]
-        try:
-            history = await self.db.get_recent_messages(
-                self.account_id, group_id, self.config.memory_max_messages
-            )
-        except Exception:
-            history = []
+        ctx = getattr(event, "_sdf_ctx", None)
+        if isinstance(ctx, dict):
+            history = ctx.get("history") or []
+            shared_notes = ctx.get("shared_notes") or []
+            time_hint = str(ctx.get("time_hint") or "")
+        else:
+            try:
+                history = await self.db.get_recent_messages(
+                    self.account_id, group_id, self.config.memory_max_messages
+                )
+            except Exception:
+                history = []
+            try:
+                shared_notes = await self.db.get_group_shared_notes(
+                    group_id, self.account_id
+                )
+            except Exception:
+                shared_notes = []
+            time_hint = self._time_hint()
         recent = history[-8:]
         if recent:
             lines.append("最近對話：")
@@ -2029,15 +2121,9 @@ class AccountWorker:
         except Exception:
             sender_name = ""
         lines.append(f"最新消息：[{sender_name or '有人'}] {incoming[:60]}")
-        try:
-            shared_notes = await self.db.get_group_shared_notes(
-                group_id, self.account_id
-            )
-        except Exception:
-            shared_notes = []
         if shared_notes:
             lines.append("本群最近聊過：" + "；".join(shared_notes[:5]))
-        lines.append(self._time_hint().strip())
+        lines.append(time_hint.strip())
         # 動態話題候選：其他人最近 3 則不重複的訊息
         topic_options = []
         seen = set()
@@ -2236,14 +2322,17 @@ class AccountWorker:
                     },
                     "issue": {
                         "type": "choice",
-                        "instructions": "這條回覆最大的問題（對照上下文和前置決策核對）",
+                        "instructions": (
+                            "這條回覆最大的問題（對照上下文和前置決策核對）；"
+                            "只有在問題明顯時才選出來，沒把握就選「沒有問題」"
+                        ),
                         "criteria": {
                             "none": "沒有問題",
                             "offtopic": "離題：偏離上下文或選定的話題",
                             "contradict": "矛盾：跟上下文或前置決策衝突",
                             "fabricate": "編造：捏造人設和上下文裡沒有的細節",
                             "repeat": "重複：跟前面已經說過的內容重複",
-                            "tone": "語氣：不像本人設或不符合規劃的露骨程度",
+                            "tone": "語氣明顯不像本人設或明顯不符合場合（只是不夠熱情、不夠露骨都算沒有問題）",
                             "time": "時段穿幫（如白天說早安、下午說早餐）",
                             "simplified": "混入簡體字",
                         },
@@ -2385,6 +2474,13 @@ class AccountWorker:
                     and bool(getattr(event, "reply_to", None))
                 )
             )
+            # ①②③ 共用同一份上下文快照：三個階段不再各讀各的 DB，
+            # 避免「判斷看 A、生成看 B、審核看 C」的漂移。
+            if not isinstance(getattr(event, "_sdf_ctx", None), dict):
+                try:
+                    event._sdf_ctx = await self._reply_context_snapshot(event)
+                except Exception:
+                    pass
             # ① 決策層：先判斷怎麼回（回話/點reaction/發貼圖/沉默＋露骨檔位）
             route, payload = await self._apply_decision(event, forced_text=forced_text)
             if route == "skip":
@@ -2473,6 +2569,11 @@ class AccountWorker:
                 if not text:
                     self._record_reply_drop("gate_held")
                     await self._audit_reply(event, "policy", "gate_held")
+                    return
+                # 發送前最後一道：這段時間有沒有真人搶先講了新話（回過時話題＝當場破戲）
+                if not await self._context_still_fresh(event):
+                    self._record_reply_drop("stale_context")
+                    await self._audit_reply(event, "policy", "stale_context")
                     return
             else:
                 self._record_reply_drop(generation_reason)
@@ -3350,12 +3451,20 @@ class AccountWorker:
             self.stats["image_understanding_errors"] += 1
             self._set_generation_reason(event, "image_unavailable")
             return ""
-        history = await self.db.get_recent_messages(
-            self.account_id, group_id, self.config.memory_max_messages
-        )
-        recent_group_replies = await self.db.get_recent_group_replies(
-            group_id, limit=12
-        )
+        history = []
+        recent_group_replies = []
+        # 有 ① 階段建立的共用快照就直接用（同一份上下文、少一次 DB 往返）
+        ctx = getattr(event, "_sdf_ctx", None)
+        if isinstance(ctx, dict) and ctx.get("history") is not None:
+            history = ctx.get("history") or []
+            recent_group_replies = ctx.get("recent_group_replies") or []
+        else:
+            history = await self.db.get_recent_messages(
+                self.account_id, group_id, self.config.memory_max_messages
+            )
+            recent_group_replies = await self.db.get_recent_group_replies(
+                group_id, limit=12
+            )
         system_prompt = get_system_prompt(self.persona)
         reply_message = None
         if getattr(event, "is_reply", False):
@@ -3379,8 +3488,12 @@ class AccountWorker:
         sender_id = int(event.sender_id or 0)
         if sender_id and sender_id not in self.managed_ids:
             try:
-                member_notes = await self.db.get_group_member_notes(
-                    group_id, sender_id, self.account_id
+                member_notes = (
+                    (ctx.get("member_notes") or [])
+                    if isinstance(ctx, dict) and ctx.get("member_notes") is not None
+                    else await self.db.get_group_member_notes(
+                        group_id, sender_id, self.account_id
+                    )
                 )
             except Exception:
                 member_notes = []
@@ -3391,13 +3504,17 @@ class AccountWorker:
                 )
         # 群內共同記憶：最近話題／共同活動，接話與主動發言的依據
         try:
-            shared_notes = await self.db.get_group_shared_notes(group_id, self.account_id)
+            shared_notes = (
+                (ctx.get("shared_notes") or [])
+                if isinstance(ctx, dict) and ctx.get("shared_notes") is not None
+                else await self.db.get_group_shared_notes(group_id, self.account_id)
+            )
         except Exception:
             shared_notes = []
         if shared_notes:
             shared = "\n".join(f"- {n}" for n in shared_notes[:5])
             user_message += f"\n本群最近聊過的內容（供接話參考）：\n{shared}"
-        user_message += self._time_hint()
+        user_message += str(ctx.get("time_hint") or "") if isinstance(ctx, dict) else self._time_hint()
         # ② 原始上下文（上面）＋選中的內容與要求：文字模型照這個生成完整回覆
         decision = getattr(event, "_sdf_decision", None)
         if isinstance(decision, dict):
