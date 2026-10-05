@@ -691,6 +691,16 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
             <label class="meta" style="grid-column:1 / span 2">興趣愛好（用、分隔）<input id="pf_hobbies" type="text" placeholder="看電影、吃美食"></label>
             <label class="meta" style="grid-column:1 / span 2">想找什麼（求偶目標）<input id="pf_looking" type="text"></label>
             <label class="meta">約炮成約次數（社會證明）<input id="pf_meetups" type="number" min="0" max="99"></label>
+            <label class="meta">聊天風格
+                <select id="pf_chat_style">
+                    <option>俏皮少量表情</option>
+                    <option>直球務實</option>
+                    <option>內斂反問</option>
+                    <option>冷淡短句</option>
+                    <option>溫柔慢熱</option>
+                    <option>生活碎念</option>
+                </select>
+            </label>
         </div>
         <div style="margin-top:1rem">
             <button class="btn btn-primary" onclick="savePersona()">儲存人設</button>
@@ -1060,6 +1070,8 @@ function fillPersonaForm(p) {
     v('pf_age', 'age'); v('pf_meetups', 'meetups_done');
     const g = document.getElementById('pf_gender'); if (g) g.value = p.gender || '女';
     const s = document.getElementById('pf_schedule'); if (s) s.value = p.schedule || '正常';
+    const cs = document.getElementById('pf_chat_style');
+    if (cs && p.chat_style) cs.value = p.chat_style;
     const h = document.getElementById('pf_hobbies'); if (h) h.value = (p.hobbies || []).join('、');
 }
 function readPersonaForm() {
@@ -1077,6 +1089,7 @@ function readPersonaForm() {
         looking_for: g('pf_looking'),
         meetups_done: parseInt(g('pf_meetups') || '0', 10),
         schedule: g('pf_schedule'),
+        chat_style: g('pf_chat_style'),
     };
 }
 async function savePersona() {
