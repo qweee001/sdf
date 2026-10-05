@@ -1827,6 +1827,23 @@ class Database:
             await self._c.commit()
             return cursor.rowcount == 1
 
+    async def release_proactive_slot(
+        self, group_id: int, slot: int, account_id: str
+    ) -> bool:
+        """歸還主動發言的時間窗口（生成不出來／③ 退回時用）。
+
+        沒歸還的話，一次失敗就讓整組人在這個窗口全部閉嘴（實測群裡會靜 20 分鐘）。
+        """
+        if not group_id or slot < 0:
+            return False
+        async with self._claim_lock:
+            cursor = await self._c.execute(
+                "DELETE FROM outbound_claims WHERE claim_key = ? AND account_id = ?",
+                (f"proactive:{int(group_id)}:{int(slot)}", account_id),
+            )
+            await self._c.commit()
+            return cursor.rowcount > 0
+
     async def reserve_continuous_slot(
         self,
         group_id: int,

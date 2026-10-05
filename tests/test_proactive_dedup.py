@@ -113,6 +113,55 @@ def test_proactive_cooldown_is_shared_within_slot_and_jitters_across_slots():
     asyncio.run(main())
 
 
+def test_proactive_loop_releases_slot_when_generation_fails(monkeypatch):
+    """claim 成功但生不出話題時，必須歸還窗口。
+
+    不歸還的代價：整個窗口（5 分鐘）全組人一起閉嘴（實測群裡靜 20 分鐘）。
+    """
+
+    async def main():
+        import time
+        from unittest.mock import AsyncMock, Mock
+
+        worker = _worker(101)
+        group = -5428680940
+        worker.is_running = True
+        worker._last_activity = {group: time.time()}
+        worker._known_groups = {group}
+        worker.config.proactive_enabled = True
+        worker.config.proactive_loop_min_seconds = 1.0
+        worker.config.proactive_loop_max_seconds = 1.0
+        worker.config.proactive_max_per_day = 10
+        worker.config.proactive_min_interval_minutes = 1
+        worker._is_sleeping = Mock(return_value=False)
+        worker._is_busy_hour = Mock(return_value=False)
+        worker._should_suppress_proactive = Mock(return_value=False)
+        worker._proactive_gate_blocks = Mock(return_value=False)
+        worker.db.claim_proactive_slot = AsyncMock(return_value=True)
+        worker.db.get_group_messages = AsyncMock(return_value=[])
+        released = []
+        worker.db.release_proactive_slot = AsyncMock(
+            side_effect=lambda *args: (released.append(args), True)[1]
+        )
+        worker._generate_context_topic = AsyncMock(return_value="")
+
+        ticks = {"n": 0}
+
+        async def controlled_sleep(_delay):
+            ticks["n"] += 1
+            if ticks["n"] > 2:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr("app.worker.asyncio.sleep", controlled_sleep)
+        await worker._proactive_loop()
+
+        assert released, "生不出話題就必須歸還窗口"
+        assert released[0][0] == group
+        assert released[0][2] == worker.account_id
+
+    asyncio.run(main())
+
+
 def test_claim_group_text_blocks_cross_account_duplicate():
     """同群同文案 1 小時內只允許第一個帳號發出（DB 層跨帳號攔截）。"""
     import os

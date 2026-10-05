@@ -4916,68 +4916,77 @@ class AccountWorker:
                 ):
                     print(f"[{self.name}] proactive-skip: slot already claimed by another account", flush=True)
                     continue
-                # 全即時生成：沒有預設池。讀群裡真正的上文現寫一句，
-                # 生不出來（空手／重複／時段穿幫）就這一輪不開口。
-                topic = await self._generate_context_topic(group_id)
-                if not topic:
-                    print(f"[{self.name}] proactive-skip: no fresh context topic", flush=True)
-                    continue
-                # ③ 決策層審核；不合格 → 帶問題重寫一次再審核；仍不合格 → 暫緩（不塞罐頭句）
-                if self._decision_enabled():
-                    try:
-                        context = await self._proactive_decision_context(group_id)
-                    except Exception:
-                        context = ""
-                    review = await self._review_candidate(context, topic)
-                    if review is None:
-                        self.stats["proactive_gate_hold"] = (
-                            int(self.stats.get("proactive_gate_hold", 0)) + 1
-                        )
-                        print(f"[{self.name}] proactive-gate-hold: 決策層超時，這輪不發 {topic[:20]!r}", flush=True)
+                # 這一輪沒發出去就歸還窗口：失敗不該讓整組人在這個窗口全部閉嘴
+                delivered = False
+                try:
+                    # 全即時生成：沒有預設池。讀群裡真正的上文現寫一句，
+                    # 生不出來（空手／重複／時段穿幫）就這一輪不開口。
+                    topic = await self._generate_context_topic(group_id)
+                    if not topic:
+                        print(f"[{self.name}] proactive-skip: no fresh context topic", flush=True)
                         continue
-                    if not self._review_passes(review):
-                        issue = str(review.get("issue") or "none")
-                        label = _DECISION_ISSUE_LABEL.get(issue, issue)
-                        self.stats["proactive_gate_rewrite"] = (
-                            int(self.stats.get("proactive_gate_rewrite", 0)) + 1
-                        )
-                        print(f"[{self.name}] proactive-gate-rewrite: issue={issue} {topic[:20]!r}", flush=True)
-                        rewrite = await self._generate_context_topic(
-                            group_id,
-                            extra_hint=f"上一版被決策層攔下，問題：{label}。這次避開這個問題。",
-                        )
-                        if not rewrite:
-                            print(f"[{self.name}] proactive-skip: rewrite empty, 這輪不發", flush=True)
-                            continue
-                        second = await self._review_candidate(context, rewrite)
-                        if second is None or not self._review_passes(second):
+                    # ③ 決策層審核；不合格 → 帶問題重寫一次再審核；仍不合格 → 暫緩（不塞罐頭句）
+                    if self._decision_enabled():
+                        try:
+                            context = await self._proactive_decision_context(group_id)
+                        except Exception:
+                            context = ""
+                        review = await self._review_candidate(context, topic)
+                        if review is None:
                             self.stats["proactive_gate_hold"] = (
                                 int(self.stats.get("proactive_gate_hold", 0)) + 1
                             )
-                            print(f"[{self.name}] proactive-gate-hold: 重寫後仍不合格，暫緩 {rewrite[:20]!r}", flush=True)
+                            print(f"[{self.name}] proactive-gate-hold: 決策層超時，這輪不發 {topic[:20]!r}", flush=True)
                             continue
-                        topic = rewrite
-                burst = self._split_human_burst(topic)
-                sent = False
-                for i, part in enumerate(burst):
-                    ok = await self._send_text_recorded(
-                        group_id,
-                        part,
-                        activity_kind="proactive",
-                        stats_key="proactive_sent",
-                        managed_origin=True,
-                        short_delay=i > 0,
-                    )
-                    sent = sent or ok
-                    if not ok:
-                        break
-                    if i < len(burst) - 1:
-                        await asyncio.sleep(random.uniform(*_BURST_PAUSE_SECONDS))
-                if not sent:
-                    print(f"[{self.name}] proactive-failed: send to {group_id} failed", flush=True)
-                    continue
-                self._proactive_today += 1
-                print(f"[{self.name}] proactive-sent: {topic[:40]}... → {group_id}", flush=True)
+                        if not self._review_passes(review):
+                            issue = str(review.get("issue") or "none")
+                            label = _DECISION_ISSUE_LABEL.get(issue, issue)
+                            self.stats["proactive_gate_rewrite"] = (
+                                int(self.stats.get("proactive_gate_rewrite", 0)) + 1
+                            )
+                            print(f"[{self.name}] proactive-gate-rewrite: issue={issue} {topic[:20]!r}", flush=True)
+                            rewrite = await self._generate_context_topic(
+                                group_id,
+                                extra_hint=f"上一版被決策層攔下，問題：{label}。這次避開這個問題。",
+                            )
+                            if not rewrite:
+                                print(f"[{self.name}] proactive-skip: rewrite empty, 這輪不發", flush=True)
+                                continue
+                            second = await self._review_candidate(context, rewrite)
+                            if second is None or not self._review_passes(second):
+                                self.stats["proactive_gate_hold"] = (
+                                    int(self.stats.get("proactive_gate_hold", 0)) + 1
+                                )
+                                print(f"[{self.name}] proactive-gate-hold: 重寫後仍不合格，暫緩 {rewrite[:20]!r}", flush=True)
+                                continue
+                            topic = rewrite
+                    burst = self._split_human_burst(topic)
+                    sent = False
+                    for i, part in enumerate(burst):
+                        ok = await self._send_text_recorded(
+                            group_id,
+                            part,
+                            activity_kind="proactive",
+                            stats_key="proactive_sent",
+                            managed_origin=True,
+                            short_delay=i > 0,
+                        )
+                        sent = sent or ok
+                        if not ok:
+                            break
+                        if i < len(burst) - 1:
+                            await asyncio.sleep(random.uniform(*_BURST_PAUSE_SECONDS))
+                    if not sent:
+                        print(f"[{self.name}] proactive-failed: send to {group_id} failed", flush=True)
+                        continue
+                    delivered = True
+                    self._proactive_today += 1
+                    print(f"[{self.name}] proactive-sent: {topic[:40]}... → {group_id}", flush=True)
+                finally:
+                    if not delivered:
+                        await self.db.release_proactive_slot(
+                            group_id, slot, self.account_id
+                        )
             except asyncio.CancelledError:
                 return
             except Exception as e:
