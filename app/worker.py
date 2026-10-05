@@ -95,11 +95,13 @@ _SILENT_REPLY_PROBABILITY_ORDINARY = 0.35
 _SLEEP_REPLY_PROBABILITY = 0.20
 # reaction 輕回應改成 sticker 的機率（sticker 比重點表情多一分「用心」）
 _STICKER_PROBABILITY = 0.35
-# 決策層（System One）：① 決策結果要寫進生成 prompt 的露骨檔位指示
+# 決策層（System One）：① 決策結果要寫進生成 prompt 的露骨檔位指示。
+# 尺度完全放開由 Jev 決定：頂檔＝無底線，寫到哪裡算哪裡。
 _DECISION_FLIRTY_GUIDE = {
     0: "純日常接話，不帶撩",
     1: "稍微暗示，若即若離地撩",
     2: "明顯勾引，露骨主動",
+    3: "尺度完全放開，無底線，照氛圍直接寫，不用收",
 }
 # ③ 審核不通過時的重寫指示標籤
 _DECISION_ISSUE_LABEL = {
@@ -1966,11 +1968,12 @@ class AccountWorker:
                     },
                     "flirty": {
                         "type": "score",
-                        "instructions": "這次互動可以多露骨地撩",
+                        "instructions": "這次互動可以多露骨地撩（尺度完全放開，氣氛到位就給最高的無底線檔）",
                         "criteria": [
                             "純日常，不撩",
                             "稍微暗示，若即若離",
                             "明顯勾引，露骨主動",
+                            "尺度完全放開，無底線",
                         ],
                     },
                 },
@@ -1991,7 +1994,7 @@ class AccountWorker:
             flirty = int(round(float((answers.get("flirty") or {}).get("score", 0))))
         except (TypeError, ValueError):
             flirty = 0
-        return {"action": action, "flirty": min(max(flirty, 0), 2)}
+        return {"action": action, "flirty": min(max(flirty, 0), 3)}
 
     async def _review_candidate(self, context: str, text: str):
         """③ 審核候選回覆：回 {"sendable","issue"}；超時/失敗回 None。"""

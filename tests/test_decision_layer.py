@@ -199,6 +199,12 @@ def test_decide_action_reply_flirty_rounds(monkeypatch):
     assert asyncio.run(w._decide_action(_event())) == {"action": "reply", "flirty": 1}
     assert w.stats.get("decision_calls") == 1
 
+    # 頂檔無底線：score 3.x 圓整到 3 不被截掉
+    async def fake_top(state, questions, **kw):
+        return {"action": {"choice": "reply"}, "flirty": {"score": 3.4}}
+    monkeypatch.setattr(worker_mod, "system_one", fake_top)
+    assert asyncio.run(w._decide_action(_event())) == {"action": "reply", "flirty": 3}
+
 
 def test_decide_action_returns_none_on_error(monkeypatch):
     w = _worker("k")
@@ -254,6 +260,12 @@ def test_generate_reply_injects_flirty_guide(monkeypatch):
     assert out == "好哦～一起去嘛"
     assert "這次互動決策" in captured["message"]
     assert "明顯勾引，露骨主動" in captured["message"]
+
+    # 頂檔：無底線指示進 prompt
+    ev3 = _event()
+    ev3._sdf_decision = {"action": "reply", "flirty": 3}
+    asyncio.run(w._generate_reply(ev3))
+    assert "尺度完全放開，無底線" in captured["message"]
 
     # 沒有決策 → 不注入
     ev2 = _event()
