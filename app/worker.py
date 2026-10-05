@@ -1829,6 +1829,32 @@ class AccountWorker:
             )
         return f"\n現在台北時間 {hour:02d} 點（{band}）：{hint}。"
 
+    def _has_time_mismatch(self, text: str) -> bool:
+        """時段穿幫偵測：主動發言自帶跟現在時段不合的詞（17 點講早安、吃早餐）。
+
+        光靠 prompt 尾端的時段提示，35B 模型不穩定；這裡做確定性兜底，
+        不合就丟掉換池子（池子全是時段中立句）。
+        """
+        t = str(text or "")
+        if not t:
+            return False
+        h = int(self._taipei_hour())
+        night = {0, 1, 2, 3}
+        checks = (
+            ("早安", set(range(5, 12))),
+            ("早餐", set(range(5, 12))),
+            ("剛起床", set(range(4, 11))),
+            ("午安", set(range(11, 15))),
+            ("午餐", set(range(11, 15))),
+            ("晚餐", set(range(16, 23))),
+            ("晚上好", set(range(17, 23))),
+            ("晚安", set(range(20, 24)) | night),
+        )
+        for word, ok_hours in checks:
+            if word in t and h not in ok_hours:
+                return True
+        return False
+
     @staticmethod
     def _note_is_trivial(note: str) -> bool:
         """輕飄飄的敷衍（<8 字且沒有自我披露）：不該蓋掉群友上一句有內容的話。"""
@@ -3960,6 +3986,13 @@ class AccountWorker:
         topic = await self._call_ai(get_system_prompt(self.persona), prompt)
         topic = (topic or "").strip()
         if not topic or self._is_refusal(topic):
+            return ""
+        # 主動發言自己開口，穿幫成本最高：時段不合或混入簡體字就丟回池子
+        if self._has_time_mismatch(topic):
+            print(f"[{self.name}] proactive-drop: time mismatch on {topic[:20]!r}", flush=True)
+            return ""
+        if self._has_simplified_chars(topic):
+            print(f"[{self.name}] proactive-drop: simplified chars on {topic[:20]!r}", flush=True)
             return ""
         normalized = self._normalized_reply(topic)
         if not normalized or normalized in self._recent_proactive_topics:

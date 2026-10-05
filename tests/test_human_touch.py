@@ -226,6 +226,23 @@ def test_time_hint_bands():
     assert "深夜" in w._time_hint()
 
 
+def test_time_mismatch_detection():
+    w = _worker()
+    # 17 點講早安/早餐＝穿幫
+    w._taipei_hour = lambda: 17.0
+    assert w._has_time_mismatch("早安呀～想吃什么早餐🥐")
+    assert w._has_time_mismatch("早安🥵")
+    # 17 點講晚安也怪
+    assert w._has_time_mismatch("晚安啦")
+    # 時段中立的句子放行
+    assert not w._has_time_mismatch("今天好熱喔")
+    # 早晨講早安、深夜講晚安都合規
+    w._taipei_hour = lambda: 8.0
+    assert not w._has_time_mismatch("早安呀～想吃什么早餐🥐")
+    w._taipei_hour = lambda: 23.0
+    assert not w._has_time_mismatch("晚安啦")
+
+
 def test_note_is_trivial():
     assert AccountWorker._note_is_trivial("哈哈")
     assert AccountWorker._note_is_trivial("6666666")
