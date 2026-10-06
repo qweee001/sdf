@@ -2,7 +2,7 @@
 
 > 版本：`191912b`（2026-10-05 上線）｜三個帳號：小小 / 小天後 / RICH
 > 部署：Railway `earnest-courtesy`（自動部署 main 分支）
-> 控制台：`https://sdf-production-4f52.up.railway.app`（admin / Tg-neYrN3JiyCF81DSNsvWKSl8TSQg69aNs）
+> 控制台：`https://sdf-production-4f52.up.railway.app`（帳密走 Railway 環境變數 `DASHBOARD_USER`／`DASHBOARD_PASS`，**不寫進文件或版控**）
 
 ## 一、誰負責什麼（模型分工）
 

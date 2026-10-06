@@ -147,10 +147,17 @@ def test_acknowledge_group_routes_to_sticker(monkeypatch):
             return f"<file:{path}>"
 
         async def send_message(self, chat_id, media=None):
-            sent.append(("sticker", chat_id, self._uploaded))
+            # 真實 Telethon 沒有 media 參數；這裡留著是為了讓舊寫法當場失敗
+            assert media is None, "貼圖不該再走 send_message(media=…)"
+            sent.append(("text", chat_id, media))
 
         async def __call__(self, request):
-            sent.append(("reaction", getattr(request, "peer", None)))
+            from telethon.tl.functions.messages import SendMediaRequest
+
+            if isinstance(request, SendMediaRequest):
+                sent.append(("sticker", request.peer, self._uploaded))
+            else:
+                sent.append(("reaction", getattr(request, "peer", None)))
 
     w.tg_client = _FakeClient()
     event = SimpleNamespace(chat_id=-1001, id=77, raw_text="早安")
@@ -180,7 +187,14 @@ def test_acknowledge_group_falls_back_to_reaction(monkeypatch):
             sent.append(("sticker", chat_id, path))
 
         async def __call__(self, request):
-            sent.append(("reaction", getattr(request, "peer", None)))
+            # 貼圖走 TL 原語 SendMediaRequest（send_message 沒有 media 參數）；
+            # 其它請求（SendReactionRequest 等）記成 reaction。
+            from telethon.tl.functions.messages import SendMediaRequest
+
+            if isinstance(request, SendMediaRequest):
+                sent.append(("sticker", getattr(request, "peer", None), self._uploaded))
+            else:
+                sent.append(("reaction", getattr(request, "peer", None)))
 
     w.tg_client = _FakeClient()
     event = SimpleNamespace(chat_id=-1001, id=77, raw_text="早安")

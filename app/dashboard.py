@@ -998,6 +998,30 @@ let currentPrivatesId = '';
 let currentFeaturesId = '';
 let latestStatusData = null;
 
+// 帳號卡片按鈕（事件委託）。首次登入時頁面載入階段還沒登入、綁不到，
+// 所以登入成功後要再呼叫一次；重複呼叫不會疊加（用旗標擋）。
+function bindAccountActions() {
+    const box = document.getElementById('accounts');
+    if (!box || box.dataset.bound === '1') return;
+    box.dataset.bound = '1';
+    box.addEventListener('click', (e) => {
+        const b = e.target.closest('button[data-act]');
+        if (!b) return;
+        const act = b.dataset.act, id = b.dataset.id;
+        if (act === 'start') startAccount(b);
+        else if (act === 'stop') stopAccount(b);
+        else if (act === 'toggle') toggleAccount(b);
+        else if (act === 'persona') showPersona(id);
+        else if (act === 'groups') showGroups(id);
+        else if (act === 'features') {
+            const a = (latestStatusData && latestStatusData.accounts || []).find(x => x.id === id);
+            showFeatures(id, a && a.reply_enabled, a && a.proactive_enabled);
+        }
+        else if (act === 'privates') showPrivates(id);
+        else if (act === 'delete') deleteAccount(id);
+    });
+}
+
 function toast(msg) {
     const t = document.getElementById('toast');
     t.textContent = msg;
@@ -1032,6 +1056,9 @@ async function doLogin() {
         document.getElementById('loginBox').style.display = 'none';
         document.getElementById('mainBox').style.display = 'block';
         document.getElementById('logoutBtn').style.display = 'block';
+        // 首次登入時頁面載入階段沒有綁過帳號卡按鈕（那時還沒登入），
+        // 這裡補綁，否則要手動重整才能按任何按鈕。
+        bindAccountActions();
         loadStatus();
     } else { toast(data.error || '登入失敗'); }
 }
@@ -1073,7 +1100,7 @@ async function loadStatus() {
                     <div>
                     <h3>${esc(acc.name)} <span class="status-badge ${stateCls}">${stateTxt}</span></h3>
                     <div class="meta">
-                        ${persona.name || ''}・${persona.gender || '?'}生・${persona.age || '?'}歲・${city}（${persona.district || ''}）・${persona.industry || ''}
+                        ${esc(persona.name || '')}・${esc(persona.gender || '?')}生・${esc(String(persona.age || '?'))}歲・${esc(city)}（${esc(persona.district || '')}）・${esc(persona.industry || '')}
                         ${acc.tg_username ? `<br>顯示名：${esc(acc.tg_username)}` : ''}
                         <br>
                         <span class="acc-tag ${acc.enabled ? 'acc-tag-on' : 'acc-tag-off'}">${acc.enabled ? '已啟用' : '已停用'}</span>
@@ -1733,23 +1760,7 @@ async function loadLiveTestStatus() {
         document.getElementById('loginBox').style.display = 'none';
         document.getElementById('mainBox').style.display = 'block';
         document.getElementById('logoutBtn').style.display = 'block';
-        // 帳號卡片按鈕（事件委託，免手動綁定）
-        document.getElementById('accounts').addEventListener('click', (e) => {
-            const b = e.target.closest('button[data-act]');
-            if (!b) return;
-            const act = b.dataset.act, id = b.dataset.id;
-            if (act === 'start') startAccount(b);
-            else if (act === 'stop') stopAccount(b);
-            else if (act === 'toggle') toggleAccount(b);
-            else if (act === 'persona') showPersona(id);
-            else if (act === 'groups') showGroups(id);
-            else if (act === 'features') {
-                const a = (latestStatusData && latestStatusData.accounts || []).find(x => x.id === id);
-                showFeatures(id, a && a.reply_enabled, a && a.proactive_enabled);
-            }
-            else if (act === 'privates') showPrivates(id);
-            else if (act === 'delete') deleteAccount(id);
-        });
+        bindAccountActions();
         loadStatus();
         loadMonitorGroups();
         loadLiveTestStatus();

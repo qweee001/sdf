@@ -43,7 +43,7 @@ from openai import AsyncOpenAI
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
-from telethon.tl.functions.messages import SendReactionRequest
+from telethon.tl.functions.messages import SendMediaRequest, SendReactionRequest
 from telethon.tl.types import (
     DocumentAttributeFilename,
     DocumentAttributeSticker,
@@ -854,6 +854,8 @@ class AccountWorker:
             self._proactive_day = self._today_index()
             self._proactive_today = 0
             self._recent_proactive_topics.clear()
+            # 重啟不要把當日主動額度歸零（監控/部署期間重啟很頻繁）
+            await self._restore_proactive_quota()
             # 反重复 P0-2：启动即从 DB 回填全群 48h 已发文案（跨账号），
             # 重启清零后不再复读旧话题。回填失败只降级为无回填，不阻塞启动。
             try:
@@ -1961,7 +1963,17 @@ class AccountWorker:
                     ),
                 ],
             )
-            await self.tg_client.send_message(int(event.chat_id), media=media)
+            # Telethon 的 send_message 沒有 media 參數（那是 send_file），
+            # 傳 media= 會在執行期 TypeError、貼圖永遠送不出去；而且測試替身
+            # 是 Mock，照單全收，所以這個 bug 在測試裡看不出來。改用 TL 原語。
+            await self.tg_client(
+                SendMediaRequest(
+                    peer=int(event.chat_id),
+                    media=media,
+                    message="",
+                    random_id=random.getrandbits(63),
+                )
+            )
             self.stats["stickers_sent"] = (
                 int(self.stats.get("stickers_sent", 0)) + 1
             )
@@ -2523,8 +2535,11 @@ class AccountWorker:
             return text
         try:
             context = await self._decision_state(event)
-        except Exception:
-            return text
+        except Exception as exc:
+            # 上下文組不出來時不能放行：寧可這條不發，也不要送出未審核的內容
+            self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
+            print(f"[{self.name}] gate-hold: 上下文取得失敗，暫緩（{exc}）", flush=True)
+            return ""
         decision = getattr(event, "_sdf_decision", None)
         directive = self._decision_directive(decision) if isinstance(decision, dict) else ""
         review = await self._review_candidate(context, text, directive)
@@ -4980,6 +4995,38 @@ class AccountWorker:
         self._proactive_today = 0
         self._recent_proactive_topics.clear()
 
+    async def _restore_proactive_quota(self) -> None:
+        """重啟後把「今天已發幾條主動」從 DB 讀回來。
+
+        原本只存在記憶體，容器一重啟額度就歸零 → 監控/部署期間的冷啟動會讓
+        水軍多發一輪（實測一天重啟多次的群最明顯）。
+        """
+        today = self._today_index()
+        key = f"proactive_today:{self.account_id}"
+        try:
+            settings = await self.db.get_runtime_settings()
+        except Exception:
+            return
+        raw = settings.get(key, "")
+        day_str, _, count_str = raw.partition(":")
+        try:
+            stored_day = int(day_str)
+            stored_count = int(count_str)
+        except (TypeError, ValueError):
+            return
+        if stored_day != today:
+            return
+        self._proactive_day = today
+        self._proactive_today = max(0, stored_count)
+
+    async def _persist_proactive_quota(self) -> None:
+        key = f"proactive_today:{self.account_id}"
+        value = f"{self._proactive_day}:{self._proactive_today}"
+        try:
+            await self.db.set_runtime_settings({key: value})
+        except Exception as exc:
+            print(f"[{self.name}] proactive quota persist error: {exc}", flush=True)
+
     def _record_sent_emojis(self, group_id: int, text: str) -> None:
         """記住這個群最近用過的 emoji（emoji 疲勞偵測用）。"""
         found = _EMOJI_RE.findall(str(text or ""))
@@ -5393,6 +5440,7 @@ class AccountWorker:
                         continue
                     delivered = True
                     self._proactive_today += 1
+                    await self._persist_proactive_quota()
                     print(f"[{self.name}] proactive-sent: {topic[:40]}... → {group_id}", flush=True)
                 finally:
                     if not delivered:
