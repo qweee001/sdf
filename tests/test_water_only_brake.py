@@ -51,15 +51,49 @@ def test_water_only_streak_counter():
 
 
 def test_proactive_stops_after_two_water_only_messages():
-    """尾端連續兩則都是水軍 → 這輪不主動開口（真人講話後才恢復）。"""
+    """尾端連續兩則都是水軍、且真的沒有真人 → 這輪不主動開口。"""
 
     async def main():
-        db = _StreakDB([_msg("user", 999, age=3600), _msg("assistant", OTHER), _msg("assistant", THIRD)])
+        db = _StreakDB(
+            [
+                _msg("user", 999, age=7200),
+                _msg("assistant", OTHER),
+                _msg("assistant", THIRD),
+            ]
+        )
         worker = _worker(ME, db=db)
         worker.tg_user_id = ME
         assert await worker._proactive_rotation_ok(GROUP, _msg("assistant", THIRD)) is False
 
     asyncio.run(main())
+
+
+def test_brake_does_not_lock_a_group_where_humans_are_talking():
+    """有真人在聊的群（桃花源）：即使尾端剛好都是我們自己的訊息，也不能鎖死。
+
+    實測被鎖 24 次：剎車原本只看「尾端連續幾則水軍」，沒看「有沒有真人在場」。
+    """
+
+    async def main():
+        db = _StreakDB(
+            [
+                _msg("user", 999, age=300, content="晚上有人要一起吃飯嗎"),
+                _msg("assistant", OTHER),
+                _msg("assistant", THIRD),
+            ]
+        )
+        worker = _worker(ME, db=db)
+        worker.tg_user_id = ME
+        assert await worker._proactive_rotation_ok(GROUP, _msg("assistant", THIRD)) is True
+
+    asyncio.run(main())
+
+
+def test_has_recent_human_window():
+    assert AccountWorker._has_recent_human([_msg("user", 999, age=300)]) is True
+    assert AccountWorker._has_recent_human([_msg("user", 999, age=7200)]) is False
+    assert AccountWorker._has_recent_human([_msg("assistant", OTHER, age=10)]) is False
+    assert AccountWorker._has_recent_human([]) is False
 
 
 def test_proactive_resumes_after_human_speaks():
@@ -77,7 +111,7 @@ def test_single_water_message_still_allows_rotation():
     """只有一則水軍時照舊輪替（新規則不該把三隻都鎖死）。"""
 
     async def main():
-        db = _StreakDB([_msg("user", 999, age=1800), _msg("assistant", OTHER)])
+        db = _StreakDB([_msg("user", 999, age=7200), _msg("assistant", OTHER)])
         worker = _worker(ME, db=db)
         worker.tg_user_id = ME
         assert await worker._proactive_rotation_ok(GROUP, _msg("assistant", OTHER)) is True

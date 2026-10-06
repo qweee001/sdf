@@ -5034,6 +5034,23 @@ class AccountWorker:
             break
         return streak
 
+    @staticmethod
+    def _has_recent_human(
+        rows: list[dict], *, window: float = _HUMAN_CONTEXT_WINDOW_SECONDS
+    ) -> bool:
+        """這個時間窗內有沒有真人講話（決定是「有對象可以接」還是「自言自語」）。"""
+        now = time.time()
+        for row in rows or []:
+            if str(row.get("role")) == "assistant":
+                continue
+            try:
+                stamp = float(row.get("timestamp") or 0)
+            except (TypeError, ValueError):
+                continue
+            if stamp and (now - stamp) < window:
+                return True
+        return False
+
     async def _proactive_rotation_ok(self, group_id: int, latest: dict | None) -> bool:
         """水軍輪替＋純水軍自演剎車。
 
@@ -5058,7 +5075,9 @@ class AccountWorker:
         except Exception:
             recent_rows = []
         streak = self._water_only_streak(recent_rows)
-        if streak >= _MAX_WATER_ONLY_STREAK:
+        # 只有「真的沒有真人」才算自演：有真人在聊的群，就算尾端剛好都是我們
+        # 自己的訊息，也不能用剎車把水軍全鎖死（實測桃花源被鎖 24 次）。
+        if streak >= _MAX_WATER_ONLY_STREAK and not self._has_recent_human(recent_rows):
             print(
                 f"[{self.name}] proactive-skip: 純水軍已連 {streak} 則沒真人，先閉嘴",
                 flush=True,
