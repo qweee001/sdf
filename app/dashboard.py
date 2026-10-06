@@ -925,6 +925,64 @@ body {
 .hub-chip-static { cursor: default; }
 .hub-label-input { background: #0a0e12; border: 1px dashed var(--line); border-radius: 4px; color: var(--ink); padding: .2rem .45rem; font-size: 11px; width: 140px; }
 .hub-empty { color: var(--ink-dim); font-size: 12px; padding: .9rem; text-align: center; }
+/* 淺色主題（預設）：紙白底、深青綠主色，和 /v2 同一套 */
+body.light {
+    --bg: #eef4f3; --panel: #ffffff; --panel-2: #f5f9f8; --line: #d8e3e1;
+    --ink: #16302c; --ink-dim: #5b7470; --ink-faint: #8ba39f;
+    --amber: #a8520a; --amber-dim: #e6d3bd; --ok: #1d625b; --bad: #b3261e; --info: #1767d2;
+    --mono: "Consolas", "SFMono-Regular", monospace;
+}
+body.light { background: var(--bg); color: var(--ink); }
+body.light .topbar { border-bottom-color: var(--line); }
+body.light .brand { color: #14403a; }
+body.light .login { box-shadow: 0 1px 2px rgba(20,48,44,.06); }
+body.light .login input,
+body.light .monitor-select,
+body.light .modal input,
+body.light .modal select,
+body.light .hub-toolbar input[type=text],
+body.light .hub-toolbar select,
+body.light .hub-label-input,
+body.light .palette-input { background: #ffffff; color: var(--ink); }
+body.light .card,
+body.light #accounts .card { background: var(--panel); box-shadow: 0 1px 2px rgba(20,48,44,.05); }
+body.light .stat-card,
+body.light .feature-item,
+body.light .hub-row { background: var(--panel-2); }
+body.light .btn { background: #f2f7f6; color: var(--ink-dim); border-color: var(--line); }
+body.light .btn:hover { background: #e8f1ef; color: var(--ink); }
+body.light .btn-primary { background: #1d625b; border-color: #1d625b; color: #ffffff; }
+body.light .btn-secondary { background: #ffffff; color: #24504a; border-color: var(--line); }
+body.light .btn-danger { background: #ffffff; border-color: #e2b6b2; color: #b3261e; }
+body.light .status-badge.running { background: #e2f3ec; color: #186c4a; border-color: #b7dfcc; }
+body.light .status-badge.stopped { background: #eef1f0; color: #5b7470; border-color: #d8e3e1; }
+body.light .status-badge.error { background: #fbeae8; color: #b3261e; border-color: #edc7c3; }
+body.light .status-badge.connecting { background: #fdf3e3; color: #a8520a; border-color: #ecd8ba; }
+body.light .acc-tag-on { background: #e2f3ec; color: #186c4a; border-color: #b7dfcc; }
+body.light .acc-tag-off { background: #eef1f0; color: #5b7470; border-color: #d8e3e1; }
+body.light .badge-human { background: #e2f3ec; color: #186c4a; }
+body.light .badge-bot { background: #fdf3e3; color: #a8520a; }
+body.light .bubble-human { background: #f1f5f4; }
+body.light .bubble-bot { background: #e8f3ef; border-left-color: #1d625b; }
+body.light .bar-row .bt { background: #edf2f1; }
+body.light .bar-row .bt i { background: #d9a268; }
+body.light .bar-row .bt i.ok { background: #7fbfa8; }
+body.light .hub-row { border-left-color: #cfdedb; }
+body.light .hub-row.hub-row-on { border-left-color: #1d625b; }
+body.light .hub-chip { background: #ffffff; color: var(--ink-dim); }
+body.light .hub-chip.hub-chip-on { background: #e2f3ec; border-color: #7fbfa8; color: #186c4a; }
+body.light .chip { background: #ffffff; color: var(--ink-dim); }
+body.light .chip.on { background: #e2f3ec; border-color: #7fbfa8; color: #186c4a; }
+body.light .chip-fav { border-color: #ecd8ba; color: #a8520a; }
+body.light .palette-box { background: #ffffff; }
+body.light .palette-input { background: #ffffff; border-bottom-color: var(--line); }
+body.light .p-hit { border-bottom-color: #eef2f1; }
+body.light .p-hit:hover, body.light .p-hit.on { background: #f2f7f6; }
+body.light .hub-list::-webkit-scrollbar-thumb,
+body.light .feed::-webkit-scrollbar-thumb { background: #cfe0dd; }
+body.light .modal-box { background: #ffffff; }
+body.light .toast { background: #16302c; color: #ffffff; }
+
 /* 全站搜尋（Ctrl+K） */
 .palette { position: fixed; inset: 0; background: rgba(6,9,12,.72); z-index: 40; display: none; align-items: flex-start; justify-content: center; padding-top: 12vh; }
 .palette.on { display: flex; }
@@ -989,6 +1047,7 @@ body.dense #accounts .card .meta { line-height: 1.45; }
             <button class="btn btn-secondary" onclick="showGroups('')">🗂️ 群組總管</button>
             <button class="btn btn-secondary" onclick="openPalette()">🔎 搜尋 <span style="color:var(--ink-faint)">Ctrl K</span></button>
             <button class="btn btn-secondary" id="densityBtn" onclick="toggleDensity()">密度：標準</button>
+            <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()">主題：淺色</button>
             <button class="btn btn-secondary" onclick="saveCurrentView()">＋ 儲存檢視</button>
             <span class="toolbar-hint" id="queueHint"></span>
         </div>
@@ -1178,6 +1237,12 @@ body.dense #accounts .card .meta { line-height: 1.45; }
 <div class="toast" id="toast"></div>
 
 <script>
+// 主題要在第一時間套用，否則登入頁會先閃一下深色（FOUC）
+(function () {
+    let theme = 'light';
+    try { theme = localStorage.getItem('sdf_theme') || 'light'; } catch (e) {}
+    if (theme !== 'dark') document.body.classList.add('light');
+})();
 let tgAuthId = '';
 let currentPersonaId = '';
 let currentPrivatesId = '';
@@ -1499,6 +1564,16 @@ function renderViewChips() {
           ).join('')
         : '';
 }
+const THEME_KEY = 'sdf_theme';
+function themeName() { return document.body.classList.contains('light') ? '淺色' : '深色'; }
+function setTheme(light) {
+    document.body.classList.toggle('light', !!light);
+    writeStore(THEME_KEY, light ? 'light' : 'dark');
+    const btn = document.getElementById('themeBtn');
+    if (btn) btn.textContent = '主題：' + themeName();
+    try { localStorage.setItem(THEME_KEY, light ? 'light' : 'dark'); } catch (e) {}
+}
+function toggleTheme() { setTheme(!document.body.classList.contains('light')); }
 function densityName() { return document.body.classList.contains('dense') ? '精簡' : '標準'; }
 function setDensity(dense) {
     document.body.classList.toggle('dense', !!dense);
@@ -2187,6 +2262,7 @@ async function loadLiveTestStatus() {
         loadMonitorGroups();
         loadLiveTestStatus();
         setDensity(readStore(DENSITY_KEY, false));
+        setTheme(document.body.classList.contains('light'));
         renderFavChips();
         renderViewChips();
         document.getElementById('paletteInput')?.addEventListener('input', (e) => renderPalette(e.target.value));
