@@ -715,150 +715,196 @@ PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SDF 控制台</title>
 <style>
+:root{
+  --bg:#0c1014; --panel:#141a20; --panel-2:#1b232b; --line:#26313c;
+  --ink:#dbe4ec; --ink-dim:#93a2b1; --ink-faint:#5d6b78;
+  --amber:#ff8a1f; --amber-dim:#7a4413; --ok:#3fb950; --bad:#f05252; --info:#58a6ff;
+  --mono:"Consolas","SFMono-Regular",monospace; --r:6px;
+}
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-    font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Microsoft JhengHei", sans-serif;
-    background: #0f172a; color: #e2e8f0; min-height: 100vh;
+    font-family: "Microsoft JhengHei", "PingFang TC", -apple-system, sans-serif;
+    background: var(--bg); color: var(--ink); min-height: 100vh; font-size: 13px; line-height: 1.45;
 }
-.container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
-h1 { font-size: 1.3rem; color: #38bdf8; }
-.login { max-width: 380px; margin: 120px auto; padding: 2rem; background: #1e293b; border-radius: 12px; }
-.login input { width: 100%; padding: 0.7rem; margin: 0.5rem 0; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; }
-.login button { width: 100%; padding: 0.7rem; margin-top: 1rem; background: #38bdf8; border: none; border-radius: 8px; color: #0f172a; font-weight: bold; cursor: pointer; }
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
-.stat-card { background: #1e293b; padding: 1.2rem; border-radius: 12px; text-align: center; }
-.stat-card .value { font-size: 1.8rem; font-weight: bold; color: #38bdf8; }
-.stat-card .label { color: #94a3b8; margin-top: 0.3rem; font-size: 0.85rem; }
-.card { background: #1e293b; padding: 1.2rem; border-radius: 12px; margin-bottom: 1rem; }
-.card h3 { margin-bottom: 0.5rem; font-size: 1rem; }
-.meta { color: #94a3b8; font-size: 0.85rem; line-height: 1.6; }
+.wrap { max-width: 1400px; margin: 0 auto; padding: 14px 18px 26px; }
+/* 頂欄：標題 + 全局 KPI + 登出，永遠一行 */
+.topbar { display: flex; align-items: center; gap: 14px; border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.brand { font-size: 15px; font-weight: 700; letter-spacing: .5px; }
+.brand-sub { font-weight: 400; color: var(--ink-dim); margin-left: 7px; font-size: 11.5px; }
+.glob { display: flex; gap: 12px; margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--ink-dim); flex-wrap: wrap; }
+.glob b { color: var(--ink); font-weight: 600; }
+.glob .kpi-warn b { color: var(--amber); }
+/* 登入 */
+.login { max-width: 360px; margin: 90px auto; padding: 22px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); }
+.login h3 { margin-bottom: 12px; font-size: 14px; }
+.login input { width: 100%; padding: .6rem .7rem; margin: .35rem 0; background: #0a0e12; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); font-family: var(--mono); }
+.login button { width: 100%; padding: .6rem; margin-top: .8rem; background: var(--amber); border: none; border-radius: 4px; color: #17110a; font-weight: 700; cursor: pointer; }
+/* 三條帳號車道 */
+.lanes { margin-bottom: 12px; }
+#accounts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: stretch; }
+#accounts .card { margin-bottom: 0; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 0; overflow: hidden; }
+#accounts .card .row { flex: 1; padding: 10px 11px; gap: 8px; align-items: flex-start; }
+#accounts .card > div:last-child { border-top: 1px solid var(--line); padding: 8px 10px; }
+#accounts .card h3 { font-size: 13.5px; }
+#accounts .card .meta { font-size: 11.5px; line-height: 1.6; }
+.toolbar { display: flex; gap: 8px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
+.toolbar-hint { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--ink-dim); }
+.bottom { display: grid; grid-template-columns: 1.45fr 1fr; gap: 12px; align-items: start; margin-bottom: 12px; }
+.bottom2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 11px 12px; margin-bottom: 12px; }
+.card h3 { margin-bottom: .5rem; font-size: 12.5px; letter-spacing: .3px; }
 .row { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
-.status-badge { display: inline-block; padding: 0.2rem 0.7rem; border-radius: 999px; font-size: 0.75rem; font-weight: bold; }
-.status-badge.running { background: #16a34a; color: #fff; }
-.status-badge.stopped { background: #475569; color: #cbd5e1; }
-.status-badge.error { background: #dc2626; color: #fff; }
-.status-badge.connecting { background: #0ea5e9; color: #fff; }
-.btn { padding: 0.45rem 0.9rem; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem; margin-left: 0.4rem; }
-.btn-primary { background: #38bdf8; color: #0f172a; }
-.btn-danger { background: #dc2626; color: #fff; }
-.btn-secondary { background: #475569; color: #e2e8f0; }
-.modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 10; align-items: center; justify-content: center; }
-.modal.active { display: flex; }
-.modal-box { background: #1e293b; border-radius: 12px; padding: 1.5rem; width: 90%; max-width: 460px; max-height: 80vh; overflow-y: auto; }
-.modal-box h3 { margin-bottom: 1rem; }
-.modal input { width: 100%; padding: 0.6rem; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; margin: 0.3rem 0; }
-.toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #334155; padding: 0.6rem 1.2rem; border-radius: 8px; font-size: 0.85rem; display: none; z-index: 20; }
-.feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.8rem; }
-.feature-item { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 0.8rem; background: #0f172a; border-radius: 9px; }
-.switch { width: 44px; height: 24px; accent-color: #38bdf8; cursor: pointer; }
-.switch:disabled { cursor: not-allowed; opacity: 0.45; }
-/* 群組監控 */
-.feed { max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.6rem; padding: 0.3rem; }
-.feed-item { display: flex; gap: 0.6rem; align-items: flex-start; }
-.feed-item .who { width: 130px; flex-shrink: 0; font-size: 0.78rem; color: #94a3b8; line-height: 1.35; }
+.meta { color: var(--ink-dim); font-size: 11.5px; line-height: 1.6; }
+/* 狀態 */
+.status-badge { display: inline-block; padding: .12rem .55rem; border-radius: 3px; font-size: 10.5px; font-family: var(--mono); font-weight: 700; }
+.status-badge.running { background: #12331c; color: #5fd07a; border: 1px solid #1f5c31; }
+.status-badge.stopped { background: #232c34; color: #9fb0bf; border: 1px solid #33414d; }
+.status-badge.error { background: #3a1414; color: #ff7b7b; border: 1px solid #6b2020; }
+.status-badge.connecting { background: #3a2a08; color: #ffb257; border: 1px solid #6b4a12; }
+.acc-tag { display: inline-block; padding: .05rem .4rem; border-radius: 3px; font-size: 10.5px; font-family: var(--mono); }
+.acc-tag-on { background: #12331c; color: #5fd07a; border: 1px solid #1f5c31; }
+.acc-tag-off { background: #232c34; color: #9fb0bf; border: 1px solid #33414d; }
+.badge { display: inline-block; padding: .05rem .4rem; border-radius: 3px; font-size: 10.5px; font-family: var(--mono); }
+.badge-human { background: #12331c; color: #5fd07a; }
+.badge-bot { background: #3a2a08; color: #ffb257; }
+/* 按鈕 */
+.btn { padding: .35rem .7rem; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; font-size: 11.5px; margin-left: .3rem; background: #0f151a; color: var(--ink-dim); font-family: var(--mono); }
+.btn:hover { border-color: #3a4753; color: var(--ink); }
+.btn-primary { background: #0f1d16; border-color: #2f6f4f; color: #7ee2a8; }
+.btn-danger { background: #1d0f0f; border-color: #6b2020; color: #ff8f8f; }
+.btn-secondary { background: #151d25; border-color: var(--line); color: #b6c4d1; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+/* 監控訊息流 */
+.feed { max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding: .2rem; }
+.feed-item { display: flex; gap: .6rem; align-items: flex-start; }
+.feed-item .who { width: 120px; flex-shrink: 0; font-size: 11px; color: var(--ink-dim); line-height: 1.35; }
 .feed-item .body { flex: 1; min-width: 0; }
-.bubble { max-width: 80%; padding: 0.5rem 0.8rem; border-radius: 10px; font-size: 0.9rem; line-height: 1.4; word-break: break-word; }
-.bubble-human { background: #24344d; }
-.bubble-bot { background: #1c3a5c; border-left: 3px solid #38bdf8; }
-.feed-item .ts { font-size: 0.7rem; color: #64748b; margin-top: 0.15rem; }
-.badge { display: inline-block; padding: 0.05rem 0.4rem; border-radius: 4px; font-size: 0.65rem; font-weight: bold; }
-.badge-human { background: #16a34a; color: #fff; }
-.badge-bot { background: #38bdf8; color: #0f172a; }
-.monitor-select { background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #e2e8f0; padding: 0.45rem 0.7rem; }
-.acc-tag { display: inline-block; padding: 0.05rem 0.4rem; border-radius: 4px; font-size: 0.7rem; font-weight: bold; }
-.acc-tag-on { background: #16a34a; color: #fff; }
-.acc-tag-off { background: #475569; color: #cbd5e1; }
+.bubble { max-width: 82%; padding: .45rem .7rem; border-radius: 4px; font-size: 12.5px; line-height: 1.45; word-break: break-word; }
+.bubble-human { background: #1c2733; }
+.bubble-bot { background: #1d2b1f; border-left: 3px solid var(--ok); }
+.feed-item .ts { font-size: 10.5px; color: var(--ink-faint); font-family: var(--mono); margin-top: .1rem; }
+.monitor-select { background: #0a0e12; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); padding: .35rem .6rem; font-size: 12px; }
+/* 監控統計 */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 10px; }
+.stat-card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: .6rem; text-align: center; }
+.stat-card .value { font-size: 1.25rem; font-weight: 700; color: var(--ink); font-family: var(--mono); }
+.stat-card .label { color: var(--ink-dim); margin-top: .15rem; font-size: 10.5px; }
+/* 攔截長條 */
+.bar-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 11.5px; }
+.bar-row .bl { width: 128px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar-row .bt { flex: 1; height: 7px; background: #0a0e12; border-radius: 2px; overflow: hidden; }
+.bar-row .bt i { display: block; height: 100%; background: var(--amber-dim); }
+.bar-row .bt i.ok { background: #2f6f4f; }
+.bar-row .bn { width: 34px; text-align: right; font-family: var(--mono); color: var(--ink); }
+/* 功能開關 */
+.feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: .6rem; }
+.feature-item { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .6rem .7rem; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; }
+.switch { width: 40px; height: 22px; accent-color: var(--ok); cursor: pointer; }
+.switch:disabled { cursor: not-allowed; opacity: .45; }
+/* 彈窗 */
+.modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.72); z-index: 10; align-items: center; justify-content: center; }
+.modal.active { display: flex; }
+.modal-box { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 1.3rem; width: 92%; max-width: 480px; max-height: 82vh; overflow-y: auto; }
+.modal-box h3 { margin-bottom: .9rem; font-size: 13.5px; }
+.modal input, .modal select { width: 100%; padding: .5rem .6rem; background: #0a0e12; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); margin: .25rem 0; }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #1b232b; border: 1px solid var(--line); padding: .5rem 1rem; border-radius: 4px; font-size: 12px; display: none; z-index: 20; }
 /* 群組總管 */
-.hub-toolbar { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.8rem; }
-.hub-toolbar input[type=text], .hub-toolbar select {
-    background: #0f172a; border: 1px solid #334155; border-radius: 8px;
-    color: #e2e8f0; padding: 0.45rem 0.7rem; font-size: 0.85rem;
-}
-.hub-toolbar input[type=text] { flex: 1; min-width: 180px; }
-.hub-filter { display: flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: #94a3b8; white-space: nowrap; }
-.hub-summary { font-size: 0.8rem; color: #94a3b8; margin-bottom: 0.6rem; }
-.hub-list { max-height: 56vh; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }
-.hub-row { background: #0f172a; border: 1px solid #24334d; border-radius: 10px; padding: 0.7rem 0.8rem; }
-.hub-row.hub-row-on { border-color: #16a34a; }
-.hub-row-top { display: flex; justify-content: space-between; gap: 0.7rem; align-items: flex-start; flex-wrap: wrap; }
-.hub-name { font-size: 0.95rem; font-weight: bold; color: #e2e8f0; word-break: break-all; }
-.hub-id { font-size: 0.72rem; color: #64748b; cursor: pointer; }
-.hub-id:hover { color: #38bdf8; }
-.hub-info { font-size: 0.76rem; color: #94a3b8; line-height: 1.6; margin-top: 0.2rem; }
-.hub-actions { display: flex; gap: 0.35rem; flex-wrap: wrap; align-items: center; }
-.hub-chip {
-    border: 1px solid #334155; background: #1e293b; color: #94a3b8; cursor: pointer;
-    border-radius: 999px; padding: 0.18rem 0.6rem; font-size: 0.74rem; white-space: nowrap;
-}
-.hub-chip.hub-chip-on { background: #16a34a; border-color: #16a34a; color: #fff; font-weight: bold; }
+.hub-toolbar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: .7rem; }
+.hub-toolbar input[type=text], .hub-toolbar select { background: #0a0e12; border: 1px solid var(--line); border-radius: 4px; color: var(--ink); padding: .35rem .6rem; font-size: 12px; }
+.hub-toolbar input[type=text] { flex: 1; min-width: 160px; }
+.hub-filter { display: flex; align-items: center; gap: .3rem; font-size: 11.5px; color: var(--ink-dim); white-space: nowrap; }
+.hub-summary { font-size: 11.5px; color: var(--ink-dim); margin-bottom: .5rem; }
+.hub-list { max-height: 56vh; overflow-y: auto; display: flex; flex-direction: column; gap: .45rem; padding-right: .2rem; }
+.hub-row { background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid #33414d; border-radius: 0 4px 4px 0; padding: .55rem .7rem; }
+.hub-row.hub-row-on { border-left-color: var(--ok); }
+.hub-row-top { display: flex; justify-content: space-between; gap: .6rem; align-items: flex-start; flex-wrap: wrap; }
+.hub-name { font-size: 12.5px; font-weight: 700; word-break: break-all; }
+.hub-id { font-size: 10.5px; color: var(--ink-faint); cursor: pointer; font-family: var(--mono); }
+.hub-id:hover { color: var(--amber); }
+.hub-info { font-size: 11px; color: var(--ink-dim); line-height: 1.6; margin-top: .15rem; }
+.hub-actions { display: flex; gap: .3rem; flex-wrap: wrap; align-items: center; }
+.hub-chip { border: 1px solid var(--line); background: #0f151a; color: var(--ink-dim); cursor: pointer; border-radius: 3px; padding: .12rem .5rem; font-size: 11px; font-family: var(--mono); white-space: nowrap; }
+.hub-chip.hub-chip-on { background: #0f1d16; border-color: #2f6f4f; color: #7ee2a8; font-weight: 700; }
 .hub-chip-static { cursor: default; }
-.hub-label-input {
-    background: #0f172a; border: 1px dashed #334155; border-radius: 8px;
-    color: #e2e8f0; padding: 0.25rem 0.5rem; font-size: 0.78rem; width: 150px;
+.hub-label-input { background: #0a0e12; border: 1px dashed var(--line); border-radius: 4px; color: var(--ink); padding: .2rem .45rem; font-size: 11px; width: 140px; }
+.hub-empty { color: var(--ink-dim); font-size: 12px; padding: .9rem; text-align: center; }
+/* 手機：車道改縱向堆疊 */
+@media (max-width: 900px) {
+    .wrap { padding: 11px 12px 20px; }
+    #accounts { grid-template-columns: 1fr; }
+    .bottom, .bottom2 { grid-template-columns: 1fr; }
+    .glob { margin-left: 0; gap: 9px; }
+    .bar-row .bl { width: 104px; }
 }
-.hub-empty { color: #94a3b8; font-size: 0.85rem; padding: 1rem; text-align: center; }
 </style>
 </head>
 <body>
-<div class="container">
-    <header>
-        <h1>💬 SDF 水軍控制台</h1>
+<div class="wrap">
+    <div class="topbar">
+        <div class="brand">水軍調度台<span class="brand-sub">三帳號 · 對外群</span></div>
+        <div class="glob" id="stats"></div>
         <button class="btn btn-secondary" id="logoutBtn" style="display:none" onclick="doLogout()">登出</button>
-    </header>
+    </div>
 
     <div class="login" id="loginBox">
-        <h3 style="margin-bottom:0.8rem">登入控制台</h3>
+        <h3>登入控制台</h3>
         <input type="text" id="username" placeholder="帳號">
         <input type="password" id="password" placeholder="密碼">
         <button onclick="doLogin()">登入</button>
     </div>
 
     <div id="mainBox" style="display:none">
-        <div class="stats" id="stats"></div>
-        <div class="card">
-            <h3>功能開關</h3>
-            <div class="feature-grid">
-                <div class="feature-item">
-                    <div><strong>媒體功能</strong><div class="meta">圖片理解預設開啟；控制圖片理解、圖片與影片生成</div></div>
-                    <input class="switch" id="mediaToggle" type="checkbox" onchange="saveFeatures()">
-                </div>
-                <div class="feature-item">
-                    <div><strong>語音功能</strong><div class="meta" id="voiceHint">本地克隆台灣腔尚未就緒</div></div>
-                    <input class="switch" id="voiceToggle" type="checkbox" onchange="saveFeatures()">
-                </div>
-            </div>
+        <div class="lanes" id="lanes">
+            <div id="accounts"></div>
         </div>
-        <div style="margin-bottom:1rem">
+
+        <div class="toolbar">
             <button class="btn btn-primary" onclick="openAddModal()">＋ 新增水軍帳號</button>
+            <button class="btn btn-secondary" onclick="showGroups('')">🗂️ 群組總管</button>
+            <span class="toolbar-hint" id="queueHint"></span>
         </div>
-        <div class="card" id="monitorCard" style="margin-bottom:1rem">
-            <div class="row" style="margin-bottom:0.8rem">
-                <h3 style="margin:0">📊 群組監控（即時收集）</h3>
-                <div>
+
+        <div class="bottom">
+            <div class="card" id="monitorCard">
+                <div class="row" style="margin-bottom:.6rem">
+                    <h3 style="margin:0">群組監控（即時收集）</h3>
                     <select id="monitorGroup" class="monitor-select" onchange="loadMonitor()"></select>
-                    <button class="btn btn-secondary" onclick="showGroups('')">🗂️ 群組總管</button>
+                </div>
+                <div class="stats" id="monitorStats" style="margin-bottom:.6rem"></div>
+                <div class="feed" id="monitorFeed"><div class="meta">尚無資料，請先選擇群組</div></div>
+            </div>
+            <div class="card">
+                <h3>🛡️ 攔截原因（近 24h）</h3>
+                <div id="replyAudit"><div class="meta">載入中…</div></div>
+            </div>
+        </div>
+
+        <div class="bottom2">
+            <div class="card">
+                <h3>功能開關</h3>
+                <div class="feature-grid">
+                    <div class="feature-item">
+                        <div><strong>媒體功能</strong><div class="meta">圖片理解預設開啟；控制圖片理解、圖片與影片生成</div></div>
+                        <input class="switch" id="mediaToggle" type="checkbox" onchange="saveFeatures()">
+                    </div>
+                    <div class="feature-item">
+                        <div><strong>語音功能</strong><div class="meta" id="voiceHint">本地克隆台灣腔尚未就緒</div></div>
+                        <input class="switch" id="voiceToggle" type="checkbox" onchange="saveFeatures()">
+                    </div>
                 </div>
             </div>
-            <div class="stats" id="monitorStats" style="margin-bottom:0.8rem"></div>
-            <div class="feed" id="monitorFeed"><div class="meta">尚無資料，請先選擇群組</div></div>
-        </div>
-        <div class="card" style="margin-bottom:1rem">
-            <h3>🛡️ 回覆審計（近 24h）</h3>
-            <div id="replyAudit"><div class="meta">載入中…</div></div>
-        </div>
-        <div class="card" style="margin-bottom:1rem">
-            <h3>🧪 媒體實測（live test）</h3>
-            <div class="row" style="margin-bottom:0.6rem">
-                <span class="meta" id="liveTestState">無進行中實測</span>
-                <div>
-                    <button class="btn btn-primary" id="liveTestStartBtn" onclick="startLiveTest()">啟動實測</button>
-                    <button class="btn btn-danger" id="liveTestStopBtn" onclick="stopLiveTest()" style="display:none">停止</button>
+            <div class="card">
+                <h3>🧪 媒體實測（live test）</h3>
+                <div class="row" style="margin-bottom:.5rem">
+                    <span class="meta" id="liveTestState">無進行中實測</span>
+                    <div>
+                        <button class="btn btn-primary" id="liveTestStartBtn" onclick="startLiveTest()">啟動實測</button>
+                        <button class="btn btn-danger" id="liveTestStopBtn" onclick="stopLiveTest()" style="display:none">停止</button>
+                    </div>
                 </div>
+                <div class="meta" id="liveTestDetail"></div>
             </div>
-            <div class="meta" id="liveTestDetail"></div>
         </div>
-        <div id="accounts"></div>
     </div>
 </div>
 
@@ -1072,9 +1118,20 @@ async function loadStatus() {
     const { ok, data } = await api('/api/status');
     if (!ok) return;
     latestStatusData = data;
+    const heldNow = (data.accounts || []).reduce(
+        (a, x) => a + (Number((x.stats || {}).gate_held) || 0), 0);
+    const auditAll = data.reply_audit || {};
+    const policyCounts = auditAll.policy || {};
+    const blocked = Object.values(policyCounts).reduce((a, b) => a + (Number(b) || 0), 0);
+    const sentCount = Number((auditAll.sent || {}).ok || 0);
+    const decisionCalls = (data.accounts || []).reduce(
+        (a, x) => a + (Number((x.stats || {}).decision_calls) || 0), 0);
     document.getElementById('stats').innerHTML = `
-        <div class="stat-card"><div class="value">${data.total}</div><div class="label">總帳號數</div></div>
-        <div class="stat-card"><div class="value">${data.running}</div><div class="label">運行中</div></div>
+        <span>運行 <b>${data.running}/${data.total}</b></span>
+        <span class="${heldNow ? 'kpi-warn' : ''}">待處置 <b>${heldNow}</b></span>
+        <span>24h 送出 <b>${sentCount}</b></span>
+        <span class="kpi-warn">24h 攔截 <b>${blocked}</b></span>
+        <span>決策呼叫 <b>${decisionCalls}</b></span>
     `;
     const features = data.features || {};
     const mediaToggle = document.getElementById('mediaToggle');
@@ -1088,6 +1145,7 @@ async function loadStatus() {
         : '本地克隆台灣腔尚未就緒，已鎖定關閉';
     document.getElementById('accounts').innerHTML = data.accounts.map(acc => {
         const persona = safeParse(acc.persona);
+        const initial = esc(acc.name || '?').charAt(0) || '?';
         const city = persona.city || '未設定';
         const st = statusDisplay(acc.state, acc.is_running, acc.setup_complete);
         const stateCls = st.className;
@@ -1096,7 +1154,7 @@ async function loadStatus() {
         <div class="card">
             <div class="row">
                 <div style="display:flex;align-items:center;gap:0.75rem">
-                    ${acc.avatar ? `<img src="${acc.avatar}" alt="頭像" style="width:48px;height:48px;border-radius:50%;object-fit:cover;flex-shrink:0">` : '<div style="width:48px;height:48px;border-radius:50%;background:#2a3a52;display:flex;align-items:center;justify-content:center;color:#7f93b0;font-size:1.1rem;flex-shrink:0">${esc(acc.name).charAt(0)}</div>'}
+                    ${acc.avatar ? `<img src="${acc.avatar}" alt="頭像" style="width:40px;height:40px;border-radius:4px;object-fit:cover;flex-shrink:0">` : `<div style="width:40px;height:40px;border-radius:4px;background:#1f2a35;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;color:var(--ink-dim);font-size:15px;flex-shrink:0">${initial}</div>`}
                     <div>
                     <h3>${esc(acc.name)} <span class="status-badge ${stateCls}">${stateTxt}</span></h3>
                     <div class="meta">
@@ -1147,7 +1205,31 @@ async function loadStatus() {
         'ok': '成功',
         'rate_limited': '限流',
         'error': '錯誤',
+        'tone': '語氣不符場合',
+        'simplified_chars': '簡體字混入',
+        'typo_held': '用字未過（暫緩）',
+        'gate_held': '審核未過（暫緩）',
+        'stale_context': '上下文已過時',
+        'too_long': '過長',
+        'human': '真人訊息',
+        'managed': '水軍訊息',
+        'silent': '看見但不說',
+        'refusal': '拒答',
+        'group_meta': '群務話題',
+        'blocked_video': '影片阻擋',
+        'near_duplicate': '近似重複',
+        'time_mismatch': '時段穿幫',
+        'place_typo': '地名別字',
+        'fabricate': '編造經歷',
+        'offtopic': '離題',
     };
+    const hintEl = document.getElementById('queueHint');
+    if (hintEl) {
+        const top = Object.entries(policyCounts).sort((a, b) => b[1] - a[1])[0];
+        hintEl.textContent = top
+            ? `24h 攔截 ${blocked} 件 · 最多是「${reasonLabel[top[0]] || top[0]}」${top[1]} 件`
+            : '24h 無攔截紀錄';
+    }
     const auditEl = document.getElementById('replyAudit');
     const stages = Object.keys(audit);
     if (!stages.length) {
@@ -1155,14 +1237,21 @@ async function loadStatus() {
     } else {
         auditEl.innerHTML = stages.map(stage => {
             const reasons = audit[stage] || {};
-            const rows = Object.keys(reasons).map(r =>
-                `<div class="row" style="padding:0.35rem 0;border-bottom:1px solid #2a3a52">
-                    <span class="meta">${reasonLabel[r] || r} <span class="meta">（${r}）</span></span>
-                    <b style="color:#38bdf8">${reasons[r]}</b>
-                </div>`
-            ).join('');
+            const maxCount = Math.max(1, ...Object.values(reasons).map(v => Number(v) || 0));
+            const rows = Object.keys(reasons)
+                .sort((a, b) => (Number(reasons[b]) || 0) - (Number(reasons[a]) || 0))
+                .map(r => {
+                    const val = Number(reasons[r]) || 0;
+                    const width = Math.max(3, Math.round((val / maxCount) * 100));
+                    const cls = (stage === 'sent') ? 'ok' : '';
+                    return `<div class="bar-row" title="${r}">
+                        <span class="bl">${reasonLabel[r] || r}</span>
+                        <span class="bt"><i class="${cls}" style="width:${width}%"></i></span>
+                        <span class="bn">${val}</span>
+                    </div>`;
+                }).join('');
             return `<div style="margin-bottom:0.8rem">
-                <div style="font-size:0.85rem;font-weight:bold;color:#e2e8f0;margin-bottom:0.3rem">${stageLabel[stage] || stage}（${stage}）</div>
+                <div class="meta" style="font-family:var(--mono);margin-bottom:.3rem">${stageLabel[stage] || stage}（${stage}）</div>
                 ${rows}
             </div>`;
         }).join('');
