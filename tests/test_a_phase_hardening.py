@@ -138,17 +138,28 @@ def test_dashboard_escapes_persona_fields():
 
 
 def test_dockerfile_runs_tests_before_producing_image():
-    """發版閘門：測試不過就不該產出映像（外部審查抓到 13 次測試失敗仍部署）。"""
+    """發版閘門：測試不過就不該產出映像（外部審查抓到 13 次測試失敗仍部署）。
+
+    三個必要條件，缺一就會出現「閘門看起來有、其實沒擋」：
+      1) 建置流程裡真的有 pytest
+      2) .dockerignore 不能把 tests 排除（否則 COPY 直接失敗或測試跑不到）
+      3) 測試需要的東西（app／tools／Dockerfile 本身）都要先複製
+    """
 
     async def main():
         from pathlib import Path
 
-        dockerfile = (
-            Path(__file__).resolve().parents[1] / "Dockerfile"
-        ).read_text(encoding="utf-8")
+        root = Path(__file__).resolve().parents[1]
+        dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+        ignored = (root / ".dockerignore").read_text(encoding="utf-8").split()
+
         assert "python -m pytest" in dockerfile
-        # 測試會 import app，所以 app 必須先複製
-        assert dockerfile.index("COPY --chown=app:app app ./app") < dockerfile.index("python -m pytest")
+        assert "tests" not in ignored, ".dockerignore 排除 tests 會讓閘門失效"
+        # 測試會 import app、讀 tools/ 與 Dockerfile，複製順序必須在 pytest 之前
+        gate_at = dockerfile.index("python -m pytest")
+        for needed in ("COPY app ./app", "COPY tests ./tests", "COPY tools ./tools", "COPY Dockerfile ./Dockerfile"):
+            assert needed in dockerfile, f"閘門缺了 {needed}"
+            assert dockerfile.index(needed) < gate_at, f"{needed} 必須在 pytest 之前"
         assert "test_video_render_runs_in_own_task_without_blocking_text_or_voice" in dockerfile
 
     asyncio.run(main())
