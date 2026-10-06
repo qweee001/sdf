@@ -94,7 +94,9 @@ def test_index_serves_zh_tw():
         r = client.get("/")
         assert r.status_code == 200
         assert "zh-TW" in r.text
-        assert "水軍控制台" in r.text
+        # 控制台改版為「航站調度台」後的品牌名（原本是「水軍控制台」）
+        assert "水軍調度台" in r.text
+        assert "三帳號" in r.text
 
 
 def test_groups_ui_uses_read_only_discovery_before_start():
