@@ -163,14 +163,14 @@
   function pointToRealLogin() {
     const note = document.querySelector('#login-screen .muted, #login-screen p.muted');
     if (note) {
-      note.innerHTML = '尚未登入。<a href="/">回主控制台登入</a>後重整這一頁，就會顯示即時資料。';
+      note.innerHTML = '尚未登入。<a href="/classic">到經典控制台登入</a>後重整這一頁，就會顯示即時資料。';
     }
     const badge = Array.from(document.querySelectorAll('.badge')).find(
       (el) => (el.textContent || '').indexOf('即時資料') >= 0
     );
     if (badge) {
       badge.textContent = '未登入 · 顯示示範資料';
-      badge.title = '請先到 / 登入';
+      badge.title = '請先到 /classic 登入';
     }
   }
 

@@ -66,5 +66,24 @@
     <form id="save-form"><div class="dialog-heading"><h2 id="save-title">儲存檢視</h2><button type="button" class="icon-button" data-action="close-save" aria-label="關閉">×</button></div><p class="muted">保存目前帳號、群組、時間與狀態篩選。</p><label for="view-name">檢視名稱</label><input id="view-name" maxlength="40" required placeholder="例如：每日待檢視"><div class="dialog-actions"><button type="button" class="button secondary" data-action="close-save">取消</button><button class="button primary" type="submit">儲存</button></div></form>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden><span id="toast-text"></span><button id="toast-undo" class="text-button" hidden>復原</button><button id="toast-close" class="icon-button" aria-label="關閉通知">×</button></div>
+
+<script>
+// v2 是預設門面但不做身分驗證：登入一律導回經典控制台，避免誤以為在真登入。
+(function () {
+  function wire() {
+    const form = document.getElementById('login-form');
+    if (!form || form.dataset.sdfLogin === '1') return;
+    form.dataset.sdfLogin = '1';
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      window.location.href = '/classic';
+    }, true);
+    const note = document.querySelector('#login-screen .muted');
+    if (note) note.innerHTML = '登入請走 <a href="/classic">經典控制台</a>；已登入的話這一頁會直接顯示即時資料。';
+  }
+  window.addEventListener('DOMContentLoaded', wire);
+  setTimeout(wire, 1200);
+})();
+</script>
 </body>
 </html>

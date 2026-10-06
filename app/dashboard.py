@@ -147,15 +147,9 @@ class Dashboard:
     def _setup_routes(self):
         app = self.app
 
-        @app.get("/", response_class=HTMLResponse)
+        @app.get("/classic", response_class=HTMLResponse)
         async def index():
             return HTMLResponse(PAGE)
-
-        # 調度台 v2：獨立前端（版面照 Codex 定稿）＋本站真後端資料。
-        # 靜態檔本身不含資料；資料都走下面這些需要 session 的 API。
-        _v2_dir = Path(__file__).resolve().parent / "static" / "v2"
-        if _v2_dir.is_dir():
-            app.mount("/v2", StaticFiles(directory=str(_v2_dir), html=True), name="v2")
 
         @app.get("/health")
         async def health():
@@ -793,6 +787,13 @@ class Dashboard:
 
 
 
+
+        # 預設門面：v2（左側導覽＋工作總覽＋三欄紀錄＋營運操作）。
+        # 必須掛在「所有 API 路由註冊完之後」，否則掛在 "/" 的 static 會吃掉 API。
+        _v2_dir = Path(__file__).resolve().parent / "static" / "v2"
+        if _v2_dir.is_dir():
+            app.mount("/v2", StaticFiles(directory=str(_v2_dir), html=True), name="v2-alias")
+            app.mount("/", StaticFiles(directory=str(_v2_dir), html=True), name="v2")
 def _record_key_of(group_id: int, row: dict) -> str:
     """跨帳號穩定的紀錄鍵：群＋發話者＋秒＋內容雜湊。
 

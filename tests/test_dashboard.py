@@ -91,7 +91,7 @@ def test_login_rate_limit():
 
 def test_index_serves_zh_tw():
     with _make_dashboard() as client:
-        r = client.get("/")
+        r = client.get("/classic")
         assert r.status_code == 200
         assert "zh-TW" in r.text
         # 控制台改版為「航站調度台」後的品牌名（原本是「水軍控制台」）
@@ -102,7 +102,7 @@ def test_index_serves_zh_tw():
 def test_groups_ui_uses_read_only_discovery_before_start():
     """群組管理畫面必須使用唯讀探索接口（不啟動互動就能看到群組）。"""
     with _make_dashboard() as client:
-        r = client.get("/")
+        r = client.get("/classic")
         assert "/api/groups/directory" in r.text
         assert "/api/groups/membership" in r.text
         assert "先啟動帳號，再回來勾選" not in r.text
@@ -110,7 +110,7 @@ def test_groups_ui_uses_read_only_discovery_before_start():
 
 def test_groups_ui_truthfully_says_empty_selection_disables_account():
     with _make_dashboard() as client:
-        page = client.get("/").text
+        page = client.get("/classic").text
         assert "不勾任何群" in page
         assert "無法啟動" in page or "停用帳號" in page
         assert "自動在所有群活動" not in page
@@ -239,7 +239,7 @@ def test_voice_toggle_refuses_enable_until_realtime_gateway_is_configured(
 
 def test_index_contains_media_and_voice_switches():
     with _make_dashboard() as client:
-        page = client.get("/").text
+        page = client.get("/classic").text
         assert 'id="mediaToggle"' in page
         assert 'id="voiceToggle"' in page
         assert "圖片理解預設開啟" in page
@@ -261,3 +261,15 @@ def test_available_groups_endpoint_discovers_without_starting(monkeypatch):
         r = client.get("/api/accounts/stopped-account/groups/available")
         assert r.status_code == 200
         assert r.json() == {"groups": [{"id": -1001, "title": "台北交友群"}]}
+
+
+def test_root_serves_v2_shell_and_classic_keeps_old_console():
+    """門面交換：/ 是 v2（左側導覽版），/classic 仍是原本的調度台。"""
+    with _make_dashboard() as client:
+        root = client.get("/")
+        assert root.status_code == 200
+        assert "調度台 v2" in root.text or "工作總覽" in root.text
+        classic = client.get("/classic")
+        assert classic.status_code == 200
+        assert "水軍調度台" in classic.text
+        assert "status" in client.get("/health").text
