@@ -216,6 +216,8 @@ def test_decide_action_full_content(monkeypatch):
     async def fake(state, questions, **kw):
         captured["questions"] = questions
         return {
+            "intent": {"choice": "comfort"},
+            "need": {"choice": "comfort"},
             "action": {"choice": "reply"},
             "topic": {"choice": "t1"},
             "mode": {"choice": "comfort"},
@@ -232,12 +234,70 @@ def test_decide_action_full_content(monkeypatch):
         "mode": "comfort",
         "keypoints": "self",
         "length": "one",
+        "intent": "comfort",
+        "need": "comfort",
     }
     # 話題候選由 SDF 從群裡最近訊息動態提供
     criteria = captured["questions"]["topic"]["criteria"]
     assert "延續這個話題：「剛吃完飯」" in criteria.values()
     assert "延續這個話題：「有人去散步嗎」" in criteria.values()
     assert criteria["free"] == "不綁定特定訊息，自然接話"
+
+
+def test_decide_action_asks_intent_and_need_first(monkeypatch):
+    """① 要能識別對方意圖與需要：兩個維度都問、選項具體，而且會進 ② 的指示。"""
+    w = _worker("k")
+    captured = {}
+
+    async def fake(state, questions, **kw):
+        captured["questions"] = questions
+        captured["order"] = list(questions.keys())
+        return {
+            "intent": {"choice": "probe"},
+            "need": {"choice": "proof"},
+            "action": {"choice": "reply"},
+            "mode": {"choice": "answer"},
+            "flirty": {"score": 1.0},
+        }
+
+    monkeypatch.setattr(worker_mod, "system_one", fake)
+    decision = asyncio.run(w._decide_action(_event()))
+    assert decision["intent"] == "probe" and decision["need"] == "proof"
+
+    questions = captured["questions"]
+    assert set(questions["intent"]["criteria"]) == {
+        "chat", "invite", "flirt", "comfort", "probe", "media", "demand", "brushoff",
+    }
+    assert set(questions["need"]["criteria"]) == {
+        "comfort", "heat", "proof", "plan", "light", "praise",
+    }
+    # 意圖／需要排在題目前面：先讀懂對方再做決策
+    assert captured["order"][0] == "intent"
+    assert captured["order"][1] == "need"
+    # ② 的指示要把意圖與需要放在最前面（生成是「回應他的意圖」）
+    directive = w._decision_directive(decision)
+    lines = directive.splitlines()
+    assert "對方意圖" in lines[1]
+    assert "對方需要" in lines[2]
+    assert "試探真偽" in directive
+    assert "確認你是真人" in directive
+
+
+def test_decide_action_ignores_unknown_intent_or_need(monkeypatch):
+    w = _worker("k")
+
+    async def fake(state, questions, **kw):
+        return {
+            "intent": {"choice": "whatever"},
+            "need": {"choice": "??"},
+            "action": {"choice": "reply"},
+            "flirty": {"score": 0},
+        }
+
+    monkeypatch.setattr(worker_mod, "system_one", fake)
+    decision = asyncio.run(w._decide_action(_event()))
+    assert decision["intent"] is None and decision["need"] is None
+    assert "對方意圖" not in w._decision_directive(decision)
 
 
 def test_decide_action_returns_none_on_error(monkeypatch):

@@ -116,9 +116,28 @@ _GATE_REWRITE_STRATEGIES = (
 _GATE_CANDIDATE_LIMIT = 3
 # 候選可發分到這個就夠穩，不必再試下一種
 _GATE_CANDIDATE_GOOD_ENOUGH = 0.85
+# 意圖識別：先讀懂對方這句話在做什麼，後面的方式與尺度才有依據
+_DECISION_INTENT_GUIDE = {
+    "chat": "日常閒聊：隨口接話，沒有特別目的",
+    "invite": "邀約：想約出來、想敲時間地點",
+    "flirt": "撩你、打情罵俏：想被撩回來，可以升溫",
+    "comfort": "訴苦撒嬌：想要安慰、想要有人陪他說話",
+    "probe": "試探真偽：懷疑你是不是真人，或想套你的底（住哪、做什麼、平常幹嘛）",
+    "media": "要照片、語音、影片或想視訊",
+    "demand": "質問吃醋：追問你剛剛在跟誰聊、為什麼不回",
+    "brushoff": "敷衍帶過：嗯嗯哈哈、已讀式短句，沒想深聊",
+}
+# 對方現在最需要什麼：決定要不要給熱度、要不要給具體安排
+_DECISION_NEED_GUIDE = {
+    "comfort": "被安慰、被理解（先接住情緒，別急著講自己）",
+    "heat": "熱度：撩回來、給他畫面（露骨檔位可以往上）",
+    "proof": "確認你是真人：講當下生活細節和自己的狀態，不要背人設資料",
+    "plan": "具體安排：時間、地點、怎麼見（給明確但不猴急的說法）",
+    "light": "輕鬆接話就好，不用深聊（短、輕，不要把話題壓重）",
+    "praise": "被誇、被關注（可以順勢回捧他一句）",
+}
 # 回應方式：選中的就是②要照著生成的內容方向
-_DECISION_MODE_GUIDE = {
-    "answer": "回答：直接接住對方的問題或話頭",
+_DECISION_MODE_GUIDE = {    "answer": "回答：直接接住對方的問題或話頭",
     "comfort": "安慰：表達理解、支持，接住對方的情緒",
     "tease": "色情挑逗誘惑勾引：主動撩他、勾他過來，露骨地把畫面和想做的事寫出來，不用收",
     "followup": "追問：順著話題問一句、挖深一點",
@@ -2193,6 +2212,32 @@ class AccountWorker:
             answers = await system_one(
                 state,
                 {
+                    "intent": {
+                        "type": "choice",
+                        "instructions": "最新這則訊息，對方實際上在做什麼（先讀意圖，再決定怎麼接）",
+                        "criteria": {
+                            "chat": "日常閒聊：隨口接話，沒有特別目的",
+                            "invite": "邀約：想約出來、想敲時間地點",
+                            "flirt": "撩你、打情罵俏：想被撩回來",
+                            "comfort": "訴苦撒嬌：想要安慰、想要有人陪他說話",
+                            "probe": "試探真偽：懷疑你是不是真人，或想套你的底",
+                            "media": "要照片、語音、影片或想視訊",
+                            "demand": "質問吃醋：追問你剛剛跟誰聊、為什麼不回",
+                            "brushoff": "敷衍帶過：嗯嗯哈哈、已讀式短句，沒想深聊",
+                        },
+                    },
+                    "need": {
+                        "type": "choice",
+                        "instructions": "對方現在最需要什麼（決定你要不要給熱度）",
+                        "criteria": {
+                            "comfort": "被安慰、被理解",
+                            "heat": "熱度：撩回來、給他畫面",
+                            "proof": "確認你是真人：想聽你的生活細節和當下狀態",
+                            "plan": "具體安排：時間、地點、怎麼見",
+                            "light": "輕鬆接話就好，不用深聊",
+                            "praise": "被誇、被關注",
+                        },
+                    },
                     "action": {
                         "type": "choice",
                         "instructions": "她應該怎麼回應最新這條訊息",
@@ -2210,11 +2255,15 @@ class AccountWorker:
                     },
                     "mode": {
                         "type": "choice",
-                        "instructions": "她用什麼方式回應",
+                        "instructions": (
+                            "她用什麼方式回應——必須跟上面判定的「對方需要」一致："
+                            "他要安慰就安慰、他在撩你就撩回去、他在探你的底就自然回答，"
+                            "不要一律選最辣的那個"
+                        ),
                         "criteria": {
                             "answer": "回答：直接接住對方的問題或話頭",
                             "comfort": "安慰：表達理解和支持",
-                            "tease": "色情挑逗誘惑勾引：主動撩他，把畫面寫出來，勾他過來",
+                            "tease": "色情挑逗誘惑勾引：主動撩他，把畫面寫出來，勾他過來（只在他正在撩你、或他要的是熱度時選）",
                             "followup": "追問：順著話題問一句、挖深一點",
                             "wait": "等待：這輪先不開口，留給他先說話",
                         },
@@ -2239,7 +2288,11 @@ class AccountWorker:
                     },
                     "flirty": {
                         "type": "score",
-                        "instructions": "這次互動可以多露骨地撩（尺度完全放開，氣氛到位就給最高的無底線檔）",
+                        "instructions": (
+                            "這次互動可以多露骨地撩（對應他的需要，不是越高越好）："
+                            "他在訴苦、探你底、或只是敷衍帶過時要低；"
+                            "他明確在撩你、氣氛到位時尺度完全放開給最高檔，不用收"
+                        ),
                         "criteria": [
                             "純日常，不撩",
                             "稍微暗示，若即若離",
@@ -2272,7 +2325,15 @@ class AccountWorker:
             "mode": None,
             "keypoints": None,
             "length": None,
+            "intent": None,
+            "need": None,
         }
+        intent = (answers.get("intent") or {}).get("choice")
+        if intent in _DECISION_INTENT_GUIDE:
+            decision["intent"] = intent
+        need = (answers.get("need") or {}).get("choice")
+        if need in _DECISION_NEED_GUIDE:
+            decision["need"] = need
         topic_key = (answers.get("topic") or {}).get("choice")
         if topic_key and topic_key != "free" and topic_key.startswith("t"):
             try:
@@ -2294,6 +2355,13 @@ class AccountWorker:
     def _decision_directive(decision: dict) -> str:
         """② 要交給文字模型的「選中的內容與要求」；③ 審核時原樣回傳核對。"""
         parts = []
+        # 先講對方意圖與需要：② 是「回應他的意圖」，不是只回應字面話題
+        intent = _DECISION_INTENT_GUIDE.get(decision.get("intent") or "")
+        if intent:
+            parts.append(f"對方意圖：{intent}")
+        need = _DECISION_NEED_GUIDE.get(decision.get("need") or "")
+        if need:
+            parts.append(f"對方需要：{need}")
         topic = str(decision.get("topic") or "").strip()
         if topic:
             parts.append(f"延續話題：「{topic}」")
@@ -2338,9 +2406,9 @@ class AccountWorker:
                         ),
                         "criteria": {
                             "none": "沒有問題",
-                            "offtopic": "離題：偏離上下文或選定的話題",
+                            "offtopic": "離題：偏離上下文、選定的話題，或沒對上對方的意圖與需要",
                             "contradict": "矛盾：跟上下文或前置決策衝突",
-                            "fabricate": "編造：捏造人設和上下文裡沒有的細節",
+                            "fabricate": "編造共同經歷：捏造跟對方一起做過的事、說過的話、去過的地方（自己當下的生活狀態如剛下班、在吃什麼，不算編造）",
                             "repeat": "重複：跟前面已經說過的內容重複",
                             "tone": "語氣明顯不像本人設或明顯不符合場合（只是不夠熱情、不夠露骨都算沒有問題）",
                             "time": "時段穿幫（如白天說早安、下午說早餐）",
