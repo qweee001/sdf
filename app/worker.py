@@ -216,6 +216,28 @@ def _place_distinctive_chars() -> frozenset[str]:
 _PLACE_DISTINCTIVE_CHARS = _place_distinctive_chars()
 
 
+def _load_typo_pairs() -> tuple[tuple[str, str], ...]:
+    """常見錯別字對照（錯形=正形），只收「在台灣幾乎不可能正確」的寫法。"""
+    path = Path(__file__).resolve().parent / "assets" / "typo_pairs.txt"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    pairs = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        wrong, _, right = line.partition("=")
+        wrong, right = wrong.strip(), right.strip()
+        if wrong and right and wrong != right:
+            pairs.append((wrong, right))
+    return tuple(pairs)
+
+
+_TYPO_PAIRS = _load_typo_pairs()
+
+
 def _is_cjk_text(text: str) -> bool:
     return bool(text) and all("\u3400" <= ch <= "\u9fff" for ch in text)
 
@@ -2707,6 +2729,14 @@ class AccountWorker:
                     self._record_reply_drop("gate_held")
                     await self._audit_reply(event, "policy", "gate_held")
                     return
+                # 用字檢查層：對照表＋決策層專問錯別字（跟 ③ 的語意審核分開）
+                text = await self._typo_gate(
+                    event, text, context=await self._decision_state(event)
+                )
+                if not text:
+                    self._record_reply_drop("typo_held")
+                    await self._audit_reply(event, "policy", "typo_held")
+                    return
                 # 發送前最後一道：這段時間有沒有真人搶先講了新話（回過時話題＝當場破戲）
                 if not await self._context_still_fresh(event):
                     self._record_reply_drop("stale_context")
@@ -3915,6 +3945,117 @@ class AccountWorker:
                 except UnicodeEncodeError:
                     return True
         return False
+
+    @staticmethod
+    def _common_typo_hint(text: str) -> str:
+        """常見錯別字（非地名）：因該→應該、時侯→時候、處裡→處理…
+
+        免費的第一道；命中就回「「因該」應寫成「應該」」，沒問題回 ""。
+        """
+        t = str(text or "")
+        if not t or not _TYPO_PAIRS:
+            return ""
+        hits = []
+        for wrong, right in _TYPO_PAIRS:
+            if wrong in t and right not in t:
+                hits.append(f"「{wrong}」應寫成「{right}」")
+                if len(hits) >= 3:
+                    break
+        return "；".join(hits)
+
+    async def _typo_review(self, text: str, context: str = ""):
+        """錯別字決策層：專問「這段文字有沒有用字錯誤」，回 {"prob","kind"} 或 None。
+
+        跟 ③ 分開一層：③ 管的是語意（離題／矛盾／語氣），這裡只盯字形與詞形，
+        包括對照表抓不到的同音字、形近字。呼叫失敗／超時回 None（＝不確定）。
+        """
+        if not self._decision_enabled():
+            return None
+        cfg = self.config
+        body = str(text or "").strip()
+        if not body:
+            return None
+        state = (
+            f"{context}\n要檢查的文字：「{body}」" if context else f"要檢查的文字：「{body}」"
+        )
+        try:
+            answers = await system_one(
+                state,
+                {
+                    "has_typo": {
+                        "type": "noul",
+                        "instructions": (
+                            "這段文字有任何用字錯誤：錯別字、同音字或形近字寫錯、"
+                            "簡體字、地名寫錯（正常口語、火星文、表情符號不算錯）"
+                        ),
+                    },
+                    "kind": {
+                        "type": "choice",
+                        "instructions": "最主要的用字問題",
+                        "criteria": {
+                            "none": "沒有用字問題",
+                            "wrong_char": "錯字：字寫錯了",
+                            "wrong_word": "別字：詞用錯字了（同音或形近）",
+                            "simplified": "簡體字",
+                            "place": "地名寫錯",
+                        },
+                    },
+                },
+                base_url=cfg.decision_base_url,
+                api_key=cfg.decision_api_key,
+                model=cfg.decision_model,
+                timeout_seconds=cfg.decision_timeout_seconds,
+            )
+        except DecisionError as exc:
+            self.stats["decision_errors"] = int(self.stats.get("decision_errors", 0)) + 1
+            print(f"[{self.name}] decision-typo error: {exc}", flush=True)
+            return None
+        self.stats["decision_calls"] = int(self.stats.get("decision_calls", 0)) + 1
+        prob = (answers.get("has_typo") or {}).get("noul")
+        if prob is None:
+            return None
+        kind = str((answers.get("kind") or {}).get("choice") or "none")
+        return {"prob": float(prob), "kind": kind}
+
+    def _typo_flag(self, review: dict | None) -> bool:
+        if not review:
+            return False
+        threshold = float(getattr(self.config, "decision_typo_threshold", 0.5))
+        kind = str(review.get("kind") or "none")
+        return float(review.get("prob") or 0.0) >= threshold and kind != "none"
+
+    async def _typo_gate(self, event, text: str, *, context: str = "") -> str:
+        """用字檢查層：對照表（免費）＋決策層專問；命中就帶提示重寫一次。
+
+        回可用文字；重寫後仍有問題回 ""（暫緩發送）。
+        """
+        if not text:
+            return text
+        exact = self._common_typo_hint(text)
+        review = await self._typo_review(text, context)
+        if not exact and not self._typo_flag(review):
+            return text
+        self.stats["typo_rewrite"] = int(self.stats.get("typo_rewrite", 0)) + 1
+        detail = exact or f"用字問題：{review.get('kind')}"
+        print(
+            f"[{self.name}] typo-rewrite: {detail} {text[:20]!r}",
+            flush=True,
+        )
+        hint = f"上一版有用字錯誤（{detail}）。只修這些字，句子長度和語氣不要改。"
+        fixed = await self._generate_reply(event, extra_hint=hint)
+        if not fixed:
+            self.stats["typo_held"] = int(self.stats.get("typo_held", 0)) + 1
+            return ""
+        if self._common_typo_hint(fixed):
+            self.stats["typo_held"] = int(self.stats.get("typo_held", 0)) + 1
+            print(f"[{self.name}] typo-hold: 重寫後仍有錯別字，暫緩 {fixed[:20]!r}", flush=True)
+            return ""
+        second = await self._typo_review(fixed, context)
+        if self._typo_flag(second):
+            self.stats["typo_held"] = int(self.stats.get("typo_held", 0)) + 1
+            print(f"[{self.name}] typo-hold: 決策層仍判定有錯別字，暫緩 {fixed[:20]!r}", flush=True)
+            return ""
+        return fixed
 
     def _reply_place_names(self, event, history) -> tuple[str, ...]:
         """這則回覆可能提到的地名來源：對方訊息＋近期對話＋人設自己住哪。"""
@@ -5204,6 +5345,14 @@ class AccountWorker:
                                 print(f"[{self.name}] proactive-gate-hold: 換策略重寫仍不合格，這輪不發", flush=True)
                                 continue
                             topic = picked
+                    # 用字檢查層：主動發言也走同一套（對照表＋決策層）
+                    checked = self._common_typo_hint(topic)
+                    if checked:
+                        self.stats["proactive_gate_hold"] = (
+                            int(self.stats.get("proactive_gate_hold", 0)) + 1
+                        )
+                        print(f"[{self.name}] proactive-typo-hold: {checked} {topic[:20]!r}", flush=True)
+                        continue
                     burst = self._split_human_burst(topic)
                     sent = False
                     for i, part in enumerate(burst):

@@ -123,6 +123,7 @@ class Settings:
     decision_model: str
     decision_timeout_seconds: float
     decision_gate_threshold: float
+    decision_typo_threshold: float
 
     # 回覆行為
     reply_enabled: bool
@@ -239,6 +240,9 @@ def load_settings() -> Settings:
         ),
         decision_gate_threshold=_bounded_float(
             "DECISION_GATE_THRESHOLD", 0.5, 0.1, 0.95
+        ),
+        decision_typo_threshold=_bounded_float(
+            "DECISION_TYPO_THRESHOLD", 0.5, 0.1, 0.95
         ),
         base_reply_probability=_float("BASE_REPLY_PROBABILITY", 0.35),
         reply_enabled=_bool("REPLY_ENABLED", True),
