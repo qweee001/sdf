@@ -24,7 +24,7 @@
     status: index < 2 ? 'pending' : 'reviewed'
   }));
   const defaultFilters = { accountId: 'account-3', groupId: 'feedback', status: 'all', query: '', range: '24h' };
-  const routes = ['overview', 'accounts', 'monitor', 'audit', 'media', 'groups', 'ops', 'preferences'];
+  const routes = ['overview', 'board', 'accounts', 'monitor', 'audit', 'media', 'groups', 'ops', 'preferences'];
   function escapeHtml(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
   }

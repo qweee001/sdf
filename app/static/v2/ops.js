@@ -278,7 +278,6 @@
         <button class="button small" data-ops="reload">重新整理</button>
         <button class="button small" data-sdf="add-account">＋ 新增水軍帳號</button>
         <button class="button small" data-sdf="livetest">媒體實測</button>
-        <a class="button small" href="/classic" target="_blank" rel="noopener">經典調度台</a>
       </div>
       <section class="card card-pad"><h2>帳號（${(data.status.accounts || []).length}）</h2>${accountsTable()}</section>
       <section class="card card-pad"><h2>功能開關</h2>${featuresBlock()}</section>

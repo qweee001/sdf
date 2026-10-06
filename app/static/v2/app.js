@@ -19,7 +19,7 @@
     check:'<path d="m5 12 4 4L19 6"/>'
   };
   const icon = name => '<svg viewBox="0 0 24 24" aria-hidden="true">' + (icons[name] || icons.file) + '</svg>';
-  const labels = {overview:'工作總覽',accounts:'帳號管理',monitor:'群組監控',audit:'回覆審計',media:'媒體測試',groups:'群組總管',ops:'營運操作',preferences:'顯示偏好'};
+  const labels = {overview:'工作總覽',accounts:'帳號管理',monitor:'群組監控',audit:'回覆審計',media:'媒體測試',groups:'群組總管',board:'調度台',ops:'營運操作',preferences:'顯示偏好'};
   const state = {
     route:'overview', filters:{...C.defaultFilters}, records:C.records.map(r => ({...r})),
     selectedId:'record-01', page:1, favorites:['feedback'], savedViews:[], density:'comfortable',
@@ -136,7 +136,8 @@
     const scroll = window.scrollY;
     document.body.classList.toggle('dense',state.density==='dense');
     renderNav();
-    $('#main').innerHTML = state.route === 'ops' && window.SDFOps ? window.SDFOps.view()
+    $('#main').innerHTML = state.route === 'board' && window.SDFBoard ? window.SDFBoard.view()
+      : state.route === 'ops' && window.SDFOps ? window.SDFOps.view()
       : state.route === 'overview' ? overview() : ['monitor','audit'].includes(state.route) ? workspace() : state.route === 'accounts' ? accountsPage() : state.route === 'groups' ? groupsPage() : state.route === 'media' ? mediaPage() : preferencesPage();
     document.title = labels[state.route] + ' · SDF 控制台';
     if (focusId) {
@@ -180,6 +181,9 @@
     state.filters=C.sanitizeFilters(view.filters); state.page=1; state.selectedId=null; persist(); navigate('audit'); toast('已套用「'+view.name+'」');
   }
   const actions = {
+    'board-pick':b=>window.SDFBoard&&window.SDFBoard.act('board-pick',b),
+    'board-group':b=>window.SDFBoard&&window.SDFBoard.act('board-group',b),
+    'board-review':b=>window.SDFBoard&&window.SDFBoard.act('board-review',b),
     navigate:b=>navigate(b.dataset.route),
     'choose-group':b=>setFilter('groupId',b.dataset.id),
     'reset-filters':()=>{state.filters={...C.defaultFilters};state.page=1;state.selectedId='record-01';persist();render();},

@@ -40,3 +40,36 @@ dialog{border:1px solid var(--line);border-radius:14px;padding:24px;box-shadow:0
 .sdf-private.out { border-left-color: #a8520a; }
 .sdf-toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(8px); background: #16302c; color: #fff; padding: .5rem 1rem; border-radius: 8px; font-size: .85rem; opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; z-index: 70; }
 .sdf-toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+
+/* 調度台分頁（board.js） */
+.board-kpi { display: flex; gap: 1rem; flex-wrap: wrap; align-items: baseline; font-family: Consolas, monospace; font-size: .85rem; color: #5b7470; margin: .2rem 0 .8rem; }
+.board-kpi b { color: #16302c; }
+.board-kpi .warn b { color: #a8520a; }
+.board-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .7rem; }
+.lane { border: 1px solid #e3e8e6; border-radius: 10px; padding: .7rem .8rem; background: #fff; }
+.lane-head { display: flex; align-items: center; gap: .5rem; margin-bottom: .25rem; }
+.lane-body { margin-top: .5rem; display: flex; flex-direction: column; gap: .35rem; }
+.lane-block { border-left: 3px solid #cfdedb; background: #f5f9f8; border-radius: 0 6px 6px 0; padding: .35rem .5rem; cursor: pointer; display: flex; flex-direction: column; }
+.lane-block.on { border-left-color: #1d625b; background: #e8f3ef; }
+.board-split { display: grid; grid-template-columns: 1.5fr 1fr; gap: .8rem; align-items: start; }
+.board-select { margin-left: .6rem; padding: .25rem .5rem; border: 1px solid #d8e3e1; border-radius: 8px; font: inherit; }
+.feed-row { display: flex; gap: .5rem; align-items: baseline; padding: .3rem 0; border-bottom: 1px solid #f0f4f3; }
+.feed-text { flex: 1; min-width: 0; }
+.bar-stage { margin-bottom: .6rem; }
+@media (max-width: 980px) { .board-split { grid-template-columns: 1fr; } }
+
+.bar-row { display: flex; align-items: center; gap: .5rem; padding: 2px 0; font-size: .8rem; }
+.bar-row .bl { width: 120px; color: #5b7470; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar-row .bt { flex: 1; height: 7px; background: #eef2f1; border-radius: 4px; overflow: hidden; }
+.bar-row .bt i { display: block; height: 100%; background: #d9a268; }
+.bar-row .bt i.ok { background: #7fbfa8; }
+.bar-row .bn { width: 32px; text-align: right; font-family: Consolas, monospace; color: #16302c; }
+
+progress.bt { flex: 1; height: 8px; appearance: none; border: 0; background: #eef2f1; border-radius: 4px; overflow: hidden; }
+progress.bt::-webkit-progress-bar { background: #eef2f1; border-radius: 4px; }
+progress.bt::-webkit-progress-value { background: #d9a268; border-radius: 4px; }
+progress.bt::-moz-progress-bar { background: #d9a268; border-radius: 4px; }
+progress.bt.ok::-webkit-progress-value { background: #7fbfa8; }
+progress.bt.ok::-moz-progress-bar { background: #7fbfa8; }
+.feed-counts { margin-bottom: .4rem; }
