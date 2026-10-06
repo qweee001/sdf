@@ -1083,15 +1083,17 @@ class AccountWorker:
                     except Exception as exc:
                         self.stats["errors"] += 1
                         print(f"[{self.name}] group_memory write error: {exc}", flush=True)
-            await self._record_group_event(
-                event,
-                "managed" if sender_id in self.managed_ids else "human",
-            )
+            sender_kind = "managed" if sender_id in self.managed_ids else "human"
+            await self._record_group_event(event, sender_kind)
             await self.db.add_message(
                 self.account_id, group_id,
                 sender_id,
                 get_display_name(await event.get_sender()) or "",
-                "user", stored_content,
+                # 水軍同伴的訊息也要記成 assistant。以前一律記成 user，等於
+                # 把同伴當真人：純水軍串剎車、輪替、發送前新鮮度、控制台「真人數」
+                # 全部被灌水（實測群 111 三個水軍被算成真人）。
+                "assistant" if sender_kind == "managed" else "user",
+                stored_content,
             )
             if not await self._should_reply(event):
                 return
