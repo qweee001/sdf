@@ -169,7 +169,47 @@ _DECISION_ISSUE_LABEL = {
     "tone": "語氣：不像本人設或不符合規劃的露骨程度",
     "time": "時段穿幫（例如白天講早安、下午說早餐）",
     "simplified": "混入簡體字",
+    "typo": "用字錯誤（錯別字或地名寫錯）",
 }
+
+
+# 台灣地名白名單：抓「形近別字」用（實測把中壢寫成中坢——坢在 Big5 裡是合法字，
+# 簡體字檢查完全看不到，③ 也沒有字形維度，等於整條管線沒人管用字）
+def _load_tw_place_names() -> frozenset[str]:
+    path = Path(__file__).resolve().parent / "assets" / "tw_places.txt"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return frozenset()
+    names = set()
+    for token in raw.split():
+        token = token.strip()
+        if len(token) >= 2:
+            names.add(token)
+    return frozenset(names)
+
+
+_TW_PLACE_NAMES = _load_tw_place_names()
+
+
+def _place_distinctive_chars() -> frozenset[str]:
+    """只出現一個地名裡的字（壢、士、板…）：這種字被寫成形近別字時才驗。
+
+    「台中」不含獨有字（台、中都出現在一堆地名），所以「平台」「新聞」這類
+    正常詞不會被誤判成地名別字。
+    """
+    counts: dict[str, int] = {}
+    for name in _TW_PLACE_NAMES:
+        for ch in set(name):
+            counts[ch] = counts.get(ch, 0) + 1
+    return frozenset(ch for ch, hits in counts.items() if hits == 1)
+
+
+_PLACE_DISTINCTIVE_CHARS = _place_distinctive_chars()
+
+
+def _is_cjk_text(text: str) -> bool:
+    return bool(text) and all("\u3400" <= ch <= "\u9fff" for ch in text)
 
 
 def _dialog_title(dialog) -> str:
@@ -2381,6 +2421,7 @@ class AccountWorker:
                             "tone": "語氣明顯不像本人設或明顯不符合場合（只是不夠熱情、不夠露骨都算沒有問題）",
                             "time": "時段穿幫（如白天說早安、下午說早餐）",
                             "simplified": "混入簡體字",
+                            "typo": "用字錯誤：錯別字或地名寫錯（例如中壢寫成中坢、士林寫成士休）",
                         },
                     },
                 },
@@ -3679,6 +3720,10 @@ class AccountWorker:
         # 只有主動話題那條路有檢查，回覆／水軍互接這條路漏掉。
         # 只驗問候語：回覆裡的「午餐／晚餐」多半在接對方的話題，不算穿幫。
         time_mismatch = self._has_time_mismatch(reply, greetings_only=True)
+        # 地名形近別字（實測：中壢寫成中坢）——只比對這則對話真的在講的地名
+        place_typo = self._place_typo_hint(
+            reply, expected=self._reply_place_names(event, history)
+        )
         if (
             not too_long
             and not format_leak
@@ -3688,6 +3733,7 @@ class AccountWorker:
             and not mentions_group_meta
             and not repetitive
             and not time_mismatch
+            and not place_typo
         ):
             if image:
                 self.stats["images_understood"] += 1
@@ -3708,6 +3754,8 @@ class AccountWorker:
                 if simplified
                 else "time_mismatch"
                 if time_mismatch
+                else "place_typo"
+                if place_typo
                 else "too_long"
                 if too_long
                 else "near_duplicate"
@@ -3753,6 +3801,11 @@ class AccountWorker:
                 "上一版講了跟現在時段不合的話（例如晚上說早安、下午聊早餐）；"
                 "改成符合現在時間的說法，或直接回應對方講的具體內容。"
             )
+        if place_typo:
+            correction += (
+                f"上一版有疑似地名別字（{place_typo}）。"
+                "如果要講那個地名就用正確的字，不是那個地名就換個說法，其他不要改。"
+            )
         retry_message = (
             f"{user_message}\n"
             f"{correction}"
@@ -3780,6 +3833,9 @@ class AccountWorker:
             retry, recent_group_replies
         )
         retry_time_mismatch = self._has_time_mismatch(retry, greetings_only=True)
+        retry_place_typo = self._place_typo_hint(
+            retry, expected=self._reply_place_names(event, history)
+        )
         if (
             retry_too_long
             or retry_format_leak
@@ -3789,6 +3845,7 @@ class AccountWorker:
             or retry_group_meta
             or retry_repetitive
             or retry_time_mismatch
+            or retry_place_typo
         ):
             reason = (
                 "refusal"
@@ -3803,6 +3860,8 @@ class AccountWorker:
                 if retry_simplified
                 else "time_mismatch"
                 if retry_time_mismatch
+                else "place_typo"
+                if retry_place_typo
                 else "too_long"
                 if retry_too_long
                 else "near_duplicate"
@@ -3846,6 +3905,74 @@ class AccountWorker:
                 except UnicodeEncodeError:
                     return True
         return False
+
+    def _reply_place_names(self, event, history) -> tuple[str, ...]:
+        """這則回覆可能提到的地名來源：對方訊息＋近期對話＋人設自己住哪。"""
+        sources = [str(getattr(event, "raw_text", "") or "")]
+        lines = []
+        for row in (history or [])[-6:]:
+            content = str(row.get("content") or "")
+            if content:
+                lines.append(content)
+        sources.append(" ".join(lines))
+        return self._expected_place_names(*sources)
+
+    def _expected_place_names(self, *sources: str) -> tuple[str, ...]:
+        """這則訊息「可能提到」的地名：人設自己的＋對方剛講的＋近期對話出現過的。
+
+        只針對這些地名檢查用字，不是拿全台地名去猜（那樣「太遠」「不如」
+        都會被當成形近別字，誤殺一片）。
+        """
+        names: list[str] = []
+        for key in ("city", "district"):
+            value = str(self.persona.get(key) or "").strip()
+            if len(value) >= 2 and value not in names:
+                names.append(value)
+        blob = " ".join(str(s or "") for s in sources)
+        if blob:
+            for name in _TW_PLACE_NAMES:
+                if name in blob and name not in names:
+                    names.append(name)
+        return tuple(names)
+
+    def _place_typo_hint(self, text: str, *, expected=()) -> str:
+        """地名形近別字：中壢→中坢 這種（坢在 Big5 是合法字，簡體檢查抓不到）。
+
+        只跟「這則對話真的在講的地名」比對：同長度視窗跟該地名只差一個字、
+        且自己不是已知地名，就回「「中坢」應該是「中壢」」；沒問題回 ""。
+        """
+        t = str(text or "")
+        if not t:
+            return ""
+        candidates = [
+            n
+            for n in expected
+            if isinstance(n, str)
+            and len(n) >= 2
+            and any(ch in _PLACE_DISTINCTIVE_CHARS for ch in n)
+        ]
+        for name in candidates:
+            size = len(name)
+            if len(t) < size:
+                continue
+            for i in range(len(t) - size + 1):
+                window = t[i : i + size]
+                if window == name or not _is_cjk_text(window):
+                    continue
+                if window in _TW_PLACE_NAMES:
+                    continue
+                diff = 0
+                for a, b in zip(window, name):
+                    if a != b:
+                        diff += 1
+                        if diff > 1:
+                            break
+                if diff == 1:
+                    return (
+                        f"「{window}」與地名「{name}」只差一個字，"
+                        "確認是用字寫錯還是要換句話"
+                    )
+        return ""
 
     @staticmethod
     def _is_refusal(text: str) -> bool:
@@ -4890,6 +5017,13 @@ class AccountWorker:
                 continue
             if self._has_simplified_chars(topic):
                 print(f"[{self.name}] proactive-drop: simplified chars on {topic[:20]!r}", flush=True)
+                continue
+            place_typo = self._place_typo_hint(
+                topic, expected=self._expected_place_names(context, notes_block)
+            )
+            if place_typo:
+                print(f"[{self.name}] proactive-drop: place typo {place_typo} on {topic[:20]!r}", flush=True)
+                already.append(topic[:40])
                 continue
             normalized = self._normalized_reply(topic)
             if not normalized:
