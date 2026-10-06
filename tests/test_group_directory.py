@@ -238,10 +238,35 @@ def test_group_overview_counts_humans_and_last_activity():
         overview = {r["group_id"]: r for r in loop.run_until_complete(db.group_overview())}
         group_a = overview[GROUP_A]
         assert group_a["msg_count"] == 3
-        assert group_a["human_senders"] == 2  # 水軍不計入真人數
+        assert group_a["human_senders"] == 2  # assistant 不計入真人數
         assert abs(group_a["last_ts"] - (now - 120)) < 0.01  # 最後一則（水軍）
         assert abs(group_a["last_human_ts"] - (now - 600)) < 0.01  # 最後一則真人
         assert overview[GROUP_B]["human_senders"] == 1
+
+
+def test_group_overview_excludes_water_army_sender_ids():
+    """歷史資料裡水軍訊息曾被記成 user：扣掉水軍 TG id 才不會算成真人。"""
+
+    import time
+
+    client, db, manager, loop = _make_dashboard()
+    with client:
+        now = time.time()
+        _insert_message(db, loop, ACC_1, GROUP_A, 555001, "小天後", "user", "舊資料", now - 300)
+        _insert_message(db, loop, ACC_1, GROUP_A, 555002, "RICH", "user", "舊資料", now - 200)
+        _insert_message(db, loop, ACC_1, GROUP_A, 999, "阿宏", "user", "真的人", now - 100)
+
+        raw = {r["group_id"]: r for r in loop.run_until_complete(db.group_overview())}
+        assert raw[GROUP_A]["human_senders"] == 3
+
+        filtered = {
+            r["group_id"]: r
+            for r in loop.run_until_complete(
+                db.group_overview(exclude_senders=(555001, 555002))
+            )
+        }
+        assert filtered[GROUP_A]["human_senders"] == 1
+        assert filtered[GROUP_A]["msg_count"] == 3
 
 
 # ---------- 目錄 API ----------

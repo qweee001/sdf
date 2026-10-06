@@ -2009,16 +2009,30 @@ class Database:
             if int(r["sender_id"] or 0) > 0
         }
 
-    async def group_overview(self) -> list[dict]:
+    async def group_overview(self, exclude_senders: tuple[int, ...] = ()) -> list[dict]:
         """每個群一行的活動概況（控制台群組總管用）。
 
         只掃 messages 一張表：訊息數、去重後真人數、最後訊息/最後真人訊息時間。
+        exclude_senders＝水軍自己的 TG id：歷史資料裡水軍訊息曾被記成 user，
+        扣掉才不會把三隻水軍算成「真人 4 人」。
         """
+        excluded = tuple(int(s) for s in exclude_senders if int(s or 0) > 0)
+        params: list = []
+        # 把「這則算不算真人」先算成一欄，避免同一段條件在 SQL 裡出現兩次、參數對不上
+        if excluded:
+            placeholders = ",".join("?" for _ in excluded)
+            human_expr = f"(role <> 'assistant' AND sender_id NOT IN ({placeholders}))"
+            params.extend(excluded)
+        else:
+            human_expr = "(role <> 'assistant')"
         cursor = await self._c.execute(
             "SELECT group_id, COUNT(*) AS msg_count, MAX(timestamp) AS last_ts, "
-            "MAX(CASE WHEN role <> 'assistant' THEN timestamp END) AS last_human_ts, "
-            "COUNT(DISTINCT CASE WHEN role <> 'assistant' THEN sender_id END) AS human_senders "
-            "FROM messages GROUP BY group_id"
+            "MAX(CASE WHEN is_human THEN timestamp END) AS last_human_ts, "
+            "COUNT(DISTINCT CASE WHEN is_human THEN sender_id END) AS human_senders "
+            f"FROM (SELECT group_id, timestamp, sender_id, {human_expr} AS is_human "
+            "      FROM messages) "
+            "GROUP BY group_id",
+            tuple(params),
         )
         rows = await cursor.fetchall()
         return [

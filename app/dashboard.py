@@ -269,8 +269,19 @@ class Dashboard:
                 )
 
             labels = await self.manager.db.get_group_labels()
+            managed_ids: list[int] = []
+            for acc in accounts:
+                try:
+                    tg_id = int(acc.get("tg_user_id") or 0)
+                except (TypeError, ValueError):
+                    tg_id = 0
+                if tg_id > 0:
+                    managed_ids.append(tg_id)
             overview = {
-                row["group_id"]: row for row in await self.manager.db.group_overview()
+                row["group_id"]: row
+                for row in await self.manager.db.group_overview(
+                    exclude_senders=tuple(managed_ids)
+                )
             }
 
             table: dict[int, dict] = {}
