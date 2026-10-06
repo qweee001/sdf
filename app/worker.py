@@ -4039,10 +4039,19 @@ class AccountWorker:
         kind = str(review.get("kind") or "none")
         return float(review.get("prob") or 0.0) >= threshold and kind != "none"
 
-    async def _typo_gate(self, event, text: str, *, context: str = "") -> str:
+    async def _typo_gate(
+        self,
+        event,
+        text: str,
+        *,
+        context: str = "",
+        regen_fn=None,
+    ) -> str:
         """用字檢查層：對照表（免費）＋決策層專問；命中就帶提示重寫一次。
 
         回可用文字；重寫後仍有問題回 ""（暫緩發送）。
+        regen_fn：重寫用。回覆路徑用預設（_generate_reply）；主動發言路徑
+        傳 _generate_context_topic 的包函，讓兩條路徑共用同一套檢查。
         """
         if not text:
             return text
@@ -4057,7 +4066,10 @@ class AccountWorker:
             flush=True,
         )
         hint = f"上一版有用字錯誤（{detail}）。只修這些字，句子長度和語氣不要改。"
-        fixed = await self._generate_reply(event, extra_hint=hint)
+        if regen_fn is None:
+            fixed = await self._generate_reply(event, extra_hint=hint)
+        else:
+            fixed = await regen_fn(hint)
         if not fixed:
             self.stats["typo_held"] = int(self.stats.get("typo_held", 0)) + 1
             return ""
@@ -5374,6 +5386,8 @@ class AccountWorker:
                     if not topic:
                         print(f"[{self.name}] proactive-skip: no fresh context topic", flush=True)
                         continue
+                    # 錯別字層也要用 context，先預設空；決策層啟用時才取
+                    context = ""
                     # ③ 決策層審核；不合格 → 帶問題重寫一次再審核；仍不合格 → 暫緩（不塞罐頭句）
                     if self._decision_enabled():
                         try:
@@ -5411,13 +5425,23 @@ class AccountWorker:
                                 print(f"[{self.name}] proactive-gate-hold: 換策略重寫仍不合格，這輪不發", flush=True)
                                 continue
                             topic = picked
-                    # 用字檢查層：主動發言也走同一套（對照表＋決策層）
-                    checked = self._common_typo_hint(topic)
-                    if checked:
+                    # 用字檢查層：跟回覆路徑同一套（對照表＋決策層，命中重寫一次再驗）
+                    topic = await self._typo_gate(
+                        None,
+                        topic,
+                        context=context,
+                        regen_fn=lambda hint: self._generate_context_topic(
+                            group_id, extra_hint=hint
+                        ),
+                    )
+                    if not topic:
                         self.stats["proactive_gate_hold"] = (
                             int(self.stats.get("proactive_gate_hold", 0)) + 1
                         )
-                        print(f"[{self.name}] proactive-typo-hold: {checked} {topic[:20]!r}", flush=True)
+                        print(
+                            f"[{self.name}] proactive-typo-hold: 用字檢查未過，這輪不發",
+                            flush=True,
+                        )
                         continue
                     burst = self._split_human_burst(topic)
                     sent = False

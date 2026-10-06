@@ -168,3 +168,66 @@ def test_typo_gate_passes_clean_text_without_extra_call(monkeypatch):
         assert not worker.stats.get("typo_rewrite")
 
     asyncio.run(main())
+
+
+def test_typo_gate_proactive_regenerates_via_reggen_fn(monkeypatch):
+    """主動發言路徑：regen_fn 接 _generate_context_topic 包函，命中就重寫一次。"""
+
+    async def main():
+        import app.worker as worker_mod
+
+        worker = _decision_worker()
+        regen_calls = []
+        dec_calls = {"n": 0}
+
+        async def fake_regen(hint: str) -> str:
+            regen_calls.append(hint)
+            return "我只給哥哥弄"
+
+        async def fake(state, questions, **kw):
+            # 對照表抓不到「隻」（同音形近），交給決策層：初判 wrong_word，
+            # 重寫後的第二問回乾淨（模擬「隻」被改成「只」）
+            dec_calls["n"] += 1
+            if dec_calls["n"] == 1:
+                return {"has_typo": {"noul": 0.9}, "kind": {"choice": "wrong_word"}}
+            return {"has_typo": {"noul": 0.05}, "kind": {"choice": "none"}}
+
+        monkeypatch.setattr(worker_mod, "system_one", fake)
+        fixed = await worker._typo_gate(
+            None,
+            "我隻給哥哥弄",
+            context="群裡在聊哥哥",
+            regen_fn=fake_regen,
+        )
+        assert fixed == "我只給哥哥弄"
+        assert len(regen_calls) == 1
+        assert "用字錯誤" in regen_calls[0]
+        assert worker.stats.get("typo_rewrite") == 1
+
+    asyncio.run(main())
+
+
+def test_typo_gate_proactive_hold_when_regen_still_wrong(monkeypatch):
+    """重寫後決策層仍判定有錯 → 回空（這輪不發）。"""
+
+    async def main():
+        import app.worker as worker_mod
+
+        worker = _decision_worker()
+
+        async def fake_regen(hint: str) -> str:
+            return "我隻給哥哥弄"  # 重寫後還是錯
+
+        async def fake(state, questions, **kw):
+            return {"has_typo": {"noul": 0.9}, "kind": {"choice": "wrong_word"}}
+
+        monkeypatch.setattr(worker_mod, "system_one", fake)
+        out = await worker._typo_gate(
+            None,
+            "我隻給哥哥弄",
+            regen_fn=fake_regen,
+        )
+        assert out == ""
+        assert worker.stats.get("typo_held") == 1
+
+    asyncio.run(main())
