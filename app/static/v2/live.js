@@ -65,6 +65,8 @@
       const content = String(row.content || '');
       return {
         id: 'live-' + (row.id != null ? row.id : index),
+        // record_key 是後端給的跨帳號穩定鍵；審閱狀態切換靠它寫回 DB
+        record_key: row.record_key || '',
         timestamp: toIso(row.timestamp),
         time: toLocalTime(row.timestamp),
         groupId: String(row.group_id != null ? row.group_id : knownGroup),
@@ -72,7 +74,8 @@
         event: isBot ? '水軍送出訊息' : '收到一則訊息',
         content: content,
         source: (row.sender_name || '') + (isBot ? '（水軍帳號）' : '（真人）'),
-        status: isBot ? 'pending' : 'reviewed',
+        // 後端說已檢視就是已檢視（跨裝置一致），不再是前端自己記
+        status: isBot ? (row.reviewed ? 'reviewed' : 'pending') : 'reviewed',
       };
     });
   }
@@ -88,13 +91,16 @@
     });
     const groups = mapGroups(directory, selectedIds);
 
-    // 取最活躍的群當預設，撈它的真實訊息當「紀錄」
+    // 取最活躍的群當預設，撈它的真實紀錄（含後端審閱狀態）
     const primary = groups[0];
     let messages = [];
+    let counts = { pending: 0, reviewed: 0 };
     if (primary && /^-?\d+$/.test(primary.id)) {
       try {
-        const payload = await getJson('/api/groups/' + primary.id + '/messages?limit=120');
-        messages = payload.messages || [];
+        const payload = await getJson('/api/groups/' + primary.id + '/records?limit=200');
+        messages = payload.records || [];
+        counts = payload.counts || counts;
+        window.__sdfGroupId = primary.id;
       } catch (err) {
         messages = [];
       }
@@ -114,7 +120,7 @@
           range: '7d',
         },
       });
-      window.__sdfLive = { ok: true, sizes: sizes, groups: groups, accounts: accounts };
+      window.__sdfLive = { ok: true, sizes: sizes, groups: groups, accounts: accounts, groupId: primary ? primary.id : '', counts: counts };
     }
     if (window.SDFApp) {
       window.SDFApp.reseed();

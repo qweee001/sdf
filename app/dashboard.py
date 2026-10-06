@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -212,6 +213,81 @@ class Dashboard:
                 return JSONResponse({"error": "未登入"}, status_code=401)
             await self.login_service.prune_expired()
             return JSONResponse(await self.manager.status())
+
+        @app.get("/api/groups/{group_id}/records")
+        async def group_records(group_id: int, request: Request):
+            """真實訊息 + 審閱狀態。待檢視＝水軍送出但還沒被標記的紀錄。"""
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            try:
+                limit = max(1, min(500, int(request.query_params.get("limit", "200"))))
+            except ValueError:
+                limit = 200
+            rows = await self.manager.db.get_group_messages(group_id, limit)
+            reviewed_keys = await self.manager.db.list_record_reviews(group_id)
+            records = []
+            seen_keys = set()
+            for row in rows:
+                key = _record_key_of(group_id, row)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                is_bot = str(row.get("role")) == "assistant"
+                stamp = key if is_bot and key in reviewed_keys else None
+                records.append({
+                    "record_key": key,
+                    "group_id": int(group_id),
+                    "sender_id": row.get("sender_id"),
+                    "sender_name": row.get("sender_name") or "",
+                    "role": row.get("role"),
+                    "content": row.get("content") or "",
+                    "timestamp": row.get("timestamp") or 0,
+                    "needs_review": is_bot,
+                    "reviewed": (not is_bot) or bool(stamp),
+                    "reviewed_at": stamp,
+                })
+            bot_records = [r for r in records if r["needs_review"]]
+            counts = {
+                "pending": sum(1 for r in bot_records if not r["reviewed"]),
+                "reviewed": sum(1 for r in bot_records if r["reviewed"]),
+            }
+            return JSONResponse({
+                "group_id": group_id,
+                "count": len(records),
+                "counts": counts,
+                "records": records,
+            })
+
+        @app.post("/api/records/review")
+        async def review_record(request: Request):
+            """把某則水軍訊息標記已檢視／取消標記（寫進 DB，跨裝置一致）。"""
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            data = await request.json()
+            key = str(data.get("record_key") or "").strip()
+            if not key:
+                return JSONResponse({"error": "缺少 record_key"}, status_code=400)
+            try:
+                group_id = int(data.get("group_id"))
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "缺少 group_id"}, status_code=400)
+            reviewed = bool(data.get("reviewed", True))
+            await self.manager.db.set_record_review(key, group_id, reviewed)
+            rows = await self.manager.db.get_group_messages(group_id, 500)
+            reviewed_keys = await self.manager.db.list_record_reviews(group_id)
+            seen = set()
+            pending = done = 0
+            for row in rows:
+                row_key = _record_key_of(group_id, row)
+                if row_key in seen or str(row.get("role")) != "assistant":
+                    continue
+                seen.add(row_key)
+                if row_key in reviewed_keys:
+                    done += 1
+                else:
+                    pending += 1
+            return JSONResponse({"ok": True, "record_key": key, "reviewed": reviewed,
+                                 "counts": {"pending": pending, "reviewed": done}})
 
         @app.get("/api/groups/{group_id}/messages")
         async def group_messages(group_id: int, request: Request):
@@ -715,6 +791,19 @@ class Dashboard:
                 "started": False,
             })
 
+
+
+def _record_key_of(group_id: int, row: dict) -> str:
+    """跨帳號穩定的紀錄鍵：群＋發話者＋秒＋內容雜湊。
+
+    同一則 Telegram 訊息會被三個帳號各記一列，用資料列 id 當鍵會重複計算，
+    所以用這個自然鍵；視窗大小不同（limit 不同）也要拿到同一個鍵。
+    """
+    sender = int(row.get("sender_id") or 0)
+    second = int(float(row.get("timestamp") or 0))
+    content = str(row.get("content") or "")
+    digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:8]
+    return f"{int(group_id)}:{sender}:{second}:{digest}"
 
 PAGE = """<!DOCTYPE html>
 <html lang="zh-TW">
@@ -1962,13 +2051,14 @@ async function loadMonitor() {
     const feed = document.getElementById('monitorFeed');
     const stats = document.getElementById('monitorStats');
     feed.innerHTML = '<div class="meta">載入中…</div>';
-    const r = await api('/api/groups/' + monitorGroupId + '/messages?limit=5000').catch(() => null);
+    const r = await api('/api/groups/' + monitorGroupId + '/records?limit=500').catch(() => null);
     if (!r || !r.ok) {
         feed.innerHTML = '<div class="meta">載入失敗</div>';
         stats.innerHTML = '';
         return;
     }
-    const msgs = (r.data.messages || []).slice().reverse(); // 舊 → 新
+    const msgs = (r.data.records || []).slice().reverse(); // 舊 → 新
+    const reviewCounts = r.data.counts || { pending: 0, reviewed: 0 };
     const bots = msgs.filter(m => isBotRole(m.role));
     const humans = msgs.filter(m => !isBotRole(m.role));
     // 有來有回率：水軍發言後 10 分鐘內有無人（非水軍）回話
@@ -1989,16 +2079,35 @@ async function loadMonitor() {
         <div class="stat-card"><div class="value">${humans.length}</div><div class="label">人類訊息</div></div>
         <div class="stat-card"><div class="value">${bots.length}</div><div class="label">水軍訊息</div></div>
         <div class="stat-card"><div class="value">${rate}%</div><div class="label">有來有回率</div></div>
+        <div class="stat-card"><div class="value" style="color:var(--amber)">${reviewCounts.pending}</div><div class="label">待檢視</div></div>
+        <div class="stat-card"><div class="value" style="color:#5fd07a">${reviewCounts.reviewed}</div><div class="label">已檢視</div></div>
         <div class="stat-card" style="grid-column:1 / -1"><div class="label" style="margin-top:0">收集區間</div><div class="value" style="font-size:0.9rem;color:#94a3b8">${winLabel}</div></div>
     `;
     feed.innerHTML = msgs.slice(-60).map(m => {
         const bot = isBotRole(m.role);
         const time = new Date(m.timestamp * 1000).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+        const review = bot
+            ? `<button class="btn ${m.reviewed ? 'btn-secondary' : 'btn-primary'}" style="margin-left:.4rem;padding:.15rem .45rem;font-size:10.5px"
+                 onclick="toggleReview('${esc(m.record_key || '')}', ${m.reviewed ? 'false' : 'true'})">${m.reviewed ? '✓ 已檢視' : '○ 待檢視'}</button>`
+            : '';
         return `<div class="feed-item">
             <div class="who"><span class="badge ${bot ? 'badge-bot' : 'badge-human'}">${bot ? '水軍' : '人類'}</span><br>${esc(m.sender_name || '匿名')}<br><span class="ts">${time}</span></div>
-            <div class="body"><div class="bubble ${bot ? 'bubble-bot' : 'bubble-human'}">${esc(m.content || '')}</div></div>
+            <div class="body"><div class="bubble ${bot ? 'bubble-bot' : 'bubble-human'}">${esc(m.content || '')}${review}</div></div>
         </div>`;
     }).join('') || '<div class="meta">群組目前沒有訊息</div>';
+}
+
+// 審閱狀態寫回 DB（跨裝置一致；重新載入會拿到同一個狀態）
+async function toggleReview(recordKey, reviewed) {
+    if (!recordKey) return;
+    const r = await api('/api/records/review', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ group_id: Number(monitorGroupId), record_key: recordKey, reviewed: reviewed }),
+    }).catch(() => null);
+    if (!r || !r.ok) { toast('審閱狀態沒有寫入'); return; }
+    toast(reviewed ? '已標記為已檢視' : '已改回待檢視');
+    loadMonitor();
 }
 
 // ---------- 媒體實測 ----------

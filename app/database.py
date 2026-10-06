@@ -255,6 +255,14 @@ class Database:
             )
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS record_reviews (
+                record_key TEXT PRIMARY KEY,
+                group_id INTEGER NOT NULL,
+                reviewed_at REAL NOT NULL,
+                reviewed_by TEXT NOT NULL DEFAULT 'admin'
+            )
+        """)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS live_test_events (
                 run_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,
@@ -2008,6 +2016,39 @@ class Database:
             for r in rows
             if int(r["sender_id"] or 0) > 0
         }
+
+    async def set_record_review(
+        self, record_key: str, group_id: int, reviewed: bool, reviewed_by: str = "admin"
+    ) -> None:
+        """標記／取消標記某則紀錄為已檢視。
+
+        record_key 是跨帳號穩定的自然鍵（見 dashboard 的 record_key_of）：同一則
+        Telegram 訊息被三個帳號各記一列，用列 id 會重複計算，所以不用列 id。
+        """
+        key = str(record_key or "").strip()
+        if not key:
+            return
+        if reviewed:
+            await self._c.execute(
+                "INSERT INTO record_reviews (record_key, group_id, reviewed_at, reviewed_by) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(record_key) DO UPDATE SET "
+                "reviewed_at = excluded.reviewed_at, reviewed_by = excluded.reviewed_by",
+                (key, int(group_id), time.time(), str(reviewed_by)),
+            )
+        else:
+            await self._c.execute(
+                "DELETE FROM record_reviews WHERE record_key = ?", (key,)
+            )
+        await self._c.commit()
+
+    async def list_record_reviews(self, group_id: int) -> set[str]:
+        """這個群已被標記已檢視的 record_key 集合。"""
+        cursor = await self._c.execute(
+            "SELECT record_key FROM record_reviews WHERE group_id = ?",
+            (int(group_id),),
+        )
+        return {str(row["record_key"]) for row in await cursor.fetchall()}
 
     async def group_overview(self, exclude_senders: tuple[int, ...] = ()) -> list[dict]:
         """每個群一行的活動概況（控制台群組總管用）。
