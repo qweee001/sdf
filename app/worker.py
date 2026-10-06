@@ -37,7 +37,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from openai import AsyncOpenAI
 from telethon import TelegramClient, events
@@ -106,6 +106,16 @@ _DECISION_FLIRTY_GUIDE = {
     2: "明顯勾引，露骨主動",
     3: "尺度完全放開，無底線，照氛圍直接寫，不用收",
 }
+# ③ 不過時的換策略重寫：同一句話常卡在同一個毛病，換策略多一次比較機會
+_GATE_REWRITE_STRATEGIES = (
+    "直接回答他問的那個具體內容，一句短話就好",
+    "先接住他話裡的重點，再補一句自己的反應，不要新開話題",
+    "用反問或半開玩笑的短句承接，把球丟回去",
+)
+# 難例最多試幾種策略（成本＝每次多一個生成＋一次 ③ 審核）
+_GATE_CANDIDATE_LIMIT = 3
+# 候選可發分到這個就夠穩，不必再試下一種
+_GATE_CANDIDATE_GOOD_ENOUGH = 0.85
 # 回應方式：選中的就是②要照著生成的內容方向
 _DECISION_MODE_GUIDE = {
     "answer": "回答：直接接住對方的問題或話頭",
@@ -2358,8 +2368,48 @@ class AccountWorker:
         threshold = float(getattr(self.config, "decision_gate_threshold", 0.5))
         return review["issue"] == "none" and review["sendable"] >= threshold
 
+    async def _pick_passing_candidate(
+        self,
+        context: str,
+        directive: str,
+        base_hint: str,
+        generate: Callable[[str], Awaitable[str]],
+        *,
+        limit: int = 3,
+    ) -> str:
+        """③ 不過時：改用不同策略各生一條候選，逐條審核，挑可發分最高的那條。
+
+        借鑑 jev-chat-jarvis 的 A/B/C 候選比較：反覆修同一句容易卡在同一個毛病，
+        換策略重寫有一次真正的比較機會。成本只落在難例上（多 2~3 次生成＋審核）。
+        生不出合格的就回 ""（呼叫方暫緩）。
+        """
+        best_text = ""
+        best_score = -1.0
+        for strategy in _GATE_REWRITE_STRATEGIES[: max(1, int(limit))]:
+            try:
+                candidate = await generate(f"{base_hint}\n這次的寫法：{strategy}")
+            except Exception:
+                continue
+            if not candidate:
+                continue
+            self.stats["gate_candidates"] = int(self.stats.get("gate_candidates", 0)) + 1
+            review = await self._review_candidate(context, candidate, directive)
+            if review is None or not self._review_passes(review):
+                continue
+            score = float(review.get("sendable") or 0.0)
+            if score > best_score:
+                best_score = score
+                best_text = candidate
+            # 已經很穩就不用再試下一種策略（省一次生成）
+            if score >= _GATE_CANDIDATE_GOOD_ENOUGH:
+                break
+        return best_text
+
     async def _gate_reply(self, event, text: str) -> str:
-        """③ 審核→重寫一次→暫緩：回 "" 表示這條不發。決策層停用時原樣通過。"""
+        """③ 審核→換策略重寫（A/B/C 候選擇優）→暫緩：回 "" 表示這條不發。
+
+        決策層停用時原樣通過。
+        """
         if not text or not self._decision_enabled():
             return text
         try:
@@ -2383,21 +2433,21 @@ class AccountWorker:
             f"sendable={review['sendable']:.2f} {text[:20]!r}",
             flush=True,
         )
-        retry = await self._generate_reply(
-            event,
-            extra_hint=f"上一版被決策層攔下，問題：{label}。這次避開這個問題。",
+        base_hint = f"上一版被決策層攔下，問題：{label}。這次避開這個問題。"
+        picked = await self._pick_passing_candidate(
+            context,
+            directive,
+            base_hint,
+            lambda hint: self._generate_reply(event, extra_hint=hint),
+            limit=_GATE_CANDIDATE_LIMIT,
         )
-        if not retry:
-            self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
-            return ""
-        review2 = await self._review_candidate(context, retry, directive)
-        if review2 is not None and self._review_passes(review2):
+        if picked:
             self.stats["gate_pass_after_rewrite"] = (
                 int(self.stats.get("gate_pass_after_rewrite", 0)) + 1
             )
-            return retry
+            return picked
         self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
-        print(f"[{self.name}] gate-hold: 重寫後仍不合格，暫緩 {retry[:20]!r}", flush=True)
+        print(f"[{self.name}] gate-hold: 換策略重寫仍不合格，暫緩", flush=True)
         return ""
 
     async def _apply_decision(self, event, *, forced_text: bool):
@@ -5062,21 +5112,23 @@ class AccountWorker:
                                 int(self.stats.get("proactive_gate_rewrite", 0)) + 1
                             )
                             print(f"[{self.name}] proactive-gate-rewrite: issue={issue} {topic[:20]!r}", flush=True)
-                            rewrite = await self._generate_context_topic(
-                                group_id,
-                                extra_hint=f"上一版被決策層攔下，問題：{label}。這次避開這個問題。",
+                            # 同樣換策略各生一條再挑（主動發言只試 2 種，成本留給回覆路徑）
+                            picked = await self._pick_passing_candidate(
+                                context,
+                                "",
+                                f"上一版被決策層攔下，問題：{label}。這次避開這個問題。",
+                                lambda hint: self._generate_context_topic(
+                                    group_id, extra_hint=hint
+                                ),
+                                limit=2,
                             )
-                            if not rewrite:
-                                print(f"[{self.name}] proactive-skip: rewrite empty, 這輪不發", flush=True)
-                                continue
-                            second = await self._review_candidate(context, rewrite)
-                            if second is None or not self._review_passes(second):
+                            if not picked:
                                 self.stats["proactive_gate_hold"] = (
                                     int(self.stats.get("proactive_gate_hold", 0)) + 1
                                 )
-                                print(f"[{self.name}] proactive-gate-hold: 重寫後仍不合格，暫緩 {rewrite[:20]!r}", flush=True)
+                                print(f"[{self.name}] proactive-gate-hold: 換策略重寫仍不合格，這輪不發", flush=True)
                                 continue
-                            topic = rewrite
+                            topic = picked
                     burst = self._split_human_burst(topic)
                     sent = False
                     for i, part in enumerate(burst):

@@ -497,3 +497,131 @@ def test_review_threshold():
     assert w._review_passes({"sendable": 0.5, "issue": "none"}) is True
     assert w._review_passes({"sendable": 0.49, "issue": "none"}) is False
     assert w._review_passes({"sendable": 0.9, "issue": "time"}) is False
+
+
+# ---------- ③ 不過時：A/B/C 換策略候選（借鑑 jev-chat-jarvis） ----------
+
+
+def test_gate_rewrite_tries_strategies_until_one_passes(monkeypatch):
+    """第三種策略才合格：要一路試到它，並記下候選數。"""
+    w = _worker("k")
+    reviews = {"n": 0}
+
+    async def fake(state, questions, **kw):
+        reviews["n"] += 1
+        if reviews["n"] == 1:
+            return {"sendable": {"noul": 0.2}, "issue": {"choice": "tone"}}
+        if reviews["n"] == 2:
+            return {"sendable": {"noul": 0.3}, "issue": {"choice": "tone"}}
+        if reviews["n"] == 3:
+            return {"sendable": {"noul": 0.4}, "issue": {"choice": "tone"}}
+        return {"sendable": {"noul": 0.9}, "issue": {"choice": "none"}}
+
+    monkeypatch.setattr(worker_mod, "system_one", fake)
+    hints = []
+
+    async def fake_gen(event, *, extra_hint=""):
+        hints.append(extra_hint)
+        return f"候選{len(hints)}"
+
+    w._generate_reply = lambda event, **kw: fake_gen(event, **kw)
+
+    out = asyncio.run(w._gate_reply(_event(), "先不要啦"))
+    assert out == "候選3"
+    assert w.stats.get("gate_candidates") == 3
+    assert w.stats.get("gate_pass_after_rewrite") == 1
+    # 三種策略各自不同，且都帶著「避開這個問題」的指示
+    assert len(set(hints)) == 3
+    assert all("避開這個問題" in h for h in hints)
+
+
+def test_gate_rewrite_stops_early_when_candidate_is_good_enough(monkeypatch):
+    """第一條候選可發分就夠高 → 不再浪費後面的生成。"""
+    w = _worker("k")
+    reviews = {"n": 0}
+
+    async def fake(state, questions, **kw):
+        reviews["n"] += 1
+        if reviews["n"] == 1:
+            return {"sendable": {"noul": 0.2}, "issue": {"choice": "tone"}}
+        return {"sendable": {"noul": 0.9}, "issue": {"choice": "none"}}
+
+    monkeypatch.setattr(worker_mod, "system_one", fake)
+    gen_calls = {"n": 0}
+
+    async def fake_gen(event, *, extra_hint=""):
+        gen_calls["n"] += 1
+        return "一次就中"
+
+    w._generate_reply = lambda event, **kw: fake_gen(event, **kw)
+
+    assert asyncio.run(w._gate_reply(_event(), "原句")) == "一次就中"
+    assert gen_calls["n"] == 1
+    assert w.stats.get("gate_candidates") == 1
+
+
+def test_gate_rewrite_picks_highest_sendable_candidate(monkeypatch):
+    """兩條都合格時取可發分高的那條，而不是先合格就先發。"""
+    w = _worker("k")
+    seq = [
+        {"sendable": {"noul": 0.2}, "issue": {"choice": "tone"}},   # 原句不過
+        {"sendable": {"noul": 0.60}, "issue": {"choice": "none"}},  # 候選A：合格但普通
+        {"sendable": {"noul": 0.80}, "issue": {"choice": "none"}},  # 候選B：更好
+    ]
+
+    async def fake(state, questions, **kw):
+        return seq.pop(0) if seq else {"sendable": {"noul": 0.5}, "issue": {"choice": "none"}}
+
+    monkeypatch.setattr(worker_mod, "system_one", fake)
+    texts = iter(["候選A", "候選B", "候選C"])
+
+    async def fake_gen(event, *, extra_hint=""):
+        return next(texts)
+
+    w._generate_reply = lambda event, **kw: fake_gen(event, **kw)
+
+    assert asyncio.run(w._gate_reply(_event(), "原句")) == "候選B"
+
+
+def test_gate_rewrite_all_candidates_fail_holds(monkeypatch):
+    w = _worker("k")
+
+    async def fake(state, questions, **kw):
+        return {"sendable": {"noul": 0.3}, "issue": {"choice": "contradict"}}
+
+    monkeypatch.setattr(worker_mod, "system_one", fake)
+    gen_calls = {"n": 0}
+
+    async def fake_gen(event, *, extra_hint=""):
+        gen_calls["n"] += 1
+        return f"還是不行{gen_calls['n']}"
+
+    w._generate_reply = lambda event, **kw: fake_gen(event, **kw)
+
+    assert asyncio.run(w._gate_reply(_event(), "原句")) == ""
+    assert gen_calls["n"] == 3  # 試滿三種策略才放棄
+    assert w.stats.get("gate_held") == 1
+    assert not w.stats.get("gate_pass_after_rewrite")
+
+
+def test_gate_rewrite_skips_empty_candidates(monkeypatch):
+    """生成空字串的候選直接跳過，不佔用審核。"""
+    w = _worker("k")
+    reviews = {"n": 0}
+
+    async def fake(state, questions, **kw):
+        reviews["n"] += 1
+        if reviews["n"] == 1:
+            return {"sendable": {"noul": 0.2}, "issue": {"choice": "tone"}}
+        return {"sendable": {"noul": 0.9}, "issue": {"choice": "none"}}
+
+    monkeypatch.setattr(worker_mod, "system_one", fake)
+    texts = iter(["", "第二條才成"])
+
+    async def fake_gen(event, *, extra_hint=""):
+        return next(texts)
+
+    w._generate_reply = lambda event, **kw: fake_gen(event, **kw)
+
+    assert asyncio.run(w._gate_reply(_event(), "原句")) == "第二條才成"
+    assert w.stats.get("gate_candidates") == 1  # 空候選不計
