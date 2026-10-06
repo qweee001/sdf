@@ -21,9 +21,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 曾被外部審查抓到「同一提交測試失敗卻仍部署成功」13 次——因為 Railway 只認 push。
 # 已知抖動（影片渲染與語音派送的時序測試）在本機單獨重跑也會失敗，先明確 deselect，
 # 其餘測試全跑；要恢復它，先修好那個測試再拿掉這行。
-# 注意順序：測試會 import app，所以 app 必須先複製進來。
+# 注意順序與內容：測試會 import app、讀 tools/ 的校準工具，也會讀 Dockerfile 本身；
+# 少複製一項就會在收集階段直接失敗（第一次上線就是漏了 tools/ 被閘門擋下）。
 COPY --chown=app:app app ./app
 COPY tests ./tests
+COPY --chown=app:app tools ./tools
+COPY Dockerfile ./Dockerfile
 RUN pip install --no-cache-dir pytest pytest-asyncio && \
     python -m pytest -q \
       --deselect tests/test_live_test.py::test_video_render_runs_in_own_task_without_blocking_text_or_voice
