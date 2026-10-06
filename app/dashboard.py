@@ -836,6 +836,35 @@ body {
 .hub-chip-static { cursor: default; }
 .hub-label-input { background: #0a0e12; border: 1px dashed var(--line); border-radius: 4px; color: var(--ink); padding: .2rem .45rem; font-size: 11px; width: 140px; }
 .hub-empty { color: var(--ink-dim); font-size: 12px; padding: .9rem; text-align: center; }
+/* 全站搜尋（Ctrl+K） */
+.palette { position: fixed; inset: 0; background: rgba(6,9,12,.72); z-index: 40; display: none; align-items: flex-start; justify-content: center; padding-top: 12vh; }
+.palette.on { display: flex; }
+.palette-box { width: min(680px, 92vw); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; box-shadow: 0 18px 60px rgba(0,0,0,.55); }
+.palette-input { width: 100%; padding: .85rem 1rem; background: #0a0e12; border: 0; border-bottom: 1px solid var(--line); color: var(--ink); font-size: 14px; font-family: var(--mono); }
+.palette-input:focus { outline: none; }
+.palette-list { max-height: 52vh; overflow-y: auto; }
+.p-hit { display: flex; align-items: center; gap: 10px; padding: .55rem .9rem; cursor: pointer; border-bottom: 1px solid #1a222a; }
+.p-hit:hover, .p-hit.on { background: #18222c; }
+.p-kind { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); width: 54px; flex-shrink: 0; }
+.p-main { flex: 1; min-width: 0; }
+.p-main b { font-size: 12.5px; }
+.p-main span { display: block; font-size: 11px; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p-empty { padding: .9rem; color: var(--ink-dim); font-size: 12px; text-align: center; }
+.palette-foot { display: flex; gap: 12px; padding: .45rem .9rem; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+/* 收藏與檢視 chips */
+.chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.chip { border: 1px solid var(--line); background: #0f151a; color: var(--ink-dim); border-radius: 3px; padding: .18rem .55rem; font-size: 11px; font-family: var(--mono); cursor: pointer; white-space: nowrap; }
+.chip:hover { border-color: #3a4753; color: var(--ink); }
+.chip.on { background: #0f1d16; border-color: #2f6f4f; color: #7ee2a8; font-weight: 700; }
+.chip .x { margin-left: 5px; color: var(--ink-faint); }
+.chip-fav { border-color: #4a3410; color: #ffc46b; }
+/* 表格密度 */
+body.dense .feed { gap: 3px; }
+body.dense .feed-item .who { font-size: 10.5px; }
+body.dense .bubble { padding: .3rem .55rem; font-size: 11.5px; }
+body.dense .bar-row { padding: 1px 0; font-size: 11px; }
+body.dense .card { padding: 9px 10px; margin-bottom: 9px; }
+body.dense #accounts .card .meta { line-height: 1.45; }
 /* 手機：車道改縱向堆疊 */
 @media (max-width: 900px) {
     .wrap { padding: 11px 12px 20px; }
@@ -869,8 +898,13 @@ body {
         <div class="toolbar">
             <button class="btn btn-primary" onclick="openAddModal()">＋ 新增水軍帳號</button>
             <button class="btn btn-secondary" onclick="showGroups('')">🗂️ 群組總管</button>
+            <button class="btn btn-secondary" onclick="openPalette()">🔎 搜尋 <span style="color:var(--ink-faint)">Ctrl K</span></button>
+            <button class="btn btn-secondary" id="densityBtn" onclick="toggleDensity()">密度：標準</button>
+            <button class="btn btn-secondary" onclick="saveCurrentView()">＋ 儲存檢視</button>
             <span class="toolbar-hint" id="queueHint"></span>
         </div>
+        <div class="chips" id="favChips" style="margin:-4px 0 10px"></div>
+        <div class="chips" id="viewChips" style="margin:-4px 0 12px"></div>
 
         <div class="bottom">
             <div class="card" id="monitorCard">
@@ -913,6 +947,15 @@ body {
                 <div class="meta" id="liveTestDetail"></div>
             </div>
         </div>
+    </div>
+</div>
+
+<!-- 全站搜尋 -->
+<div class="palette" id="palette">
+    <div class="palette-box">
+        <input class="palette-input" id="paletteInput" placeholder="搜尋帳號、群組、最近訊息…" autocomplete="off">
+        <div class="palette-list" id="paletteList"></div>
+        <div class="palette-foot"><span>↑↓ 選擇</span><span>Enter 前往</span><span>Esc 關閉</span></div>
     </div>
 </div>
 
@@ -1238,6 +1281,8 @@ async function loadStatus() {
             ? `24h 攔截 ${blocked} 件 · 最多是「${reasonLabel[top[0]] || top[0]}」${top[1]} 件`
             : '24h 無攔截紀錄';
     }
+    renderFavChips();
+    renderViewChips();
     const auditEl = document.getElementById('replyAudit');
     const stages = Object.keys(audit);
     if (!stages.length) {
@@ -1282,6 +1327,176 @@ async function saveFeatures() {
     if (!r.ok) toast(r.data.error || '功能設定失敗');
     else toast('功能設定已立即生效');
     await loadStatus();
+}
+
+// ---- 收藏群組 / 儲存檢視 / 密度 / 全站搜尋（移植自 v2）-------------------
+const FAV_KEY = 'sdf_fav_groups';
+const VIEW_KEY = 'sdf_saved_views';
+const DENSITY_KEY = 'sdf_density';
+let directoryGroups = [];
+let paletteHits = [];
+let paletteIndex = 0;
+
+function readStore(key, fallback) {
+    try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
+    catch (e) { return fallback; }
+}
+function writeStore(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+}
+function groupLabel(id) {
+    const hit = directoryGroups.find(g => String(g.id) === String(id));
+    return hit ? (hit.display || hit.title || String(id)) : ('群組 ' + id);
+}
+function selectedIds() {
+    return [...(document.getElementById('monitorGroup')?.options || [])].map(o => o.value);
+}
+function applyGroup(id) {
+    const sel = document.getElementById('monitorGroup');
+    if (!sel) return;
+    if (![...sel.options].some(o => o.value === String(id))) return;
+    sel.value = String(id);
+    monitorGroupId = String(id);
+    try { localStorage.setItem('sdf_monitor_group', String(id)); } catch (e) {}
+    loadMonitor();
+    renderFavChips();
+    closePalette();
+}
+function toggleFavorite(id) {
+    const favs = readStore(FAV_KEY, []);
+    const next = favs.includes(String(id)) ? favs.filter(x => x !== String(id)) : [...favs, String(id)];
+    writeStore(FAV_KEY, next);
+    renderFavChips();
+}
+function renderFavChips() {
+    const box = document.getElementById('favChips');
+    if (!box) return;
+    const favs = readStore(FAV_KEY, []).filter(id => selectedIds().includes(String(id)));
+    box.innerHTML = favs.length
+        ? '<span class="meta" style="font-family:var(--mono)">收藏</span>' + favs.map(id =>
+            `<span class="chip chip-fav${String(monitorGroupId) === String(id) ? ' on' : ''}" onclick="applyGroup('${id}')">★ ${esc(groupLabel(id))}<span class="x" onclick="event.stopPropagation();toggleFavorite('${id}')">✕</span></span>`
+          ).join('')
+        : '<span class="meta">沒有收藏的群組（在下方群組清單或總管按 ★ 加入）</span>';
+}
+function saveCurrentView() {
+    const name = prompt('檢視名稱（例如：桃花源 待處理）', groupLabel(monitorGroupId) + ' · ' + densityName());
+    if (!name) return;
+    const views = readStore(VIEW_KEY, []);
+    views.push({ name: name.slice(0, 40), group: monitorGroupId, dense: document.body.classList.contains('dense') });
+    writeStore(VIEW_KEY, views.slice(-12));
+    renderViewChips();
+    toast('已儲存檢視：' + name);
+}
+function applyView(idx) {
+    const views = readStore(VIEW_KEY, []);
+    const view = views[idx];
+    if (!view) return;
+    if (view.group) applyGroup(view.group);
+    setDensity(!!view.dense);
+}
+function deleteView(idx) {
+    const views = readStore(VIEW_KEY, []);
+    views.splice(idx, 1);
+    writeStore(VIEW_KEY, views);
+    renderViewChips();
+}
+function renderViewChips() {
+    const box = document.getElementById('viewChips');
+    if (!box) return;
+    const views = readStore(VIEW_KEY, []);
+    box.innerHTML = views.length
+        ? '<span class="meta" style="font-family:var(--mono)">檢視</span>' + views.map((v, i) =>
+            `<span class="chip" onclick="applyView(${i})">${esc(v.name)}<span class="x" onclick="event.stopPropagation();deleteView(${i})">✕</span></span>`
+          ).join('')
+        : '';
+}
+function densityName() { return document.body.classList.contains('dense') ? '精簡' : '標準'; }
+function setDensity(dense) {
+    document.body.classList.toggle('dense', !!dense);
+    writeStore(DENSITY_KEY, !!dense);
+    const btn = document.getElementById('densityBtn');
+    if (btn) btn.textContent = '密度：' + densityName();
+}
+function toggleDensity() { setDensity(!document.body.classList.contains('dense')); }
+
+// ---- 全站搜尋 ----
+function openPalette() {
+    const box = document.getElementById('palette');
+    if (!box) return;
+    box.classList.add('on');
+    const input = document.getElementById('paletteInput');
+    input.value = '';
+    input.focus();
+    renderPalette('');
+}
+function closePalette() {
+    document.getElementById('palette')?.classList.remove('on');
+}
+function paletteItems() {
+    const items = [];
+    ((latestStatusData && latestStatusData.accounts) || []).forEach(acc => {
+        const persona = safeParse(acc.persona);
+        items.push({
+            kind: '帳號',
+            title: (persona.name || acc.name) + (acc.is_running ? '（運行中）' : '（停止）'),
+            sub: (persona.city || '未設定') + (persona.district ? '・' + persona.district : '') + '｜回覆 ' + acc.stats.replies_sent + '｜主動 ' + acc.stats.proactive_sent,
+            act: () => { closePalette(); showPersona(acc.id); },
+        });
+    });
+    directoryGroups.forEach(g => {
+        items.push({
+            kind: '群組',
+            title: g.display || g.title || String(g.id),
+            sub: `${g.members || 0} 人｜訊息 ${g.msg_count || 0}｜真人 ${g.human_senders || 0}｜水軍 ${g.selected_count || 0}`,
+            act: () => applyGroup(g.id),
+        });
+    });
+    ((window.__paletteMessages) || []).forEach(m => {
+        items.push({
+            kind: '訊息',
+            title: String(m.content || '').slice(0, 60),
+            sub: (m.sender_name || '') + ' · ' + (String(m.role) === 'assistant' ? '水軍' : '真人'),
+            act: () => { const gid = m.group_id || monitorGroupId; closePalette(); applyGroup(gid); },
+        });
+    });
+    return items;
+}
+function renderPalette(query) {
+    const list = document.getElementById('paletteList');
+    if (!list) return;
+    const term = String(query || '').trim().toLowerCase();
+    const all = paletteItems();
+    paletteHits = (term
+        ? all.filter(i => (i.title + ' ' + i.sub).toLowerCase().includes(term))
+        : all.slice(0, 12)).slice(0, 40);
+    paletteIndex = 0;
+    list.innerHTML = paletteHits.length
+        ? paletteHits.map((h, i) =>
+            `<div class="p-hit${i === 0 ? ' on' : ''}" data-i="${i}"><span class="p-kind">${h.kind}</span><span class="p-main"><b>${esc(h.title)}</b><span>${esc(h.sub)}</span></span></div>`
+          ).join('')
+        : '<div class="p-empty">沒有符合的項目</div>';
+    if (term) loadPaletteMessages(term);
+}
+let paletteMsgTimer = null;
+function loadPaletteMessages(term) {
+    clearTimeout(paletteMsgTimer);
+    paletteMsgTimer = setTimeout(async () => {
+        if (!monitorGroupId) return;
+        const r = await api(`/api/groups/${monitorGroupId}/messages?limit=200`).catch(() => null);
+        if (!r || !r.ok) return;
+        window.__paletteMessages = (r.data.messages || []).filter(m => String(m.content || '').toLowerCase().includes(term));
+        renderPalette(term);
+    }, 220);
+}
+function paletteMove(step) {
+    if (!paletteHits.length) return;
+    paletteIndex = (paletteIndex + step + paletteHits.length) % paletteHits.length;
+    document.querySelectorAll('.p-hit').forEach((el, i) => el.classList.toggle('on', i === paletteIndex));
+    document.querySelector('.p-hit.on')?.scrollIntoView({ block: 'nearest' });
+}
+function paletteRun() {
+    const hit = paletteHits[paletteIndex];
+    if (hit) hit.act();
 }
 
 function safeParse(s) { try { return JSON.parse(s) || {}; } catch (e) { return {}; } }
@@ -1706,6 +1921,7 @@ async function loadMonitorGroups() {
     const sel = document.getElementById('monitorGroup');
     if (!sel) return;
     const groups = (r && r.ok && r.data.groups) || [];
+    directoryGroups = groups;
     if (groups.length) {
         sel.innerHTML = groups.map(g => {
             const flags = [];
@@ -1861,6 +2077,32 @@ async function loadLiveTestStatus() {
         loadStatus();
         loadMonitorGroups();
         loadLiveTestStatus();
+        setDensity(readStore(DENSITY_KEY, false));
+        renderFavChips();
+        renderViewChips();
+        document.getElementById('paletteInput')?.addEventListener('input', (e) => renderPalette(e.target.value));
+        document.getElementById('paletteList')?.addEventListener('click', (e) => {
+            const hit = e.target.closest('.p-hit');
+            if (!hit) return;
+            paletteIndex = Number(hit.dataset.i) || 0;
+            paletteRun();
+        });
+        document.getElementById('palette')?.addEventListener('click', (e) => {
+            if (e.target.id === 'palette') closePalette();
+        });
+        document.addEventListener('keydown', (e) => {
+            const open = document.getElementById('palette')?.classList.contains('on');
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+                e.preventDefault();
+                open ? closePalette() : openPalette();
+                return;
+            }
+            if (!open) return;
+            if (e.key === 'Escape') closePalette();
+            else if (e.key === 'ArrowDown') { e.preventDefault(); paletteMove(1); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); paletteMove(-1); }
+            else if (e.key === 'Enter') { e.preventDefault(); paletteRun(); }
+        });
         setInterval(() => {
             if (document.getElementById('mainBox').style.display !== 'none') {
                 loadStatus();
