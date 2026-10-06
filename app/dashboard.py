@@ -770,7 +770,6 @@ h1 { font-size: 1.3rem; color: #38bdf8; }
 .hub-list { max-height: 56vh; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.2rem; }
 .hub-row { background: #0f172a; border: 1px solid #24334d; border-radius: 10px; padding: 0.7rem 0.8rem; }
 .hub-row.hub-row-on { border-color: #16a34a; }
-.hub-row.hub-row-focus { box-shadow: 0 0 0 1px #38bdf8; }
 .hub-row-top { display: flex; justify-content: space-between; gap: 0.7rem; align-items: flex-start; flex-wrap: wrap; }
 .hub-name { font-size: 0.95rem; font-weight: bold; color: #e2e8f0; word-break: break-all; }
 .hub-id { font-size: 0.72rem; color: #64748b; cursor: pointer; }

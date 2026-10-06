@@ -167,23 +167,6 @@ def test_prompt_keeps_stable_speaker_identity_and_unknown_provenance():
     assert "共享筆記不是你的親身經歷" in prompt
 
 
-@pytest.mark.parametrize("hours_idle", [7, 25, None])
-@pytest.mark.parametrize("base", [60.0, 600.0])
-def test_cold_room_never_speeds_up_configured_continuous_interval(monkeypatch, hours_idle, base):
-    async def main():
-        worker = running_worker()
-        now = 1_000_000.0
-        monkeypatch.setattr("app.worker.time.time", lambda: now)
-        worker.config.continuous_activity_interval_seconds = base
-        worker.last_human_activity = {} if hours_idle is None else {GROUP: now - hours_idle * 3600}
-        worker._continuous_turn_winner = lambda *args: 101
-        worker.db.reserve_continuous_slot = AsyncMock(return_value=False)
-        await worker._continuous_activity_tick()
-        reservation = worker.db.reserve_continuous_slot.await_args.args
-        assert reservation[3] >= base
-
-    asyncio.run(main())
-
 
 def test_manager_preserves_empty_shared_topic_counts(monkeypatch):
     from app.manager import AccountManager

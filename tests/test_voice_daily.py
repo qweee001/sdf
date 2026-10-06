@@ -90,43 +90,8 @@ def test_daily_voice_claim_is_atomic_per_account_and_day_across_connections(tmp_
     asyncio.run(main())
 
 
-def test_worker_daily_pregenerated_voice_is_always_fail_closed():
-    async def main():
-        db = _VoiceDB()
-        worker = _voice_worker(db, enabled=False)
-        now = _hkt_timestamp(100, 23, 59)
-
-        assert await worker._maybe_send_daily_voice(now=now) is False
-        assert db.claim_calls == []
-        worker.tg_client.send_file.assert_not_awaited()
-
-        worker.config.voice_media_enabled = True
-        assert await worker._maybe_send_daily_voice(now=now) is False
-        assert worker.voice_library.calls == []
-        assert db.claim_calls == []
-        worker.tg_client.send_file.assert_not_awaited()
-        assert db.messages == []
-        assert db.activities == []
-        assert worker.stats["voice_proactive_sent"] == 0
-
-    asyncio.run(main())
 
 
-def test_worker_suppresses_daily_voice_during_taohuayuan_busy_hours_or_recent_human_activity():
-    async def main():
-        db = _VoiceDB()
-        worker = _voice_worker(db)
-        busy = _hkt_timestamp(100, 20, 30)
-        assert await worker._maybe_send_daily_voice(now=busy) is False
-        assert db.claim_calls == []
-
-        quiet = _hkt_timestamp(100, 23, 59)
-        worker.last_human_activity[-1001] = quiet - 60
-        assert await worker._maybe_send_daily_voice(now=quiet) is False
-        assert db.claim_calls == []
-        worker.tg_client.send_file.assert_not_awaited()
-
-    asyncio.run(main())
 
 
 def test_daily_voice_group_separation_blocks_second_account_within_30_minutes(tmp_path: Path):
@@ -160,21 +125,6 @@ def test_daily_voice_group_separation_blocks_second_account_within_30_minutes(tm
     asyncio.run(main())
 
 
-def test_worker_does_not_send_when_group_claim_is_refused():
-    async def main():
-        db = _VoiceDB()
-
-        async def refuse(*args, **kwargs):
-            return False
-
-        db.claim_daily_voice = refuse
-        worker = _voice_worker(db)
-        now = _hkt_timestamp(100, 23, 59)
-        assert await worker._maybe_send_daily_voice(now=now) is False
-        worker.tg_client.send_file.assert_not_awaited()
-        assert db.messages == []
-
-    asyncio.run(main())
 
 
 def test_worker_start_never_creates_daily_voice_loop_even_if_flag_true():

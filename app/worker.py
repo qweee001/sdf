@@ -211,12 +211,6 @@ def _dialog_member_count(dialog) -> int:
 
 # 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
 _MAX_TOPIC_TURNS = 3
-# 冷場（无真人）時，水軍主動發言的漸進降頻窗口（秒）
-_COLD_ROOM_BASE_INTERVAL = 10.0
-_COLD_ROOM_REDUCED_INTERVAL = 15.0
-_COLD_ROOM_PAUSED_INTERVAL = 30.0
-_COLD_ROOM_REDUCED_HOURS = 6.0
-_COLD_ROOM_PAUSED_HOURS = 24.0
 _HIGH_TRAFFIC_HUMANS_5M = 14
 _HIGH_TRAFFIC_MAX_ORDINARY_5M = 2
 _MAX_ORDINARY_CLAIMS_10M = 8
@@ -541,12 +535,6 @@ _PERSON_INTERACTION_PATTERN = re.compile(
     r"的?(?:文字|訊息|消息|照片|相片))|"
     r"(?<![a-z0-9])(?:see|show)\s+(?:you|me)(?![a-z0-9])"
 )
-_PHOTO_OR_EQUIPMENT_PATTERN = re.compile(
-    r"(?:拍照|拍攝|拍摄|攝影|摄影|照片|相片|鏡頭蓋|镜头盖|"
-    r"焦距|光圈|畫素|像素|設定|設置|设置|規格|规格|相機店|相机店|"
-    r"故障|維修|维修|修理|(?<![a-z0-9])(?:photo|lens|broken|repair|settings?|specs?)"
-    r"(?![a-z0-9]))"
-)
 _REMOTE_CALL_OR_CHAT_PATTERN = re.compile(
     r"(?:聊|通話|通话)|(?<![a-z0-9])(?:call|chat)(?![a-z0-9])"
 )
@@ -680,7 +668,7 @@ class AccountWorker:
         self._rng = random.Random(
             int.from_bytes(
                 hashlib.blake2b(
-                    f"pool:{self.account_id}".encode(), digest_size=8
+                    f"rng:{self.account_id}".encode(), digest_size=8
                 ).digest(),
                 "big",
             )
@@ -703,7 +691,6 @@ class AccountWorker:
             "replies_sent": 0,
             "errors": 0,
             "proactive_sent": 0,
-            "voice_proactive_sent": 0,
             "voice_realtime_sent": 0,
             "voice_realtime_errors": 0,
             "managed_claimed": 0,
@@ -1342,10 +1329,7 @@ class AccountWorker:
             if is_photo:
                 return await self._wait_for_media_claim(event)
             return False
-        continuous = bool(
-            getattr(self.config, "continuous_activity_mode", False)
-        )
-        if ordinary and not continuous and not await self._admit_ordinary_reply(event):
+        if ordinary and not await self._admit_ordinary_reply(event):
             await self.db.release_message_response_claim(
                 key[0], key[1], self.account_id
             )
@@ -1423,7 +1407,6 @@ class AccountWorker:
 
     async def _should_reply(self, event) -> bool:
         sender_id = int(event.sender_id or 0)
-        continuous = bool(getattr(self.config, "continuous_activity_mode", False))
         if sender_id == self.tg_user_id:
             return False
         # 管理員/機器人公告不互動：它是群務廣播，真人也不會回它
@@ -1459,25 +1442,12 @@ class AccountWorker:
                     return await self._wait_for_media_claim(event)
                 return False
             return await self._claim_human_reply(event, int(self.tg_user_id or 0))
-        if not self._is_meaningful_human_message(event) and not (
-            continuous
-            and (
-                bool(str(event.raw_text or "").strip())
-                or getattr(event, "media", None) is not None
-            )
-        ):
+        if not self._is_meaningful_human_message(event):
             return False
         if not await self._ordinary_reply_allowed(event):
             return False
         group_id = int(event.chat_id or 0)
         eligible_in_group = self.active_group_ids.get(group_id, set())
-        if continuous:
-            winner = self._ordinary_reply_winner(event)
-            if not winner:
-                return False
-            return await self._claim_human_reply(
-                event, winner, ordinary=True
-            )
         owner_key = (group_id, sender_id)
         owner_id = self._active_owner(self.human_owners.get(owner_key))
         if (
@@ -1596,10 +1566,6 @@ class AccountWorker:
         group_id, message_id = self._reply_claim_key(event)
         if not group_id or message_id <= 0:
             return False
-        if bool(getattr(self.config, "continuous_activity_mode", False)):
-            # 连续活跃模式仍由稳定赢家 + 数据库 claim 保证 exactly-one；
-            # 这里只取消概率与高峰预算，确保每条真人消息有人接住。
-            return True
         probability = max(
             0.0,
             min(1.0, float(getattr(self.config, "base_reply_probability", 0.35))),
@@ -1991,7 +1957,7 @@ class AccountWorker:
         """時段穿幫偵測：主動發言自帶跟現在時段不合的詞（17 點講早安、吃早餐）。
 
         光靠 prompt 尾端的時段提示，35B 模型不穩定；這裡做確定性兜底，
-        不合就丟掉換池子（池子全是時段中立句）。
+        不合就丟掉重寫（重寫時把已經講過的餵回去逼模型換說法）。
 
         greetings_only=True 只驗問候語，給「回覆」路徑用：回覆裡出現
         「早餐／午餐／晚餐」通常是在接對方的話題（例如「付兩百買午餐」），
@@ -4415,9 +4381,6 @@ class AccountWorker:
     def _hkt_second_of_day(now: float) -> int:
         return int((float(now) + 8 * 3600) % 86400)
 
-    async def _maybe_send_daily_voice(self, *, now: float | None = None) -> bool:
-        """Pre-generated daily voice is permanently disabled."""
-        return False
 
     # ---------- 即時話題語音（本地 IndexTTS2 服務） ----------
 
@@ -4939,199 +4902,12 @@ class AccountWorker:
             return topic
         return ""
 
-    def _continuous_turn_winner(self, group_id: int, slot: int) -> int:
-        """Return one rotating eligible account for a group/time slot."""
-        eligible_ids = (
-            self.active_group_ids.get(int(group_id), set())
-            if self._group_eligibility_enabled
-            else self.active_ids
-        )
-        candidates = sorted(
-            int(user_id)
-            for user_id in eligible_ids
-            if int(user_id) > 0 and int(user_id) in self.active_ids
-        )
-        if not candidates:
-            return 0
-        offset = int.from_bytes(
-            hashlib.blake2b(
-                f"continuous-group:{int(group_id)}".encode(), digest_size=2
-            ).digest(),
-            "big",
-        ) % len(candidates)
-        return candidates[(int(slot) + offset) % len(candidates)]
 
-    async def _generate_continuous_reply(self, group_id: int) -> str:
-        """Extend the latest concrete group topic using this account's persona."""
-        history = await self.db.get_recent_messages(
-            self.account_id,
-            int(group_id),
-            max(1, int(getattr(self.config, "memory_max_messages", 30))),
-        )
-        if not history:
-            return await self._generate_context_topic(int(group_id))
-        latest = history[-1]
-        sender_name = str(latest.get("sender_name") or "有人")
-        event = SimpleNamespace(
-            chat_id=int(group_id),
-            sender_id=int(latest.get("sender_id") or 0),
-            id=0,
-            message=None,
-            raw_text=str(latest.get("content") or "").strip(),
-            media=None,
-            sender=SimpleNamespace(
-                first_name=sender_name,
-                last_name="",
-                title=sender_name,
-            ),
-            is_reply=False,
-            mentioned=False,
-        )
-        if not event.raw_text:
-            return await self._generate_context_topic(int(group_id))
-        return await self._generate_reply(event)
 
-    async def _continuous_activity_tick(self) -> None:
-        current = time.time()
-        for group_id in sorted(int(gid) for gid in self.selected_groups):
-            # 每個群分開計時：依該群最近真人活動時間決定本群間隔（冷場逐步降頻）
-            last_human = float(self.last_human_activity.get(group_id, 0) or 0)
-            hours_since_human = (
-                (current - last_human) / 3600 if last_human else float("inf")
-            )
-            base_interval = max(
-                _COLD_ROOM_BASE_INTERVAL,
-                float(
-                    getattr(
-                        self.config,
-                        "continuous_activity_interval_seconds",
-                        _COLD_ROOM_BASE_INTERVAL,
-                    )
-                ),
-            )
-            if hours_since_human < _COLD_ROOM_REDUCED_HOURS:
-                # 真人活躍：正常節奏（真人回來時優先接真人內容）
-                interval = base_interval
-            elif hours_since_human < _COLD_ROOM_PAUSED_HOURS:
-                # 冷場 6h：逐步降頻（間隔拉長）
-                interval = max(base_interval, _COLD_ROOM_REDUCED_INTERVAL)
-            else:
-                # 冷場 24h+：再降頻
-                interval = max(base_interval, _COLD_ROOM_PAUSED_INTERVAL)
-            slot = int(current // interval)
-            if self._continuous_turn_winner(group_id, slot) != int(
-                self.tg_user_id or 0
-            ):
-                continue
-            if last_human and current - last_human < interval:
-                # 先给真人一個發送窗口：真人在說話時水軍讓路，優先接真人內容
-                continue
-            pending_seconds = max(120.0, interval * 12.0)
-            if not await self.db.reserve_continuous_slot(
-                group_id,
-                slot,
-                self.account_id,
-                interval,
-                pending_seconds,
-            ):
-                continue
-            try:
-                text = await self._generate_continuous_reply(group_id)
-            except asyncio.CancelledError:
-                # 生成阶段尚未进入 Telegram RPC，可安全让下一账号接管。
-                await self.db.release_continuous_slot(
-                    group_id, slot, self.account_id
-                )
-                raise
-            except Exception as e:
-                self.stats["errors"] += 1
-                print(f"[{self.name}] continuous generation error: {e}", flush=True)
-                await self.db.release_continuous_slot(
-                    group_id, slot, self.account_id
-                )
-                continue
-            if not text:
-                await self.db.release_continuous_slot(
-                    group_id, slot, self.account_id
-                )
-                continue
-
-            dispatched = False
-
-            def mark_dispatched() -> None:
-                nonlocal dispatched
-                dispatched = True
-
-            sent = False
-            delivery_unknown = False
-            try:
-                sent = await self._send_text_recorded(
-                    group_id,
-                    text,
-                    activity_kind="proactive",
-                    stats_key="proactive_sent",
-                    managed_origin=False,
-                    on_dispatched=mark_dispatched,
-                )
-            except asyncio.CancelledError:
-                # 取消可能发生在 Telegram RPC 已被服务端接收之后；fail-closed。
-                delivery_unknown = True
-                try:
-                    await asyncio.shield(
-                        self.db.complete_continuous_slot(
-                            group_id, slot, self.account_id
-                        )
-                    )
-                except Exception as complete_error:
-                    self.stats["errors"] += 1
-                    print(
-                        f"[{self.name}] continuous cancelled slot completion error: "
-                        f"{complete_error}",
-                        flush=True,
-                    )
-                raise
-            except Exception as e:
-                # 发送调用抛错时无法证明 Telegram 未接收；禁止释放后重复发送。
-                delivery_unknown = True
-                self.stats["errors"] += 1
-                print(f"[{self.name}] continuous send error: {e}", flush=True)
-
-            if sent or dispatched or delivery_unknown:
-                completed = await self.db.complete_continuous_slot(
-                    group_id, slot, self.account_id
-                )
-                if not completed:
-                    self.stats["errors"] += 1
-                    print(
-                        f"[{self.name}] continuous slot completion failed",
-                        flush=True,
-                    )
-            else:
-                await self.db.release_continuous_slot(
-                    group_id, slot, self.account_id
-                )
 
     async def _proactive_loop(self):
         while self.is_running:
             try:
-                if bool(getattr(self.config, "continuous_activity_mode", False)):
-                    interval = max(
-                        10.0,
-                        float(
-                            getattr(
-                                self.config,
-                                "continuous_activity_interval_seconds",
-                                10.0,
-                            )
-                        ),
-                    )
-                    await asyncio.sleep(min(1.0, interval / 4.0))
-                    if not self.is_running:
-                        return
-                    # 帳號級主動開關優先，全域 PROACTIVE_ENABLED 為 fallback
-                    if self.proactive_enabled and bool(getattr(self.config, "proactive_enabled", True)):
-                        await self._continuous_activity_tick()
-                    continue
                 # 隨機間隔 4-12 分鐘（錯峰）
                 loop_min = max(1.0, float(self.config.proactive_loop_min_seconds))
                 loop_max = max(
