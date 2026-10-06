@@ -118,6 +118,14 @@ _GATE_CANDIDATE_LIMIT = 3
 _GATE_CANDIDATE_GOOD_ENOUGH = 0.85
 # 水軍輪替：上一則是自己人時，只在「輪到我」且隔了這麼久才接（避免三隻疊字）
 _PROACTIVE_ROTATION_MIN_GAP = 90.0
+# 純水軍自演剎車：連續幾則都是水軍、期間沒有真人講話，就不再主動開口。
+# 實測沒有這條時，三隻會在空群裡一路接力升級（RICH→小小→小天後→小小 七則連續，
+# 最後演變成「來中壢讓我檢查／不如士林讓我檢查」這種沒對象的邀約）。
+_MAX_WATER_ONLY_STREAK = 2
+# 純水軍串時露骨度上限：沒有真人參與，越撩越兇只會更像機器人
+_WATER_ONLY_FLIRTY_CAP = 1
+# 這個時間窗內有真人講話，才算是「有人可以接話」的場合
+_HUMAN_CONTEXT_WINDOW_SECONDS = 1800.0
 # 意圖識別：先讀懂對方這句話在做什麼，後面的方式與尺度才有依據
 _DECISION_INTENT_GUIDE = {
     "chat": "日常閒聊：隨口接話，沒有特別目的",
@@ -4872,15 +4880,27 @@ class AccountWorker:
         ratio = int.from_bytes(digest, "big") / 65535.0
         return base * (0.8 + 1.6 * ratio)
 
-    async def _proactive_rotation_ok(self, group_id: int, latest: dict | None) -> bool:
-        """水軍輪替：誰最久沒在這個群講話，誰優先接；其他兩隻繼續讓路。
+    @staticmethod
+    def _water_only_streak(rows: list[dict]) -> int:
+        """群裡尾端連續幾則是水軍（期間沒有真人插話）。"""
+        streak = 0
+        for row in reversed(list(rows or [])):
+            if str(row.get("role")) == "assistant":
+                streak += 1
+                continue
+            break
+        return streak
 
-        舊規則是「上一則是水軍就一律閉嘴」，結果群裡永遠只有同一隻在撐場
-        （實測群 111 幾乎都是小小）。現在改成：
-        - 上一則不是自己人 → 照常（市場對話優先）
+    async def _proactive_rotation_ok(self, group_id: int, latest: dict | None) -> bool:
+        """水軍輪替＋純水軍自演剎車。
+
+        輪替：誰最久沒在這個群講話，誰優先接（真人熱聊時三隻平均輪流）。
+        剎車：群裡尾端連續 _MAX_WATER_ONLY_STREAK 則以上都是水軍、期間沒有真人
+        講話時，不再主動開口——空群裡三隻互相接力只會演成「AI 自己跟自己聊天」。
+
+        - 上一則不是自己人 → 真人剛講話，照常（市場對話優先）
         - 上一則是自己：不接（不跟自己講話）
-        - 上一則是另一個水軍：只有「我上一條比其他人更早（或從沒講過）」才接，
-          而且那則要隔 _PROACTIVE_ROTATION_MIN_GAP 秒以上，避免三隻疊字。
+        - 上一則是另一個水軍：輪到我 + 隔 _PROACTIVE_ROTATION_MIN_GAP 秒才接
         """
         latest = latest or {}
         if str(latest.get("role")) != "assistant":
@@ -4889,6 +4909,17 @@ class AccountWorker:
         me = int(self.tg_user_id or 0)
         if latest_sender and me and latest_sender == me:
             print(f"[{self.name}] proactive-skip: 上一則是我自己", flush=True)
+            return False
+        try:
+            recent_rows = await self.db.get_group_messages(group_id, limit=6)
+        except Exception:
+            recent_rows = []
+        streak = self._water_only_streak(recent_rows)
+        if streak >= _MAX_WATER_ONLY_STREAK:
+            print(
+                f"[{self.name}] proactive-skip: 純水軍已連 {streak} 則沒真人，先閉嘴",
+                flush=True,
+            )
             return False
         try:
             gap = time.time() - float(latest.get("timestamp") or 0)
@@ -4946,6 +4977,13 @@ class AccountWorker:
                 )
             lines.append(f"[{label}] {content[:60]}")
         context = "\n".join(lines)
+        # 這個窗內有沒有真人講話：決定「可以接誰的話」還是「只能自言自語」
+        now = time.time()
+        human_recent = any(
+            str(m.get("role")) != "assistant"
+            and (now - float(m.get("timestamp") or 0)) < _HUMAN_CONTEXT_WINDOW_SECONDS
+            for m in msgs
+        )
         # 主動互動有根據：從群友公開聊過的事情延伸（例如「你昨天說的面試，今天結果怎樣？」）
         # 只取群內共同記憶（member_id=0，跨群隔離）；個別群友記憶在回覆時按群友精確取用。
         try:
@@ -4986,6 +5024,13 @@ class AccountWorker:
                     "要兩則就用換行分開），"
                     "像真人在群裡隨口說話：講你今天在做什麼、想吃什麼、看到什麼、心情如何，"
                     "自然口語、繁體中文、合計 40 字元內、結尾不要句號，可以帶一點撩，不要談群務。"
+                )
+            if not human_recent:
+                # 最近沒有真人講話：不要對空氣邀約、不要互相升級
+                body += (
+                    "\n注意：這個群最近沒有真人講話（現在都是同群其他帳號在自言自語）。"
+                    "所以只講自己的日常碎念就好：不要邀約見面、不要問對方在哪、不要說「來找我」，"
+                    f"露骨程度最多到「{_DECISION_FLIRTY_GUIDE[_WATER_ONLY_FLIRTY_CAP]}」，不要升級。"
                 )
             if notes_block:
                 body += f"\n{notes_block}"
