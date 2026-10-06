@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>SDF 控制台 · 調度台 v2</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script defer src="./core.js"></script>
+  <script defer src="./live.js"></script>
+  <script defer src="./app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳至主要內容</a>
+  <section id="login-screen" class="login-screen" aria-labelledby="login-title">
+    <div class="login-intro">
+      <a class="brand" href="./index.html"><span class="brand-mark">S</span><span>SDF <b>控制台</b></span></a>
+      <div class="intro-copy"><span class="eyebrow">YOUR DAILY WORKSPACE</span><h1>把工作看清楚，<br>讓操作更簡單。</h1><p>帳號、群組與紀錄，各就其位。<br>從一個安靜、有條理的工作空間開始。</p></div>
+      <div class="intro-proof"><span class="proof-icon">✓</span><div><strong>三個帳號即時狀態</strong><p>小小、小天後、RICH，資料直接來自線上後端。</p></div></div>
+      <small>調度台 v2 · 即時資料</small>
+    </div>
+    <div class="login-form-wrap">
+      <div class="login-card">
+        <span class="badge teal">即時資料</span><h2 id="login-title">登入 SDF 控制台</h2><p class="muted">回到你的工作空間。</p>
+        <div class="notice neutral">本版未連接身分驗證，請勿輸入正式帳密。使用下方「進入」瀏覽。</div>
+        <form id="login-form" novalidate>
+          <div class="field"><label for="username">帳號</label><input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="輸入帳號" aria-describedby="username-error"><small id="username-error" class="field-error"></small></div>
+          <div class="field"><label for="password">密碼</label><div class="password-field"><input id="password" name="password" type="password" autocomplete="current-password" placeholder="輸入密碼" aria-describedby="password-error"><button type="button" id="password-toggle" class="text-button" aria-controls="password" aria-pressed="false" aria-label="顯示密碼">顯示</button></div><small id="password-error" class="field-error"></small></div>
+          <p id="login-error" class="notice error" role="alert" hidden></p>
+          <button id="login-submit" class="button primary full" type="submit">登入</button>
+        </form>
+        <div class="divider"><span>或先看介面</span></div>
+        <button id="demo-enter" class="button secondary full">進入 <span aria-hidden="true">→</span></button>
+        <p class="login-footnote">審閱標記只存在這台瀏覽器；密碼不儲存、不傳送。</p>
+      </div>
+    </div>
+  </section>
+
+  <div id="app-shell" hidden>
+    <header class="topbar">
+      <button id="mobile-menu" class="icon-button mobile-only" aria-label="開啟導覽" aria-controls="sidebar" aria-expanded="false">☰</button>
+      <a class="brand" href="#overview"><span class="brand-mark">S</span><span>SDF <b>控制台</b></span></a>
+      <button id="search-open" class="search-trigger"><span data-icon="search"></span><span>搜尋帳號、群組或紀錄</span><kbd>Ctrl K</kbd></button>
+      <div class="topbar-right"><span class="badge teal">即時資料</span><span class="demo-date">2026-10-06</span><button id="demo-exit" class="button ghost small">離開示範</button></div>
+    </header>
+    <button id="sidebar-scrim" class="scrim" aria-label="關閉導覽" hidden></button>
+    <aside id="sidebar" class="sidebar" aria-label="主要導覽">
+      <nav id="primary-nav"></nav>
+      <div class="sidebar-divider"></div>
+      <div class="nav-caption"><span data-icon="star"></span>收藏群組</div>
+      <div id="sidebar-favorites"></div>
+      <div class="sidebar-note"><span class="status-dot"></span><div>即時資料<small>已連線後端</small></div></div>
+    </aside>
+    <main id="main" class="main" tabindex="-1"></main>
+  </div>
+
+  <dialog id="search-dialog" aria-labelledby="search-title">
+    <div class="dialog-heading"><h2 id="search-title">全站搜尋</h2><button class="icon-button" data-action="close-search" aria-label="關閉搜尋">×</button></div>
+    <div class="command-input"><span data-icon="search"></span><input id="command-query" type="search" placeholder="輸入帳號、群組、時間或內容" aria-label="全站搜尋"><kbd>Esc</kbd></div>
+    <div id="command-results" class="command-results"></div><p class="dialog-foot">搜尋範圍：本頁的線上資料</p>
+  </dialog>
+  <dialog id="save-dialog" aria-labelledby="save-title">
+    <form id="save-form"><div class="dialog-heading"><h2 id="save-title">儲存檢視</h2><button type="button" class="icon-button" data-action="close-save" aria-label="關閉">×</button></div><p class="muted">保存目前帳號、群組、時間與狀態篩選。</p><label for="view-name">檢視名稱</label><input id="view-name" maxlength="40" required placeholder="例如：每日待檢視"><div class="dialog-actions"><button type="button" class="button secondary" data-action="close-save">取消</button><button class="button primary" type="submit">儲存</button></div></form>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden><span id="toast-text"></span><button id="toast-undo" class="text-button" hidden>復原</button><button id="toast-close" class="icon-button" aria-label="關閉通知">×</button></div>
+</body>
+</html>

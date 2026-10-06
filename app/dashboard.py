@@ -11,9 +11,11 @@ import hmac
 import json
 import os
 import secrets
+from pathlib import Path
 import time
 
 from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .live_test import LiveTestError
@@ -147,6 +149,12 @@ class Dashboard:
         @app.get("/", response_class=HTMLResponse)
         async def index():
             return HTMLResponse(PAGE)
+
+        # 調度台 v2：獨立前端（版面照 Codex 定稿）＋本站真後端資料。
+        # 靜態檔本身不含資料；資料都走下面這些需要 session 的 API。
+        _v2_dir = Path(__file__).resolve().parent / "static" / "v2"
+        if _v2_dir.is_dir():
+            app.mount("/v2", StaticFiles(directory=str(_v2_dir), html=True), name="v2")
 
         @app.get("/health")
         async def health():
