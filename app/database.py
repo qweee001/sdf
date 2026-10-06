@@ -2115,6 +2115,28 @@ class Database:
         rows = await cursor.fetchall()
         return {int(r[0]): str(r[1]) for r in rows}
 
+    async def group_bot_last_spoke(self, group_id: int) -> dict[int, float]:
+        """群內每個水軍帳號最近一次發言的時間（輪替用：誰最久沒講話誰優先）。
+
+        只看 role='assistant' 的訊息；sender_id 是發話那隻的 TG id，
+        所以同一條訊息被其他帳號重複記錄也不影響 MAX。
+        """
+        try:
+            gid = int(group_id)
+        except (TypeError, ValueError):
+            return {}
+        cursor = await self._c.execute(
+            "SELECT sender_id, MAX(timestamp) AS at FROM messages "
+            "WHERE group_id = ? AND role = 'assistant' GROUP BY sender_id",
+            (gid,),
+        )
+        rows = await cursor.fetchall()
+        return {
+            int(r["sender_id"]): float(r["at"] or 0.0)
+            for r in rows
+            if int(r["sender_id"] or 0) > 0
+        }
+
     async def group_overview(self) -> list[dict]:
         """每個群一行的活動概況（控制台群組總管用）。
 

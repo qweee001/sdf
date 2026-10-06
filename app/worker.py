@@ -116,6 +116,8 @@ _GATE_REWRITE_STRATEGIES = (
 _GATE_CANDIDATE_LIMIT = 3
 # 候選可發分到這個就夠穩，不必再試下一種
 _GATE_CANDIDATE_GOOD_ENOUGH = 0.85
+# 水軍輪替：上一則是自己人時，只在「輪到我」且隔了這麼久才接（避免三隻疊字）
+_PROACTIVE_ROTATION_MIN_GAP = 90.0
 # 意圖識別：先讀懂對方這句話在做什麼，後面的方式與尺度才有依據
 _DECISION_INTENT_GUIDE = {
     "chat": "日常閒聊：隨口接話，沒有特別目的",
@@ -4780,6 +4782,53 @@ class AccountWorker:
         ratio = int.from_bytes(digest, "big") / 65535.0
         return base * (0.8 + 1.6 * ratio)
 
+    async def _proactive_rotation_ok(self, group_id: int, latest: dict | None) -> bool:
+        """水軍輪替：誰最久沒在這個群講話，誰優先接；其他兩隻繼續讓路。
+
+        舊規則是「上一則是水軍就一律閉嘴」，結果群裡永遠只有同一隻在撐場
+        （實測群 111 幾乎都是小小）。現在改成：
+        - 上一則不是自己人 → 照常（市場對話優先）
+        - 上一則是自己：不接（不跟自己講話）
+        - 上一則是另一個水軍：只有「我上一條比其他人更早（或從沒講過）」才接，
+          而且那則要隔 _PROACTIVE_ROTATION_MIN_GAP 秒以上，避免三隻疊字。
+        """
+        latest = latest or {}
+        if str(latest.get("role")) != "assistant":
+            return True
+        latest_sender = int(latest.get("sender_id") or 0)
+        me = int(self.tg_user_id or 0)
+        if latest_sender and me and latest_sender == me:
+            print(f"[{self.name}] proactive-skip: 上一則是我自己", flush=True)
+            return False
+        try:
+            gap = time.time() - float(latest.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            gap = _PROACTIVE_ROTATION_MIN_GAP
+        if gap < _PROACTIVE_ROTATION_MIN_GAP:
+            print(
+                f"[{self.name}] proactive-skip: 剛有人講過（{gap:.0f}s），先等一下",
+                flush=True,
+            )
+            return False
+        try:
+            spoke = await self.db.group_bot_last_spoke(group_id)
+        except Exception:
+            spoke = {}
+        if not spoke:
+            return True
+        mine = float(spoke.get(me, 0.0) or 0.0)
+        others = [
+            float(at) for sender, at in spoke.items() if int(sender) != me and at
+        ]
+        if others and mine > min(others):
+            print(
+                f"[{self.name}] proactive-skip: 輪不到我（別人更久沒講話了）",
+                flush=True,
+            )
+            return False
+        print(f"[{self.name}] proactive-turn: 這輪輪到我接話", flush=True)
+        return True
+
     async def _generate_context_topic(self, group_id: int, *, extra_hint: str = "") -> str:
         """即時生成主動話題：沒有預設池了，一律讀群裡真正的上文現寫。
 
@@ -5115,14 +5164,15 @@ class AccountWorker:
                 if not groups:
                     continue
                 group_id = random.choice(groups)
-                # 不疊水軍：群內最新一則若是水軍所發，這輪讓路，避免水軍自說自話
+                # 水軍輪替：上一則是自己人時，只在「輪到我」才接（最少發言優先）
+                latest_row: dict | None = None
                 try:
-                    latest = await self.db.get_group_messages(group_id, limit=1)
-                    if latest and str(latest[-1].get("role")) == "assistant":
-                        print(f"[{self.name}] proactive-skip: last message from another water account", flush=True)
-                        continue
+                    latest_rows = await self.db.get_group_messages(group_id, limit=1)
+                    latest_row = latest_rows[-1] if latest_rows else None
                 except Exception:
-                    pass
+                    latest_row = None
+                if not await self._proactive_rotation_ok(group_id, latest_row):
+                    continue
                 if self._should_suppress_proactive(group_id):
                     # 人類近 10 分鐘有活動：以 70% 讓路、30% 像正常人一樣偶爾插話
                     if random.random() < 0.7:
