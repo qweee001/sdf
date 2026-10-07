@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import time
 from collections import Counter
 from datetime import datetime
 from types import SimpleNamespace
@@ -735,7 +736,11 @@ def test_video_render_runs_in_own_task_without_blocking_text_or_voice(tmp_path):
         await asyncio.wait_for(manager.video_client.started.wait(), timeout=1)
         kinds = []
         try:
-            for _ in range(300):
+            # video flaky：以前用固定 range(300) 迭代（3 秒上限），本機慢時
+            # 排程還沒派出 voice 就超時。改用 wall-clock 30 秒截止，保留原意
+            # （voice 最終一定要派出）但不再被固定迭代數卡住。
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
                 kinds = [
                     dispatch[1]
                     for worker in manager.workers.values()

@@ -116,6 +116,10 @@ class Settings:
     # 記憶
     memory_max_messages: int
     memory_ttl_hours: int
+    # F13：去重保存期。proactive 去重回看 48h，但清理作業原本只留 24h
+    # （＝ memory_ttl_hours），24–48h 的已發文案被清掉，去重窗口名不副實。
+    # 把它跟上下文窗口（memory_ttl_hours）分開，messages 表照較長那個保留。
+    dedup_retention_hours: int
 
     # 決策層（System One：TypeSafe Jev / Laya 同協議，api_key 空＝停用走舊概率門）
     decision_api_key: str
@@ -229,6 +233,7 @@ def load_settings() -> Settings:
         db_path=os.getenv("DB_PATH", "/data/chat.db").strip(),
         memory_max_messages=_int("MEMORY_MAX_MESSAGES", 30),
         memory_ttl_hours=_int("MEMORY_TTL_HOURS", 24),
+        dedup_retention_hours=max(_int("DEDUP_RETENTION_HOURS", 48), 24),
         decision_api_key=os.getenv("DECISION_API_KEY", "").strip(),
         decision_base_url=(
             os.getenv("DECISION_BASE_URL", "").strip()

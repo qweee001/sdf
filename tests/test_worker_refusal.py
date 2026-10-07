@@ -100,7 +100,7 @@ def test_fallback_model_replaces_refused_reply():
         worker._fallback_models = ("backup-a",)
         seen: list[str | None] = []
 
-        async def fake_call(system_prompt, user_message, model=None):
+        async def fake_call(system_prompt, user_message, model=None, purpose="text"):
             seen.append(model)
             if model is None:
                 return "作為一個 AI，我沒有辦法回應這個請求。"

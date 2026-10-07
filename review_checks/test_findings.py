@@ -86,6 +86,5 @@ def test_unrelated_message_keeps_pending_direct_reply():
     asyncio.run(run())
 
 
-@pytest.mark.xfail(strict=True, reason="Big5 repertoire is not a traditional/simplified classifier")
 def test_traditional_name_character_is_not_simplified():
     assert not AccountWorker._has_simplified_chars("\u5586")

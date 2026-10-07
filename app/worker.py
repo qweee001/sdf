@@ -91,6 +91,17 @@ _SIMPLIFIED_PHRASE_PATTERNS = (
     re.compile(r"干净|干燥|干杯|干什么"),
     re.compile(r"家里|这里|那里|哪里|心里|里头"),
 )
+# F16：Big5 字元表不是繁簡分類器。繁體姓名／罕用字收錄不全，逐字 Big5
+# 編碼會把「編不出」誤判成簡體。這裡維持一份「繁體但在 Big5 缺字」的例外
+# 清單（有版本、有來源），命中例外才放行；真正的簡體（什么／家里…）仍由
+# 片語黑名單與 Big5 雙層擋下。加字時必須附註出處，別把真簡體放進來。
+_TRADITIONAL_BIG5_EXCEPTIONS_VERSION = 1
+_TRADITIONAL_BIG5_EXCEPTIONS = frozenset(
+    {
+        "\u5586",  # 喆：繁體雙「哲」，人名常用字（Big5 缺收，實測被誤判簡體）
+        "\u5803",  # 堃：「坤」的繁體異體，人名／地名常用字（Big5 缺收）
+    }
+)
 # 真人「看見但不說」：被 @／直接回覆很少漏接，普通訊息常只是默認
 _SILENT_REPLY_PROBABILITY_DIRECTED = 0.10
 _SILENT_REPLY_PROBABILITY_ORDINARY = 0.35
@@ -2099,6 +2110,41 @@ class AccountWorker:
     # ③ 通過→發送；重寫→重生成一次再審核；超時/仍不合格→暫緩發送。
     # 決策層停用（無 key）或呼叫失敗時一律降級回舊概率門，不是硬依賴。
     # ------------------------------------------------------------------
+    async def _decision_call(self, state: str, questions: dict, purpose: str) -> dict:
+        """F16：決策模型呼叫的統一包裝——回傳 answers 前記一筆成本帳。
+
+        三個決策點（① 選內容／③ 審核／重寫策略）都從這裡走，耗時與成本
+        狀態（reserved＝有呼叫但無帳單，決策端點目前不回 token）一起記進
+        ai_calls；失敗原樣擲 DecisionError，由呼叫方決定降級（回 None /
+        回 None / 換策略），記帳不改變任何既有行為。
+        """
+        cfg = self.config
+        started = time.monotonic()
+        try:
+            answers = await system_one(
+                state,
+                questions,
+                base_url=cfg.decision_base_url,
+                api_key=cfg.decision_api_key,
+                model=cfg.decision_model,
+                timeout_seconds=cfg.decision_timeout_seconds,
+            )
+        except DecisionError:
+            await self._record_model_call(
+                purpose,
+                str(getattr(cfg, "decision_model", "") or "unknown"),
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                cost_status="unknown",
+            )
+            raise
+        await self._record_model_call(
+            purpose,
+            str(getattr(cfg, "decision_model", "") or "unknown"),
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            cost_status="reserved",
+        )
+        return answers
+
     def _decision_enabled(self) -> bool:
         return bool(getattr(self.config, "decision_api_key", ""))
 
@@ -2278,12 +2324,11 @@ class AccountWorker:
             state, topic_options = await self._decision_input(event)
         except Exception:
             return None
-        cfg = self.config
         topic_criteria = {"free": "不綁定特定訊息，自然接話"}
         for i, content in enumerate(topic_options):
             topic_criteria[f"t{i}"] = f"延續這個話題：「{content}」"
         try:
-            answers = await system_one(
+            answers = await self._decision_call(
                 state,
                 {
                     "intent": {
@@ -2375,10 +2420,7 @@ class AccountWorker:
                         ],
                     },
                 },
-                base_url=cfg.decision_base_url,
-                api_key=cfg.decision_api_key,
-                model=cfg.decision_model,
-                timeout_seconds=cfg.decision_timeout_seconds,
+                "decide_action",
             )
         except DecisionError as exc:
             self.stats["decision_errors"] = int(self.stats.get("decision_errors", 0)) + 1
@@ -2461,11 +2503,10 @@ class AccountWorker:
         核對離題、矛盾、編造、重複及內容規則；回 {"sendable","issue"}，
         超時/失敗回 None（＝不確定→暫緩）。
         """
-        cfg = self.config
         decision_block = f"前置決策（這次原本要怎麼回）：\n{directive}\n" if directive else ""
         state = f"{context}\n{decision_block}你要發出的回覆：「{str(text).strip()}」"
         try:
-            answers = await system_one(
+            answers = await self._decision_call(
                 state,
                 {
                     "sendable": {
@@ -2491,10 +2532,7 @@ class AccountWorker:
                         },
                     },
                 },
-                base_url=cfg.decision_base_url,
-                api_key=cfg.decision_api_key,
-                model=cfg.decision_model,
-                timeout_seconds=cfg.decision_timeout_seconds,
+                "review_candidate",
             )
         except DecisionError as exc:
             self.stats["decision_errors"] = int(self.stats.get("decision_errors", 0)) + 1
@@ -3573,7 +3611,10 @@ class AccountWorker:
             "自然台灣繁體口語。只能輸出要說的內容，不要旁白或格式標記，最多120字。"
         )
         reply = str(
-            await self._call_ai(get_system_prompt(self.persona), prompt) or ""
+            await self._call_ai(
+                get_system_prompt(self.persona), prompt, purpose="realtime_voice"
+            )
+            or ""
         ).strip()
         if not reply or len(reply) > 120:
             return None
@@ -3622,7 +3663,10 @@ class AccountWorker:
             "群組保證。只輸出影片畫面與動作描述，最多300字。"
         )
         brief = str(
-            await self._call_ai(get_system_prompt(self.persona), prompt) or ""
+            await self._call_ai(
+                get_system_prompt(self.persona), prompt, purpose="realtime_video"
+            )
+            or ""
         ).strip()
         if not brief or len(brief) > 300:
             return None
@@ -3749,7 +3793,7 @@ class AccountWorker:
                     self.stats["image_understanding_errors"] += 1
                     print(f"[{self.name}] vision error: {exc}", flush=True)
                     return ""
-            text = await self._call_ai(system_prompt, message)
+            text = await self._call_ai(system_prompt, message, purpose="reply")
             # 拒答來自權重裡的對齊，不是提示詞沒講清楚；把同一句話再問一次
             # 只會拿到同一句拒絕。所以這裡直接換模型，換不動就原樣回傳，
             # 交由呼叫方的校驗鏈判定不合格。
@@ -3757,7 +3801,10 @@ class AccountWorker:
                 return text
             for fallback in self._fallback_models:
                 alternative = await self._call_ai(
-                    system_prompt, message, model=fallback
+                    system_prompt,
+                    message,
+                    model=fallback,
+                    purpose="reply_fallback",
                 )
                 if alternative and not self._is_refusal(alternative):
                     self.stats["refusal_fallbacks"] = (
@@ -3971,6 +4018,11 @@ class AccountWorker:
         Big5 編得出來的字不一定是繁體用法：「么」在 Big5 裡有（么女、么兒），
         但「什么／怎么／这么」是大陸寫法，實測生成過「想吃什么我陪你」。
         所以除了逐字 Big5 檢查，再補一層字形共用詞的片語黑名單。
+
+        F16：Big5 字元表不是繁簡分類器。罕用字／人名用字（如「喆」）Big5
+        缺收，逐字編碼會把真繁體誤判成簡體。例外清單
+        （_TRADITIONAL_BIG5_EXCEPTIONS）收錄已知「繁體但 Big5 缺字」的字，
+        命中例外就放行；真正的簡體仍由片語黑名單與 Big5 雙層擋下。
         """
         if not text:
             return False
@@ -3979,6 +4031,8 @@ class AccountWorker:
             return True
         for ch in text:
             if unicodedata.name(ch, "").startswith("CJK"):
+                if ch in _TRADITIONAL_BIG5_EXCEPTIONS:
+                    continue
                 try:
                     ch.encode("big5")
                 except UnicodeEncodeError:
@@ -4010,7 +4064,6 @@ class AccountWorker:
         """
         if not self._decision_enabled():
             return None
-        cfg = self.config
         body = str(text or "").strip()
         if not body:
             return None
@@ -4018,7 +4071,7 @@ class AccountWorker:
             f"{context}\n要檢查的文字：「{body}」" if context else f"要檢查的文字：「{body}」"
         )
         try:
-            answers = await system_one(
+            answers = await self._decision_call(
                 state,
                 {
                     "has_typo": {
@@ -4040,10 +4093,7 @@ class AccountWorker:
                         },
                     },
                 },
-                base_url=cfg.decision_base_url,
-                api_key=cfg.decision_api_key,
-                model=cfg.decision_model,
-                timeout_seconds=cfg.decision_timeout_seconds,
+                "typo_review",
             )
         except DecisionError as exc:
             self.stats["decision_errors"] = int(self.stats.get("decision_errors", 0)) + 1
@@ -4429,13 +4479,51 @@ class AccountWorker:
             "要說兩句就拆成兩則短訊，挑逗時可以直接露骨，不要長篇）。"
         )
 
+    async def _record_model_call(
+        self,
+        purpose: str,
+        model: str,
+        *,
+        latency_ms: float,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        retries: int = 0,
+        cost_status: str,
+    ) -> None:
+        """F16：把一次模型呼叫寫進 ai_calls。成本帳是旁路，失敗不該拖垮主流程。"""
+        db = self.db
+        recorder = getattr(db, "record_ai_call", None)
+        if not callable(recorder):
+            return
+        try:
+            await recorder(
+                self.account_id,
+                purpose,
+                model,
+                latency_ms=float(latency_ms),
+                prompt_tokens=int(prompt_tokens or 0),
+                completion_tokens=int(completion_tokens or 0),
+                retries=int(retries or 0),
+                cost_status=cost_status,
+            )
+        except Exception as exc:
+            self.stats["ai_cost_record_errors"] = (
+                int(self.stats.get("ai_cost_record_errors", 0)) + 1
+            )
+            print(f"[{self.name}] ai-cost record error: {exc}", flush=True)
+
     async def _call_ai(
-        self, system_prompt: str, user_message: str, model: str | None = None
+        self,
+        system_prompt: str,
+        user_message: str,
+        model: str | None = None,
+        purpose: str = "text",
     ) -> str:
         # model 只用於拒答時的備援輪換；一般呼叫沿用主模型。
         model = (model or self.config.ai_model or "").strip()
         if not model:
             return ""
+        started = time.monotonic()
         try:
             request_kwargs = {
                 "model": model,
@@ -4453,6 +4541,20 @@ class AccountWorker:
                 }
             resp = await self.ai_client.chat.completions.create(**request_kwargs)
             content = resp.choices[0].message.content
+            usage = getattr(resp, "usage", None)
+            # F16：文字生成每次呼叫都記一筆（用途、模型、耗時、token、成本狀態）。
+            # 有真實 token 才算 measured；沒有就 unknown，不把沒帳的呼叫當已計費。
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            cost_status = "measured" if (prompt_tokens or completion_tokens) else "unknown"
+            await self._record_model_call(
+                purpose,
+                model,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cost_status=cost_status,
+            )
             if content:
                 return content.strip()
             return ""
@@ -4460,6 +4562,12 @@ class AccountWorker:
             # API 層錯誤（如 402 欠費）與「模型回空」分開計數，控制台一眼看得出
             self.stats["ai_api_errors"] = int(self.stats.get("ai_api_errors", 0)) + 1
             print(f"[{self.name}] AI error: {e}", flush=True)
+            await self._record_model_call(
+                purpose,
+                model,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                cost_status="unknown",
+            )
             return ""
 
     # ---------- 發送 ----------
@@ -5296,7 +5404,7 @@ class AccountWorker:
                     f"{hint}\n" if hint else ""
                 ) + "這幾句群裡已經出現過，換一個完全不同的說法：" + "／".join(already[:3])
             raw = await self._call_ai(
-                get_system_prompt(self.persona), build_prompt(hint)
+                get_system_prompt(self.persona), build_prompt(hint), purpose="proactive"
             )
             topic = (raw or "").strip()
             if not topic or self._is_refusal(topic):
@@ -5507,6 +5615,11 @@ class AccountWorker:
         while self.is_running:
             await asyncio.sleep(3600)
             try:
-                await self.db.cleanup_expired(self.config.memory_ttl_hours)
+                # F13：messages 照去重保存期（48h）留，其他表照上下文窗口
+                # （memory_ttl_hours）清；不傳第二參就退回全部同 ttl（舊行為）。
+                await self.db.cleanup_expired(
+                    self.config.memory_ttl_hours,
+                    int(getattr(self.config, "dedup_retention_hours", 0) or 0),
+                )
             except Exception:
                 pass

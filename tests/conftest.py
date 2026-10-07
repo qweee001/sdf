@@ -52,13 +52,40 @@ def pytest_sessionfinish(session, exitstatus):
     _EXIT["code"] = int(exitstatus or 0)
 
 
-def pytest_unconfigure(config):
-    """測試結束後強制收場，避免 aiosqlite 背景線程卡住 process 退出。
+def _drain_database_connections():
+    """關閉所有還在跑的 aiosqlite 連線，讓其背景線程結束。
 
-    生產環境只用一個 Database 一個 event loop，不會有這個問題；
-    這裡每個 dashboard 測試各建一個 aiosqlite 連線（不同 loop），
-    這些背景線程不會在正常退出時 drain。帶上真實 pytest 結果碼收場。
+    aiosqlite 每個連線會起一條 background 線程（非 daemon）。測試裡大量
+    `asyncio.run(main())` 各自建一個新 loop，loop 收場時不會主動 drain
+    aiosqlite 的 pending 工作，那些連線的背景線程就殘留，讓 process 正常
+    退出卡住。這裡在 pytest 收場時把仍活著（`_running` 為真）的連線統一
+    關閉。aiosqlite 沒提供全域連線清單，用 gc 掃活著實例。
     """
-    import os
+    import gc
 
-    os._exit(_EXIT["code"])
+    import aiosqlite
+    import asyncio
+
+    connections = {
+        obj
+        for obj in gc.get_objects()
+        if isinstance(obj, aiosqlite.Connection) and getattr(obj, "_running", False)
+    }
+    for conn in connections:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(conn.close())
+        except Exception:
+            pass
+        finally:
+            loop.close()
+
+
+def pytest_unconfigure(config):
+    """測試結束後收場：關閉殘留 aiosqlite 連線，讓 process 正常退出。
+
+    F14：原本直接用 os._exit 兜底，會把 pytest 標準結果總結（passed/failed 行）
+    一起吞掉——CI 日誌有完整進度但沒有結果行，判讀全靠外掛。改成真正關閉
+    殘留連線後走正常退出，結果總結才會印出來。
+    """
+    _drain_database_connections()

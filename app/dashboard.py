@@ -142,6 +142,48 @@ class Dashboard:
             for stale in oldest[:overflow]:
                 self._login_attempts.pop(stale, None)
 
+    # ---------- 健康度（F15） ----------
+
+    async def _health(self) -> dict:
+        """F15：真實健康度，不再固定回 ok。
+
+        三件事分別探測、各自標記：
+        - database：真打一筆 SELECT 1（以前 DB 斷了 /health 仍回 ok，
+          Railway 不會重啟，整站靜默失能）。
+        - accounts：running/total 取自已註冊的 worker（不含任何敏感值，
+          /health 是免登入的公開端點，只暴露最小必要資訊）。
+        - ai_calls_24h：近 24h 模型呼叫筆數（成本帳旁路，DB 壞時省略）。
+        任何一項壞都只把該項標 degraded／failed，不讓健康端點本身拋錯
+        （健康端點拋錯＝Railway 把它當成 5xx，反而誤判成「整個服務掛了」）。
+        """
+        db = self.manager.db
+        database_ok = False
+        ai_calls_24h: int | None = None
+        try:
+            cursor = await db._c.execute("SELECT 1")
+            await cursor.fetchone()
+            database_ok = True
+        except Exception:
+            database_ok = False
+        if database_ok:
+            try:
+                summary = await db.ai_call_summary(hours=24)
+                ai_calls_24h = int(summary.get("totals", {}).get("calls", 0))
+            except Exception:
+                ai_calls_24h = None
+        workers = getattr(self.manager, "workers", {}) or {}
+        running = sum(1 for w in workers.values() if getattr(w, "is_running", False))
+        total = len(workers)
+        healthy = database_ok
+        payload: dict = {
+            "status": "ok" if healthy else "degraded",
+            "database": "ok" if database_ok else "failed",
+            "accounts": {"running": running, "total": total},
+        }
+        if ai_calls_24h is not None:
+            payload["ai_calls_24h"] = ai_calls_24h
+        return payload
+
     # ---------- 路由 ----------
 
     def _setup_routes(self):
@@ -153,8 +195,9 @@ class Dashboard:
 
         @app.get("/health")
         async def health():
-            # Railway healthcheckPath：只回最小公開狀態，不洩漏帳號數等內部資訊
-            return {"status": "ok"}
+            # Railway healthcheckPath：回最小公開狀態（DB 探測＋帳號數），
+            # DB 壞時標 degraded 而不是假裝 ok（F15）。
+            return await self._health()
 
         @app.post("/api/login")
         async def login(request: Request):

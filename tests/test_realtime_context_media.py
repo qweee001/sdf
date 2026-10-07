@@ -78,7 +78,7 @@ def test_current_context_voice_snapshot_precedes_generation_and_changes_reply():
         db = ContextDB([_message("早餐吃蛋餅")], events)
         worker = _worker(db)
 
-        async def generate(system_prompt, context_prompt):
+        async def generate(system_prompt, context_prompt, purpose="text"):
             events.append(("generate", system_prompt, context_prompt))
             if "電影" in context_prompt:
                 return "今晚想看電影"
@@ -124,7 +124,7 @@ def test_current_context_video_brief_precedes_generation_and_tracks_latest_messa
         db = ContextDB([_message("窗外正在下雨")], events)
         worker = _worker(db)
 
-        async def generate(system_prompt, context_prompt):
+        async def generate(system_prompt, context_prompt, purpose="text"):
             events.append(("generate", system_prompt, context_prompt))
             if "咖啡" in context_prompt:
                 return "小安拿著咖啡，回應群裡的新咖啡話題"

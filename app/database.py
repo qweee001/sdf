@@ -347,6 +347,24 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_live_test_events_run_state
             ON live_test_events (run_id, state, reserved_at)
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ai_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                model TEXT NOT NULL,
+                latency_ms REAL NOT NULL,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                retries INTEGER NOT NULL DEFAULT 0,
+                cost_status TEXT NOT NULL,
+                at REAL NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ai_calls_at
+            ON ai_calls (at)
+        """)
         await db.commit()
 
     async def close(self):
@@ -1960,6 +1978,80 @@ class Database:
         row = await cursor.fetchone()
         return {"sent": row["n"] if row else 0}
 
+    async def record_ai_call(
+        self,
+        account_id: str,
+        purpose: str,
+        model: str,
+        *,
+        latency_ms: float,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        retries: int = 0,
+        cost_status: str = "unknown",
+    ) -> None:
+        """F16：每次文字／決策模型呼叫都留一筆成本與品質指標。
+
+        媒體走 media_spend 的原子預算（那是預約額），文字與決策以前完全沒帳——
+        這裡把用途、模型、耗時、token、重試次數與成本狀態統一記下來。
+        cost_status：measured＝有真實帳單／token，reserved＝只有預約額，
+        unknown＝兩種都沒有（不能把沒錢的呼叫當已計費）。
+        寫入失敗不該拖垮主流程（成本帳是旁路），呼叫方自己 try。
+        """
+        await self._c.execute(
+            "INSERT INTO ai_calls "
+            "(account_id, purpose, model, latency_ms, prompt_tokens, "
+            "completion_tokens, retries, cost_status, at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                str(account_id),
+                str(purpose),
+                str(model),
+                float(latency_ms),
+                int(prompt_tokens or 0),
+                int(completion_tokens or 0),
+                int(retries or 0),
+                str(cost_status),
+                time.time(),
+            ),
+        )
+        await self._c.commit()
+
+    async def ai_call_summary(self, hours: int = 24) -> dict:
+        """F16：近 N 小時模型呼叫的成本／品質彙總（按用途分組）。"""
+        cutoff = time.time() - max(1, int(hours)) * 3600
+        cursor = await self._c.execute(
+            "SELECT purpose, COUNT(*) AS calls, SUM(retries) AS retries, "
+            "SUM(CASE WHEN cost_status = 'measured' THEN 1 ELSE 0 END) AS measured, "
+            "SUM(prompt_tokens) AS prompt_tokens, "
+            "SUM(completion_tokens) AS completion_tokens, "
+            "AVG(latency_ms) AS avg_latency_ms "
+            "FROM ai_calls WHERE at >= ? GROUP BY purpose",
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        by_purpose = {
+            str(row["purpose"]): {
+                "calls": int(row["calls"]),
+                "retries": int(row["retries"] or 0),
+                "measured": int(row["measured"] or 0),
+                "prompt_tokens": int(row["prompt_tokens"] or 0),
+                "completion_tokens": int(row["completion_tokens"] or 0),
+                "avg_latency_ms": round(float(row["avg_latency_ms"] or 0.0), 1),
+            }
+            for row in rows
+        }
+        totals = {
+            "calls": sum(v["calls"] for v in by_purpose.values()),
+            "retries": sum(v["retries"] for v in by_purpose.values()),
+            "measured": sum(v["measured"] for v in by_purpose.values()),
+            "prompt_tokens": sum(v["prompt_tokens"] for v in by_purpose.values()),
+            "completion_tokens": sum(
+                v["completion_tokens"] for v in by_purpose.values()
+            ),
+        }
+        return {"hours": int(hours), "totals": totals, "by_purpose": by_purpose}
+
     # ---------- 維護 ----------
 
     async def get_group_member_notes(
@@ -2178,11 +2270,23 @@ class Database:
             for r in rows
         ]
 
-    async def cleanup_expired(self, ttl_hours: int) -> None:
-        cutoff = time.time() - ttl_hours * 3600
-        await self._c.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
+    async def cleanup_expired(self, ttl_hours: int, messages_retention_hours: int = 0) -> None:
+        # F13：messages（去重來源）與一般記憶分開保留。proactive 去重回看
+        # 48h，若 messages 跟其他表一起只留 24h，去重窗口就斷了；傳
+        # messages_retention_hours（＝ config.dedup_retention_hours）讓
+        # messages 保留到去重窗口結束，其余表照 ttl_hours 清。
+        cutoff = time.time() - float(ttl_hours) * 3600
+        messages_cutoff = time.time() - (
+            float(ttl_hours)
+            if messages_retention_hours <= 0
+            else max(float(ttl_hours), float(messages_retention_hours))
+        ) * 3600
+        await self._c.execute("DELETE FROM messages WHERE timestamp < ?", (messages_cutoff,))
         await self._c.execute("DELETE FROM group_memory WHERE updated_at < ?", (cutoff,))
         await self._c.execute("DELETE FROM private_messages WHERE timestamp < ?", (cutoff,))
         await self._c.execute("DELETE FROM group_events WHERE observed_at < ?", (cutoff,))
         await self._c.execute("DELETE FROM reply_events WHERE at < ?", (cutoff,))
+        # F16 成本帳也是旁路帳，一樣會漲：ai_calls 跟 messages 用同一保留期
+        # （去重回看窗口），太舊的成本記錄對 24h 儀表板沒用，一併清掉。
+        await self._c.execute("DELETE FROM ai_calls WHERE at < ?", (messages_cutoff,))
         await self._c.commit()
