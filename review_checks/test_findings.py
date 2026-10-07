@@ -10,7 +10,6 @@ from app.database import Database
 from app.worker import AccountWorker
 
 
-@pytest.mark.xfail(strict=True, reason="Member notes overwrite earlier facts")
 def test_member_memory_preserves_more_than_the_latest_message(tmp_path):
     async def run():
         db = Database(str(tmp_path / "memory.db"))
@@ -26,7 +25,6 @@ def test_member_memory_preserves_more_than_the_latest_message(tmp_path):
     asyncio.run(run())
 
 
-@pytest.mark.xfail(strict=True, reason="Account deletion omits group_memory")
 def test_account_deletion_removes_member_and_shared_notes(tmp_path):
     async def run():
         db = Database(str(tmp_path / "deletion.db"))

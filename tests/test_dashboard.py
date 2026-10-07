@@ -263,6 +263,33 @@ def test_available_groups_endpoint_discovers_without_starting(monkeypatch):
         assert r.json() == {"groups": [{"id": -1001, "title": "台北交友群"}]}
 
 
+def test_directory_refresh_shows_groups_for_stopped_account(monkeypatch):
+    """F11: 停機帳號（沒有 worker）按「重新取得」後，探索到的新群要出現在
+    群組總管清單——以前探索結果被丟棄，只有歷史訊息裡的群才看得到。"""
+    async def fake_list(self, account_id):
+        return [{"id": -2002, "title": "新拉進去的群"}], ""
+
+    monkeypatch.setattr(AccountManager, "list_available_groups", fake_list, raising=False)
+
+    # directory 迴圈以 db 帳號清單為基：放一個「停機中」的帳號（workers 裡沒有）
+    async def fake_accounts(self):
+        return [{"id": "stopped-acc", "name": "停機號", "groups": "[]",
+                 "persona": None, "tg_user_id": 0, "tg_username": None,
+                 "enabled": 1, "avatar": None}]
+
+    monkeypatch.setattr(Database, "list_accounts", fake_accounts, raising=False)
+
+    with _make_dashboard() as client:
+        client.post("/api/login", json={"username": "admin", "password": "secret123"})
+        r = client.get("/api/groups/directory?refresh=1")
+        assert r.status_code == 200
+        groups = r.json()["groups"]
+        ids = {g["id"] for g in groups}
+        assert -2002 in ids
+        hit = next(g for g in groups if g["id"] == -2002)
+        assert hit["title"] == "新拉進去的群"
+
+
 def test_root_serves_v2_shell_and_classic_keeps_old_console():
     """門面交換：/ 是 v2（左側導覽版），/classic 仍是原本的調度台。"""
     with _make_dashboard() as client:

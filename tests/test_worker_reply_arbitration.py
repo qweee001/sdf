@@ -103,10 +103,11 @@ class _ClaimDB:
             self.followup_pending.pop(group_id, None)
         self.followup_released.append((group_id, message_id, account_id))
 
-    async def add_message(self, *args):
-        self.messages.append(args)
+    async def add_message(self, *args, **kwargs):
+        # F09: 生產端現在多帶 message_id=（事件身分），假 DB 也要吃 keyword
+        self.messages.append((args, kwargs))
 
-    async def touch_activity(self, *args):
+    async def touch_activity(self, *args, **kwargs):
         self.activities.append(args)
 
     async def interaction_pressure(self, *_args, **_kwargs):
@@ -1038,6 +1039,38 @@ def test_recent_human_activity_suppresses_proactive_message():
     activity = {-5428680940: float("inf")}
     worker = _worker(101, last_human_activity=activity)
     assert worker._should_suppress_proactive(-5428680940) is True
+
+
+def test_cancel_during_initial_delay_releases_claim():
+    """F07: 初始延遲期間被取消（真人插話/停機），認領必須釋放。
+
+    以前 asyncio.sleep 在受管 try 外，取消直接外傳，release 完全沒被呼叫，
+    群組槽位鎖死、其他水軍對同一則訊息永遠輪不到。"""
+
+    async def main():
+        db = _ClaimDB()
+        worker = _worker(101, {101}, db=db)
+        worker.is_running = True
+        worker.tg_client = SimpleNamespace(disconnect=AsyncMock())
+        event = _event(sender_id=999, message_id=771)
+        assert await worker._should_reply(event) is True
+        key = (-5428680940, 771)
+        assert db.claims.get(key) == "101"
+
+        task = asyncio.create_task(worker._reply_later(event, 30))
+        await asyncio.sleep(0.01)
+        assert db.claims.get(key) == "101"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert db.claims.get(key) is None
+        cancelled = [
+            item for _args, item in db.reply_events
+            if item.get("stage") == "cancel"
+        ]
+        assert any(item.get("reason") == "human_interrupt" for item in cancelled)
+
+    asyncio.run(main())
 
 
 def test_proactive_topic_does_not_repeat_normalized_text_within_account_day(monkeypatch):

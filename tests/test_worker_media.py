@@ -23,7 +23,7 @@ class _DB:
     async def get_recent_group_replies(self, *_args, **_kwargs):
         return []
 
-    async def add_message(self, *args):
+    async def add_message(self, *args, **kwargs):
         self.messages.append(args)
 
     async def claim_message_response(self, group_id, message_id, account_id):

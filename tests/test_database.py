@@ -167,6 +167,103 @@ def test_groups_migration_on_existing_db():
         loop.close()
 
 
+def test_group_messages_dedup_by_telegram_message_id():
+    """F09: 同一 TG 事件被兩個帳號在不同秒收到，去重後仍是一則。"""
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    async def main():
+        db = Database(DB)
+        await db.connect()
+        base = time.time()
+        # 兩個帳號各自記錄同一則訊息（TG id 9001），時間差 1.5 秒
+        # （舊秒級去重鍵會在這裡把它拆成兩則）
+        await db.add_message(
+            "a1", 333, 777, "老王", "user", "今晚有人要聊嗎",
+            message_id=9001,
+        )
+        # 手動把第二筆時間往前推，模擬跨秒
+        await db._c.execute(
+            "UPDATE messages SET timestamp = ? WHERE id = 1", (base - 5,)
+        )
+        await db.add_message(
+            "a2", 333, 777, "老王", "user", "今晚有人要聊嗎",
+            message_id=9001,
+        )
+        # 另一則不同 TG id 的訊息
+        await db.add_message(
+            "a1", 333, 777, "老王", "user", "第二則",
+            message_id=9002,
+        )
+        rows = await db.get_group_messages(333)
+        assert len(rows) == 2
+        contents = [r["content"] for r in rows]
+        assert contents == ["今晚有人要聊嗎", "第二則"]
+
+        # 舊資料（無 TG id）仍走秒級鍵：同秒去重、跨秒不算同一則
+        await db.add_message("a1", 444, 888, "小陳", "user", "舊資料句")
+        await db.add_message("a1", 444, 888, "小陳", "user", "舊資料句")
+        old = await db.get_group_messages(444)
+        assert len(old) == 1
+        await db.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
+def test_group_memory_f10_accumulates_facts_and_delete_cleans():
+    """F10: ① 新事實不蓋舊事實（連續兩個不同事實均可檢索）；
+    ② 同秒重複只記一筆；③ 刪帳號後該帳號的群友記憶與共同記憶消失。"""
+    if os.path.exists(DB):
+        os.remove(DB)
+
+    async def main():
+        db = Database(DB)
+        await db.connect()
+
+        # ① 兩個不同事實要都能取到（以前 upsert 會蓋掉前一筆）
+        await db.upsert_group_member_note(555, 777, "a1", "昨晚說要去墾丁")
+        await asyncio.sleep(0.01)
+        await db.upsert_group_member_note(555, 777, "a1", "今天說在忙")
+        notes = await db.get_group_member_notes(555, 777, "a1")
+        # 最新在前
+        assert notes[0] == "今天說在忙"
+        assert "昨晚說要去墾丁" in notes
+
+        # ② 60 秒內同內容重複只記一筆
+        before = len(await db.get_group_member_notes(555, 777, "a1"))
+        await db.upsert_group_member_note(555, 777, "a1", "今天說在忙")
+        after = await db.get_group_member_notes(555, 777, "a1")
+        assert len(after) == before
+
+        # ③ 共同記憶同樣累積
+        await db.upsert_group_shared_note(555, "a1", "群裡在約周末吃飯")
+        await asyncio.sleep(0.01)
+        await db.upsert_group_shared_note(555, "a1", "有人提到要去爬山")
+        shared = await db.get_group_shared_notes(555, "a1")
+        assert "群裡在約周末吃飯" in shared
+        assert "有人提到要去爬山" in shared
+
+        # ④ 刪帳號：該帳號的群友記憶＋共同記憶都要消失
+        await db.create_account("a1", "測試帳號", "key1")
+        await db.delete_account("a1")
+        assert await db.get_group_member_notes(555, 777, "a1") == []
+        assert await db.get_group_shared_notes(555, "a1") == []
+        # 別帳號的同群記憶不受影響
+        await db.upsert_group_member_note(555, 777, "a2", "a2 記得的事實")
+        assert await db.get_group_member_notes(555, 777, "a2") == ["a2 記得的事實"]
+        await db.close()
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()
+
+
 def test_memory_cap_200():
     if os.path.exists(DB):
         os.remove(DB)

@@ -327,12 +327,19 @@ class Dashboard:
                 worker = self.manager.workers.get(acc_id)
                 if refresh:
                     # 停機帳號也要能探索：list_available_groups 會開唯讀連線
+                    # F11: 以前探索結果被丟棄、仍從（不存在的）worker 取清單，
+                    # 停機帳號首次設定的新群就這樣消失。這裡接住回傳值，
+                    # worker 不在時直接用探索結果。
                     try:
-                        await self.manager.list_available_groups(acc_id)
+                        explored, _err = await self.manager.list_available_groups(acc_id)
                     except Exception:
-                        pass
+                        explored = []
                     worker = self.manager.workers.get(acc_id)
-                available = worker.group_list() if worker else []
+                else:
+                    explored = []
+                available = (
+                    worker.group_list() if worker else explored
+                )
                 per_account[acc_id] = {
                     "selected": set(selected),
                     "available": available,

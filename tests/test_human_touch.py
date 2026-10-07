@@ -160,6 +160,7 @@ def test_acknowledge_group_routes_to_sticker(monkeypatch):
                 sent.append(("reaction", getattr(request, "peer", None)))
 
     w.tg_client = _FakeClient()
+    w.is_running = True
     event = SimpleNamespace(chat_id=-1001, id=77, raw_text="早安")
     ok = asyncio.run(w._acknowledge_group(event))
     assert ok is True
@@ -197,6 +198,7 @@ def test_acknowledge_group_falls_back_to_reaction(monkeypatch):
                 sent.append(("reaction", getattr(request, "peer", None)))
 
     w.tg_client = _FakeClient()
+    w.is_running = True
     event = SimpleNamespace(chat_id=-1001, id=77, raw_text="早安")
     ok = asyncio.run(w._acknowledge_group(event))
     assert ok is True
@@ -242,6 +244,62 @@ def test_note_is_trivial():
     assert not AccountWorker._note_is_trivial("今天天氣真的好好哦")
 
 
+def test_outbound_guard_blocks_stopped_account():
+    """F03: 帳號不在執行中時，reaction／貼圖在 RPC 前就被攔（RPC 次數=0）。"""
+    w = _worker()
+    sent = []
+
+    class _FakeClient:
+        async def upload_file(self, path):
+            return f"<file:{path}>"
+
+        async def __call__(self, request):
+            sent.append(request)
+
+    w.tg_client = _FakeClient()
+    w.is_running = False
+    event = SimpleNamespace(chat_id=-1001, id=77, raw_text="早安", media=None)
+    assert asyncio.run(w._send_group_reaction(event)) is False
+    assert asyncio.run(w._send_group_sticker(event)) is False
+    assert len(sent) == 0
+    assert not w.stats.get("reactions_sent")
+    assert not w.stats.get("stickers_sent")
+
+
+def test_outbound_guard_blocks_removed_group():
+    """F03: 群組被移出範圍時，實際 RPC 前攔下。"""
+    w = _worker()
+    sent = []
+
+    class _FakeClient:
+        async def __call__(self, request):
+            sent.append(request)
+
+    w.tg_client = _FakeClient()
+    w.is_running = True
+    # selected_groups=[-1001]（_worker 預設），但事件來自別群
+    event = SimpleNamespace(chat_id=-9999, id=77, raw_text="早安", media=None)
+    assert asyncio.run(w._send_group_reaction(event)) is False
+    assert len(sent) == 0
+
+
+def test_outbound_guard_blocks_disabled_feature():
+    """F03: 功能開關（reply_enabled）關閉時，reaction 也過同一道門。"""
+    w = _worker()
+    sent = []
+
+    class _FakeClient:
+        async def __call__(self, request):
+            sent.append(request)
+
+    w.tg_client = _FakeClient()
+    w.is_running = True
+    w.reply_enabled = False
+    event = SimpleNamespace(chat_id=-1001, id=77, raw_text="早安", media=None)
+    assert asyncio.run(w._send_group_reaction(event)) is False
+    assert len(sent) == 0
+
+
 def test_send_group_reaction_uses_client_and_stats():
     w = _worker()
     w.persona = {"name": "t", "chat_style": "內斂反問"}
@@ -253,6 +311,7 @@ def test_send_group_reaction_uses_client_and_stats():
             sent.append(request)
 
     w.tg_client = _CallableClient()
+    w.is_running = True
     event = SimpleNamespace(
         id=99, chat_id=-1001, raw_text="剛下班", media=None
     )

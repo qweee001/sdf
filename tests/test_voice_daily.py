@@ -37,7 +37,7 @@ class _VoiceDB:
         self.claimed = True
         return True
 
-    async def add_message(self, *args):
+    async def add_message(self, *args, **kwargs):
         self.messages.append(args)
 
     async def touch_activity(self, *args):

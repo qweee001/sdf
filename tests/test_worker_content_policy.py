@@ -100,7 +100,7 @@ class _FakeDB:
     async def claim_group_text(self, *_args, **_kwargs):
         return True
 
-    async def add_message(self, *args):
+    async def add_message(self, *args, **kwargs):
         self.messages.append(args)
 
     async def touch_activity(self, *args):

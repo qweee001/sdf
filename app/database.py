@@ -105,9 +105,17 @@ class Database:
                 sender_name TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
-                timestamp REAL NOT NULL
+                timestamp REAL NOT NULL,
+                message_id INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # 舊庫升級：message_id = Telegram 訊息 ID（事件身分）。
+        # 以前跨帳號去重用 (sender_id, content, 秒級 timestamp)，同一事件
+        # 跨秒收到就變兩則；有 TG ID 後同一事件無論哪個帳號、哪一秒收到都唯一。
+        _msg_cols = await db.execute("PRAGMA table_info(messages)")
+        _msg_col_names = {r[1] for r in await _msg_cols.fetchall()}
+        if "message_id" not in _msg_col_names:
+            await db.execute("ALTER TABLE messages ADD COLUMN message_id INTEGER NOT NULL DEFAULT 0")
         await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_messages_account_group
             ON messages (account_id, group_id, timestamp DESC)
@@ -239,14 +247,44 @@ class Database:
         """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS group_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 group_id INTEGER NOT NULL,
                 member_id INTEGER NOT NULL,
                 account_id TEXT NOT NULL,
                 note TEXT NOT NULL,
-                updated_at REAL NOT NULL,
-                PRIMARY KEY (group_id, member_id, account_id)
+                updated_at REAL NOT NULL
             )
         """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_group_memory_lookup
+            ON group_memory (group_id, member_id, account_id, updated_at DESC)
+        """)
+        # F10: 舊庫主鍵是 (group_id, member_id, account_id) 單筆，新備註會直接蓋掉
+        # 舊事實（「昨晚說要去墾丁」被「哈哈」蓋掉）。改成 id 自增後同一
+        # 群友＋帳號可留多筆事實，讀端取最近 N 筆。偵測到沒有 id 欄就重建。
+        _gm_cols = {r[1] for r in await (
+            await db.execute("PRAGMA table_info(group_memory)")).fetchall()}
+        if "id" not in _gm_cols:
+            await db.execute("ALTER TABLE group_memory RENAME TO _group_memory_old")
+            await db.execute("""
+                CREATE TABLE group_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id INTEGER NOT NULL,
+                    member_id INTEGER NOT NULL,
+                    account_id TEXT NOT NULL,
+                    note TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            """)
+            await db.execute("""
+                INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at)
+                SELECT group_id, member_id, account_id, note, updated_at FROM _group_memory_old
+            """)
+            await db.execute("DROP TABLE _group_memory_old")
+            await db.execute("""
+                CREATE INDEX idx_group_memory_lookup
+                ON group_memory (group_id, member_id, account_id, updated_at DESC)
+            """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS group_labels (
                 group_id INTEGER PRIMARY KEY,
@@ -1184,16 +1222,22 @@ class Database:
         await self._c.execute("DELETE FROM messages WHERE account_id = ?", (account_id,))
         await self._c.execute("DELETE FROM private_messages WHERE account_id = ?", (account_id,))
         await self._c.execute("DELETE FROM activity WHERE account_id = ?", (account_id,))
+        # F10: 群組記憶也歸屬帳號（account_id 欄位），不刪就留下「已刪帳號還記得
+        # 那位群友」的殘留——刪帳號後所有歸屬該帳號的私人記憶都要消失。
+        await self._c.execute("DELETE FROM group_memory WHERE account_id = ?", (account_id,))
+        # 回覆認領（槽位鎖）也歸屬帳號；不刪會卡住該帳號之後的認領判斷
+        await self._c.execute("DELETE FROM outbound_claims WHERE account_id = ?", (account_id,))
         await self._c.commit()
 
     # ---------- 記憶 ----------
 
     async def add_message(self, account_id: str, group_id: int, sender_id: int,
-                          sender_name: str, role: str, content: str) -> None:
+                          sender_name: str, role: str, content: str,
+                          message_id: int = 0) -> None:
         await self._c.execute(
-            "INSERT INTO messages (account_id, group_id, sender_id, sender_name, role, content, timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (account_id, group_id, sender_id, sender_name, role, content, time.time()),
+            "INSERT INTO messages (account_id, group_id, sender_id, sender_name, role, content, timestamp, message_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (account_id, group_id, sender_id, sender_name, role, content, time.time(), int(message_id or 0)),
         )
         # 每群最多留 200 條
         await self._c.execute(
@@ -1218,11 +1262,11 @@ class Database:
     async def get_group_messages(self, group_id: int, limit: int = 100) -> list[dict]:
         """跨所有帳號讀取某群組的實際訊息串（含人類與水軍），按時間順序回傳，供互動分析。
 
-        同一條群訊息會被群內每個水軍帳號各記錄一份（timestamp 差 <1s），
-        按 (sender_id, content, 秒級 timestamp) 去重。
+        同一條群訊息會被群內每個水軍帳號各記錄一份；以 (sender_id, TG 訊息 ID)
+        去重（F09 事件身分），舊資料無 TG ID 時退回 (sender_id, content, 秒)。
         """
         cursor = await self._c.execute(
-            "SELECT sender_id, sender_name, role, content, timestamp "
+            "SELECT sender_id, sender_name, role, content, timestamp, message_id "
             "FROM messages WHERE group_id = ? "
             "ORDER BY timestamp DESC, id DESC LIMIT ?",
             (group_id, limit),
@@ -1231,7 +1275,13 @@ class Database:
         seen: set = set()
         deduped: list[dict] = []
         for r in rows:
-            key = (r["sender_id"], r["content"], int(float(r["timestamp"]) // 1))
+            # F09: 事件身分 = Telegram 訊息 ID（同一事件任何帳號、任何秒收到都相同）。
+            # 舊資料沒有 TG ID（message_id=0）時退回原秒級鍵，標記為估計值。
+            tg_id = int(r["message_id"] or 0)
+            if tg_id > 0:
+                key = (r["sender_id"], tg_id)
+            else:
+                key = (r["sender_id"], r["content"], int(float(r["timestamp"]) // 1))
             if key in seen:
                 continue
             seen.add(key)
@@ -1915,13 +1965,16 @@ class Database:
     async def get_group_member_notes(
         self, group_id: int, member_id: int, account_id: str, limit: int = 10
     ) -> list[str]:
-        """該帳號與該群友最近的互動備註（群組＋成員＋帳號三層隔離，絕不跨群跨人混用）。"""
+        """該帳號與該群友最近的互動備註（群組＋成員＋帳號三層隔離，絕不跨群跨人混用）。
+
+        F10: 回傳「最近 N 筆」而不只是最新一筆——新事實不再蓋掉舊事實
+        （「昨晚說要去墾丁」不會被今天的「哈哈」吃掉）。"""
         if not group_id or not member_id or not account_id:
             return []
         cursor = await self._c.execute(
             "SELECT note FROM group_memory "
             "WHERE group_id = ? AND member_id = ? AND account_id = ? "
-            "ORDER BY updated_at DESC LIMIT ?",
+            "ORDER BY updated_at DESC, id DESC LIMIT ?",
             (int(group_id), int(member_id), account_id, int(limit)),
         )
         rows = await cursor.fetchall()
@@ -1930,29 +1983,67 @@ class Database:
     async def upsert_group_member_note(
         self, group_id: int, member_id: int, account_id: str, note: str
     ) -> bool:
-        """把一條群友備註寫入（同 key 覆蓋最新，舊的過期由 cleanup_expired 清）。"""
-        if not group_id or not member_id or not account_id:
+        """把一條群友備註寫入。
+
+        F10: 語義從「覆蓋最新」改為「累積」——同一 key 不再互蓋，新事實追加。
+        只擋「同 key 同內容 60 秒內重複」，避免刷屏把記憶灌爆；
+        每組 (group, member, account) 最多留 10 筆（超出刪最舊）。
+        過期由 cleanup_expired 清。"""
+        note = (note or "").strip()
+        if not group_id or not member_id or not account_id or not note:
             return False
+        now = time.time()
+        dup = await self._c.execute(
+            "SELECT 1 FROM group_memory "
+            "WHERE group_id = ? AND member_id = ? AND account_id = ? "
+            "AND note = ? AND updated_at > ? LIMIT 1",
+            (int(group_id), int(member_id), account_id, note, now - 60),
+        )
+        if not await dup.fetchone():
+            await self._c.execute(
+                "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (int(group_id), int(member_id), account_id, note, now),
+            )
+        # 容量上限：同 key 只留最近 10 筆
         await self._c.execute(
-            "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(group_id, member_id, account_id) DO UPDATE SET "
-            "note = excluded.note, updated_at = excluded.updated_at",
-            (int(group_id), int(member_id), account_id, note, time.time()),
+            "DELETE FROM group_memory WHERE group_id = ? AND member_id = ? AND account_id = ? "
+            "AND id NOT IN (SELECT id FROM group_memory "
+            "WHERE group_id = ? AND member_id = ? AND account_id = ? "
+            "ORDER BY updated_at DESC, id DESC LIMIT 10)",
+            (int(group_id), int(member_id), account_id,
+             int(group_id), int(member_id), account_id),
         )
         await self._c.commit()
         return True
 
     async def upsert_group_shared_note(self, group_id: int, account_id: str, note: str) -> bool:
-        """把一條群組共同記憶寫入（member_id=0，跨群組隔離；舊的過期由 cleanup_expired 清）。"""
+        """把一條群組共同記憶寫入（member_id=0，跨群組隔離）。
+
+        F10: 同樣從「單筆覆蓋」改為「累積最近 10 筆」＋60 秒同內容去重。
+        過期由 cleanup_expired 清。"""
         if not group_id or not account_id or not note or not note.strip():
             return False
+        note = note.strip()
+        now = time.time()
+        dup = await self._c.execute(
+            "SELECT 1 FROM group_memory "
+            "WHERE group_id = ? AND member_id = 0 AND account_id = ? "
+            "AND note = ? AND updated_at > ? LIMIT 1",
+            (int(group_id), account_id, note, now - 60),
+        )
+        if not await dup.fetchone():
+            await self._c.execute(
+                "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
+                "VALUES (?, 0, ?, ?, ?)",
+                (int(group_id), account_id, note, now),
+            )
         await self._c.execute(
-            "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
-            "VALUES (?, 0, ?, ?, ?) "
-            "ON CONFLICT(group_id, member_id, account_id) DO UPDATE SET "
-            "note = excluded.note, updated_at = excluded.updated_at",
-            (int(group_id), account_id, note.strip(), time.time()),
+            "DELETE FROM group_memory WHERE group_id = ? AND member_id = 0 AND account_id = ? "
+            "AND id NOT IN (SELECT id FROM group_memory "
+            "WHERE group_id = ? AND member_id = 0 AND account_id = ? "
+            "ORDER BY updated_at DESC, id DESC LIMIT 10)",
+            (int(group_id), account_id, int(group_id), account_id),
         )
         await self._c.commit()
         return True
@@ -1964,7 +2055,7 @@ class Database:
         cursor = await self._c.execute(
             "SELECT note FROM group_memory "
             "WHERE group_id = ? AND member_id = 0 AND account_id = ? "
-            "ORDER BY updated_at DESC LIMIT ?",
+            "ORDER BY updated_at DESC, id DESC LIMIT ?",
             (int(group_id), account_id, int(limit)),
         )
         rows = await cursor.fetchall()

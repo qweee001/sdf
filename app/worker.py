@@ -1118,6 +1118,8 @@ class AccountWorker:
                 # 全部被灌水（實測群 111 三個水軍被算成真人）。
                 "assistant" if sender_kind == "managed" else "user",
                 stored_content,
+                # F09: TG 訊息 ID = 事件身分，跨帳號/跨秒去重靠它
+                message_id=int(getattr(event, "id", 0) or 0),
             )
             if not await self._should_reply(event):
                 return
@@ -1912,9 +1914,27 @@ class AccountWorker:
             pool = base
         return self._rng.choice(pool)
 
+    async def _outbound_guard(self, event, activity_kind: str = "reply") -> bool:
+        """最終發送入口前的統一資格檢查（F03）：reaction／貼圖以前直接打 Telegram
+        RPC，繞過了文字走的「帳號還在跑、群組還在範圍、功能開關」檢查。
+        實際 RPC 前一律先過這裡；被攔就記 log 回 False，RPC 次數為 0。"""
+        chat_id = int(getattr(event, "chat_id", 0) or 0)
+        if not self.is_running or self.tg_client is None:
+            print(f"[{self.name}] final-gate-block: 帳號不在執行中 {chat_id}", flush=True)
+            return False
+        if chat_id not in self.selected_groups:
+            print(f"[{self.name}] final-gate-block: 群組已移出範圍 {chat_id}", flush=True)
+            return False
+        if not self._activity_enabled(activity_kind):
+            print(f"[{self.name}] final-gate-block: {activity_kind} 功能已關閉 {chat_id}", flush=True)
+            return False
+        return True
+
     async def _send_group_reaction(self, event) -> bool:
         """對群訊息只發一個 reaction（不發文字），回傳是否成功。"""
         if not self.tg_client or not getattr(event, "id", None):
+            return False
+        if not await self._outbound_guard(event):
             return False
         is_photo = isinstance(getattr(event, "media", None), MessageMediaPhoto)
         emoji = self._pick_reaction(str(event.raw_text or ""), is_photo)
@@ -1948,6 +1968,8 @@ class AccountWorker:
         真 sticker 顯示（不是圖片）。
         """
         if not self.tg_client or not getattr(event, "id", None) or not self._stickers:
+            return False
+        if not await self._outbound_guard(event):
             return False
         path = self._rng.choice(self._stickers)
         try:
@@ -2610,7 +2632,6 @@ class AccountWorker:
     async def _reply_later(
         self, event, delay: float, *, managed_followup: bool = False
     ):
-        await asyncio.sleep(delay)
         sent = False
         telegram_dispatched = False
         sent_audited = False
@@ -2634,6 +2655,9 @@ class AccountWorker:
             telegram_dispatched = True
 
         try:
+            # F07: 初始延遲移進受管區塊（以前在 try 外）——延遲期間被真人插話/
+            # 停機取消時，CancelledError 直接外傳，跳過釋放 claim，群組槽位鎖死。
+            await asyncio.sleep(delay)
             media_kind = (
                 None
                 if managed_followup
