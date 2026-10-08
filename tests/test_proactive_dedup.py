@@ -88,6 +88,41 @@ def test_context_topic_returns_empty_when_model_keeps_repeating():
     asyncio.run(main())
 
 
+def test_context_topic_drops_and_next_cycle_avoids_same_topic():
+    """跨 cycle 反重複：被「repeated topic」drop 的句子要記進記憶，
+    下一個 cycle 的 prompt 必須餵回去，逼模型換說法。
+
+    實測根因（小天後 12h：163 次 drop 只有 6 次 sent）：already 每個 cycle
+    從零開始，模型反覆生成同一批露骨短句、每次都被正確 drop、下一 cycle 又抽到。
+    """
+
+    async def main():
+        from unittest.mock import AsyncMock
+
+        old = "早啊\n還賴在床上\n想被幹🫶"
+        worker = _worker(404, db=_TopicDB(history=[old]))
+        await worker.reload_proactive_memory()
+        captured: list[str] = []
+
+        worker._call_ai = AsyncMock(side_effect=lambda system_prompt, prompt, **kw: (
+            captured.append(prompt), old)[1]
+        )
+        assert await worker._generate_context_topic(-5428680940) == ""
+        assert len(captured) == 3, "同一句連撞三次應該全部用完"
+
+        # 記憶有記下被 drop 的句子
+        assert worker._proactive_recent_seen.get(-5428680940), "drop 的句子要進跨 cycle 記憶"
+
+        # 下一 cycle：第一次呼叫的 prompt 就必須餵回舊句
+        worker._call_ai = AsyncMock(return_value="今天下班去吃火鍋")
+        fresh = await worker._generate_context_topic(-5428680940)
+        assert fresh == "今天下班去吃火鍋"
+        first_prompt = worker._call_ai.call_args_list[0].args[1]
+        assert old[:4] in first_prompt, "跨 cycle：上輪被 drop 的句子要餵進本輪 prompt"
+
+    asyncio.run(main())
+
+
 def test_proactive_cooldown_is_shared_within_slot_and_jitters_across_slots():
     """冷卻時間要抖動（反節拍器），但同一窗口內三個帳號必須算出同一個值。
 

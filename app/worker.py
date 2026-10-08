@@ -744,6 +744,10 @@ class AccountWorker:
         self._proactive_today = 0
         self._proactive_day = 0
         self._recent_proactive_topics: set[str] = set()
+        # 跨 cycle 的反重複記憶：每群最近生成過的主動話題（接受或都被 drop 的都記），
+        # 最舊在前、最新在後、上限 12。沒有它，模型每個 cycle 都從零開始、把同一批露骨
+        # 短句反覆生成再被「repeated topic」drop（實測小天後 12h：163 次 drop 只有 6 次 sent）。
+        self._proactive_recent_seen: dict[int, list[str]] = {}
         self._recent_emojis_by_group: dict[int, list[str]] = {}  # group_id -> 最近用過的 emoji
         # 帳號私有 RNG：reaction／貼圖挑選用（話題不再走預設池，全部即時生成）
         self._rng = random.Random(
@@ -5396,19 +5400,29 @@ class AccountWorker:
 
         # 生成不出可用的一句就重試（最多 3 次）：重試時把「已經講過的」餵回去，
         # 逼模型換說法；三次都撞句／穿幫就這一輪不開口，也不塞罐頭句。
-        already = []
+        # 起點帶上跨 cycle 記憶：每群最近生成過（含全部被 drop）的主動話題，
+        # 不然模型每個 cycle 都從零開始、同一批露骨短句反覆生成再被「repeated topic」drop。
+        already = self._proactive_recent_seen.get(int(group_id), [])[-8:]
+        def _note_seen(topic: str) -> None:
+            """把這一批生成過的句子記進跨 cycle 記憶（接受與被 drop 的都記），上限 12 條。"""
+            bucket = self._proactive_recent_seen.setdefault(int(group_id), [])
+            bucket.append(topic[:60])
+            del bucket[:-12]
+
         for _ in range(3):
             hint = extra_hint
             if already:
                 hint = (
                     f"{hint}\n" if hint else ""
-                ) + "這幾句群裡已經出現過，換一個完全不同的說法：" + "／".join(already[:3])
+                ) + "這幾句群裡已經出現過，換一個完全不同的說法：" + "／".join(already[-3:])
             raw = await self._call_ai(
                 get_system_prompt(self.persona), build_prompt(hint), purpose="proactive"
             )
             topic = (raw or "").strip()
             if not topic or self._is_refusal(topic):
                 continue
+            # 不管最後被哪條規則 drop（或放行）都記：模型下一 cycle 要看到「這些已經出過」
+            _note_seen(topic)
             # 主動發言自己開口，穿幫成本最高：時段不合或混入簡體字就換一句
             if self._has_time_mismatch(topic):
                 print(f"[{self.name}] proactive-drop: time mismatch on {topic[:20]!r}", flush=True)
