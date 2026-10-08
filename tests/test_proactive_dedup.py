@@ -123,6 +123,28 @@ def test_context_topic_drops_and_next_cycle_avoids_same_topic():
     asyncio.run(main())
 
 
+def test_context_topic_prompt_includes_other_accounts_recent_topics():
+    """跨帳號話題提示：同群其他水軍最近送出的句子要餵進 prompt，
+    避免多號同一時段炒同一主題（實測正午三號齊刷「餓/吃飯」）。
+
+    去重仍靠 remote_texts（撞句回空）；這裡只驗證「模型看得到別號最近講過什麼」。
+    """
+
+    async def main():
+        from unittest.mock import AsyncMock
+
+        other = "中午餓死了\n誰要約飯🫶"
+        worker = _worker(505, db=_TopicDB(history=[other]))
+        prompts: list[str] = []
+        worker._call_ai = AsyncMock(side_effect=lambda s, p, **kw: (prompts.append(p), "晚上想吃火鍋")[1])
+        fresh = await worker._generate_context_topic(-5428680940)
+        assert fresh == "晚上想吃火鍋"
+        assert prompts, "至少呼叫一次模型"
+        assert other.replace("\n", " ")[:20] in prompts[0], "其他帳號最近句子要餵進 prompt"
+
+    asyncio.run(main())
+
+
 def test_proactive_cooldown_is_shared_within_slot_and_jitters_across_slots():
     """冷卻時間要抖動（反節拍器），但同一窗口內三個帳號必須算出同一個值。
 

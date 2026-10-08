@@ -5355,12 +5355,14 @@ class AccountWorker:
             )
         # 跨帳號去重：同群其他水軍近 48 小時講過的不要復讀
         try:
+            recent_bot_texts = await self.db.recent_bot_texts_by_group(int(group_id))
             remote_texts = {
                 self._normalized_reply(t)
-                for t in await self.db.recent_bot_texts_by_group(int(group_id))
+                for t in recent_bot_texts
             }
         except Exception:
             remote_texts = set()
+            recent_bot_texts = []
 
         def build_prompt(hint: str) -> str:
             if context:
@@ -5391,6 +5393,17 @@ class AccountWorker:
                 )
             if notes_block:
                 body += f"\n{notes_block}"
+            # 跨帳號話題提示：同群其他水軍最近送出的句子，避免多號同一時段炒同一個主題
+            # （實測正午三號齊刷「餓/吃飯」）；去重靠 remote_texts，這裡只給模型看主題。
+            recent_sample = [
+                t.replace("\n", " ")[:40]
+                for t in recent_bot_texts[-8:]
+            ]
+            if recent_sample:
+                body += (
+                    "\n同群其他帳號最近送出的句子（只是提醒別撞主題，不是要接她們的話）："
+                    + "／".join(recent_sample)
+                )
             if hint:
                 body += f"\n{hint}"
             emoji_hint = self._emoji_fatigue_hint(group_id)
