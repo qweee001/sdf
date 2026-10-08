@@ -102,3 +102,26 @@ def test_missing_db_support_fails_open():
         assert await worker._proactive_rotation_ok(GROUP, _row("assistant", OTHER, 300)) is True
 
     asyncio.run(main())
+
+
+def test_self_throttle_blocks_second_proactive_within_gap():
+    """自我節流：我 120 秒前才在該群發過言（不管主動或回覆），
+    就算 rotation 判斷「輪到我」（我比別號更久沒講）也先閉嘴。
+
+    實測根因（10-08 群 111）：真人熱聊時每個 cycle 獨立擲 30% 接話，
+    同一帳號連中 13 分鐘連發 4 次主動——rotation 只防三隻接力。
+    """
+
+    async def main():
+        now = time.time()
+        # 我 120 秒前講過；別號 600 秒前 → rotation 本來會判「輪到我」
+        worker = _worker(ME, db=_RotateDB({ME: now - 120, OTHER: now - 600}))
+        worker.tg_user_id = ME
+        assert await worker._proactive_rotation_ok(GROUP, _row("assistant", OTHER, 300)) is False
+
+        # 超過自我節流窗（360s）後就放行
+        worker2 = _worker(ME, db=_RotateDB({ME: now - 600, OTHER: now - 600}))
+        worker2.tg_user_id = ME
+        assert await worker2._proactive_rotation_ok(GROUP, _row("assistant", OTHER, 300)) is True
+
+    asyncio.run(main())

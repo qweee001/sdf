@@ -135,6 +135,12 @@ _PROACTIVE_ROTATION_MIN_GAP = 90.0
 _MAX_WATER_ONLY_STREAK = 2
 # 純水軍串時露骨度上限：沒有真人參與，越撩越兇只會更像機器人
 _WATER_ONLY_FLIRTY_CAP = 1
+# 自我節流：同一帳號在該群最近一次發言（主動或回覆都算）後 N 秒內，
+# 就算輪替判斷「輪到我」也先閉嘴。實測（10-08 群 111 13:44~13:57）：
+# 真人熱聊時每個 cycle 都獨立擲 30% 接話，同一帳號連續中獎、13 分鐘連發
+# 4 次主動——rotation 只防「三隻接力」，防不住「一隻自己刷」。
+# 真人熱聊時連發是接對話，主動插話 6 分鐘內第二句就太密。
+_PROACTIVE_SELF_MIN_GAP = 360.0
 # 這個時間窗內有真人講話，才算是「有人可以接話」的場合
 _HUMAN_CONTEXT_WINDOW_SECONDS = 1800.0
 # 意圖識別：先讀懂對方這句話在做什麼，後面的方式與尺度才有依據
@@ -5295,6 +5301,15 @@ class AccountWorker:
         if not spoke:
             return True
         mine = float(spoke.get(me, 0.0) or 0.0)
+        # 自我節流：我最近一次發言（主動或回覆都算，spoke 從 messages 表讀）
+        # 離現在不夠 _PROACTIVE_SELF_MIN_GAP 就先閉嘴——rotation 只防三隻接力，
+        # 防不住同一隻 30% 接話連中後在該群連發。
+        if mine and (time.time() - mine) < _PROACTIVE_SELF_MIN_GAP:
+            print(
+                f"[{self.name}] proactive-skip: 我 {time.time() - mine:.0f}s 前才在該群發過言，先等一下",
+                flush=True,
+            )
+            return False
         others = [
             float(at) for sender, at in spoke.items() if int(sender) != me and at
         ]
