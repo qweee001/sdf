@@ -213,8 +213,9 @@ def test_mainland_term_hint_names_the_replacement():
         )
         assert worker._mainland_term_hint("我住酒店") == "「酒店」應講「飯店」"
         assert worker._mainland_term_hint("想找炮友") == "「炮友」應講「砲友」"
-        # 美女→正妹（實測研究：台灣人講正妹，美女是大陸講法）
-        assert worker._mainland_term_hint("你是大美女") == "「美女」應講「正妹」"
+        # 美女 不擋：實測群裡真人講「美女」3 次、「正妹」0 次，硬擋會露怯
+        # （改成 persona 引導兩者皆可，見 persona 語言硬規則）
+        assert worker._mainland_term_hint("你是大美女") == ""
         # 多個命中要並列（correction 才能一次改完）
         assert (
             worker._mainland_term_hint("方便面酸奶一起買")
