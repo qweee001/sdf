@@ -95,6 +95,34 @@ _SIMPLIFIED_PHRASE_PATTERNS = (
     # 收錄三個變體：乾(U+4E7E)飯／幹(U+5E79)飯／干饭（簡體）。
     re.compile(r"乾飯|幹飯|干饭"),
 )
+# 大陸講法→台灣講法對照（Big5 編得出、逐字簡體檢查過關但仍是大陸講法）。
+# 跟 typo_pairs.txt 同模式，從 app/assets/mainland_tw_terms.txt 讀（錯講=正講），
+# 可直接改檔擴充不用動 code；完整 536 組對照表見 docs/mainland_tw_comparison.txt。
+# 群組語境兩邊都用的詞（信息/程序/群主/半套/全套/超市）不放進來避免誤殺；
+# 單字（操/尻/逼）誤殺高也不放。
+
+
+def _load_mainland_tw_terms() -> tuple[tuple[str, str], ...]:
+    """大陸講法→台灣講法（錯講=正講），只收 Big5 編得出但仍是大陸講法的詞。"""
+    path = Path(__file__).resolve().parent / "assets" / "mainland_tw_terms.txt"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    pairs = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        wrong, _, right = line.partition("=")
+        wrong, right = wrong.strip(), right.strip()
+        if wrong and right and wrong != right:
+            pairs.append((wrong, right))
+    return tuple(pairs)
+
+
+_MAINLAND_TW_TERMS = _load_mainland_tw_terms()
+
 # F16：Big5 字元表不是繁簡分類器。繁體姓名／罕用字收錄不全，逐字 Big5
 # 編碼會把「編不出」誤判成簡體。這裡維持一份「繁體但在 Big5 缺字」的例外
 # 清單（有版本、有來源），命中例外才放行；真正的簡體（什么／家里…）仍由
@@ -3852,6 +3880,7 @@ class AccountWorker:
         too_long = len(reply) > _MAX_REPLY_CHARS
         format_leak = self._has_format_leak(reply)
         simplified = self._has_simplified_chars(reply)
+        mainland_term = self._mainland_term_hint(reply)
         refusal = self._is_refusal(reply)
         mentions_video = self._mentions_video_topic(reply)
         mentions_group_meta = await self._candidate_mentions_current_group_meta(reply)
@@ -3868,6 +3897,7 @@ class AccountWorker:
             not too_long
             and not format_leak
             and not simplified
+            and not mainland_term
             and not refusal
             and not mentions_video
             and not mentions_group_meta
@@ -3892,6 +3922,8 @@ class AccountWorker:
                 if format_leak
                 else "simplified_chars"
                 if simplified
+                else "mainland_term"
+                if mainland_term
                 else "time_mismatch"
                 if time_mismatch
                 else "place_typo"
@@ -3921,6 +3953,11 @@ class AccountWorker:
             correction += "上一版包含 <answer> 等標籤或格式標記；絕不能輸出任何標籤、括號指令或格式標記，只輸出自然對話文字。"
         if simplified:
             correction += "上一版含簡體字；必須全部使用繁體中文。"
+        if mainland_term:
+            correction += (
+                f"上一版用了大陸講法的詞（{mainland_term}）。"
+                "換成台灣講法，其他不要改。"
+            )
         if mentions_video:
             correction += (
                 "不要提及或複述禁止話題，也不要解釋拒絕原因；"
@@ -3966,6 +4003,7 @@ class AccountWorker:
         retry_too_long = len(retry) > _MAX_REPLY_CHARS
         retry_format_leak = self._has_format_leak(retry)
         retry_simplified = self._has_simplified_chars(retry)
+        retry_mainland_term = self._mainland_term_hint(retry)
         retry_refusal = self._is_refusal(retry)
         retry_video = self._mentions_video_topic(retry)
         retry_group_meta = await self._candidate_mentions_current_group_meta(retry)
@@ -3980,6 +4018,7 @@ class AccountWorker:
             retry_too_long
             or retry_format_leak
             or retry_simplified
+            or retry_mainland_term
             or retry_refusal
             or retry_video
             or retry_group_meta
@@ -3998,6 +4037,8 @@ class AccountWorker:
                 if retry_format_leak
                 else "simplified_chars"
                 if retry_simplified
+                else "mainland_term"
+                if retry_mainland_term
                 else "time_mismatch"
                 if retry_time_mismatch
                 else "place_typo"
@@ -4024,6 +4065,27 @@ class AccountWorker:
                 text,
             )
         )
+
+    @staticmethod
+    def _mainland_term_hint(text: str) -> str:
+        """大陸講法偵測＋指名替代：「方便面」應講「泡麵」這種。
+
+        這些詞不是簡體字（逐字 Big5 檢查過關），而是大陸講法（如
+        方便面／酸奶／酒店／炮友）。命中回「「方便面」應講「泡麵」」，
+        correction 指名替代，模型才知道往哪改（光說「用繁體」它不會
+        把「方便面」改成「泡麵」，因為「方便面」本身就是合法繁體）。
+        沒問題回 ""。
+        """
+        t = unicodedata.normalize("NFKC", str(text or ""))
+        if not t:
+            return ""
+        hits = []
+        for wrong, right in _MAINLAND_TW_TERMS:
+            if wrong in t:
+                hits.append(f"「{wrong}」應講「{right}」")
+                if len(hits) >= 3:
+                    break
+        return "；".join(hits)
 
     @staticmethod
     def _has_simplified_chars(text: str) -> bool:
@@ -5461,6 +5523,9 @@ class AccountWorker:
                 continue
             if self._has_simplified_chars(topic):
                 print(f"[{self.name}] proactive-drop: simplified chars on {topic[:20]!r}", flush=True)
+                continue
+            if self._mainland_term_hint(topic):
+                print(f"[{self.name}] proactive-drop: mainland term on {topic[:20]!r}", flush=True)
                 continue
             place_typo = self._place_typo_hint(
                 topic, expected=self._expected_place_names(context, notes_block)

@@ -196,3 +196,83 @@ def test_reply_generation_allows_time_appropriate_greeting():
         assert text == "晚安，早點睡囉"
 
     asyncio.run(main())
+
+
+def test_mainland_term_hint_names_the_replacement():
+    """大陸講法偵測＋指名替代：「方便面」應講「泡麵」。
+
+    這些詞不是簡體字（Big5 逐字檢查過關），而是大陸講法，所以獨立一層。
+    群組語境兩邊都用的詞（超市／信息／群主）不擋，避免誤殺。
+    """
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        assert (
+            worker._mainland_term_hint("方便面很好吃")
+            == "「方便面」應講「泡麵」"
+        )
+        assert worker._mainland_term_hint("我住酒店") == "「酒店」應講「飯店」"
+        assert worker._mainland_term_hint("想找炮友") == "「炮友」應講「砲友」"
+        # 美女→正妹（實測研究：台灣人講正妹，美女是大陸講法）
+        assert worker._mainland_term_hint("你是大美女") == "「美女」應講「正妹」"
+        # 多個命中要並列（correction 才能一次改完）
+        assert (
+            worker._mainland_term_hint("方便面酸奶一起買")
+            == "「方便面」應講「泡麵」；「酸奶」應講「優酪乳」"
+        )
+        # 群組語境兩邊都用的不誤殺
+        assert worker._mainland_term_hint("超市買東西") == ""
+        assert worker._mainland_term_hint("信息很正確") == ""
+        assert worker._mainland_term_hint("哥哥們好") == ""
+        assert worker._mainland_term_hint("") == ""
+
+    asyncio.run(main())
+
+
+def test_generation_rewrites_mainland_term():
+    """_generate_reply 校驗鏈要含大陸講法檢查：違規重生一次，重生後正常放行。"""
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        replies = iter(["明天一起吃方便面吧", "明天一起吃泡麵吧"])
+        worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: next(replies))
+        event = AsyncMock(
+            sender_id=999,
+            chat_id=-5428680940,
+            id=90,
+            mentioned=False,
+            is_reply=False,
+            reply_to=None,
+            raw_text="晚上餓了想吃東西",
+            media=None,
+        )
+        text = await worker._generate_reply(event)
+        assert text == "明天一起吃泡麵吧"
+
+    asyncio.run(main())
+
+
+def test_generation_drops_reply_when_mainland_term_survives_retry():
+    """兩次都用大陸講法 → 不發送，drop 原因記為 mainland_term。"""
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker._call_ai = AsyncMock(
+            side_effect=lambda *_a, **_k: "明天一起吃方便面吧"
+        )
+        event = AsyncMock(
+            sender_id=999,
+            chat_id=-5428680940,
+            id=91,
+            mentioned=False,
+            is_reply=False,
+            reply_to=None,
+            raw_text="晚上餓了想吃東西",
+            media=None,
+        )
+        text = await worker._generate_reply(event)
+        assert text == ""
+        reason = worker._generation_reasons.get(worker._generation_key(event))
+        assert reason == "mainland_term"
+
+    asyncio.run(main())
