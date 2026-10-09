@@ -35,6 +35,10 @@ def test_reply_with_simplified_chars_is_blocked():
             is False
         )
         assert worker._has_simplified_chars("下次有机会我親自下廚") is True
+        # 實測 10-09 小小「餓到想乾飯」：「幹飯」是大陸口語（吃飯的意思），
+        # 單字「乾」在 Big5 是合法繁體，逐字檢查全放行 → 走片語黑名單攔
+        assert worker._has_simplified_chars("餓到想乾飯") is True
+        assert worker._has_simplified_chars("餓到想吃飯") is False
 
     asyncio.run(main())
 
