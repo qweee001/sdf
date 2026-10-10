@@ -73,6 +73,12 @@ class _FakeDB:
 class _FakeManager:
     def __init__(self):
         self.db = _FakeDB()
+        self.workers = {
+            "a1": type("W", (), {"is_running": True})(),
+        }
+        self.calls = []
+        self._media = True
+        self._voice = False
 
     async def status(self):
         return {
@@ -92,6 +98,35 @@ class _FakeManager:
                 }
             ],
         }
+
+    def feature_status(self):
+        return {
+            "media_enabled": self._media,
+            "voice_enabled": self._voice,
+            "voice_available": False,
+        }
+
+    async def update_feature_flags(self, media_enabled, voice_enabled):
+        self.calls.append(("features", media_enabled, voice_enabled))
+        self._media = media_enabled
+        self._voice = voice_enabled
+        return None
+
+    async def start(self, account_id):
+        self.calls.append(("start", account_id))
+        return None
+
+    async def stop(self, account_id):
+        self.calls.append(("stop", account_id))
+        return None
+
+    async def delete(self, account_id):
+        self.calls.append(("delete", account_id))
+        return None
+
+    async def add_account(self, name, session_key, enable=False, display_name=""):
+        self.calls.append(("add", name))
+        return {"id": "a2", "name": name}
 
 
 def _bot(monkeypatch, manager):
@@ -172,3 +207,52 @@ def test_help():
     h = TgControlBot._help(bot)
     assert "/status" in h
     assert "/groups" in h
+    assert "/startacc" in h
+    assert "/stopacc" in h
+    assert "/deleteacc" in h
+    assert "/media" in h
+    assert "/addacc" in h
+
+
+def test_acct_list(monkeypatch):
+    bot = _bot(monkeypatch, _FakeManager())
+    loop = asyncio.new_event_loop()
+    try:
+        out = loop.run_until_complete(bot._acct_list())
+    finally:
+        loop.close()
+    assert "台北-小小" in out
+    assert "🟢" in out  # worker 運行中
+
+
+def test_acc_toggle_and_delete(monkeypatch):
+    mgr = _FakeManager()
+    bot = _bot(monkeypatch, mgr)
+    loop = asyncio.new_event_loop()
+    try:
+        started = loop.run_until_complete(bot._acc_toggle("startacc", ["台北-小小"]))
+        assert "已啟動" in started
+        stopped = loop.run_until_complete(bot._acc_toggle("stopacc", ["台北-小小"]))
+        assert "已停止" in stopped
+        deleted = loop.run_until_complete(bot._acc_delete(["台北-小小"]))
+        assert "已刪除" in deleted
+        missing = loop.run_until_complete(bot._acc_toggle("startacc", [" nobody "]))
+        assert "找不到帳號" in missing
+    finally:
+        loop.close()
+    assert ("start", "a1") in mgr.calls
+    assert ("stop", "a1") in mgr.calls
+    assert ("delete", "a1") in mgr.calls
+
+
+def test_feature_toggle(monkeypatch):
+    mgr = _FakeManager()
+    bot = _bot(monkeypatch, mgr)
+    loop = asyncio.new_event_loop()
+    try:
+        out = loop.run_until_complete(bot._feature_toggle("media", ["off"]))
+        # voice 維持現狀（False），media 被關
+        assert ("features", False, False) in mgr.calls
+        assert "媒體：關閉" in out
+    finally:
+        loop.close()

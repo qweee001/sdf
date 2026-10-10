@@ -58,7 +58,7 @@ async def async_main() -> None:
         print(f"啟動水軍帳號失敗：{e}", flush=True)
 
     # Telegram 控制台 bot（有 BOT_TOKEN 才啟動；獨立 task，掛了不影響主流程）
-    bot = make_bot(settings, manager)
+    bot = make_bot(settings, manager, login_service)
     bot_task: asyncio.Task | None = None
     if bot is not None:
         bot_task = asyncio.create_task(bot.run())
