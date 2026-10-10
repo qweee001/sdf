@@ -21,7 +21,7 @@ import datetime
 import logging
 import re
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, types
 
 from .config import Settings
 from .manager import AccountManager
@@ -29,6 +29,38 @@ from .manager import AccountManager
 log = logging.getLogger("sdf.bot")
 
 MSG_LIMIT = 4096
+
+# 按鍵式菜單：(按鈕文字, 對應指令)；指令為空＝隱藏鍵盤
+MENU: list[tuple[str, str]] = [
+    ("📊 狀態", "status"),
+    ("🗂 群組", "groups"),
+    ("👤 帳號", "acct"),
+    ("▶ 啟動", "startacc"),
+    ("⏹ 停止", "stopacc"),
+    ("🗑 刪除", "deleteacc"),
+    ("🖼 媒體", "media"),
+    ("🔊 語音", "voice"),
+    ("➕ 新增", "addacc"),
+    ("📖 說明", "help"),
+    ("⌨ 隱藏", ""),
+]
+MENU_LABELS = {label: cmd for label, cmd in MENU}
+MENU_ROWS = [MENU[0:3], MENU[3:6], MENU[6:9], [MENU[9], MENU[10]]]
+
+# 打 / 時的指令下拉（setMyCommands）
+BOT_COMMANDS = [
+    types.BotCommand("status", "運行狀態＋24h KPI"),
+    types.BotCommand("groups", "群組清單／群訊息"),
+    types.BotCommand("privates", "私訊"),
+    types.BotCommand("acct", "帳號清單"),
+    types.BotCommand("startacc", "啟動帳號"),
+    types.BotCommand("stopacc", "停止帳號"),
+    types.BotCommand("deleteacc", "刪除帳號"),
+    types.BotCommand("media", "媒體功能（on/off/不按＝切換）"),
+    types.BotCommand("voice", "語音功能（on/off/不按＝切換）"),
+    types.BotCommand("addacc", "新增帳號（TG 驗證碼流程）"),
+    types.BotCommand("help", "說明"),
+]
 
 
 def _fmt_ts(ts: float) -> str:
@@ -66,6 +98,15 @@ class TgControlBot:
         await client.start(bot_token=self.bot_token)
         me = await client.get_me()
         self._bot_username = str(getattr(me, "username", "") or "")
+        # 打 / 時的指令下拉
+        try:
+            await client(types.SetMyCommands(commands=BOT_COMMANDS))
+        except Exception:
+            log.exception("setMyCommands 失敗")
+        self._reply_menu = types.ReplyKeyboardMarkup(
+            [[types.Button(text=label) for label, _ in row] for row in MENU_ROWS],
+            resize_keyboard=True,
+        )
         client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
         log.info("Telegram 控制台 bot 上線（@%s）", self._bot_username)
         try:
@@ -93,6 +134,18 @@ class TgControlBot:
             await event.reply("⚠️ 不是管理者（BOT_ADMIN_IDS 未包含你）")
             return
         text = (event.raw_text or "").strip()
+        # 按鍵式菜單：按鈕回傳的是標籤（如「📊 狀態」），先映射成指令
+        if text in MENU_LABELS:
+            mapped = MENU_LABELS[text]
+            text = f"/{mapped}" if mapped else ""
+            if not mapped:  # 「⌨ 隱藏」
+                await event.reply(
+                    "鍵盤已隱藏。按下方「📊 狀態」恢復完整鍵盤",
+                    reply_markup=types.ReplyKeyboardMarkup(
+                        [[types.Button(text="📊 狀態")]], resize_keyboard=True
+                    ),
+                )
+                return
         cmd = text.split()
         name = cmd[0].lower().lstrip("/").split("@")[0] if cmd else ""
         rest: list[str] = list(cmd[1:])
@@ -123,10 +176,11 @@ class TgControlBot:
                 body = await self._acct_list()
             else:
                 body = f"不認識的指令「/{name}」\n" + self._help()
-            await event.reply(body[:MSG_LIMIT])
+            await event.reply(body[:MSG_LIMIT], reply_markup=self._reply_menu)
         except Exception as e:
             log.exception("bot 指令 %r 失敗", text)
-            await event.reply(f"⚠️ {type(e).__name__}: {e}")
+            await event.reply(f"⚠️ {type(e).__name__}: {e}",
+                              reply_markup=self._reply_menu)
 
     # ---------- 各指令內容 ----------
 
@@ -313,7 +367,8 @@ class TgControlBot:
 
     async def _acc_toggle(self, name: str, args: list[str]) -> str:
         if not args:
-            return f"用法：/{name} <帳號名或id>"
+            # 按鍵點「▶ 啟動」「⏹ 停止」不帶帳號：回帳號清單讓主人挑
+            return await self._acct_list()
         target = args[0]
         accounts = await self.manager.db.list_accounts()
         acc = self._find_account_sync(accounts, target)
@@ -333,7 +388,7 @@ class TgControlBot:
 
     async def _acc_delete(self, args: list[str]) -> str:
         if not args:
-            return "用法：/deleteacc <帳號名或id>"
+            return (await self._acct_list()) + "\n\n刪除：/deleteacc <帳號>"
         target = args[0]
         accounts = await self.manager.db.list_accounts()
         acc = self._find_account_sync(accounts, target)
@@ -346,13 +401,17 @@ class TgControlBot:
         return f"🗑️ 已刪除 {acc.get('name')}（含記憶）"
 
     async def _feature_toggle(self, name: str, args: list[str]) -> str:
-        on = (args[0].lower() if args else "") in {"on", "1", "true", "開", "開啟"}
-        media = name == "media"
-        voice = name == "voice"
-        # 讀目前狀態：manager 只從 config 拿，這裡用現有開關的取反＋目標
+        # 按鍵點「🖼 媒體」「🔊 語音」不帶參數＝切換；帶 on/off＝設成該值
         current = self.manager.feature_status()
-        media_enabled = on if media else current["media_enabled"]
-        voice_enabled = on if voice else current["voice_enabled"]
+        if args:
+            on = args[0].lower() in {"on", "1", "true", "開", "開啟"}
+            off = args[0].lower() in {"off", "0", "false", "關", "關閉"}
+            if not (on or off):
+                return "開關值用 on / off"
+        else:
+            on = not (current["media_enabled"] if name == "media" else current["voice_enabled"])
+        media_enabled = on if name == "media" else current["media_enabled"]
+        voice_enabled = on if name == "voice" else current["voice_enabled"]
         err = await self.manager.update_feature_flags(
             media_enabled=media_enabled, voice_enabled=voice_enabled
         )
@@ -370,12 +429,11 @@ class TgControlBot:
         if self.login_service is None:
             return "⚠️ 登入服務未初始化"
         if not args:
-            return "用法：/addacc +886****5678"
+            return "➕ 新增帳號：把水軍帳號手機號碼（含國碼）傳給我\n例如：/addacc +886912345678"
         try:
             r = await self.login_service.start(args[0])
         except Exception as e:
             return f"⚠️ {e}"
-        event.chat_id  # 確保有 chat 上下文
         return (
             f"驗證碼已傳送至 {r.get('phone_hint')}（5 分鐘內有效）\n"
             f"收到後回：/code 12345"

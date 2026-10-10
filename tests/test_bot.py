@@ -254,5 +254,22 @@ def test_feature_toggle(monkeypatch):
         # voice 維持現狀（False），media 被關
         assert ("features", False, False) in mgr.calls
         assert "媒體：關閉" in out
+        # 不帶參數＝切換：媒體現在是 False → 切換後 True
+        out2 = loop.run_until_complete(bot._feature_toggle("media", []))
+        assert ("features", True, False) in mgr.calls
+        assert "媒體：開啟" in out2
     finally:
         loop.close()
+
+
+def test_menu_labels_map_to_commands():
+    from app.bot import MENU_LABELS, MENU_ROWS
+    # 每顆按鈕都要能映射回指令（隱藏鍵是例外）
+    assert MENU_LABELS["📊 狀態"] == "status"
+    assert MENU_LABELS["👤 帳號"] == "acct"
+    assert MENU_LABELS["🖼 媒體"] == "media"
+    assert MENU_LABELS["⌨ 隱藏"] == ""
+    for row in MENU_ROWS:
+        assert len(row) <= 4
+        for label, _ in row:
+            assert label in MENU_LABELS
