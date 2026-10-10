@@ -212,7 +212,8 @@ def test_mainland_term_hint_names_the_replacement():
             == "「方便面」應講「泡麵」"
         )
         assert worker._mainland_term_hint("我住酒店") == "「酒店」應講「飯店」"
-        assert worker._mainland_term_hint("想找炮友") == "「炮友」應講「砲友」"
+        # 炮友 不擋：學習資料 v1.0 把「炮友」列為台灣用法，硬擋成「砲友」會露怯
+        assert worker._mainland_term_hint("想找炮友") == ""
         # 美女 不擋：實測群裡真人講「美女」3 次、「正妹」0 次，硬擋會露怯
         # （改成 persona 引導兩者皆可，見 persona 語言硬規則）
         assert worker._mainland_term_hint("你是大美女") == ""
