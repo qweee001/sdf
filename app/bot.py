@@ -333,11 +333,14 @@ class TgControlBot:
 
     async def _home_text(self) -> str:
         rows = await self._account_rows()
+        n = len(rows)
         return (
-            "SDF 控制台\n"
+            "🎛️ SDF 控制台\n"
             "──────────────\n"
+            + ("（尚無帳號）" if not rows else "账号:")
+            + "\n"
             + "\n".join(rows)
-            + "\n\n按下方按鈕操作（點帳號可展開該帳號的功能）"
+            + f"\n\n選擇账号（{n} 個）→ 展開該账号可操作功能"
         )
 
     async def _home_keyboard(self) -> types.ReplyInlineMarkup:
@@ -355,14 +358,17 @@ class TgControlBot:
                 cb("addacc", "➕ 新增帳號"),
             ],
         ]
-        for a in accs:
-            on = bool(a.get("is_running"))
-            rows.append([
-                cb(
+        # 帳號清單：2 欄排列（類參考圖 provider 清單），運行中加 ✓ 前綴
+        for i in range(0, len(accs), 2):
+            row = []
+            for a in accs[i:i + 2]:
+                on = bool(a.get("is_running"))
+                mark = "✓ " if on else ""
+                row.append(cb(
                     "acc:" + a["id"],
-                    f"👤 {a.get('name')}（{'▶' if on else '⏹'}）",
-                ),
-            ])
+                    f"{mark}{a.get('name')}（{'運行' if on else '待機'}）",
+                ))
+            rows.append(row)
         rows.append([
             cb("media", "🖼 媒體開關"),
             cb("voice", "🔊 語音開關"),
@@ -384,8 +390,10 @@ class TgControlBot:
         toggle_action = "acc.stop" if on else "acc.start"
         state = acc.get("state", "待機中") if acc else "待機中"
         body = (
-            f"帳號操作｜{name}（{account_id}）\n"
-            f"狀態：{'🟢 運行中' if on else '⚪ ' + state}"
+            f"👤 帳號操作｜{name}（{account_id}）\n"
+            "──────────────\n"
+            f"狀態：{'🟢 運行中' if on else '⚪ ' + state}\n"
+            "可操作功能:"
         )
         rows = [
             [
