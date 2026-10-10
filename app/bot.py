@@ -22,6 +22,7 @@ import logging
 import re
 
 from telethon import TelegramClient, events, types
+from telethon.tl.functions.bots import SetBotCommandsRequest
 
 from .config import Settings
 from .manager import AccountManager
@@ -98,11 +99,17 @@ class TgControlBot:
         await client.start(bot_token=self.bot_token)
         me = await client.get_me()
         self._bot_username = str(getattr(me, "username", "") or "")
-        # 打 / 時的指令下拉
+        # 打 / 時的指令下拉（telethon 1.44：SetBotCommandsRequest，scope 必填）
         try:
-            await client(types.SetMyCommands(commands=BOT_COMMANDS))
+            await client(
+                SetBotCommandsRequest(
+                    types.BotCommandScopeDefault(),
+                    "",
+                    [c for c in BOT_COMMANDS],
+                )
+            )
         except Exception:
-            log.exception("setMyCommands 失敗")
+            log.exception("setBotCommands 失敗")
         self._reply_menu = types.ReplyKeyboardMarkup(
             [[types.Button(text=label) for label, _ in row] for row in MENU_ROWS],
             resize_keyboard=True,
