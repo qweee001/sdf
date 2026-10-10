@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging
 import re
 
@@ -47,6 +48,11 @@ MENU: list[tuple[str, str]] = [
 ]
 MENU_LABELS = {label: cmd for label, cmd in MENU}
 MENU_ROWS = [MENU[0:3], MENU[3:6], MENU[6:9], [MENU[9], MENU[10]]]
+
+
+def cb(data: str, text: str) -> "types.KeyboardButtonCallback":
+    """內嵌按鈕：telethon 1.44 簽名 KeyboardButtonCallback(text, data:bytes)。"""
+    return types.KeyboardButtonCallback(text, data.encode())
 
 # 打 / 時的指令下拉（setMyCommands）
 BOT_COMMANDS = [
@@ -111,10 +117,11 @@ class TgControlBot:
         except Exception:
             log.exception("setBotCommands 失敗")
         self._reply_menu = types.ReplyKeyboardMarkup(
-            [[types.Button(text=label) for label, _ in row] for row in MENU_ROWS],
-            resize_keyboard=True,
+            [[types.KeyboardButton(label) for label, _ in row] for row in MENU_ROWS],
+            resize=True,
         )
         client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
+        client.add_event_handler(self._on_callback, events.CallbackQuery)
         log.info("Telegram 控制台 bot 上線（@%s）", self._bot_username)
         try:
             await client.run_until_disconnected()
@@ -143,51 +150,339 @@ class TgControlBot:
         text = (event.raw_text or "").strip()
         # 按鍵式菜單：按鈕回傳的是標籤（如「📊 狀態」），先映射成指令
         if text in MENU_LABELS:
-            mapped = MENU_LABELS[text]
-            text = f"/{mapped}" if mapped else ""
-            if not mapped:  # 「⌨ 隱藏」
+            if not MENU_LABELS[text]:  # 「⌨ 隱藏」→ 收掉下方固定鍵盤
                 await event.reply(
-                    "鍵盤已隱藏。按下方「📊 狀態」恢復完整鍵盤",
-                    reply_markup=types.ReplyKeyboardMarkup(
-                        [[types.Button(text="📊 狀態")]], resize_keyboard=True
-                    ),
+                    "⌨ 鍵盤已隱藏（訊息內按鈕仍可用，再按「📊 狀態」重建）",
+                    reply_markup=types.ReplyKeyboardHide(),
                 )
                 return
+            text = f"/{MENU_LABELS[text]}"
         cmd = text.split()
         name = cmd[0].lower().lstrip("/").split("@")[0] if cmd else ""
         rest: list[str] = list(cmd[1:])
         try:
-            if name in {"start", "help", ""}:
-                body = self._help()
+            # 回 (文字, 鍵盤)；鍵盤＝下方固定鍵盤 / 內嵌主菜單 / 無
+            if name in {"start", "help", "", "acct"}:
+                body, kb = (
+                    self._help() if name in {"start", "help", ""}
+                    else await self._home_text(),
+                    await self._home_keyboard(),
+                )
             elif name == "status":
-                body = await self._status()
+                body, kb = await self._status(), self._reply_menu
             elif name == "groups":
-                body = await self._groups(rest)
+                body, kb = await self._groups(rest), self._reply_menu
             elif name in {"privates", "priv"}:
-                body = await self._privates(rest)
+                body, kb = await self._privates(rest), self._reply_menu
             elif name in {"startacc", "stopacc", "run"}:
-                body = await self._acc_toggle(name, rest)
+                body, kb = await self._acc_toggle(name, rest), self._reply_menu
             elif name in {"deleteacc", "del"}:
-                body = await self._acc_delete(rest)
+                body, kb = await self._acc_delete(rest), self._reply_menu
             elif name in {"media", "voice"}:
-                body = await self._feature_toggle(name, rest)
+                body, kb = await self._feature_toggle(name, rest), self._reply_menu
             elif name == "addacc":
-                body = await self._add_start(rest, event)
+                body, kb = await self._add_start(rest, event), self._reply_menu
             elif name == "code":
-                body = await self._add_code(rest, event)
+                body, kb = await self._add_code(rest, event), self._reply_menu
             elif name == "pass":
-                body = await self._add_pass(rest, event)
+                body, kb = await self._add_pass(rest, event), self._reply_menu
             elif name == "name":
-                body = await self._add_name(rest, event)
-            elif name == "acct":
-                body = await self._acct_list()
+                body, kb = await self._add_name(rest, event), self._reply_menu
             else:
-                body = f"不認識的指令「/{name}」\n" + self._help()
-            await event.reply(body[:MSG_LIMIT], reply_markup=self._reply_menu)
+                body, kb = f"不認識的指令「/{name}」\n" + self._help(), self._reply_menu
+            await event.reply(body[:MSG_LIMIT], reply_markup=kb)
         except Exception as e:
             log.exception("bot 指令 %r 失敗", text)
             await event.reply(f"⚠️ {type(e).__name__}: {e}",
                               reply_markup=self._reply_menu)
+
+    # ---------- 內嵌按鈕（callback） ----------
+
+    async def _on_callback(self, cb) -> None:
+        raw = getattr(cb, "data", None)
+        if isinstance(raw, bytes):
+            data = raw.decode()
+        else:
+            data = str(raw or "")
+        try:
+            await self._dispatch_callback(cb, data)
+        except Exception as e:
+            log.exception("callback %r 失敗", data)
+            try:
+                await cb.answer(f"⚠️ {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
+    async def _dispatch_callback(self, cb, data: str) -> None:
+        """內嵌按鈕路由：data 格式「action[:arg]」。"""
+        if not data:
+            await cb.answer()
+            return
+        action, _, arg = data.partition(":")
+
+        if action == "home":
+            await cb.message.edit(
+                await self._home_text(), reply_markup=await self._home_keyboard()
+            )
+        elif action == "status":
+            await cb.message.edit(
+                (await self._status())[:MSG_LIMIT],
+                reply_markup=await self._home_keyboard(),
+            )
+        elif action == "groups":
+            await cb.message.edit(
+                (await self._groups([]))[:MSG_LIMIT],
+                reply_markup=await self._home_keyboard(),
+            )
+        elif action == "help":
+            await cb.message.edit(
+                self._help()[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+            )
+        elif action == "acc":
+            # 選了某帳號 → 該帳號的「可操作功能」內嵌菜單
+            body, kb = await self._account_actions_keyboard(arg)
+            await cb.message.edit(body[:MSG_LIMIT], reply_markup=kb)
+        elif action == "acc.start":
+            body = await self._acc_toggle("startacc", [arg])
+            await cb.message.edit(
+                body[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+            )
+        elif action == "acc.stop":
+            body = await self._acc_toggle("stopacc", [arg])
+            await cb.message.edit(
+                body[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+            )
+        elif action == "acc.del":
+            body = await self._acc_delete([arg])
+            await cb.message.edit(
+                body[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+            )
+        elif action == "acc.persona":
+            body, kb = await self._persona_actions_keyboard(arg)
+            await cb.message.edit(body[:MSG_LIMIT], reply_markup=kb)
+        elif action == "priv":
+            body = await self._privates([arg])
+            await cb.message.edit(
+                body[:MSG_LIMIT],
+                reply_markup=types.ReplyInlineMarkup([[
+                    cb(
+                        "back.acc:" + arg, "🔙 回帳號操作"
+                    ),
+                    cb("back.home", "🏠 主菜單"),
+                ]]),
+            )
+        elif action == "media":
+            body = await self._feature_toggle("media", [])
+            await cb.message.edit(
+                body[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+            )
+        elif action == "voice":
+            body = await self._feature_toggle("voice", [])
+            await cb.message.edit(
+                body[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+            )
+        elif action == "addacc":
+            await cb.message.edit(
+                "➕ 新增帳號\n把 Telegram 手機號傳給我，例如 +886912345678",
+                reply_markup=await self._home_keyboard(),
+            )
+        elif action == "hidekb":
+            await cb.message.edit(
+                "⌨ 已隱藏下方快速鍵盤（訊息內按鈕仍可用，再按「📊 狀態」重建）",
+                reply_markup=types.ReplyKeyboardHide(),
+            )
+            await cb.answer("下方鍵盤已隱藏")
+        elif action == "persona.show":
+            body = await self._persona_show(arg)
+            await cb.message.edit(
+                body[:MSG_LIMIT], reply_markup=await self._persona_keyboard(arg)
+            )
+        elif action == "persona.regen":
+            body = await self._persona_regen(arg)
+            await cb.message.edit(
+                body[:MSG_LIMIT], reply_markup=await self._persona_keyboard(arg)
+            )
+        elif action == "back.home":
+            await cb.message.edit(
+                await self._home_text(), reply_markup=await self._home_keyboard()
+            )
+        elif action == "back.acc":
+            body, kb = await self._account_actions_keyboard(arg)
+            await cb.message.edit(body[:MSG_LIMIT], reply_markup=kb)
+        else:
+            await cb.answer("未處理的按鈕", show_alert=True)
+
+    # ---------- 內嵌主菜單（按鍵式交互，類圖示） ----------
+
+    async def _account_rows(self) -> list[str]:
+        """帳號行（文字）：狀態＋名字＋所在群，_status/_home_text 共用。"""
+        data = await self.manager.status()
+        rows = []
+        for a in sorted(
+            data.get("accounts", []),
+            key=lambda x: not x.get("is_running"),
+        ):
+            on = bool(a.get("is_running"))
+            state = a.get("state", "")
+            groups = a.get("groups") or []
+            rows.append(
+                f"{'🟢 運行中' if on else '⚪ ' + (state or '待機中')}｜{a.get('name')}（{a['id']}）"
+                + (f"｜群 {', '.join(groups)}" if groups else "")
+            )
+        return rows
+
+    async def _home_text(self) -> str:
+        rows = await self._account_rows()
+        return (
+            "SDF 控制台\n"
+            "──────────────\n"
+            + "\n".join(rows)
+            + "\n\n按下方按鈕操作（點帳號可展開該帳號的功能）"
+        )
+
+    async def _home_keyboard(self) -> types.ReplyInlineMarkup:
+        accs = sorted(
+            (await self.manager.status()).get("accounts", []),
+            key=lambda x: not x.get("is_running"),
+        )
+        rows = [
+            [
+                cb("status", "📊 狀態"),
+                cb("groups", "🗂 群組"),
+            ],
+            [
+                cb("help", "📖 說明"),
+                cb("addacc", "➕ 新增帳號"),
+            ],
+        ]
+        for a in accs:
+            on = bool(a.get("is_running"))
+            rows.append([
+                cb(
+                    "acc:" + a["id"],
+                    f"👤 {a.get('name')}（{'▶' if on else '⏹'}）",
+                ),
+            ])
+        rows.append([
+            cb("media", "🖼 媒體開關"),
+            cb("voice", "🔊 語音開關"),
+        ])
+        rows.append([
+            cb("hidekb", "⌨ 隱藏鍵盤"),
+        ])
+        return types.ReplyInlineMarkup(rows)
+
+    async def _account_actions_keyboard(self, account_id: str):
+        """選了某帳號 → 該帳號「可操作功能」內嵌菜單。回 (文字, 鍵盤)。"""
+        data = await self.manager.status()
+        acc = next(
+            (a for a in data.get("accounts", []) if a["id"] == account_id), None
+        )
+        name = acc.get("name", account_id) if acc else account_id
+        on = bool(acc and acc.get("is_running"))
+        toggle_txt = "⏹ 停止" if on else "▶ 啟動"
+        toggle_action = "acc.stop" if on else "acc.start"
+        state = acc.get("state", "待機中") if acc else "待機中"
+        body = (
+            f"帳號操作｜{name}（{account_id}）\n"
+            f"狀態：{'🟢 運行中' if on else '⚪ ' + state}"
+        )
+        rows = [
+            [
+                cb(
+                    toggle_action + ":" + account_id, toggle_txt
+                ),
+                cb(
+                    "acc.persona:" + account_id, "🧬 人設"
+                ),
+            ],
+            [
+                cb(
+                    "priv:" + account_id, "📩 私訊"
+                ),
+                cb(
+                    "acc.del:" + account_id, "🗑 刪除"
+                ),
+            ],
+            [
+                cb("back.home", "🔙 回主菜單"),
+            ],
+        ]
+        return body, types.ReplyInlineMarkup(rows)
+
+    async def _persona_actions_keyboard(self, account_id: str):
+        acc = next(
+            (
+                a
+                for a in (await self.manager.status()).get("accounts", [])
+                if a["id"] == account_id
+            ),
+            None,
+        )
+        name = acc.get("name", account_id) if acc else account_id
+        body = f"人設操作｜{name}（{account_id}）"
+        rows = [
+            [
+                cb(
+                    "persona.show:" + account_id, "👀 查看人設"
+                ),
+                cb(
+                    "persona.regen:" + account_id, "♻️ 重新生成"
+                ),
+            ],
+            [
+                cb(
+                    "back.acc:" + account_id, "🔙 回帳號操作"
+                ),
+            ],
+        ]
+        return body, types.ReplyInlineMarkup(rows)
+
+    async def _persona_show(self, account_id: str) -> str:
+        acc = await self.manager.db.get_account(account_id)
+        if not acc:
+            return f"找不到帳號 {account_id}"
+        persona = acc.get("persona") or {}
+        if isinstance(persona, str):
+            try:
+                persona = json.loads(persona)
+            except Exception:
+                persona = {}
+        keys = (
+            "name", "nickname", "gender", "age", "city", "job",
+            "occupation", "personality", "speaking_style", "catchphrase",
+            "likes", "dislikes", "bio", "intro", "mbti", "education",
+        )
+        lines = [f"人設｜{account_id}"]
+        for k in keys:
+            v = persona.get(k)
+            if v:
+                lines.append(f"· {k}: {str(v)[:80]}")
+        return "\n".join(lines)[:MSG_LIMIT]
+
+    async def _persona_regen(self, account_id: str) -> str:
+        p = await self.manager.regen_persona(account_id)
+        return (
+            f"♻️ 已重新生成 {account_id} 的人設"
+            + (f"（{p.get('name', '')}）" if p else "（被保護中，未改動）")
+        )
+
+    def _persona_keyboard(self, account_id: str) -> types.ReplyInlineMarkup:
+        return types.ReplyInlineMarkup([
+            [
+                cb(
+                    "persona.show:" + account_id, "👀 再看一下"
+                ),
+                cb(
+                    "persona.regen:" + account_id, "♻️ 重新生成"
+                ),
+            ],
+            [
+                cb(
+                    "back.acc:" + account_id, "🔙 回帳號操作"
+                ),
+            ],
+        ])
 
     # ---------- 各指令內容 ----------
 
