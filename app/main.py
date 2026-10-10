@@ -6,6 +6,7 @@ import sys
 
 import uvicorn
 
+from .bot import make_bot
 from .config import load_settings
 from .crypto import SecretBox
 from .dashboard import Dashboard
@@ -56,6 +57,13 @@ async def async_main() -> None:
     except Exception as e:
         print(f"啟動水軍帳號失敗：{e}", flush=True)
 
+    # Telegram 控制台 bot（有 BOT_TOKEN 才啟動；獨立 task，掛了不影響主流程）
+    bot = make_bot(settings, manager)
+    bot_task: asyncio.Task | None = None
+    if bot is not None:
+        bot_task = asyncio.create_task(bot.run())
+        print("Telegram 控制台 bot 任務已建立", flush=True)
+
     # 同時監看停止訊號與控制台服務：若 serve() 先結束（例如連接埠被占用而立即拋錯），
     # 不能只等 stop_event，否則容器會活著但 HTTP 完全不可用。
     stop_task = asyncio.create_task(stop_event.wait())
@@ -82,6 +90,12 @@ async def async_main() -> None:
         print("收到停止訊號，正在關閉…", flush=True)
     server.should_exit = True
     await manager.aclose()
+    if bot_task is not None:
+        bot_task.cancel()
+        try:
+            await bot_task
+        except (asyncio.CancelledError, Exception):
+            pass
     try:
         await server_task
     except asyncio.CancelledError:

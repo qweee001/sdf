@@ -67,6 +67,9 @@ class Settings:
     # Telegram
     tg_api_id: int
     tg_api_hash: str
+    # Telegram 控制台 bot（留空＝不啟動）
+    bot_token: str
+    bot_admin_ids: tuple[str, ...]
 
     # 加密（帳號 session 用）
     account_encryption_key: str
@@ -153,6 +156,12 @@ def load_settings() -> Settings:
         acceptance_test_mode=acceptance_test_mode,
         tg_api_id=int(_required("TG_API_ID")),
         tg_api_hash=_required("TG_API_HASH"),
+        bot_token=os.getenv("BOT_TOKEN", "").strip(),
+        bot_admin_ids=tuple(
+            x.strip()
+            for x in os.getenv("BOT_ADMIN_IDS", "").split(",")
+            if x.strip()
+        ),
         account_encryption_key=_required("ACCOUNT_ENCRYPTION_KEY"),
         ai_api_key=os.getenv("AI_API_KEY", "").strip(),
         # 預設只給本機位址。這個 repo 是公開的，把真實部署端點寫進來等於
