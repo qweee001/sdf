@@ -54,6 +54,12 @@ def cb(data: str, text: str) -> "types.KeyboardButtonCallback":
     """內嵌按鈕：telethon 1.44 簽名 KeyboardButtonCallback(text, data:bytes)。"""
     return types.KeyboardButtonCallback(text, data.encode())
 
+
+def kbrows(rows) -> list:
+    """telethon 1.44 的 markup rows 必須是 KeyboardButtonRow 物件（純 list 會
+    在序列化時炸 'list' object has no attribute '_bytes'）。"""
+    return [types.KeyboardButtonRow(row) for row in rows]
+
 # 打 / 時的指令下拉（setMyCommands）
 BOT_COMMANDS = [
     types.BotCommand("status", "運行狀態＋24h KPI"),
@@ -117,7 +123,10 @@ class TgControlBot:
         except Exception:
             log.exception("setBotCommands 失敗")
         self._reply_menu = types.ReplyKeyboardMarkup(
-            [[types.KeyboardButton(label) for label, _ in row] for row in MENU_ROWS],
+            [
+                types.KeyboardButtonRow([types.KeyboardButton(l) for l, _ in row])
+                for row in MENU_ROWS
+            ],
             resize=True,
         )
         client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
@@ -264,12 +273,12 @@ class TgControlBot:
             body = await self._privates([arg])
             await cb.message.edit(
                 body[:MSG_LIMIT],
-                buttons=types.ReplyInlineMarkup([[
+                buttons=types.ReplyInlineMarkup(kbrows([[
                     cb(
                         "back.acc:" + arg, "🔙 回帳號操作"
                     ),
                     cb("back.home", "🏠 主菜單"),
-                ]]),
+                ]])),
             )
         elif action == "media":
             body = await self._feature_toggle("media", [])
@@ -376,7 +385,7 @@ class TgControlBot:
         rows.append([
             cb("hidekb", "⌨ 隱藏鍵盤"),
         ])
-        return types.ReplyInlineMarkup(rows)
+        return types.ReplyInlineMarkup(kbrows(rows))
 
     async def _account_actions_keyboard(self, account_id: str):
         """選了某帳號 → 該帳號「可操作功能」內嵌菜單。回 (文字, 鍵盤)。"""
@@ -416,7 +425,7 @@ class TgControlBot:
                 cb("back.home", "🔙 回主菜單"),
             ],
         ]
-        return body, types.ReplyInlineMarkup(rows)
+        return body, types.ReplyInlineMarkup(kbrows(rows))
 
     async def _persona_actions_keyboard(self, account_id: str):
         acc = next(
@@ -444,7 +453,7 @@ class TgControlBot:
                 ),
             ],
         ]
-        return body, types.ReplyInlineMarkup(rows)
+        return body, types.ReplyInlineMarkup(kbrows(rows))
 
     async def _persona_show(self, account_id: str) -> str:
         acc = await self.manager.db.get_account(account_id)
@@ -476,7 +485,7 @@ class TgControlBot:
         )
 
     def _persona_keyboard(self, account_id: str) -> types.ReplyInlineMarkup:
-        return types.ReplyInlineMarkup([
+        rows = [
             [
                 cb(
                     "persona.show:" + account_id, "👀 再看一下"
@@ -490,7 +499,8 @@ class TgControlBot:
                     "back.acc:" + account_id, "🔙 回帳號操作"
                 ),
             ],
-        ])
+        ]
+        return types.ReplyInlineMarkup(kbrows(rows))
 
     # ---------- 各指令內容 ----------
 
