@@ -343,6 +343,11 @@ class TgControlBot:
 
     # ---------- 內嵌主菜單（按鍵式交互，類圖示） ----------
 
+    @staticmethod
+    def _acc_label(a: dict) -> str:
+        """帳號顯示名：優先 TG 顯示名（tg_username），沒有才用內部帳號名。"""
+        return str(a.get("tg_username") or "").strip() or str(a.get("name") or "")
+
     async def _account_rows(self) -> list[str]:
         """帳號行（文字）：狀態＋名字＋所在群，_status/_home_text 共用。"""
         data = await self.manager.status()
@@ -355,7 +360,7 @@ class TgControlBot:
             state = a.get("state", "")
             groups = a.get("groups") or []
             rows.append(
-                f"{'🟢 運行中' if on else '⚪ ' + (state or '待機中')}｜{a.get('name')}（{a['id']}）"
+                f"{'🟢 運行中' if on else '⚪ ' + (state or '待機中')}｜{self._acc_label(a)}（{a['id']}）"
                 + (f"｜群 {', '.join(str(g) for g in groups)}" if groups else "")
             )
         return rows
@@ -395,7 +400,7 @@ class TgControlBot:
                 mark = "✓ " if on else ""
                 row.append(cb(
                     "acc:" + a["id"],
-                    f"{mark}{a.get('name')}（{'運行' if on else '待機'}）",
+                    f"{mark}{self._acc_label(a)}（{'運行' if on else '待機'}）",
                 ))
             rows.append(row)
         rows.append([
@@ -413,7 +418,7 @@ class TgControlBot:
         acc = next(
             (a for a in data.get("accounts", []) if a["id"] == account_id), None
         )
-        name = acc.get("name", account_id) if acc else account_id
+        name = self._acc_label(acc) if acc else account_id
         on = bool(acc and acc.get("is_running"))
         toggle_txt = "⏹ 停止" if on else "▶ 啟動"
         toggle_action = "acc.stop" if on else "acc.start"
@@ -456,7 +461,7 @@ class TgControlBot:
             ),
             None,
         )
-        name = acc.get("name", account_id) if acc else account_id
+        name = self._acc_label(acc) if acc else account_id
         body = f"人設操作｜{name}（{account_id}）"
         rows = [
             [
@@ -699,7 +704,7 @@ class TgControlBot:
             st = "🟢" if running else "⚪"
             on = "啟用" if a.get("enabled") else "停用"
             lines.append(
-                f"{st} {a.get('name')}（{persona.get('name', '')}）[{on}]"
+                f"{st} {self._acc_label(a)}（{persona.get('name', '')}）[{on}]"
             )
         lines.append("")
         lines.append("控制：/startacc、/stopacc、/deleteacc <帳號>")

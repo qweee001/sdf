@@ -333,3 +333,23 @@ def test_account_rows_with_int_groups(monkeypatch):
     assert "台北-小小" in rows[0]
     assert "-1002229799107" in rows[0]
     assert "-1004567890123" in rows[0]
+
+
+def test_acc_label_prefers_tg_username(monkeypatch):
+    """_acc_label 優先用 TG 顯示名（tg_username），沒有才回退內部帳號名。"""
+    bot = _bot(monkeypatch, _FakeManager())
+    # 有 TG 名 → 用 TG 名
+    assert (
+        bot._acc_label({"name": "水軍帳號 281", "tg_username": "小美（台北）"})
+        == "小美（台北）"
+    )
+    # 無 TG 名 → 回退內部名
+    assert (
+        bot._acc_label({"name": "水軍帳號 281", "tg_username": None})
+        == "水軍帳號 281"
+    )
+    # TG 名為空白字串 → 回退內部名
+    assert (
+        bot._acc_label({"name": "水軍帳號 281", "tg_username": "   "})
+        == "水軍帳號 281"
+    )
