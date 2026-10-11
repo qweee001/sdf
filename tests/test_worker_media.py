@@ -80,6 +80,7 @@ def _worker(
         min_typing_delay=0,
         max_typing_delay=0,
         media_enabled=True,
+        media_generation_enabled=True,
         voice_media_enabled=False,
         media_max_input_bytes=8 * 1024 * 1024,
         base_reply_probability=1.0,

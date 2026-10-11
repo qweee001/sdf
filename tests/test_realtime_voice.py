@@ -87,6 +87,7 @@ def _rt_config(**over):
     base = dict(
         voice_media_enabled=True,
         media_enabled=True,
+        media_generation_enabled=True,
         voice_realtime_url="https://tunnel.example",
         voice_realtime_token="tok",
         voice_realtime_daily_max=3,

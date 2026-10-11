@@ -462,6 +462,7 @@ def test_post_send_record_failure_keeps_image_claim(send_path, record_failure):
         clients = []
         for worker in workers:
             worker.config.media_enabled = True
+            worker.config.media_generation_enabled = True
             worker.config.media_max_input_bytes = 1024
             client = SimpleNamespace(
                 send_message=AsyncMock(),

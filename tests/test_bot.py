@@ -78,6 +78,7 @@ class _FakeManager:
         }
         self.calls = []
         self._media = True
+        self._gen = True
         self._voice = False
 
     async def status(self):
@@ -102,14 +103,21 @@ class _FakeManager:
     def feature_status(self):
         return {
             "media_enabled": self._media,
+            "media_generation_enabled": self._gen,
             "voice_enabled": self._voice,
             "voice_available": False,
         }
 
-    async def update_feature_flags(self, media_enabled, voice_enabled):
-        self.calls.append(("features", media_enabled, voice_enabled))
+    async def update_feature_flags(
+        self, media_enabled, voice_enabled, media_generation_enabled=None
+    ):
+        self.calls.append(
+            ("features", media_enabled, voice_enabled, media_generation_enabled)
+        )
         self._media = media_enabled
         self._voice = voice_enabled
+        if media_generation_enabled is not None:
+            self._gen = media_generation_enabled
         return None
 
     async def start(self, account_id):
@@ -251,13 +259,17 @@ def test_feature_toggle(monkeypatch):
     loop = asyncio.new_event_loop()
     try:
         out = loop.run_until_complete(bot._feature_toggle("media", ["off"]))
-        # voice 維持現狀（False），media 被關
-        assert ("features", False, False) in mgr.calls
-        assert "媒體：關閉" in out
-        # 不帶參數＝切換：媒體現在是 False → 切換後 True
+        # voice 維持現狀（False），media 被關，imagegen 維持現狀（True）
+        assert ("features", False, False, True) in mgr.calls
+        assert "媒體識別：關閉" in out
+        # 不帶參數＝切換：媒體現在是 False → 切換後 True（imagegen 維持 True）
         out2 = loop.run_until_complete(bot._feature_toggle("media", []))
-        assert ("features", True, False) in mgr.calls
-        assert "媒體：開啟" in out2
+        assert ("features", True, False, True) in mgr.calls
+        assert "媒體識別：開啟" in out2
+        # 圖片生成獨立開關：on → off
+        out3 = loop.run_until_complete(bot._feature_toggle("imagegen", ["off"]))
+        assert ("features", True, False, False) in mgr.calls
+        assert "圖片生成：關閉" in out3
     finally:
         loop.close()
 

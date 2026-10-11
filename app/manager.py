@@ -111,6 +111,7 @@ class AccountManager:
         voice_available = self._voice_realtime_available()
         return {
             "media_enabled": bool(self.config.media_enabled),
+            "media_generation_enabled": bool(self.config.media_generation_enabled),
             "voice_enabled": bool(self.config.voice_media_enabled and voice_available),
             "voice_available": voice_available,
         }
@@ -127,6 +128,10 @@ class AccountManager:
         self.config.media_enabled = self._stored_bool(
             stored.get("media_enabled"), bool(self.config.media_enabled)
         )
+        self.config.media_generation_enabled = self._stored_bool(
+            stored.get("media_generation_enabled"),
+            bool(self.config.media_generation_enabled),
+        )
         if stored.get("voice_media_enabled") == "1" and self._voice_realtime_available():
             self.config.voice_media_enabled = True
         else:
@@ -135,17 +140,33 @@ class AccountManager:
                 await self.db.set_runtime_settings({"voice_media_enabled": "0"})
 
     async def update_feature_flags(
-        self, *, media_enabled: bool, voice_enabled: bool
+        self,
+        *,
+        media_enabled: bool,
+        voice_enabled: bool,
+        media_generation_enabled: bool | None = None,
     ) -> str:
         if voice_enabled and not self._voice_realtime_available():
             return "即時 IndexTTS2 URL/token 未就緒，語音功能不能開啟"
+        gen_stored = (
+            "1" if media_generation_enabled else "0"
+            if media_generation_enabled is not None
+            else None
+        )
         async with self._feature_lock:
-            await self.db.set_runtime_settings({
+            stored = {
                 "media_enabled": "1" if media_enabled else "0",
                 "voice_media_enabled": "1" if voice_enabled else "0",
-            })
+            }
+            if gen_stored is not None:
+                stored["media_generation_enabled"] = gen_stored
+            await self.db.set_runtime_settings(stored)
             # 所有 worker 共用同一 Settings 物件，更新後立即熱生效。
             self.config.media_enabled = bool(media_enabled)
+            if media_generation_enabled is not None:
+                self.config.media_generation_enabled = bool(
+                    media_generation_enabled
+                )
             self.config.voice_media_enabled = (
                 bool(voice_enabled) and self._voice_realtime_available()
             )

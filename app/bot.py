@@ -41,13 +41,14 @@ MENU: list[tuple[str, str]] = [
     ("⏹ 停止", "stopacc"),
     ("🗑 刪除", "deleteacc"),
     ("🖼 媒體", "media"),
+    ("📷 圖片生成", "imagegen"),
     ("🔊 語音", "voice"),
     ("➕ 新增", "addacc"),
     ("📖 說明", "help"),
     ("⌨ 隱藏", ""),
 ]
 MENU_LABELS = {label: cmd for label, cmd in MENU}
-MENU_ROWS = [MENU[0:3], MENU[3:6], MENU[6:9], [MENU[9], MENU[10]]]
+MENU_ROWS = [MENU[0:3], MENU[3:6], MENU[6:9], MENU[9:12]]
 
 
 def cb(data: str, text: str) -> "types.KeyboardButtonCallback":
@@ -69,8 +70,9 @@ BOT_COMMANDS = [
     types.BotCommand("startacc", "啟動帳號"),
     types.BotCommand("stopacc", "停止帳號"),
     types.BotCommand("deleteacc", "刪除帳號"),
-    types.BotCommand("media", "媒體功能（on/off/不按＝切換）"),
-    types.BotCommand("voice", "語音功能（on/off/不按＝切換）"),
+    types.BotCommand("media", "媒體識別開關（看懂圖/影片，on/off）"),
+    types.BotCommand("imagegen", "圖片生成開關（被要求時發圖/影片，on/off）"),
+    types.BotCommand("voice", "語音開關（on/off）"),
     types.BotCommand("addacc", "新增帳號（TG 驗證碼流程）"),
     types.BotCommand("help", "說明"),
 ]
@@ -207,7 +209,7 @@ class TgControlBot:
                 body, kb = await self._acc_toggle(name, rest), self._reply_menu
             elif name in {"deleteacc", "del"}:
                 body, kb = await self._acc_delete(rest), self._reply_menu
-            elif name in {"media", "voice"}:
+            elif name in {"media", "voice", "imagegen"}:
                 body, kb = await self._feature_toggle(name, rest), self._reply_menu
             elif name == "addacc":
                 body, kb = await self._add_start(rest, event), self._reply_menu
@@ -300,13 +302,8 @@ class TgControlBot:
                     cb("back.home", "🏠 主菜單"),
                 ]])),
             )
-        elif action == "media":
-            body = await self._feature_toggle("media", [])
-            await cb.edit(
-                body[:MSG_LIMIT], buttons=await self._home_keyboard()
-            )
-        elif action == "voice":
-            body = await self._feature_toggle("voice", [])
+        elif action in {"media", "imagegen", "voice"}:
+            body = await self._feature_toggle(action, [])
             await cb.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
@@ -404,8 +401,9 @@ class TgControlBot:
                 ))
             rows.append(row)
         rows.append([
-            cb("media", "🖼 媒體開關"),
-            cb("voice", "🔊 語音開關"),
+            cb("media", "🖼 媒體識別"),
+            cb("imagegen", "📷 圖片生成"),
+            cb("voice", "🔊 語音"),
         ])
         rows.append([
             cb("hidekb", "⌨ 隱藏鍵盤"),
@@ -543,8 +541,9 @@ class TgControlBot:
             "/startacc <帳號> 啟動（登入/上線）\n"
             "/stopacc <帳號> 停止（下線/登出）\n"
             "/deleteacc <帳號> 刪除（含記憶）\n"
-            "/media on|off 媒體功能開關\n"
-            "/voice on|off 語音功能開關\n"
+            "/media on|off 媒體識別開關（看懂別人發的圖/影片）\n"
+            "/imagegen on|off 圖片生成開關（被要求時自動發圖/影片）\n"
+            "/voice on|off 語音開關\n"
             "➕ 新增帳號（TG 驗證碼流程）\n"
             "/addacc +886…5678 傳驗證碼\n"
             "/code 12345 輸入驗證碼\n"
@@ -746,26 +745,36 @@ class TgControlBot:
         return f"🗑️ 已刪除 {acc.get('name')}（含記憶）"
 
     async def _feature_toggle(self, name: str, args: list[str]) -> str:
-        # 按鍵點「🖼 媒體」「🔊 語音」不帶參數＝切換；帶 on/off＝設成該值
+        # 三個獨立開關：
+        #   media   ＝ 媒體識別（看懂別人發的圖／影片）
+        #   imagegen＝ 圖片生成（水軍被要求時生成圖片/影片發出去）
+        #   voice   ＝ 語音
+        # 按鍵不帶參數＝切換；帶 on/off＝設成該值
         current = self.manager.feature_status()
+        key = {"media": "media_enabled", "imagegen": "media_generation_enabled",
+               "voice": "voice_enabled"}[name]
         if args:
             on = args[0].lower() in {"on", "1", "true", "開", "開啟"}
             off = args[0].lower() in {"off", "0", "false", "關", "關閉"}
             if not (on or off):
                 return "開關值用 on / off"
         else:
-            on = not (current["media_enabled"] if name == "media" else current["voice_enabled"])
+            on = not bool(current[key])
         media_enabled = on if name == "media" else current["media_enabled"]
         voice_enabled = on if name == "voice" else current["voice_enabled"]
+        imagegen = on if name == "imagegen" else current["media_generation_enabled"]
         err = await self.manager.update_feature_flags(
-            media_enabled=media_enabled, voice_enabled=voice_enabled
+            media_enabled=media_enabled,
+            voice_enabled=voice_enabled,
+            media_generation_enabled=imagegen,
         )
         if err:
             return f"⚠️ {err}"
         st = self.manager.feature_status()
         return (
-            f"媒體：{'開啟' if st['media_enabled'] else '關閉'}｜"
-            f"語音：{'開啟' if st['voice_enabled'] else '關閉'}"
+            f"🖼 媒體識別：{'開啟' if st['media_enabled'] else '關閉'}｜"
+            f"📷 圖片生成：{'開啟' if st['media_generation_enabled'] else '關閉'}｜"
+            f"🔊 語音：{'開啟' if st['voice_enabled'] else '關閉'}"
         )
 
     # ---------- 新增帳號（TG 驗證碼流程） ----------

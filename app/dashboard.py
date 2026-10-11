@@ -544,11 +544,15 @@ class Dashboard:
                 return JSONResponse({"error": "功能設定格式錯誤"}, status_code=400)
             media_enabled = data.get("media_enabled")
             voice_enabled = data.get("voice_enabled")
+            media_generation_enabled = data.get("media_generation_enabled")
             if type(media_enabled) is not bool or type(voice_enabled) is not bool:
                 return JSONResponse({"error": "功能開關必須是布林值"}, status_code=400)
+            if media_generation_enabled is not None and type(media_generation_enabled) is not bool:
+                return JSONResponse({"error": "格式錯誤"}, status_code=400)
             error = await self.manager.update_feature_flags(
                 media_enabled=media_enabled,
                 voice_enabled=voice_enabled,
+                media_generation_enabled=media_generation_enabled,
             )
             if error:
                 return JSONResponse({"error": error}, status_code=409)
@@ -1125,8 +1129,12 @@ body.dense #accounts .card .meta { line-height: 1.45; }
                 <h3>功能開關</h3>
                 <div class="feature-grid">
                     <div class="feature-item">
-                        <div><strong>媒體功能</strong><div class="meta">圖片理解預設開啟；控制圖片理解、圖片與影片生成</div></div>
+                        <div><strong>媒體識別</strong><div class="meta">看懂別人發的圖/影片（預設開啟）</div></div>
                         <input class="switch" id="mediaToggle" type="checkbox" onchange="saveFeatures()">
+                    </div>
+                    <div class="feature-item">
+                        <div><strong>圖片生成</strong><div class="meta">被要求「傳張圖」時自動生成圖片/影片發出去</div></div>
+                        <input class="switch" id="imagegenToggle" type="checkbox" onchange="saveFeatures()">
                     </div>
                     <div class="feature-item">
                         <div><strong>語音功能</strong><div class="meta" id="voiceHint">本地克隆台灣腔尚未就緒</div></div>
@@ -1391,9 +1399,12 @@ async function loadStatus() {
     `;
     const features = data.features || {};
     const mediaToggle = document.getElementById('mediaToggle');
+    const imagegenToggle = document.getElementById('imagegenToggle');
     const voiceToggle = document.getElementById('voiceToggle');
     mediaToggle.checked = !!features.media_enabled;
     mediaToggle.disabled = false;
+    imagegenToggle.checked = !!features.media_generation_enabled;
+    imagegenToggle.disabled = false;
     voiceToggle.checked = !!features.voice_enabled;
     voiceToggle.disabled = !features.voice_available;
     document.getElementById('voiceHint').textContent = features.voice_available
@@ -1518,14 +1529,17 @@ async function loadStatus() {
 
 async function saveFeatures() {
     const mediaToggle = document.getElementById('mediaToggle');
+    const imagegenToggle = document.getElementById('imagegenToggle');
     const voiceToggle = document.getElementById('voiceToggle');
     mediaToggle.disabled = true;
+    imagegenToggle.disabled = true;
     voiceToggle.disabled = true;
     const r = await api('/api/features', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
             media_enabled: mediaToggle.checked,
+            media_generation_enabled: imagegenToggle.checked,
             voice_enabled: voiceToggle.checked,
         }),
     });

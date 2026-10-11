@@ -87,6 +87,7 @@ async def _worker(db, gate, account_id=ACCOUNT_IDS[0]):
         min_typing_delay=0,
         max_typing_delay=0,
         media_enabled=True,
+        media_generation_enabled=True,
         voice_media_enabled=True,
     )
     worker = AccountWorker(

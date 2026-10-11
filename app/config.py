@@ -91,6 +91,7 @@ class Settings:
     speech_model: str
     video_model: str
     media_enabled: bool
+    media_generation_enabled: bool
     voice_media_enabled: bool
     voice_assets_dir: str
     voice_daily_pre_gen: bool
@@ -200,6 +201,9 @@ def load_settings() -> Settings:
             or "minimax/minimax-h3"
         ),
         media_enabled=_bool("MEDIA_ENABLED", True),
+        # 媒體生成（水軍被要求時自動生成圖片/影片發出去）獨立開關；
+        # media_enabled 只控制「識別」（看懂別人發的圖）。預設關＝只識別不發。
+        media_generation_enabled=_bool("MEDIA_GENERATION_ENABLED", False),
         # 語音目前只允許未來的本地克隆後端；OrcaRouter TTS 不得啟用。
         voice_media_enabled=False,
         # 每日隨機語音素材目錄（含 manifest.json + 各帳號 ogg 片段），

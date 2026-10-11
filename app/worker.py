@@ -2985,7 +2985,11 @@ class AccountWorker:
             if not bool(getattr(self.config, "voice_media_enabled", False)):
                 self.stats["voice_blocked"] += 1
                 return None
-        elif not bool(getattr(self.config, "media_enabled", False)):
+        elif not bool(getattr(self.config, "media_generation_enabled", False)):
+            # 「識別」與「發」分開：生成圖片/影片要獨立開關（預設關＝只識別不發）
+            self.stats["media_generation_blocked"] = (
+                int(self.stats.get("media_generation_blocked", 0)) + 1
+            )
             return None
         if not self.media_service:
             return None
@@ -3262,7 +3266,7 @@ class AccountWorker:
         ):
             return False
         if asset.kind in {"image", "video"} and not bool(
-            getattr(self.config, "media_enabled", False)
+            getattr(self.config, "media_generation_enabled", False)
         ):
             return False
         kind = str(live_test_kind or asset.kind)

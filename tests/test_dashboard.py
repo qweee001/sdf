@@ -241,8 +241,10 @@ def test_index_contains_media_and_voice_switches():
     with _make_dashboard() as client:
         page = client.get("/classic").text
         assert 'id="mediaToggle"' in page
+        assert 'id="imagegenToggle"' in page
         assert 'id="voiceToggle"' in page
-        assert "圖片理解預設開啟" in page
+        assert "媒體識別" in page
+        assert "圖片生成" in page
 
 
 def test_available_groups_endpoint_discovers_without_starting(monkeypatch):
