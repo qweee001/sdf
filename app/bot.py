@@ -250,48 +250,48 @@ class TgControlBot:
         action, _, arg = data.partition(":")
 
         if action == "home":
-            await cb.message.edit(
+            await cb.edit(
                 await self._home_text(), buttons=await self._home_keyboard()
             )
         elif action == "status":
-            await cb.message.edit(
+            await cb.edit(
                 (await self._status())[:MSG_LIMIT],
                 buttons=await self._home_keyboard(),
             )
         elif action == "groups":
-            await cb.message.edit(
+            await cb.edit(
                 (await self._groups([]))[:MSG_LIMIT],
                 buttons=await self._home_keyboard(),
             )
         elif action == "help":
-            await cb.message.edit(
+            await cb.edit(
                 self._help()[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc":
             # 選了某帳號 → 該帳號的「可操作功能」內嵌菜單
             body, kb = await self._account_actions_keyboard(arg)
-            await cb.message.edit(body[:MSG_LIMIT], buttons=kb)
+            await cb.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "acc.start":
             body = await self._acc_toggle("startacc", [arg])
-            await cb.message.edit(
+            await cb.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc.stop":
             body = await self._acc_toggle("stopacc", [arg])
-            await cb.message.edit(
+            await cb.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc.del":
             body = await self._acc_delete([arg])
-            await cb.message.edit(
+            await cb.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc.persona":
             body, kb = await self._persona_actions_keyboard(arg)
-            await cb.message.edit(body[:MSG_LIMIT], buttons=kb)
+            await cb.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "priv":
             body = await self._privates([arg])
-            await cb.message.edit(
+            await cb.edit(
                 body[:MSG_LIMIT],
                 buttons=types.ReplyInlineMarkup(kbrows([[
                     cb(
@@ -302,42 +302,42 @@ class TgControlBot:
             )
         elif action == "media":
             body = await self._feature_toggle("media", [])
-            await cb.message.edit(
+            await cb.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "voice":
             body = await self._feature_toggle("voice", [])
-            await cb.message.edit(
+            await cb.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "addacc":
-            await cb.message.edit(
+            await cb.edit(
                 "➕ 新增帳號\n把 Telegram 手機號傳給我，例如 +886912345678",
                 buttons=await self._home_keyboard(),
             )
         elif action == "hidekb":
-            await cb.message.edit(
+            await cb.edit(
                 "⌨ 已隱藏下方快速鍵盤（訊息內按鈕仍可用，再按「📊 狀態」重建）",
                 buttons=types.ReplyKeyboardHide(),
             )
             await cb.answer("下方鍵盤已隱藏")
         elif action == "persona.show":
             body = await self._persona_show(arg)
-            await cb.message.edit(
+            await cb.edit(
                 body[:MSG_LIMIT], buttons=await self._persona_keyboard(arg)
             )
         elif action == "persona.regen":
             body = await self._persona_regen(arg)
-            await cb.message.edit(
+            await cb.edit(
                 body[:MSG_LIMIT], buttons=await self._persona_keyboard(arg)
             )
         elif action == "back.home":
-            await cb.message.edit(
+            await cb.edit(
                 await self._home_text(), buttons=await self._home_keyboard()
             )
         elif action == "back.acc":
             body, kb = await self._account_actions_keyboard(arg)
-            await cb.message.edit(body[:MSG_LIMIT], buttons=kb)
+            await cb.edit(body[:MSG_LIMIT], buttons=kb)
         else:
             await cb.answer("未處理的按鈕", show_alert=True)
 

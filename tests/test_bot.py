@@ -273,3 +273,25 @@ def test_menu_labels_map_to_commands():
         assert len(row) <= 4
         for label, _ in row:
             assert label in MENU_LABELS
+
+
+def test_dispatch_callback_uses_cb_edit(monkeypatch):
+    """telethon 1.44 的 CallbackQuery 事件沒有 .message（是 get_message()），
+    但事件本身有 edit()。callback 處理必須走 cb.edit 而非 cb.message.edit，
+    否則炸 AttributeError: 'Event' object has no attribute 'message'。"""
+    import unittest.mock as mock
+
+    bot = _bot(monkeypatch, _FakeManager())
+    loop = asyncio.new_event_loop()
+    try:
+        cb = mock.Mock()
+        cb.data = "status"
+        cb.edit = mock.AsyncMock(return_value=True)
+        cb.answer = mock.AsyncMock(return_value=True)
+        cb.message = mock.PropertyMock(
+            side_effect=AttributeError("Event has no attribute 'message'")
+        )
+        loop.run_until_complete(bot._dispatch_callback(cb, "status"))
+        cb.edit.assert_awaited_once()
+    finally:
+        loop.close()
