@@ -356,7 +356,7 @@ class TgControlBot:
             groups = a.get("groups") or []
             rows.append(
                 f"{'🟢 運行中' if on else '⚪ ' + (state or '待機中')}｜{a.get('name')}（{a['id']}）"
-                + (f"｜群 {', '.join(groups)}" if groups else "")
+                + (f"｜群 {', '.join(str(g) for g in groups)}" if groups else "")
             )
         return rows
 

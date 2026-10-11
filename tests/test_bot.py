@@ -295,3 +295,41 @@ def test_dispatch_callback_uses_cb_edit(monkeypatch):
         cb.edit.assert_awaited_once()
     finally:
         loop.close()
+
+
+def test_account_rows_with_int_groups(monkeypatch):
+    """_account_rows 把群組 id（int）拼進文字；join 前若沒轉 str 會炸
+    TypeError: sequence item 0: expected str instance, int found（主人按
+    「👤 帳號」遇到的錯）。"""
+
+    class _Mgr:
+        class _DB:
+            async def list_accounts(self):
+                return [{"id": "a1", "name": "台北-小小"}]
+
+        def __init__(self):
+            self.db = self._DB()
+
+        async def status(self):
+            return {
+                "accounts": [
+                    {
+                        "id": "a1",
+                        "name": "台北-小小",
+                        "is_running": True,
+                        "groups": [-1002229799107, -1004567890123],
+                    }
+                ]
+            }
+
+    bot = TgControlBot.__new__(TgControlBot)
+    bot.manager = _Mgr()
+    loop = asyncio.new_event_loop()
+    try:
+        rows = loop.run_until_complete(bot._account_rows())
+    finally:
+        loop.close()
+    assert len(rows) == 1
+    assert "台北-小小" in rows[0]
+    assert "-1002229799107" in rows[0]
+    assert "-1004567890123" in rows[0]
