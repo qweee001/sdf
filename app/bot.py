@@ -153,7 +153,7 @@ class TgControlBot:
             if not MENU_LABELS[text]:  # 「⌨ 隱藏」→ 收掉下方固定鍵盤
                 await event.reply(
                     "⌨ 鍵盤已隱藏（訊息內按鈕仍可用，再按「📊 狀態」重建）",
-                    reply_markup=types.ReplyKeyboardHide(),
+                    buttons=types.ReplyKeyboardHide(),
                 )
                 return
             text = f"/{MENU_LABELS[text]}"
@@ -190,11 +190,11 @@ class TgControlBot:
                 body, kb = await self._add_name(rest, event), self._reply_menu
             else:
                 body, kb = f"不認識的指令「/{name}」\n" + self._help(), self._reply_menu
-            await event.reply(body[:MSG_LIMIT], reply_markup=kb)
+            await event.reply(body[:MSG_LIMIT], buttons=kb)
         except Exception as e:
             log.exception("bot 指令 %r 失敗", text)
             await event.reply(f"⚠️ {type(e).__name__}: {e}",
-                              reply_markup=self._reply_menu)
+                              buttons=self._reply_menu)
 
     # ---------- 內嵌按鈕（callback） ----------
 
@@ -222,49 +222,49 @@ class TgControlBot:
 
         if action == "home":
             await cb.message.edit(
-                await self._home_text(), reply_markup=await self._home_keyboard()
+                await self._home_text(), buttons=await self._home_keyboard()
             )
         elif action == "status":
             await cb.message.edit(
                 (await self._status())[:MSG_LIMIT],
-                reply_markup=await self._home_keyboard(),
+                buttons=await self._home_keyboard(),
             )
         elif action == "groups":
             await cb.message.edit(
                 (await self._groups([]))[:MSG_LIMIT],
-                reply_markup=await self._home_keyboard(),
+                buttons=await self._home_keyboard(),
             )
         elif action == "help":
             await cb.message.edit(
-                self._help()[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+                self._help()[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc":
             # 選了某帳號 → 該帳號的「可操作功能」內嵌菜單
             body, kb = await self._account_actions_keyboard(arg)
-            await cb.message.edit(body[:MSG_LIMIT], reply_markup=kb)
+            await cb.message.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "acc.start":
             body = await self._acc_toggle("startacc", [arg])
             await cb.message.edit(
-                body[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+                body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc.stop":
             body = await self._acc_toggle("stopacc", [arg])
             await cb.message.edit(
-                body[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+                body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc.del":
             body = await self._acc_delete([arg])
             await cb.message.edit(
-                body[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+                body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc.persona":
             body, kb = await self._persona_actions_keyboard(arg)
-            await cb.message.edit(body[:MSG_LIMIT], reply_markup=kb)
+            await cb.message.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "priv":
             body = await self._privates([arg])
             await cb.message.edit(
                 body[:MSG_LIMIT],
-                reply_markup=types.ReplyInlineMarkup([[
+                buttons=types.ReplyInlineMarkup([[
                     cb(
                         "back.acc:" + arg, "🔙 回帳號操作"
                     ),
@@ -274,41 +274,41 @@ class TgControlBot:
         elif action == "media":
             body = await self._feature_toggle("media", [])
             await cb.message.edit(
-                body[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+                body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "voice":
             body = await self._feature_toggle("voice", [])
             await cb.message.edit(
-                body[:MSG_LIMIT], reply_markup=await self._home_keyboard()
+                body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "addacc":
             await cb.message.edit(
                 "➕ 新增帳號\n把 Telegram 手機號傳給我，例如 +886912345678",
-                reply_markup=await self._home_keyboard(),
+                buttons=await self._home_keyboard(),
             )
         elif action == "hidekb":
             await cb.message.edit(
                 "⌨ 已隱藏下方快速鍵盤（訊息內按鈕仍可用，再按「📊 狀態」重建）",
-                reply_markup=types.ReplyKeyboardHide(),
+                buttons=types.ReplyKeyboardHide(),
             )
             await cb.answer("下方鍵盤已隱藏")
         elif action == "persona.show":
             body = await self._persona_show(arg)
             await cb.message.edit(
-                body[:MSG_LIMIT], reply_markup=await self._persona_keyboard(arg)
+                body[:MSG_LIMIT], buttons=await self._persona_keyboard(arg)
             )
         elif action == "persona.regen":
             body = await self._persona_regen(arg)
             await cb.message.edit(
-                body[:MSG_LIMIT], reply_markup=await self._persona_keyboard(arg)
+                body[:MSG_LIMIT], buttons=await self._persona_keyboard(arg)
             )
         elif action == "back.home":
             await cb.message.edit(
-                await self._home_text(), reply_markup=await self._home_keyboard()
+                await self._home_text(), buttons=await self._home_keyboard()
             )
         elif action == "back.acc":
             body, kb = await self._account_actions_keyboard(arg)
-            await cb.message.edit(body[:MSG_LIMIT], reply_markup=kb)
+            await cb.message.edit(body[:MSG_LIMIT], buttons=kb)
         else:
             await cb.answer("未處理的按鈕", show_alert=True)
 
