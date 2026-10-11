@@ -324,12 +324,12 @@ class TgControlBot:
         elif action == "persona.show":
             body = await self._persona_show(arg)
             await cb.edit(
-                body[:MSG_LIMIT], buttons=await self._persona_keyboard(arg)
+                body[:MSG_LIMIT], buttons=self._persona_keyboard(arg)
             )
         elif action == "persona.regen":
             body = await self._persona_regen(arg)
             await cb.edit(
-                body[:MSG_LIMIT], buttons=await self._persona_keyboard(arg)
+                body[:MSG_LIMIT], buttons=self._persona_keyboard(arg)
             )
         elif action == "back.home":
             await cb.edit(
