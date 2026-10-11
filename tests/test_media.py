@@ -555,3 +555,90 @@ def test_download_rejects_allowed_host_resolving_to_private_ip():
         assert http.stream_calls == []
 
     asyncio.run(main())
+
+
+class _ContentPolicyBlocked(Exception):
+    """模擬 Routeway 對露骨圖的內容審核攔截（400 content_policy_violation）。"""
+
+    status_code = 400
+
+    def __init__(self):
+        super().__init__(
+            "Your request was blocked by our content moderation system "
+            "(code: content_policy_violation)"
+        )
+        self.message = (
+            "Your request was blocked by our content moderation system"
+        )
+        self.body = {"error": {"code": "content_policy_violation"}}
+
+
+def test_vision_falls_back_on_content_policy_moderation():
+    """主 vision 模型被 Routeway 內容審核攔 → 切到不審核的兜底模型成功。"""
+
+    async def main():
+        service, client = _service()
+        service.config.vision_fallback_model = "qwen3.8-27b-uncensored"
+        client.chat.completions.create = AsyncMock(side_effect=[
+            _ContentPolicyBlocked(),
+            SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="照片裡是一位穿泳裝的女生"))]),
+        ])
+        text = await service.understand_image(
+            "a1", _image_bytes(), "image/jpeg", "sys", "user"
+        )
+        assert text == "照片裡是一位穿泳裝的女生"
+        # 主模型（gemini）先被試、失敗後才切兜底
+        calls = [c.kwargs["model"] for c in client.chat.completions.create.await_args_list]
+        assert calls == ["gemini-3.5-flash-lite", "qwen3.8-27b-uncensored"]
+
+    asyncio.run(main())
+
+
+def test_vision_no_fallback_when_primary_succeeds():
+    """主模型成功時不切兜底模型（非露骨圖仍走 gemini）。"""
+
+    async def main():
+        service, client = _service()
+        service.config.vision_fallback_model = "qwen3.8-27b-uncensored"
+        # 預設 client 回傳成功
+        text = await service.understand_image(
+            "a1", _image_bytes(), "image/jpeg", "sys", "user"
+        )
+        assert text == "照片裡是一杯咖啡"
+        calls = [c.kwargs["model"] for c in client.chat.completions.create.await_args_list]
+        assert calls == ["gemini-3.5-flash-lite"]  # 只試一次主模型
+
+    asyncio.run(main())
+
+
+def test_vision_no_fallback_on_plain_4xx():
+    """一般 4xx（非內容審核）不切兜底模型，直接丟出例外。"""
+
+    async def main():
+        service, client = _service()
+        service.config.vision_fallback_model = "qwen3.8-27b-uncensored"
+        client.chat.completions.create = AsyncMock(side_effect=[
+            _Upstream400(),
+            SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="備援"))]),
+        ])
+        with pytest.raises(_Upstream400):
+            await service.understand_image(
+                "a1", _image_bytes(), "image/jpeg", "sys", "user"
+            )
+        calls = [c.kwargs["model"] for c in client.chat.completions.create.await_args_list]
+        assert calls == ["gemini-3.5-flash-lite"]  # 只試一次，沒切兜底
+
+    asyncio.run(main())
+
+
+class _Upstream400(Exception):
+    """一般 4xx 請求錯（非內容審核），status_code 400。"""
+
+    status_code = 400
+
+    def __init__(self):
+        super().__init__("bad request: image too large")
+        self.message = "bad request: image too large"
+        self.body = {"error": {"code": "invalid_request"}}

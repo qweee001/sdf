@@ -86,6 +86,7 @@ class Settings:
     ai_timeout: float
     ai_disable_thinking: bool
     vision_model: str
+    vision_fallback_model: str
     image_model: str
     image_fallback_model: str
     speech_model: str
@@ -183,6 +184,12 @@ def load_settings() -> Settings:
         vision_model=(
             os.getenv("VISION_MODEL", "").strip()
             or "gemini-3.5-flash-lite"
+        ),
+        # 露骨圖會被 Routeway 內容審核攔（content_policy_violation），
+        # 切到不審核的 uncensored 多模態模型兜底（qwen3.8-27b 實測能看圖）。
+        vision_fallback_model=(
+            os.getenv("VISION_FALLBACK_MODEL", "").strip()
+            or "qwen3.8-27b-uncensored"
         ),
         image_model=(
             os.getenv("IMAGE_MODEL", "").strip()

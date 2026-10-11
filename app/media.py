@@ -130,6 +130,47 @@ class OrcaMediaService:
         status_code = getattr(exc, "status_code", None)
         return isinstance(status_code, int) and status_code >= 500
 
+    @staticmethod
+    def _is_vision_fallback_worthy(exc: Exception) -> bool:
+        """主 vision 模型失敗後，是否值得切兜底模型。
+
+        值得切的三種情況：
+        - 內容審核攔（Routeway content_policy_violation / moderation）—
+          主模型（Gemini）對露骨圖審核，兜底（uncensored）不審核；
+        - 5xx transient；
+        - timeout / 連線錯。
+        其他 4xx（純請求格式錯）切不同模型也未必解決，不切。
+        """
+        if isinstance(
+            exc,
+            (
+                TimeoutError,
+                asyncio.TimeoutError,
+                httpx.TimeoutException,
+                APIConnectionError,
+            ),
+        ):
+            return True
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int) and status_code >= 500:
+            return True
+        # 4xx：只認「內容審核」類錯誤值得切（不同模型審核標準不同）
+        haystack = " ".join(
+            str(x)
+            for x in (
+                getattr(exc, "message", None),
+                getattr(exc, "body", None),
+                getattr(exc, "code", None),
+                str(exc),
+            )
+            if x
+        ).lower()
+        return any(
+            key in haystack
+            for key in ("content_policy", "moderation", "content filter",
+                        "blocked by", "nsfw", "explicit content")
+        )
+
     def _host_allowed(self, host: str) -> bool:
         host = host.lower().rstrip(".")
         for pattern in getattr(self.config, "media_download_hosts", ()):
@@ -293,36 +334,56 @@ class OrcaMediaService:
         if not await self._reserve(account_id, "vision"):
             return ""
         encoded = base64.b64encode(normalized).decode("ascii")
-        response = await self.client.chat.completions.create(
-            model=self.config.vision_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
+        primary = str(self.config.vision_model)
+        fallback = str(getattr(self.config, "vision_fallback_model", ""))
+        # 露骨圖會被 Routeway 內容審核攔（content_policy_violation），
+        # 主模型失敗時切到不審核的兜底模型再試一次。
+        models = [primary, fallback] if fallback else [primary]
+        last_exc: Exception | None = None
+        for index, model in enumerate(models):
+            try:
+                response = await self.client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
                         {
-                            "type": "text",
-                            "text": (
-                                f"{user_text}\n請先理解照片，再用人設自然回覆；"
-                                "只回最終文字，不要描述你的分析過程。"
-                            ),
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{encoded}"
-                            },
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        f"{user_text}\n請先理解照片，再用人設自然回覆；"
+                                        "只回最終文字，不要描述你的分析過程。"
+                                    ),
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{encoded}"
+                                    },
+                                },
+                            ],
                         },
                     ],
-                },
-            ],
-            temperature=self.config.ai_temperature,
-            max_tokens=self.config.ai_max_tokens,
-            extra_headers={"X-Include-Cost": "true"},
-            timeout=self.config.ai_timeout,
-        )
-        content = response.choices[0].message.content
-        return str(content or "").strip()
+                    temperature=self.config.ai_temperature,
+                    max_tokens=self.config.ai_max_tokens,
+                    extra_headers={"X-Include-Cost": "true"},
+                    timeout=self.config.ai_timeout,
+                )
+                content = response.choices[0].message.content
+                return str(content or "").strip()
+            except Exception as exc:  # noqa: BLE001 - 單次 API 失敗切兜底
+                last_exc = exc
+                print(
+                    f"[vision] {model} 失敗: {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                has_fallback = index + 1 < len(models)
+                if not has_fallback or not self._is_vision_fallback_worthy(exc):
+                    break
+        if last_exc:
+            raise last_exc
+        return ""
 
     async def _download(self, url: str) -> bytes:
         url = self._validate_download_url(url)
