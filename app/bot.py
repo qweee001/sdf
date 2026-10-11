@@ -104,39 +104,59 @@ class TgControlBot:
     # ---------- 生命週期 ----------
 
     async def run(self) -> None:
-        client = TelegramClient(
-            "sdf_control_bot", self.settings.tg_api_id, self.settings.tg_api_hash
-        )
-        self._client = client
-        await client.start(bot_token=self.bot_token)
-        me = await client.get_me()
-        self._bot_username = str(getattr(me, "username", "") or "")
-        # 打 / 時的指令下拉（telethon 1.44：SetBotCommandsRequest，scope 必填）
+        # 舊 session 檔可能帶上一代的 auth key／api_id，bot 用 token 重新授權即可，
+        # 先清掉避免 client.start 卡住或炸 ApiIdInvalid。
         try:
-            await client(
-                SetBotCommandsRequest(
-                    types.BotCommandScopeDefault(),
-                    "",
-                    [c for c in BOT_COMMANDS],
-                )
-            )
+            import os as _os
+
+            if _os.path.exists("sdf_control_bot.session"):
+                _os.remove("sdf_control_bot.session")
+                print("bot：清掉舊 session 檔", flush=True)
         except Exception:
-            log.exception("setBotCommands 失敗")
-        self._reply_menu = types.ReplyKeyboardMarkup(
-            [
-                types.KeyboardButtonRow([types.KeyboardButton(l) for l, _ in row])
-                for row in MENU_ROWS
-            ],
-            resize=True,
-        )
-        client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
-        client.add_event_handler(self._on_callback, events.CallbackQuery)
-        log.info("Telegram 控制台 bot 上線（@%s）", self._bot_username)
+            pass
         try:
+            client = TelegramClient(
+                "sdf_control_bot", self.settings.tg_api_id, self.settings.tg_api_hash
+            )
+            self._client = client
+            print("bot：client.start 連線中…", flush=True)
+            await client.start(bot_token=self.bot_token)
+            print("bot：start 完成", flush=True)
+            me = await client.get_me()
+            self._bot_username = str(getattr(me, "username", "") or "")
+            # 打 / 時的指令下拉（telethon 1.44：SetBotCommandsRequest，scope 必填）
+            try:
+                await client(
+                    SetBotCommandsRequest(
+                        types.BotCommandScopeDefault(),
+                        "",
+                        [c for c in BOT_COMMANDS],
+                    )
+                )
+            except Exception:
+                log.exception("setBotCommands 失敗")
+            self._reply_menu = types.ReplyKeyboardMarkup(
+                [
+                    types.KeyboardButtonRow([types.KeyboardButton(l) for l, _ in row])
+                    for row in MENU_ROWS
+                ],
+                resize=True,
+            )
+            client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
+            client.add_event_handler(self._on_callback, events.CallbackQuery)
+            print(f"Telegram 控制台 bot 上線（@{self._bot_username}）", flush=True)
+            log.info("Telegram 控制台 bot 上線（@%s）", self._bot_username)
             await client.run_until_disconnected()
+        except Exception as e:
+            # 不打到 stderr 就沉底（main 只在 shutdown 才 await 這個 task）
+            import traceback
+
+            traceback.print_exc()
+            print(f"⚠️ bot 啟動失敗：{type(e).__name__}: {e}", flush=True)
         finally:
             try:
-                await client.disconnect()
+                if self._client:
+                    await self._client.disconnect()
             except Exception:
                 pass
 

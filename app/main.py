@@ -63,6 +63,20 @@ async def async_main() -> None:
     if bot is not None:
         bot_task = asyncio.create_task(bot.run())
         print("Telegram 控制台 bot 任務已建立", flush=True)
+        # bot task 掛了要立刻看到（main 只在 shutdown 才 await，例外否則沉底）
+
+        def _bot_task_done(t: "asyncio.Task") -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                print(
+                    f"⚠️ bot 任務結束：{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        bot_task.add_done_callback(_bot_task_done)
 
     # 同時監看停止訊號與控制台服務：若 serve() 先結束（例如連接埠被占用而立即拋錯），
     # 不能只等 stop_event，否則容器會活著但 HTTP 完全不可用。
