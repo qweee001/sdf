@@ -31,6 +31,13 @@ async def async_main() -> None:
     dashboard = Dashboard(settings, manager, login_service)
     print("控制台初始化完成", flush=True)
 
+    # Telegram 控制台 bot 要先建（物件建立不連 TG），讓 Mini App 路由能在
+    # uvicorn startup 前掛到 dashboard.app；run() 的 task 仍在 uvicorn 後再開。
+    bot = make_bot(settings, manager, login_service)
+    if bot is not None:
+        dashboard.app.include_router(bot.app)
+        print("Mini App 路由已掛到控制台", flush=True)
+
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -58,7 +65,6 @@ async def async_main() -> None:
         print(f"啟動水軍帳號失敗：{e}", flush=True)
 
     # Telegram 控制台 bot（有 BOT_TOKEN 才啟動；獨立 task，掛了不影響主流程）
-    bot = make_bot(settings, manager, login_service)
     bot_task: asyncio.Task | None = None
     if bot is not None:
         bot_task = asyncio.create_task(bot.run())

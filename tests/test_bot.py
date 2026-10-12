@@ -1,6 +1,7 @@
 """Telegram 控制台 bot 橋接的測試。"""
 
 import asyncio
+import time
 
 import pytest
 
@@ -69,6 +70,26 @@ class _FakeDB:
         assert account_id == "a1"
         return list(self.privates)[:limit]
 
+    async def update_account(self, account_id, **k):
+        return {"id": account_id, "updated": True}
+
+    async def ai_call_summary(self, hours=24):
+        return {
+            "by_purpose": {
+                "reply": {"calls": 12, "retries": 1, "measured": 10,
+                          "prompt_tokens": 5000, "completion_tokens": 800,
+                          "avg_latency_ms": 1500.0},
+                "proactive": {"calls": 5, "retries": 0, "measured": 5,
+                              "prompt_tokens": 2000, "completion_tokens": 300,
+                              "avg_latency_ms": 1200.0},
+            },
+            "totals": {
+                "calls": 17, "retries": 1, "measured": 15,
+                "prompt_tokens": 7000, "completion_tokens": 1100,
+                "avg_latency_ms": 1411.8,
+            },
+        }
+
 
 class _FakeManager:
     def __init__(self):
@@ -80,6 +101,21 @@ class _FakeManager:
         self._media = True
         self._gen = True
         self._voice = False
+        self.config = type(
+            "Cfg",
+            (),
+            {
+                "ai_model": "glm-5.3",
+                "chat_base_url": "https://ollama.com/v1",
+                "ai_fallback_models": ("kimi-k3",),
+                "vision_model": "glm-5.3-flash",
+                "vision_fallback_model": "deepseek-v4.1-flash",
+                "image_model": "google/imagen-4.0-fast-generate-001",
+                "video_model": "minimax/minimax-h3",
+                "speech_model": "openai/tts-1",
+            },
+        )()
+        self._saved_groups: dict[str, list] = {}
 
     async def status(self):
         return {
@@ -89,16 +125,37 @@ class _FakeManager:
                 "sent": {"ok": 10},
                 "policy": {"near_duplicate": 4, "gate_held": 2},
             },
+            "media_spend_usd": 0.4,
+            "media_budget_usd": 10,
             "accounts": [
                 {
                     "id": "a1",
                     "name": "台北-小小",
                     "persona": '{"name": "小小", "gender": "女"}',
                     "is_running": True,
+                    "groups": [-1002229799107],
+                    "groups_available": [
+                        {"id": -1002229799107, "title": "桃花源・約會"},
+                        {"id": -1004567890123, "title": "另一個群"},
+                    ],
                     "stats": {"replies_sent": 5, "proactive_sent": 2, "gate_held": 1},
                 }
             ],
         }
+
+    async def list_available_groups(self, account_id):
+        return (
+            [
+                {"id": -1002229799107, "title": "桃花源・約會"},
+                {"id": -1004567890123, "title": "另一個群"},
+            ],
+            "",
+        )
+
+    async def save_groups(self, account_id, group_ids):
+        self._saved_groups[account_id] = list(group_ids)
+        self.calls.append(("save_groups", account_id, tuple(group_ids)))
+        return None
 
     def feature_status(self):
         return {
@@ -365,3 +422,264 @@ def test_acc_label_prefers_tg_username(monkeypatch):
         bot._acc_label({"name": "水軍帳號 281", "tg_username": "   "})
         == "水軍帳號 281"
     )
+
+
+class _CbEvent:
+    """fake CallbackQuery：帶 sender（權限檢查用）＋ edit/answer 記錄。"""
+
+    def __init__(self, sender_id: int, data: str):
+        self.data = data
+        self.sender = type("S", (), {"id": sender_id})()
+        self.edits: list[tuple] = []
+
+    async def edit(self, *a, **k):
+        self.edits.append((a, k))
+        return True
+
+    async def answer(self, *a, **k):
+        return True
+
+
+def _kb_data(kb) -> list[str]:
+    """收集鍵盤所有按鈕的 callback data（bytes → str）。"""
+    return [b.data.decode() for r in kb.rows for b in r.buttons]
+
+
+def _kb_texts(kb) -> list[str]:
+    """收集鍵盤所有按鈕的文字。"""
+    return [b.text for r in kb.rows for b in r.buttons]
+
+
+def test_callback_rejects_non_admin(monkeypatch):
+    """BOT_ADMIN_IDS=111,222 時，333 按按鈕被擋＋彈提示；111 按則進入。"""
+    import unittest.mock as mock
+
+    bot = _bot(monkeypatch, _FakeManager())
+    # 非管理者 333：用真實 telethon 的同步 sender_id 欄位
+    cb = mock.Mock(spec=["sender_id", "data", "answer", "edit"])
+    cb.data = "status"
+    cb.sender_id = 333
+    cb.answer = mock.AsyncMock(return_value=True)
+    cb.edit = mock.AsyncMock(return_value=True)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(bot._on_callback(cb))
+    finally:
+        loop.close()
+    cb.answer.assert_awaited_once()  # 彈「不是管理者」
+    cb.edit.assert_not_awaited()  # 沒進入 dispatch
+    # 管理者 111：進 dispatch（edit 被呼叫）
+    cb2 = mock.Mock(spec=["sender_id", "data", "answer", "edit"])
+    cb2.data = "status"
+    cb2.sender_id = 111
+    cb2.answer = mock.AsyncMock(return_value=True)
+    cb2.edit = mock.AsyncMock(return_value=True)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(bot._on_callback(cb2))
+    finally:
+        loop.close()
+    cb2.edit.assert_awaited_once()
+
+
+def test_acc_delete_confirm_page(monkeypatch):
+    bot = _bot(monkeypatch, _FakeManager())
+    loop = asyncio.new_event_loop()
+    try:
+        body, kb = loop.run_until_complete(bot._acc_delete_confirm("a1"))
+    finally:
+        loop.close()
+    assert "確認刪除" in body
+    assert "台北-小小" in body
+    data = _kb_data(kb)
+    assert "acc.del.yes:a1" in data
+    assert "acc.del.no:a1" in data
+
+
+def test_groups_menu_and_save(monkeypatch):
+    mgr = _FakeManager()
+    bot = _bot(monkeypatch, mgr)
+    loop = asyncio.new_event_loop()
+    try:
+        body, kb = loop.run_until_complete(bot._groups_menu("a1"))
+        # 預選＝目前已設定的群組（只有 -1002229799107 已勾）
+        assert "已選 1 個" in body
+        data = _kb_data(kb)
+        texts = _kb_texts(kb)
+        assert any("桃花源・約會" in t for t in texts)  # 群組名在按鈕文字
+        assert "g:-1002229799107:a1" in data
+        assert "g:-1004567890123:a1" in data
+        assert "g.save:a1" in data
+        # 勾第二個群組
+        loop.run_until_complete(
+            bot._dispatch_callback(
+                _CbEvent(111, "g:-1004567890123:a1"), "g:-1004567890123:a1"
+            )
+        )
+        assert bot._group_selections["a1"] == {-1002229799107, -1004567890123}
+        # 保存
+        loop.run_until_complete(
+            bot._dispatch_callback(_CbEvent(111, "g.save:a1"), "g.save:a1")
+        )
+        assert ("save_groups", "a1", (-1004567890123, -1002229799107)) in mgr.calls
+        # 保存後暫存清掉
+        assert "a1" not in bot._group_selections
+    finally:
+        loop.close()
+
+
+def test_model_info(monkeypatch):
+    bot = _bot(monkeypatch, _FakeManager())
+    out = bot._model_info()
+    assert "glm-5.3" in out
+    assert "ollama.com/v1" in out
+    assert "glm-5.3-flash" in out
+    assert "kimi-k3" in out
+
+
+def test_usage_info(monkeypatch):
+    bot = _bot(monkeypatch, _FakeManager())
+    loop = asyncio.new_event_loop()
+    try:
+        out = loop.run_until_complete(bot._usage_info())
+    finally:
+        loop.close()
+    assert "17 次" in out
+    assert "7000" in out
+    assert "1100" in out
+    assert "reply" in out
+    assert "proactive" in out
+    assert "門控暫緩" in out
+
+
+def test_home_menu_has_model_and_usage(monkeypatch):
+    from app.bot import TgControlBot
+
+    bot = _bot(monkeypatch, _FakeManager())
+    loop = asyncio.new_event_loop()
+    try:
+        kb = loop.run_until_complete(bot._home_keyboard())
+    finally:
+        loop.close()
+    data = _kb_data(kb)
+    assert "model" in data
+    assert "usage" in data
+    assert "media" in data
+
+
+class _FakeLoginService:
+    """Mini App 流程用的 fake login_service。"""
+
+    def __init__(self):
+        self.calls = []
+        self.pending = {}
+
+    async def start(self, phone):
+        self.calls.append(("start", phone))
+        aid = "auth-1"
+        self.pending[aid] = type("P", (), {"auth_id": aid, "created_at": 0.0})()
+        return {"phone_hint": phone[:4] + "****", "status": "code_required"}
+
+    async def submit_code(self, auth_id, code):
+        self.calls.append(("code", auth_id, code))
+        return {"status": "password_required"}
+
+    async def submit_password(self, auth_id, pw):
+        self.calls.append(("pass", auth_id, pw))
+        return {"status": "authorized"}
+
+    async def claim(self, auth_id):
+        self.calls.append(("claim", auth_id))
+        return type(
+            "V",
+            (),
+            {
+                "session_string": "s:xyz",
+                "tg_user_id": 42,
+                "tg_name": "美玲",
+                "avatar": "data:image/png;base64,AA",
+            },
+        )()
+
+
+def test_mini_app_routes(monkeypatch):
+    """Mini App：/tg/addacc 要令牌；/tgapi/start→code→pass→claim 串起來。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    mgr = _FakeManager()
+    ls = _FakeLoginService()
+    bot = TgControlBot(_settings(monkeypatch), mgr, login_service=ls)
+    host = FastAPI()
+    host.include_router(bot.app)  # bot.app 是 APIRouter，要掛到 app 才能打
+    client = TestClient(host)
+    # 簽發一個令牌
+    tok = secrets_token()
+    bot._mini_tokens[tok] = time.time() + 3600
+
+    # 無令牌 → 400
+    r = client.post("/tgapi/start", json={"phone": "+886912345678"})
+    assert r.status_code == 400
+    # 有令牌 → 200
+    r = client.post(
+        f"/tgapi/start?t={tok}", json={"phone": "+886912345678"}
+    )
+    assert r.status_code == 200
+    assert r.json().get("phone_hint")
+    # code
+    r = client.post(f"/tgapi/code?t={tok}", json={"code": "12345"})
+    assert r.status_code == 200
+    assert r.json().get("status") == "password_required"
+    # pass
+    r = client.post(f"/tgapi/pass?t={tok}", json={"password": "cloudpw"})
+    assert r.status_code == 200
+    assert r.json().get("status") == "authorized"
+    # claim → 建立帳號
+    r = client.post(f"/tgapi/claim?t={tok}", json={"name": "台北-美玲"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("ok") is True
+    assert body.get("tg_name") == "美玲"
+    assert body["account"]["name"] == "台北-美玲"
+    assert ("add", "台北-美玲") in mgr.calls
+    # claim 成功後 token 應該被清
+    assert tok not in bot._mini_tokens
+    # login service 串接
+    assert ("start", "+886912345678") in ls.calls
+    assert ("code", "auth-1", "12345") in ls.calls
+    assert ("pass", "auth-1", "cloudpw") in ls.calls
+
+
+def test_mini_page_needs_token(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    mgr = _FakeManager()
+    bot = TgControlBot(_settings(monkeypatch), mgr, login_service=_FakeLoginService())
+    host = FastAPI()
+    host.include_router(bot.app)
+    client = TestClient(host)
+    # 無令牌 → 顯示過期
+    r = client.get("/tg/addacc")
+    assert "令牌過期" in r.text or "回 bot" in r.text
+    # 有令牌 → 回完整 HTML
+    tok = secrets_token()
+    bot._mini_tokens[tok] = time.time() + 3600
+    r = client.get(f"/tg/addacc?t={tok}")
+    assert "新增水軍帳號" in r.text
+    assert "doStart" in r.text
+
+
+def test_mini_app_keyboard_url(monkeypatch):
+    """Mini App 入口按鈕的 url 帶 token＋公網位址。"""
+    bot = _bot(monkeypatch, _FakeManager())
+    kb = bot._mini_app_keyboard("TOK123")
+    btn = kb.rows[0].buttons[0]
+    assert btn.url.endswith("/tg/addacc?t=TOK123")
+    assert "localhost" in btn.url or "http://" in btn.url
+
+
+def secrets_token():
+    import secrets
+
+    return secrets.token_urlsafe(16)

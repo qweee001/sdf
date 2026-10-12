@@ -123,6 +123,9 @@ class Settings:
     dashboard_user: str
     dashboard_pass: str
     dashboard_port: int
+    # 控制台公網位址（Railway 對外 URL）。Mini App 連結要用公網位址，
+    # 不能寫本機 localhost；留空＝用 http://localhost:port（本機測試）。
+    dashboard_public_url: str
 
     # 資料庫
     db_path: str
@@ -270,6 +273,10 @@ def load_settings() -> Settings:
         dashboard_user=os.getenv("DASHBOARD_USER", "admin").strip(),
         dashboard_pass=_required("DASHBOARD_PASS"),
         dashboard_port=_int("PORT", 8000),
+        dashboard_public_url=(
+            os.getenv("DASHBOARD_PUBLIC_URL", "").strip().rstrip("/")
+            or f"http://localhost:{_int('PORT', 8000)}"
+        ),
         db_path=os.getenv("DB_PATH", "/data/chat.db").strip(),
         memory_max_messages=_int("MEMORY_MAX_MESSAGES", 30),
         memory_ttl_hours=_int("MEMORY_TTL_HOURS", 24),

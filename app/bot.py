@@ -21,9 +21,12 @@ import datetime
 import json
 import logging
 import re
+import secrets
+import time
 
 from telethon import TelegramClient, events, types
 from telethon.tl.functions.bots import SetBotCommandsRequest
+from fastapi import Request
 
 from .config import Settings
 from .manager import AccountManager
@@ -49,6 +52,154 @@ MENU: list[tuple[str, str]] = [
 ]
 MENU_LABELS = {label: cmd for label, cmd in MENU}
 MENU_ROWS = [MENU[0:3], MENU[3:6], MENU[6:9], MENU[9:12]]
+
+# ---------- Mini App 單頁（新增帳號：手機→驗證碼→兩步密碼→名稱） ----------
+# token 由 ?t=... 帶入；所有 API 呼叫都附上同一個 t。
+_MINI_HTML = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>新增水軍帳號</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{--bg:#0f1115;--card:#1a1d24;--fg:#e6e8ee;--mut:#8b93a3;--acc:#4f8cff;--ok:#39c07f;--err:#ff5c5c}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans TC",sans-serif;
+       background:var(--bg);color:var(--fg);min-height:100vh;padding:16px 14px 40px}
+  h1{font-size:18px;margin:6px 0 14px;font-weight:600}
+  .card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:14px}
+  label{display:block;font-size:13px;color:var(--mut);margin:10px 0 6px}
+  input{width:100%;background:#0c0e12;border:1px solid #2a2f3a;border-radius:10px;
+        color:var(--fg);font-size:16px;padding:12px 12px;outline:none}
+  input:focus{border-color:var(--acc)}
+  button{width:100%;margin-top:14px;background:var(--acc);border:0;border-radius:10px;
+         color:#fff;font-size:15px;font-weight:600;padding:13px;cursor:pointer}
+  button:disabled{opacity:.45;cursor:default}
+  .step{display:none}
+  .step.on{display:block}
+  .msg{margin-top:12px;font-size:14px;line-height:1.5;white-space:pre-wrap}
+  .msg.ok{color:var(--ok)}
+  .msg.err{color:var(--err)}
+  .hint{font-size:12px;color:var(--mut);margin-top:8px;line-height:1.5}
+</style>
+</head>
+<body>
+<h1>➕ 新增水軍帳號</h1>
+
+<div class="card step on" id="s1">
+  <label>手機號碼（含國碼）</label>
+  <input id="phone" type="tel" placeholder="+886912345678" autocomplete="off">
+  <button id="b1" onclick="doStart()">傳送驗證碼</button>
+  <div class="hint">驗證碼會傳到該手機的 Telegram（5 分鐘內有效）</div>
+  <div class="msg" id="m1"></div>
+</div>
+
+<div class="card step" id="s2">
+  <label>驗證碼</label>
+  <input id="code" type="text" inputmode="numeric" placeholder="12345" autocomplete="off">
+  <button id="b2" onclick="doCode()">送出驗證碼</button>
+  <div class="msg" id="m2"></div>
+</div>
+
+<div class="card step" id="s3">
+  <label>兩步驗證密碼（如需要）</label>
+  <input id="pass" type="text" placeholder="cloud password" autocomplete="off">
+  <button id="b3" onclick="doPass()">送出密碼</button>
+  <div class="msg" id="m3"></div>
+</div>
+
+<div class="card step" id="s4">
+  <label>帳號名稱（內部辨識用）</label>
+  <input id="name" type="text" placeholder="台北-美玲" autocomplete="off">
+  <button id="b4" onclick="doClaim()">建立帳號（暫不啟動）</button>
+  <div class="msg" id="m4"></div>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const T = params.get('t') || '';
+const base = location.pathname.replace(/\\/tg\\/addacc.*/, '');
+const API = base + '/tgapi/';
+
+function show(n){
+  for(let i=1;i<=4;i++){document.getElementById('s'+i).classList.toggle('on', i===n);}
+}
+function setMsg(id, txt, cls){
+  const el = document.getElementById(id);
+  el.textContent = txt || '';
+  el.className = 'msg' + (cls ? ' ' + cls : '');
+}
+async function post(path, body){
+  const r = await fetch(API + path + (T ? '?t='+encodeURIComponent(T) : ''), {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  });
+  let j = {};
+  try{ j = await r.json(); }catch(e){}
+  if(!r.ok) throw new Error(j.error || ('HTTP '+r.status));
+  return j;
+}
+function busy(id, on){document.getElementById(id).disabled = on;}
+
+async function doStart(){
+  const phone = document.getElementById('phone').value.trim();
+  if(!phone){setMsg('m1','請輸入手機號碼','err');return;}
+  busy('b1', true); setMsg('m1','傳送中…');
+  try{
+    const r = await post('start', {phone});
+    setMsg('m1', '✅ 驗證碼已傳到 '+(r.phone_hint||phone)+'，請輸入驗證碼', 'ok');
+    show(2);
+  }catch(e){ setMsg('m1', '⚠️ '+e.message, 'err'); }
+  finally{ busy('b1', false); }
+}
+async function doCode(){
+  const code = document.getElementById('code').value.trim();
+  if(!code){setMsg('m2','請輸入驗證碼','err');return;}
+  busy('b2', true); setMsg('m2','驗證中…');
+  try{
+    const r = await post('code', {code});
+    if(r.status === 'password_required'){
+      setMsg('m2','需要兩步驗證密碼','ok'); show(3);
+    }else if(r.status === 'authorized'){
+      setMsg('m2','✅ 驗證成功！請輸入帳號名稱','ok'); show(4);
+    }else{
+      setMsg('m2','狀態：'+r.status, 'err');
+    }
+  }catch(e){ setMsg('m2','⚠️ '+e.message, 'err'); }
+  finally{ busy('b2', false); }
+}
+async function doPass(){
+  const password = document.getElementById('pass').value.trim();
+  if(!password){setMsg('m3','請輸入密碼','err');return;}
+  busy('b3', true); setMsg('m3','驗證中…');
+  try{
+    const r = await post('pass', {password});
+    if(r.status === 'authorized'){
+      setMsg('m3','✅ 驗證成功！請輸入帳號名稱','ok'); show(4);
+    }else{ setMsg('m3','狀態：'+r.status, 'err'); }
+  }catch(e){ setMsg('m3','⚠️ '+e.message, 'err'); }
+  finally{ busy('b3', false); }
+}
+async function doClaim(){
+  const name = document.getElementById('name').value.trim() || '水軍帳號';
+  busy('b4', true); setMsg('m4','建立中…');
+  try{
+    const r = await post('claim', {name});
+    setMsg('m4', '✅ 已建立 '+(r.account && r.account.name || name)
+      + (r.tg_name ? '（'+r.tg_name+'）' : '') + '\\n先設人設與群組，再回 bot 啟動上線。', 'ok');
+  }catch(e){ setMsg('m4','⚠️ '+e.message, 'err'); }
+  finally{ busy('b4', false); }
+}
+// Telegram WebApp 主題色（若存在）
+if(window.Telegram && window.Telegram.WebApp){
+  window.Telegram.WebApp.ready();
+  window.Telegram.WebApp.expand();
+}
+</script>
+</body>
+</html>
+"""
 
 
 def cb(data: str, text: str) -> "types.KeyboardButtonCallback":
@@ -100,8 +251,13 @@ class TgControlBot:
         self.admin_ids = tuple(str(x) for x in settings.bot_admin_ids if str(x))
         self._client: TelegramClient | None = None
         self._bot_username = ""
+        # 群組勾選的暫存選中狀態（callback 無狀態，用記憶體暫存）
+        self._group_selections: dict[str, set[int]] = {}
+        # Mini App（新增帳號）用的臨時令牌：{token: exp_ts}
+        self._mini_tokens: dict[str, float] = {}
         if not self.admin_ids:
             log.warning("BOT_ADMIN_IDS 為空：任何 TG 使用者都能操作 bot")
+        self.app = self._build_mini_app()
 
     # ---------- 生命週期 ----------
 
@@ -162,15 +318,143 @@ class TgControlBot:
             except Exception:
                 pass
 
+    # ---------- Mini App（新增帳號，免在聊天傳驗證碼/密碼） ----------
+
+    _MINI_TOKEN_TTL = 1800  # 30 分鐘
+
+    def _build_mini_app(self):
+        """一組 HTTP 路由：/tg/addacc 開 Mini App，/tgapi/* 是它後端。
+
+        回 APIRouter，由 main.py 掛到 dashboard.app（同一個 uvicorn 對外）。
+        令牌走 query string（?t=...），由 bot 按「➕ 新增帳號」時簽發；
+        同一個 token 綁定一筆新增流程，避免多人同時加帳號互相搶 pending。
+        """
+        from fastapi import APIRouter, Request
+        from fastapi.responses import HTMLResponse, JSONResponse
+
+        router = APIRouter()
+
+        def _tok(req: Request) -> str:
+            return str(req.query_params.get("t", ""))
+
+        def _tok_valid(req: Request) -> bool:
+            t = _tok(req)
+            exp = self._mini_tokens.get(t)
+            if not exp:
+                return False
+            import time as _t
+
+            if _t.time() > exp:
+                self._mini_tokens.pop(t, None)
+                return False
+            return True
+
+        @router.get("/tg/addacc", response_class=HTMLResponse)
+        async def mini_page(req: Request):
+            if not _tok_valid(req):
+                return HTMLResponse("<h3>令牌過期，請回到 bot 再按「➕ 新增帳號」</h3>")
+            return HTMLResponse(_MINI_HTML)
+
+        @router.post("/tgapi/start")
+        async def start(req: Request):
+            if self.login_service is None:
+                return JSONResponse({"error": "登入服務未初始化"}, status_code=500)
+            if not _tok_valid(req):
+                return JSONResponse({"error": "令牌無效"}, status_code=400)
+            data = await req.json()
+            phone = str(data.get("phone", "")).strip()
+            if not phone:
+                return JSONResponse({"error": "請輸入手機號碼"}, status_code=400)
+            try:
+                r = await self.login_service.start(phone)
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            return JSONResponse(r)
+
+        @router.post("/tgapi/code")
+        async def code(req: Request):
+            if self.login_service is None:
+                return JSONResponse({"error": "登入服務未初始化"}, status_code=500)
+            if not _tok_valid(req):
+                return JSONResponse({"error": "令牌無效"}, status_code=400)
+            data = await req.json()
+            code_v = str(data.get("code", "")).strip()
+            aid = await self._mini_auth_id()
+            if not aid:
+                return JSONResponse({"error": "先發驗證碼"}, status_code=400)
+            try:
+                r = await self.login_service.submit_code(aid, code_v)
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            return JSONResponse(r)
+
+        @router.post("/tgapi/pass")
+        async def pas(req: Request):
+            if self.login_service is None:
+                return JSONResponse({"error": "登入服務未初始化"}, status_code=500)
+            if not _tok_valid(req):
+                return JSONResponse({"error": "令牌無效"}, status_code=400)
+            data = await req.json()
+            pw = str(data.get("password", "")).strip()
+            aid = await self._mini_auth_id()
+            if not aid:
+                return JSONResponse({"error": "流程不存在"}, status_code=400)
+            try:
+                r = await self.login_service.submit_password(aid, pw)
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            return JSONResponse(r)
+
+        @router.post("/tgapi/claim")
+        async def claim(req: Request):
+            if self.login_service is None:
+                return JSONResponse({"error": "登入服務未初始化"}, status_code=500)
+            if not _tok_valid(req):
+                return JSONResponse({"error": "令牌無效"}, status_code=400)
+            data = await req.json()
+            name = str(data.get("name", "")).strip() or "水軍帳號"
+            aid = await self._mini_auth_id()
+            if not aid:
+                return JSONResponse({"error": "流程不存在"}, status_code=400)
+            try:
+                verified = await self.login_service.claim(aid)
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+            account = await self.manager.add_account(
+                name, verified.session_string, enable=False,
+                display_name=str(getattr(verified, "tg_name", "") or ""),
+            )
+            await self.manager.db.update_account(
+                account["id"],
+                tg_user_id=verified.tg_user_id,
+                tg_username=str(getattr(verified, "tg_name", "") or ""),
+                avatar=str(getattr(verified, "avatar", "") or ""),
+                enabled=0,
+            )
+            self._mini_tokens.pop(_tok(req), None)
+            return JSONResponse({"ok": True, "account": account,
+                                 "tg_name": str(getattr(verified, "tg_name", ""))})
+
+        return router
+
+    async def _mini_auth_id(self) -> str:
+        """Mini App 新增流程用同一個 auth_id（與 /addacc 串行的最近一次 start）。"""
+        return await self._last_auth_id()
+
     # ---------- 權限 ----------
 
     def _allowed(self, event) -> bool:
         if not self.admin_ids:
             return True
-        sender = event.sender
-        if sender is None:
+        # 優先用同步的 sender_id（CallbackQuery/NewMessage 都有，且 always set）；
+        # .sender 是 property，entity 未快取時可能是 None，不可靠。
+        sid = getattr(event, "sender_id", None)
+        if sid is None:
+            sender = event.sender
+            sid = getattr(sender, "id", None) if sender is not None else None
+        if sid is None:
             return False
-        return str(getattr(sender, "id", "")) in self.admin_ids
+        return str(sid) in self.admin_ids
 
     # ---------- 指令處理 ----------
 
@@ -212,7 +496,7 @@ class TgControlBot:
             elif name in {"media", "voice", "imagegen"}:
                 body, kb = await self._feature_toggle(name, rest), self._reply_menu
             elif name == "addacc":
-                body, kb = await self._add_start(rest, event), self._reply_menu
+                body, kb = await self._add_start(rest, event)
             elif name == "code":
                 body, kb = await self._add_code(rest, event), self._reply_menu
             elif name == "pass":
@@ -235,6 +519,13 @@ class TgControlBot:
             data = raw.decode()
         else:
             data = str(raw or "")
+        # 權限：callback 的 sender 是按下按鈕的人；非管理者按按鈕給提示
+        if not self._allowed(cb):
+            try:
+                await cb.answer("⚠️ 不是管理者（BOT_ADMIN_IDS 未包含你）", show_alert=True)
+            except Exception:
+                pass
+            return
         try:
             await self._dispatch_callback(cb, data)
         except Exception as e:
@@ -284,10 +575,46 @@ class TgControlBot:
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc.del":
+            # 先給確認頁（避免誤觸直接刪），按「確認」才真的刪
+            body, kb = await self._acc_delete_confirm(arg)
+            await cb.edit(body[:MSG_LIMIT], buttons=kb)
+        elif action == "acc.del.yes":
             body = await self._acc_delete([arg])
             await cb.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
+        elif action == "acc.del.no":
+            body, kb = await self._account_actions_keyboard(arg)
+            await cb.edit(body[:MSG_LIMIT], buttons=kb)
+        elif action == "acc.groups":
+            body, kb = await self._groups_menu(arg)
+            await cb.edit(body[:MSG_LIMIT], buttons=kb)
+        elif data.startswith("g.save:"):
+            # g.save:<acc_id> 保存勾選（要先於一般 g: 分支）
+            _, acc_id = data.split(":", 1)
+            body = await self._groups_save(acc_id)
+            await cb.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
+        elif data.startswith("g:"):
+            # g:<gid>:<acc_id> 切換某群組勾選
+            _, gid_s, acc_id = data.split(":", 2)
+            try:
+                gid = int(gid_s)
+            except ValueError:
+                await cb.answer("群組 id 格式錯誤", show_alert=True)
+                return
+            sel = self._group_selections.setdefault(acc_id, set())
+            if gid in sel:
+                sel.discard(gid)
+            else:
+                sel.add(gid)
+            body, kb = await self._groups_menu(acc_id)
+            await cb.edit(body[:MSG_LIMIT], buttons=kb)
+        elif action == "model":
+            body = self._model_info()
+            await cb.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
+        elif action == "usage":
+            body = await self._usage_info()
+            await cb.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
         elif action == "acc.persona":
             body, kb = await self._persona_actions_keyboard(arg)
             await cb.edit(body[:MSG_LIMIT], buttons=kb)
@@ -406,6 +733,10 @@ class TgControlBot:
             cb("voice", "🔊 語音"),
         ])
         rows.append([
+            cb("model", "🧩 模型"),
+            cb("usage", "📈 用量"),
+        ])
+        rows.append([
             cb("hidekb", "⌨ 隱藏鍵盤"),
         ])
         return types.ReplyInlineMarkup(kbrows(rows))
@@ -438,13 +769,16 @@ class TgControlBot:
             ],
             [
                 cb(
-                    "priv:" + account_id, "📩 私訊"
+                    "acc.groups:" + account_id, "📍 群組"
                 ),
                 cb(
-                    "acc.del:" + account_id, "🗑 刪除"
+                    "priv:" + account_id, "📩 私訊"
                 ),
             ],
             [
+                cb(
+                    "acc.del:" + account_id, "🗑 刪除"
+                ),
                 cb("back.home", "🔙 回主菜單"),
             ],
         ]
@@ -673,6 +1007,134 @@ class TgControlBot:
 
     # ---------- 帳號控制 ----------
 
+    async def _acc_delete_confirm(self, account_id: str):
+        """刪除確認頁：回 (文字, 鍵盤)。"""
+        acc = next(
+            (
+                a
+                for a in (await self.manager.status()).get("accounts", [])
+                if a["id"] == account_id
+            ),
+            None,
+        )
+        name = self._acc_label(acc) if acc else account_id
+        body = (
+            f"🗑 確認刪除｜{name}（{account_id}）\n"
+            "──────────────\n"
+            "刪除後人設、記憶、收發紀錄一併清掉（session 也要重新登入）。"
+        )
+        rows = [
+            [
+                cb("acc.del.yes:" + account_id, "✅ 確認刪除"),
+                cb("acc.del.no:" + account_id, "↩️ 再想想"),
+            ],
+        ]
+        return body, types.ReplyInlineMarkup(kbrows(rows))
+
+    async def _groups_menu(self, account_id: str):
+        """群組勾選頁：回 (文字, 鍵盤)。勾選狀態暫存 self._group_selections。"""
+        data = await self.manager.status()
+        acc = next(
+            (a for a in data.get("accounts", []) if a["id"] == account_id), None
+        )
+        if acc is None:
+            return f"找不到帳號 {account_id}", types.ReplyInlineMarkup(
+                kbrows([[cb("back.home", "🔙 回主菜單")]])
+            )
+        name = self._acc_label(acc)
+        selected_now = set(acc.get("groups") or [])
+        if account_id not in self._group_selections:
+            # 首次進入：預設＝目前已設定的群組
+            self._group_selections[account_id] = set(selected_now)
+        sel = self._group_selections[account_id]
+        # 群組清單：優先用 worker 的（運行中），沒有才臨時抓
+        available = acc.get("groups_available") or []
+        if not available:
+            available, err = await self.manager.list_available_groups(account_id)
+        lines = [
+            f"📍 群組勾選｜{name}（{account_id}）",
+            "──────────────",
+            f"勾選要讓這個帳號駐留的群組（已選 {len(sel)} 個）",
+        ]
+        if not available:
+            lines.append("（還沒有任何群組資料，先讓帳號上線收過訊息）")
+        rows = []
+        for g in available[:30]:
+            gid = int(g["id"])
+            title = str(g.get("title") or f"群組 {gid}")[:24]
+            mark = "✅" if gid in sel else "▫️"
+            rows.append([cb(f"g:{gid}:{account_id}", f"{mark} {title}")])
+        rows.append([
+            cb("g.save:" + account_id, "💾 保存群組"),
+            cb("back.acc:" + account_id, "🔙 回帳號操作"),
+        ])
+        return "\n".join(lines), types.ReplyInlineMarkup(kbrows(rows))
+
+    async def _groups_save(self, account_id: str) -> str:
+        sel = self._group_selections.get(account_id)
+        if sel is None:
+            return "⚠️ 勾選狀態不存在，請重新進入群組頁"
+        err = await self.manager.save_groups(account_id, sorted(sel))
+        if err:
+            return f"⚠️ 保存失敗：{err}"
+        self._group_selections.pop(account_id, None)
+        return (
+            f"💾 已保存 {len(sel)} 個群組（{account_id}）。\n"
+            "運行中的帳號重啟後生效。"
+        )
+
+    def _model_info(self) -> str:
+        cfg = self.manager.config
+        lines = [
+            "🧩 目前模型設定",
+            "──────────────",
+            f"主聊天：{cfg.ai_model}",
+            f"  端點：{cfg.chat_base_url}",
+            f"備援模型：{', '.join(cfg.ai_fallback_models) or '（無）'}",
+            f"視覺識別：{cfg.vision_model}",
+            f"  兜底：{cfg.vision_fallback_model}",
+            f"圖片生成：{cfg.image_model}",
+            f"影片生成：{cfg.video_model}",
+            f"語音：{cfg.speech_model}",
+            "",
+            "改模型＝改 Railway 環境變數（AI_MODEL 等）＋重新部署。",
+        ]
+        return "\n".join(lines)
+
+    async def _usage_info(self) -> str:
+        data = await self.manager.status()
+        summary = await self.manager.db.ai_call_summary(hours=24)
+        lines = [
+            "📈 24 小時用量",
+            "──────────────",
+            f"模型呼叫：{summary['totals']['calls']} 次"
+            f"（有帳 {summary['totals']['measured']}）",
+            f"token：{summary['totals']['prompt_tokens']}"
+            f" 入 / {summary['totals']['completion_tokens']} 出",
+            f"重試：{summary['totals']['retries']}",
+            "",
+            "依用途：",
+        ]
+        for purpose, v in sorted(
+            summary["by_purpose"].items(), key=lambda x: -x[1]["calls"]
+        ):
+            lines.append(
+                f"· {purpose}：{v['calls']} 次｜"
+                f"延遲均值 {v['avg_latency_ms']}ms"
+            )
+        spend = data.get("media_spend_usd", 0)
+        budget = data.get("media_budget_usd", 0)
+        lines.append("")
+        lines.append(
+            f"媒體花費：${spend} / ${budget}（每日預算）"
+        )
+        held = sum(
+            int((a.get("stats") or {}).get("gate_held") or 0)
+            for a in data.get("accounts", [])
+        )
+        lines.append(f"門控暫緩累計：{held}")
+        return "\n".join(lines)
+
     def _find_account_sync(self, accounts: list[dict], target: str) -> dict | None:
         return next(
             (
@@ -779,18 +1241,40 @@ class TgControlBot:
 
     # ---------- 新增帳號（TG 驗證碼流程） ----------
 
-    async def _add_start(self, args: list[str], event) -> str:
+    async def _add_start(self, args: list[str], event):
         if self.login_service is None:
-            return "⚠️ 登入服務未初始化"
-        if not args:
-            return "➕ 新增帳號：把水軍帳號手機號碼（含國碼）傳給我\n例如：/addacc +886912345678"
-        try:
-            r = await self.login_service.start(args[0])
-        except Exception as e:
-            return f"⚠️ {e}"
+            return "⚠️ 登入服務未初始化", self._reply_menu
+        # 有 Mini App：優先讓主人按按鈕在 Mini App 填（免在聊天傳驗證碼/密碼）
+        if args:
+            # 直接帶手機號：照舊走 start 發驗證碼
+            try:
+                r = await self.login_service.start(args[0])
+            except Exception as e:
+                return f"⚠️ {e}", self._reply_menu
+            return (
+                f"驗證碼已傳送至 {r.get('phone_hint')}（5 分鐘內有效）\n"
+                f"按下面「📱 開 Mini App 輸入驗證碼」繼續",
+                self._mini_app_keyboard(),
+            )
+        token = secrets.token_urlsafe(16)
+        self._mini_tokens[token] = time.time() + self._MINI_TOKEN_TTL
         return (
-            f"驗證碼已傳送至 {r.get('phone_hint')}（5 分鐘內有效）\n"
-            f"收到後回：/code 12345"
+            "➕ 新增帳號：按「📱 開 Mini App」填手機號＋驗證碼＋名稱\n"
+            "（全程在 Mini App 內，不會把驗證碼/密碼傳到聊天）",
+            self._mini_app_keyboard(token),
+        )
+
+    def _mini_app_keyboard(self, token: str | None = None):
+        """Mini App 入口按鈕：url 帶 token（?t=...），30 分鐘有效。"""
+        tok = token or secrets.token_urlsafe(16)
+        if token is None:
+            self._mini_tokens[tok] = time.time() + self._MINI_TOKEN_TTL
+        base = getattr(self.settings, "dashboard_public_url", "") or (
+            "http://localhost:" + str(self.settings.dashboard_port)
+        )
+        url = f"{base}/tg/addacc?t={tok}"
+        return types.ReplyInlineMarkup(
+            kbrows([[types.KeyboardButtonUrl("📱 開 Mini App 新增帳號", url)]])
         )
 
     async def _add_code(self, args: list[str], event) -> str:
