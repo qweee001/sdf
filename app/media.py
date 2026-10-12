@@ -71,8 +71,13 @@ class OrcaMediaService:
         http_client: Any | None = None,
         resolve_host: Callable[[str, int], Awaitable[list[str]]] | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        gen_client: Any | None = None,
     ):
         self.client = client
+        # 生成端點（images.generate）走的 client。Ollama Cloud 沒有
+        # /v1/images/generations，所以 generation 要單獨指到 Routeway；
+        # 未指定時退回 self.client（行為不變）。
+        self.gen_client = gen_client or client
         self.db = db
         self.config = config
         self._owns_http = http_client is None
@@ -427,7 +432,7 @@ class OrcaMediaService:
             if not await self._reserve_image_model(account_id, model):
                 return None
             try:
-                response = await self.client.images.generate(
+                response = await self.gen_client.images.generate(
                     model=model,
                     prompt=self._SUGGESTIVE_IMAGE_POLICY + prompt,
                     n=1,

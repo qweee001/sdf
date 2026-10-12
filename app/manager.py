@@ -64,6 +64,7 @@ class AccountManager:
             client=self._chat_client,
             db=db,
             config=config,
+            gen_client=self._ai_client,
         )
         enabled_values = {"1", "true", "yes", "on"}
         self.live_test = BoundedLiveTest(
