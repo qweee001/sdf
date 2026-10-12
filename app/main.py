@@ -38,6 +38,8 @@ async def async_main() -> None:
     # POST 405）。所以掛完再把它們的 routes 移到最前面。
     bot = make_bot(settings, manager, login_service)
     if bot is not None:
+        # #11：/health 要含 bot 狀態（防 health 3/3 但 bot 死）
+        dashboard.attach_bot(bot)
         _app = dashboard.app
         _routes = _app.router.routes
         _n = len(_routes)
@@ -78,12 +80,11 @@ async def async_main() -> None:
     # Telegram 控制台 bot（有 BOT_TOKEN 才啟動；獨立 task，掛了不影響主流程）
     bot_task: asyncio.Task | None = None
     if bot is not None:
-        bot_task = asyncio.create_task(bot.run())
-        print("Telegram 控制台 bot 任務已建立", flush=True)
-        # bot task 掛了要立刻看到（main 只在 shutdown 才 await，例外否則沉底）
-
         def _bot_task_done(t: "asyncio.Task") -> None:
-            if t.cancelled():
+            # #11：done 監督——task 意外結束（run() 迴圈自己退出）要重新拉起，
+            # 否則 bot 靜默失能而 /health 仍 3/3。正常 shutdown 不重啟。
+            nonlocal bot_task
+            if stop_event.is_set() or t.cancelled():
                 return
             exc = t.exception()
             if exc is not None:
@@ -92,7 +93,20 @@ async def async_main() -> None:
                     file=sys.stderr,
                     flush=True,
                 )
+            print("bot 任務已結束，3s 後重新拉起…", flush=True)
 
+            def _relaunch() -> None:
+                nonlocal bot_task
+                if stop_event.is_set():
+                    return
+                bot_task = asyncio.create_task(bot.run())
+                bot_task.add_done_callback(_bot_task_done)
+                print("Telegram 控制台 bot 已重新拉起", flush=True)
+
+            loop.call_later(3, _relaunch)
+
+        bot_task = asyncio.create_task(bot.run())
+        print("Telegram 控制台 bot 任務已建立", flush=True)
         bot_task.add_done_callback(_bot_task_done)
 
     # 同時監看停止訊號與控制台服務：若 serve() 先結束（例如連接埠被占用而立即拋錯），
@@ -121,6 +135,8 @@ async def async_main() -> None:
         print("收到停止訊號，正在關閉…", flush=True)
     server.should_exit = True
     await manager.aclose()
+    if bot is not None:
+        bot.stop()  # 先告訴 run() 的重試迴圈「正常停止」，避免 done 監督又拉起
     if bot_task is not None:
         bot_task.cancel()
         try:

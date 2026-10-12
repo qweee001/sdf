@@ -18,11 +18,15 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
+import hmac
 import json
 import logging
 import re
 import secrets
 import time
+import urllib.parse
+from dataclasses import dataclass
 
 from telethon import TelegramClient, events, types
 from telethon.tl.functions.bots import SetBotCommandsRequest
@@ -104,7 +108,7 @@ _MINI_HTML = """<!doctype html>
 
 <div class="card step" id="s3">
   <label>兩步驗證密碼（如需要）</label>
-  <input id="pass" type="text" placeholder="cloud password" autocomplete="off">
+  <input id="pass" type="password" placeholder="cloud password" autocomplete="new-password">
   <button id="b3" onclick="doPass()">送出密碼</button>
   <div class="msg" id="m3"></div>
 </div>
@@ -141,13 +145,23 @@ async function post(path, body){
   return j;
 }
 function busy(id, on){document.getElementById(id).disabled = on;}
+// #2：身分優先用 Telegram initData（HMAC 簽章）；沒有才退回 token 綁定的 admin/chat
+function ident(){
+  const o = {};
+  try{
+    if(window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData){
+      o.init_data = window.Telegram.WebApp.initData;
+    }
+  }catch(e){}
+  return o;
+}
 
 async function doStart(){
   const phone = document.getElementById('phone').value.trim();
   if(!phone){setMsg('m1','請輸入手機號碼','err');return;}
   busy('b1', true); setMsg('m1','傳送中…');
   try{
-    const r = await post('start', {phone});
+    const r = await post('start', Object.assign({phone}, ident()));
     setMsg('m1', '✅ 驗證碼已傳到 '+(r.phone_hint||phone)+'，請輸入驗證碼', 'ok');
     show(2);
   }catch(e){ setMsg('m1', '⚠️ '+e.message, 'err'); }
@@ -158,34 +172,34 @@ async function doCode(){
   if(!code){setMsg('m2','請輸入驗證碼','err');return;}
   busy('b2', true); setMsg('m2','驗證中…');
   try{
-    const r = await post('code', {code});
-    if(r.status === 'password_required'){
+    const r = await post('code', Object.assign({code}, ident()));
+    if(r.need_password){
       setMsg('m2','需要兩步驗證密碼','ok'); show(3);
-    }else if(r.status === 'authorized'){
-      setMsg('m2','✅ 驗證成功！請輸入帳號名稱','ok'); show(4);
     }else{
-      setMsg('m2','狀態：'+r.status, 'err');
+      setMsg('m2','✅ 驗證成功！請輸入帳號名稱','ok'); show(4);
     }
   }catch(e){ setMsg('m2','⚠️ '+e.message, 'err'); }
   finally{ busy('b2', false); }
 }
 async function doPass(){
-  const password = document.getElementById('pass').value.trim();
+  const pwEl = document.getElementById('pass');
+  const password = pwEl.value.trim();
   if(!password){setMsg('m3','請輸入密碼','err');return;}
   busy('b3', true); setMsg('m3','驗證中…');
+  pwEl.value = ''; // #5：處理後清掉欄位（不留在頁面上）
   try{
-    const r = await post('pass', {password});
-    if(r.status === 'authorized'){
+    const r = await post('pass', Object.assign({password}, ident()));
+    if(r.ok){
       setMsg('m3','✅ 驗證成功！請輸入帳號名稱','ok'); show(4);
-    }else{ setMsg('m3','狀態：'+r.status, 'err'); }
-  }catch(e){ setMsg('m3','⚠️ '+e.message, 'err'); }
+    }else{ setMsg('m3','狀態：'+(r.error||'失敗'), 'err'); }
+  }catch(e){ setMsg('m3', '⚠️ '+e.message, 'err'); }
   finally{ busy('b3', false); }
 }
 async function doClaim(){
   const name = document.getElementById('name').value.trim() || '水軍帳號';
   busy('b4', true); setMsg('m4','建立中…');
   try{
-    const r = await post('claim', {name});
+    const r = await post('claim', Object.assign({name}, ident()));
     setMsg('m4', '✅ 已建立 '+(r.account && r.account.name || name)
       + (r.tg_name ? '（'+r.tg_name+'）' : '') + '\\n先設人設與群組，再回 bot 啟動上線。', 'ok');
   }catch(e){ setMsg('m4','⚠️ '+e.message, 'err'); }
@@ -239,6 +253,56 @@ def _fmt_ts(ts: float) -> str:
     return dt.strftime("%m-%d %H:%M")
 
 
+@dataclass
+class _MiniFlow:
+    """Mini App（新增帳號）的臨時流程。
+
+    綁定：簽發時的管理員 sender_id、聊天 chat_id、auth_id（start 後填入）、
+    階段 stage（page/code/pass/claim）、期限 expires_at、是否已用 used。
+    任一 HTTP 操作都要驗證 token 仍存在、未過期、未用，且 管理員／聊天 對得上，
+    才准執行對應階段的 login_service 呼叫——禁止跨流程、跨 token 操作。
+    """
+
+    admin_id: str
+    chat_id: int
+    auth_id: str = ""
+    stage: str = "page"
+    expires_at: float = 0.0
+    used: bool = False
+
+
+def _tg_initdata_user_id(init_data: str, bot_token: str) -> str | None:
+    """驗證 Telegram WebApp initData（HMAC-SHA256），回傳發送者 user id。
+
+    不能只相信客戶端傳的 user id：initData 是 key=value& 串，
+    secret = HMAC_SHA256("WebAppData", bot_token)，再對
+    HMAC_SHA256(secret, sorted_data_check_string) 驗簽。
+    回傳 ""＝驗證失敗／無 user 欄位；成功回 user.id 字串。
+    """
+    if not init_data:
+        return None
+    try:
+        params = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
+    except Exception:
+        return None
+    if "hash" not in params:
+        return None
+    hash_v = params["hash"]
+    check_items = {k: v for k, v in params.items() if k != "hash"}
+    check_str = "\n".join(f"{k}={v}" for k, v in sorted(check_items.items()))
+    secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+    digest = hmac.new(secret, check_str.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(digest, str(hash_v)):
+        return None
+    user = check_items.get("user")
+    if not user:
+        return None
+    try:
+        return str(json.loads(user).get("id", ""))
+    except Exception:
+        return None
+
+
 class TgControlBot:
     """輕量橋接：讀 DB 資料＋控制水軍帳號（啟動/停止/刪除/功能開關/新增）。"""
 
@@ -251,17 +315,49 @@ class TgControlBot:
         self.admin_ids = tuple(str(x) for x in settings.bot_admin_ids if str(x))
         self._client: TelegramClient | None = None
         self._bot_username = ""
-        # 群組勾選的暫存選中狀態（callback 無狀態，用記憶體暫存）
-        self._group_selections: dict[str, set[int]] = {}
-        # Mini App（新增帳號）用的臨時令牌：{token: exp_ts}
-        self._mini_tokens: dict[str, float] = {}
+        # 群組勾選的暫存選中狀態（callback 無狀態，用記憶體暫存）。
+        # 鍵＝(管理員, 聊天, 帳號)：避免兩個管理員同時勾同一帳號互相覆蓋。
+        self._group_selections: dict[tuple[str, int, str], set[int]] = {}
+        # Mini App（新增帳號）用的臨時流程：{token: _MiniFlow}
+        # 每個 token 綁定 管理員／聊天／auth_id／階段／期限／使用狀態，
+        # 禁止跨流程、跨 token、跨管理員、跨聊天操作。
+        self._mini_flows: dict[str, _MiniFlow] = {}
+        # 刪除確認：{token: (account_id, admin_id, chat_id, exp)}
+        # 一次性、有期限、綁管理員／聊天／帳號；重複點不會二次刪除。
+        self._del_confirms: dict[str, tuple[str, str, int, float]] = {}
+        # #11：run() 重試／可觀測（/health 含 bot 狀態，防「health 3/3 但 bot 死」）
+        self._stop_event: asyncio.Event | None = None
+        self._last_error = ""
         if not self.admin_ids:
-            log.warning("BOT_ADMIN_IDS 為空：任何 TG 使用者都能操作 bot")
+            log.warning("BOT_ADMIN_IDS 為空：fail-closed，任何 TG 使用者都會被擋")
         self.app = self._build_mini_app()
 
     # ---------- 生命週期 ----------
 
     async def run(self) -> None:
+        # #11：斷線/啟動失敗自動重連（指數退避 3→60 秒）；stop() 或 task cancel 才結束。
+        self._stop_event = asyncio.Event()
+        backoff = 3
+        while True:
+            try:
+                await self._run_once()
+                self._last_error = ""
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._last_error = f"{type(e).__name__}: {e}"
+                log.exception("bot 連線失敗（%ss 後重試）", backoff)
+                print(f"⚠️ bot 連線失敗：{e}", flush=True)
+            if self._stop_event.is_set():
+                return
+            print(f"bot：{backoff}s 後重連…", flush=True)
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=backoff)
+            except asyncio.TimeoutError:
+                pass
+            backoff = min(backoff * 2, 60)
+
+    async def _run_once(self) -> None:
         # 舊 session 檔可能帶上一代的 auth key／api_id，bot 用 token 重新授權即可，
         # 先清掉避免 client.start 卡住或炸 ApiIdInvalid。
         try:
@@ -306,28 +402,91 @@ class TgControlBot:
             log.info("Telegram 控制台 bot 上線（@%s）", self._bot_username)
             await client.run_until_disconnected()
         except Exception as e:
-            # 不打到 stderr 就沉底（main 只在 shutdown 才 await 這個 task）
-            import traceback
-
-            traceback.print_exc()
-            print(f"⚠️ bot 啟動失敗：{type(e).__name__}: {e}", flush=True)
+            # 丟回 run() 的重試迴圈（#11：斷線恢復＋last_error 可觀測）
+            raise
         finally:
             try:
                 if self._client:
                     await self._client.disconnect()
             except Exception:
                 pass
+            self._client = None
+
+    def stop(self) -> None:
+        """正常停止 run() 的重試迴圈（main shutdown 用）。"""
+        if self._stop_event is not None:
+            self._stop_event.set()
+
+    def state(self) -> dict:
+        """/health 用的 bot 健康狀態（#11：防 health 3/3 但 bot 無法操作）。"""
+        client = self._client
+        connected = False
+        if client is not None:
+            try:
+                connected = bool(client.is_connected)
+            except Exception:
+                connected = False
+        return {
+            "connected": connected,
+            "username": self._bot_username,
+            "last_error": self._last_error,
+        }
 
     # ---------- Mini App（新增帳號，免在聊天傳驗證碼/密碼） ----------
 
     _MINI_TOKEN_TTL = 1800  # 30 分鐘
 
+    # claim 回應欄位白名單：禁止 session／密鑰／hash 等內部欄位外洩
+    _ACCOUNT_PUBLIC_FIELDS = (
+        "id", "name", "tg_username", "tg_name", "avatar", "status",
+        "enabled", "persona", "reply_enabled", "proactive_enabled",
+        "created_at", "updated_at",
+    )
+
+    def _mini_mint(self, admin_id: str, chat_id: int) -> str:
+        """簽發一個綁定 管理員＋聊天 的新流程令牌。"""
+        token = secrets.token_urlsafe(16)
+        self._mini_flows[token] = _MiniFlow(
+            admin_id=str(admin_id), chat_id=int(chat_id),
+            expires_at=time.time() + self._MINI_TOKEN_TTL,
+        )
+        return token
+
+    def _mini_flow(self, token: str, *, admin_id: str | None = None,
+                   chat_id: int | None = None,
+                   stage: str | None = None) -> _MiniFlow | None:
+        """驗證並取出 token 對應的流程。
+
+        條件：存在、未過期、未用、（若提供）管理員/聊天/階段都對得上。
+        """
+        flow = self._mini_flows.get(token)
+        if flow is None:
+            return None
+        if time.time() > flow.expires_at:
+            self._mini_flows.pop(token, None)
+            return None
+        if flow.used:
+            return None
+        if admin_id is not None and str(flow.admin_id) != str(admin_id):
+            return None
+        if chat_id is not None and flow.chat_id != int(chat_id):
+            return None
+        if stage is not None and flow.stage != stage:
+            return None
+        return flow
+
+    @staticmethod
+    def _public_account(account: dict) -> dict:
+        """只回白名單欄位，其餘（session_key 等）擋在外。"""
+        return {k: account.get(k) for k in TgControlBot._ACCOUNT_PUBLIC_FIELDS
+                if k in account}
+
     def _build_mini_app(self):
         """一組 HTTP 路由：/tg/addacc 開 Mini App，/tgapi/* 是它後端。
 
         回 APIRouter，由 main.py 掛到 dashboard.app（同一個 uvicorn 對外）。
-        令牌走 query string（?t=...），由 bot 按「➕ 新增帳號」時簽發；
-        同一個 token 綁定一筆新增流程，避免多人同時加帳號互相搶 pending。
+        令牌走 query string（?t=...），綁定 管理員/聊天/auth_id/階段/期限/使用狀態；
+        start 後另要求 initData（HMAC 驗證）或 admin_id+chat_id 綁定，防跨流程操作。
         """
         from fastapi import APIRouter, Request
         from fastapi.responses import HTMLResponse, JSONResponse
@@ -337,21 +496,46 @@ class TgControlBot:
         def _tok(req: Request) -> str:
             return str(req.query_params.get("t", ""))
 
-        def _tok_valid(req: Request) -> bool:
-            t = _tok(req)
-            exp = self._mini_tokens.get(t)
-            if not exp:
-                return False
-            import time as _t
-
-            if _t.time() > exp:
-                self._mini_tokens.pop(t, None)
-                return False
-            return True
+        async def _flow_for(req: Request, payload: dict,
+                            stage: str) -> _MiniFlow | None:
+            """從 token＋initData/payload 驗證出對應階段的流程。"""
+            token = _tok(req)
+            # 身分：initData 驗簽（HMAC）優先用；沒 initData 才用 payload 的
+            # admin_id+chat_id（僅在無 initData 時信任，且仍要與 token 綁定一致）
+            admin_id: str | None = None
+            chat_id: int | None = None
+            init_data = str(payload.get("init_data") or "")
+            if init_data:
+                uid = _tg_initdata_user_id(init_data, self.bot_token)
+                if not uid:
+                    # initData 存在但驗簽失敗＝客戶端亂傳：當作跨流程拒掉
+                    return None
+                admin_id = uid
+                cid = None
+                try:
+                    params = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
+                    user = json.loads(params.get("user", "{}"))
+                    cid = user.get("chat_id")
+                except Exception:
+                    cid = None
+                if cid is not None:
+                    chat_id = int(cid)
+            if admin_id is None:
+                admin_id = str(payload.get("admin_id") or "") or None
+            if chat_id is None:
+                raw = payload.get("chat_id")
+                if raw not in (None, ""):
+                    try:
+                        chat_id = int(raw)
+                    except (TypeError, ValueError):
+                        chat_id = -1  # 對不上即失敗
+            return self._mini_flow(token, admin_id=admin_id,
+                                   chat_id=chat_id, stage=stage)
 
         @router.get("/tg/addacc", response_class=HTMLResponse)
         async def mini_page(req: Request):
-            if not _tok_valid(req):
+            token = _tok(req)
+            if self._mini_flow(token) is None:
                 return HTMLResponse("<h3>令牌過期，請回到 bot 再按「➕ 新增帳號」</h3>")
             return HTMLResponse(_MINI_HTML)
 
@@ -359,67 +543,78 @@ class TgControlBot:
         async def start(req: Request):
             if self.login_service is None:
                 return JSONResponse({"error": "登入服務未初始化"}, status_code=500)
-            if not _tok_valid(req):
-                return JSONResponse({"error": "令牌無效"}, status_code=400)
             data = await req.json()
             phone = str(data.get("phone", "")).strip()
             if not phone:
                 return JSONResponse({"error": "請輸入手機號碼"}, status_code=400)
+            flow = await _flow_for(req, data, stage="page")
+            if flow is None:
+                return JSONResponse({"error": "令牌無效或與管理員/聊天不符"},
+                                     status_code=400)
             try:
                 r = await self.login_service.start(phone)
             except Exception as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
-            return JSONResponse(r)
+            if not isinstance(r, dict) or not r.get("auth_id"):
+                return JSONResponse({"error": "驗證碼發送失敗"}, status_code=400)
+            # 綁定 auth_id 與 code 階段：之後 code/pass/claim 都用這個流程
+            flow.auth_id = str(r["auth_id"])
+            flow.stage = "code"
+            return JSONResponse({"ok": True, "auth_id": r["auth_id"]})
 
         @router.post("/tgapi/code")
         async def code(req: Request):
             if self.login_service is None:
                 return JSONResponse({"error": "登入服務未初始化"}, status_code=500)
-            if not _tok_valid(req):
-                return JSONResponse({"error": "令牌無效"}, status_code=400)
             data = await req.json()
             code_v = str(data.get("code", "")).strip()
-            aid = await self._mini_auth_id()
-            if not aid:
+            if not code_v:
+                return JSONResponse({"error": "請輸入驗證碼"}, status_code=400)
+            flow = await _flow_for(req, data, stage="code")
+            if flow is None or not flow.auth_id:
                 return JSONResponse({"error": "先發驗證碼"}, status_code=400)
             try:
-                r = await self.login_service.submit_code(aid, code_v)
+                r = await self.login_service.submit_code(flow.auth_id, code_v)
             except Exception as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
-            return JSONResponse(r)
+            if isinstance(r, dict) and r.get("need_password"):
+                flow.stage = "pass"
+            return JSONResponse({"ok": True,
+                                 "need_password": bool(r.get("need_password"))})
 
         @router.post("/tgapi/pass")
         async def pas(req: Request):
             if self.login_service is None:
                 return JSONResponse({"error": "登入服務未初始化"}, status_code=500)
-            if not _tok_valid(req):
-                return JSONResponse({"error": "令牌無效"}, status_code=400)
             data = await req.json()
             pw = str(data.get("password", "")).strip()
-            aid = await self._mini_auth_id()
-            if not aid:
+            if not pw:
+                return JSONResponse({"error": "請輸入密碼"}, status_code=400)
+            flow = await _flow_for(req, data, stage="pass")
+            if flow is None or not flow.auth_id:
                 return JSONResponse({"error": "流程不存在"}, status_code=400)
             try:
-                r = await self.login_service.submit_password(aid, pw)
+                r = await self.login_service.submit_password(flow.auth_id, pw)
             except Exception as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
-            return JSONResponse(r)
+            flow.stage = "claim"
+            return JSONResponse({"ok": True})
 
         @router.post("/tgapi/claim")
         async def claim(req: Request):
             if self.login_service is None:
                 return JSONResponse({"error": "登入服務未初始化"}, status_code=500)
-            if not _tok_valid(req):
-                return JSONResponse({"error": "令牌無效"}, status_code=400)
             data = await req.json()
             name = str(data.get("name", "")).strip() or "水軍帳號"
-            aid = await self._mini_auth_id()
-            if not aid:
+            flow = await _flow_for(req, data, stage="claim")
+            if flow is None or not flow.auth_id:
                 return JSONResponse({"error": "流程不存在"}, status_code=400)
             try:
-                verified = await self.login_service.claim(aid)
+                verified = await self.login_service.claim(flow.auth_id)
             except Exception as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
+            # 成功 claim → 流程用完（used）：之後重放同 token 會被擋
+            flow.used = True
             account = await self.manager.add_account(
                 name, verified.session_string, enable=False,
                 display_name=str(getattr(verified, "tg_name", "") or ""),
@@ -431,21 +626,20 @@ class TgControlBot:
                 avatar=str(getattr(verified, "avatar", "") or ""),
                 enabled=0,
             )
-            self._mini_tokens.pop(_tok(req), None)
-            return JSONResponse({"ok": True, "account": account,
+            self._mini_flows.pop(_tok(req), None)
+            return JSONResponse({"ok": True,
+                                 "account": self._public_account(account),
                                  "tg_name": str(getattr(verified, "tg_name", ""))})
 
         return router
 
-    async def _mini_auth_id(self) -> str:
-        """Mini App 新增流程用同一個 auth_id（與 /addacc 串行的最近一次 start）。"""
-        return await self._last_auth_id()
-
     # ---------- 權限 ----------
 
     def _allowed(self, event) -> bool:
+        # 預設拒絕（fail-closed）：admin_ids 空＝沒設定管理者＝不給任何人操作。
+        # 以前空時 return True（＝任何人可操作），安全失敗路徑要改成 fail-closed。
         if not self.admin_ids:
-            return True
+            return False
         # 優先用同步的 sender_id（CallbackQuery/NewMessage 都有，且 always set）；
         # .sender 是 property，entity 未快取時可能是 None，不可靠。
         sid = getattr(event, "sender_id", None)
@@ -492,7 +686,7 @@ class TgControlBot:
             elif name in {"startacc", "stopacc", "run"}:
                 body, kb = await self._acc_toggle(name, rest), self._reply_menu
             elif name in {"deleteacc", "del"}:
-                body, kb = await self._acc_delete(rest), self._reply_menu
+                body, kb = await self._acc_delete(rest, event)
             elif name in {"media", "voice", "imagegen"}:
                 body, kb = await self._feature_toggle(name, rest), self._reply_menu
             elif name == "addacc":
@@ -503,6 +697,16 @@ class TgControlBot:
                 body, kb = await self._add_pass(rest, event), self._reply_menu
             elif name == "name":
                 body, kb = await self._add_name(rest, event), self._reply_menu
+            elif name == "gsearch":
+                body, kb = await self._gsearch(rest, event)
+            elif name == "personasave":
+                body, kb = await self._persona_save_cmd(rest), self._reply_menu
+            elif name in {"logs", "log"}:
+                body, kb = (
+                    await self._acc_logs(rest[0]) if rest
+                    else "用法：/logs <帳號> [則數]",
+                    self._reply_menu,
+                )
             else:
                 body, kb = f"不認識的指令「/{name}」\n" + self._help(), self._reply_menu
             await event.reply(body[:MSG_LIMIT], buttons=kb)
@@ -513,114 +717,168 @@ class TgControlBot:
 
     # ---------- 內嵌按鈕（callback） ----------
 
-    async def _on_callback(self, cb) -> None:
-        raw = getattr(cb, "data", None)
+    async def _on_callback(self, event) -> None:
+        raw = getattr(event, "data", None)
         if isinstance(raw, bytes):
             data = raw.decode()
         else:
             data = str(raw or "")
         # 權限：callback 的 sender 是按下按鈕的人；非管理者按按鈕給提示
-        if not self._allowed(cb):
+        if not self._allowed(event):
             try:
-                await cb.answer("⚠️ 不是管理者（BOT_ADMIN_IDS 未包含你）", show_alert=True)
+                await event.answer("⚠️ 不是管理者（BOT_ADMIN_IDS 未包含你）", show_alert=True)
             except Exception:
                 pass
             return
         try:
-            await self._dispatch_callback(cb, data)
+            await self._dispatch_callback(event, data)
         except Exception as e:
             log.exception("callback %r 失敗", data)
             try:
-                await cb.answer(f"⚠️ {type(e).__name__}: {e}")
+                await event.answer(f"⚠️ {type(e).__name__}: {e}")
             except Exception:
                 pass
 
-    async def _dispatch_callback(self, cb, data: str) -> None:
+    async def _dispatch_callback(self, event, data: str) -> None:
         """內嵌按鈕路由：data 格式「action[:arg]」。"""
         if not data:
-            await cb.answer()
+            await event.answer()
             return
         action, _, arg = data.partition(":")
 
         if action == "home":
-            await cb.edit(
+            await event.edit(
                 await self._home_text(), buttons=await self._home_keyboard()
             )
         elif action == "status":
-            await cb.edit(
+            await event.edit(
                 (await self._status())[:MSG_LIMIT],
                 buttons=await self._home_keyboard(),
             )
         elif action == "groups":
-            await cb.edit(
+            await event.edit(
                 (await self._groups([]))[:MSG_LIMIT],
                 buttons=await self._home_keyboard(),
             )
         elif action == "help":
-            await cb.edit(
+            await event.edit(
                 self._help()[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc":
             # 選了某帳號 → 該帳號的「可操作功能」內嵌菜單
             body, kb = await self._account_actions_keyboard(arg)
-            await cb.edit(body[:MSG_LIMIT], buttons=kb)
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "acc.start":
             body = await self._acc_toggle("startacc", [arg])
-            await cb.edit(
+            await event.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc.stop":
             body = await self._acc_toggle("stopacc", [arg])
-            await cb.edit(
+            await event.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc.del":
-            # 先給確認頁（避免誤觸直接刪），按「確認」才真的刪
-            body, kb = await self._acc_delete_confirm(arg)
-            await cb.edit(body[:MSG_LIMIT], buttons=kb)
+            # 先給確認頁（避免誤觸直接刪），簽發一次性 token
+            admin = str(getattr(event, "sender_id", "") or "")
+            chat = int(getattr(event, "chat_id", 0) or 0)
+            body, kb = await self._acc_delete_confirm(arg, admin, chat)
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "acc.del.yes":
-            body = await self._acc_delete([arg])
-            await cb.edit(
-                body[:MSG_LIMIT], buttons=await self._home_keyboard()
+            # arg＝一次性 token：驗 期限/管理員 綁定，按第二次會被擋
+            info = self._del_confirms.pop(arg, None)
+            if info is None:
+                await event.answer("確認已過期，請重新按「🗑 刪除」",
+                                   show_alert=True)
+                return
+            acc_id, adm, _cht, exp = info
+            if time.time() > exp or str(adm) != str(
+                getattr(event, "sender_id", "") or ""
+            ):
+                await event.answer("確認已過期或不是原按者", show_alert=True)
+                return
+            accounts = await self.manager.db.list_accounts()
+            acc = next((a for a in accounts if a["id"] == acc_id), None)
+            err = await self.manager.delete(acc_id)
+            body = (
+                f"🗑️ 已刪除 {acc.get('name') if acc else acc_id}（含記憶）"
+                if not err else f"⚠️ 刪除失敗：{err}"
             )
+            await event.edit(body[:MSG_LIMIT],
+                             buttons=await self._home_keyboard())
         elif action == "acc.del.no":
+            # 取消：移除綁定此帳號的確認 token（使「✅ 確認刪除」失效）
+            for tok, (aid, _a, _c, _e) in list(self._del_confirms.items()):
+                if aid == arg:
+                    self._del_confirms.pop(tok, None)
+                    break
             body, kb = await self._account_actions_keyboard(arg)
-            await cb.edit(body[:MSG_LIMIT], buttons=kb)
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "acc.groups":
-            body, kb = await self._groups_menu(arg)
-            await cb.edit(body[:MSG_LIMIT], buttons=kb)
+            admin = str(getattr(event, "sender_id", "") or "")
+            chat = int(getattr(event, "chat_id", 0) or 0)
+            body, kb = await self._groups_menu(arg, admin, chat)
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
         elif data.startswith("g.save:"):
             # g.save:<acc_id> 保存勾選（要先於一般 g: 分支）
             _, acc_id = data.split(":", 1)
-            body = await self._groups_save(acc_id)
-            await cb.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
+            admin = str(getattr(event, "sender_id", "") or "")
+            chat = int(getattr(event, "chat_id", 0) or 0)
+            body = await self._groups_save(acc_id, admin, chat)
+            await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
+        elif data.startswith("gp:"):
+            # gp:<page>:<acc_id> 群組分頁（要先於 g:，gp: 不會被 g: 吃到）
+            _, page_s, acc_id = data.split(":", 2)
+            admin = str(getattr(event, "sender_id", "") or "")
+            chat = int(getattr(event, "chat_id", 0) or 0)
+            st = self._group_state((str(admin), int(chat), str(acc_id)))
+            try:
+                st["page"] = max(0, int(page_s))
+            except ValueError:
+                st["page"] = 0
+            body, kb = await self._groups_menu(acc_id, admin, chat)
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
         elif data.startswith("g:"):
             # g:<gid>:<acc_id> 切換某群組勾選
             _, gid_s, acc_id = data.split(":", 2)
+            admin = str(getattr(event, "sender_id", "") or "")
+            chat = int(getattr(event, "chat_id", 0) or 0)
             try:
                 gid = int(gid_s)
             except ValueError:
-                await cb.answer("群組 id 格式錯誤", show_alert=True)
+                await event.answer("群組 id 格式錯誤", show_alert=True)
                 return
-            sel = self._group_selections.setdefault(acc_id, set())
-            if gid in sel:
-                sel.discard(gid)
+            st = self._group_state((str(admin), int(chat), str(acc_id)))
+            if gid in st["sel"]:
+                st["sel"].discard(gid)
             else:
-                sel.add(gid)
-            body, kb = await self._groups_menu(acc_id)
-            await cb.edit(body[:MSG_LIMIT], buttons=kb)
+                st["sel"].add(gid)
+            body, kb = await self._groups_menu(acc_id, admin, chat)
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "model":
             body = self._model_info()
-            await cb.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
+            await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
         elif action == "usage":
             body = await self._usage_info()
-            await cb.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
+            await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
         elif action == "acc.persona":
             body, kb = await self._persona_actions_keyboard(arg)
-            await cb.edit(body[:MSG_LIMIT], buttons=kb)
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
+        elif action == "acc.reply":
+            body = await self._acc_flag_toggle(arg, "reply_enabled")
+            await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
+        elif action == "acc.proactive":
+            body = await self._acc_flag_toggle(arg, "proactive_enabled")
+            await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
+        elif action == "acc.logs":
+            body = await self._acc_logs(arg)
+            await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
+        elif action == "persona.edit":
+            body = await self._persona_edit(arg)
+            await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
         elif action == "priv":
             body = await self._privates([arg])
-            await cb.edit(
+            await event.edit(
                 body[:MSG_LIMIT],
                 buttons=types.ReplyInlineMarkup(kbrows([[
                     cb(
@@ -631,39 +889,44 @@ class TgControlBot:
             )
         elif action in {"media", "imagegen", "voice"}:
             body = await self._feature_toggle(action, [])
-            await cb.edit(
+            await event.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "addacc":
-            await cb.edit(
-                "➕ 新增帳號\n把 Telegram 手機號傳給我，例如 +886912345678",
-                buttons=await self._home_keyboard(),
+            # #7：inline 新增也走 Mini App（跟文字 /addacc 同一閉環）
+            admin = str(getattr(event, "sender_id", "") or "")
+            chat = int(getattr(event, "chat_id", 0) or 0)
+            token = self._mini_mint(admin, chat)
+            await event.edit(
+                "➕ 新增帳號：按「📱 開 Mini App」填手機號＋驗證碼＋名稱\n"
+                "（完成後回這裡設群組/人設，再「▶ 啟動」上線）",
+                buttons=self._mini_keyboard_token(token, admin, chat),
             )
         elif action == "hidekb":
-            await cb.edit(
+            await event.edit(
                 "⌨ 已隱藏下方快速鍵盤（訊息內按鈕仍可用，再按「📊 狀態」重建）",
                 buttons=types.ReplyKeyboardHide(),
             )
-            await cb.answer("下方鍵盤已隱藏")
+            await event.answer("下方鍵盤已隱藏")
         elif action == "persona.show":
             body = await self._persona_show(arg)
-            await cb.edit(
+            await event.edit(
                 body[:MSG_LIMIT], buttons=self._persona_keyboard(arg)
             )
         elif action == "persona.regen":
             body = await self._persona_regen(arg)
-            await cb.edit(
+            await event.edit(
                 body[:MSG_LIMIT], buttons=self._persona_keyboard(arg)
             )
         elif action == "back.home":
-            await cb.edit(
+            await event.edit(
                 await self._home_text(), buttons=await self._home_keyboard()
             )
         elif action == "back.acc":
             body, kb = await self._account_actions_keyboard(arg)
-            await cb.edit(body[:MSG_LIMIT], buttons=kb)
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
         else:
-            await cb.answer("未處理的按鈕", show_alert=True)
+            await event.answer("未處理的按鈕", show_alert=True)
 
     # ---------- 內嵌主菜單（按鍵式交互，類圖示） ----------
 
@@ -758,6 +1021,8 @@ class TgControlBot:
             f"狀態：{'🟢 運行中' if on else '⚪ ' + state}\n"
             "可操作功能:"
         )
+        rep_on = bool(acc and acc.get("reply_enabled", 1))
+        pro_on = bool(acc and acc.get("proactive_enabled", 1))
         rows = [
             [
                 cb(
@@ -774,6 +1039,13 @@ class TgControlBot:
                 cb(
                     "priv:" + account_id, "📩 私訊"
                 ),
+            ],
+            [
+                cb("acc.reply:" + account_id,
+                   f"💬 回覆：{'開' if rep_on else '關'}"),
+                cb("acc.proactive:" + account_id,
+                   f"📣 主動：{'開' if pro_on else '關'}"),
+                cb("acc.logs:" + account_id, "📜 日誌"),
             ],
             [
                 cb(
@@ -853,6 +1125,11 @@ class TgControlBot:
             ],
             [
                 cb(
+                    "persona.edit:" + account_id, "✏️ 編輯人設"
+                ),
+            ],
+            [
+                cb(
                     "back.acc:" + account_id, "🔙 回帳號操作"
                 ),
             ],
@@ -879,10 +1156,12 @@ class TgControlBot:
             "/imagegen on|off 圖片生成開關（被要求時自動發圖/影片）\n"
             "/voice on|off 語音開關\n"
             "➕ 新增帳號（TG 驗證碼流程）\n"
-            "/addacc +886…5678 傳驗證碼\n"
-            "/code 12345 輸入驗證碼\n"
-            "/pass xxx 兩步驗證密碼（若需要）\n"
-            "/name 台北-美玲 建立帳號（暫不啟動）\n"
+            "/addacc 開 Mini App 填手機號/驗證碼/名稱（密碼不進聊天）\n"
+            "/code 12345 輸入驗證碼（Mini App 外備用）\n"
+            "/pass 兩步密碼請在 Mini App 內輸入\n"
+            "/gsearch <帳號> [關鍵字] 群組勾選頁搜尋\n"
+            "/personasave <帳號> {JSON} 編輯人設（白名單欄位）\n"
+            "/logs <帳號> 最近收發紀錄\n"
             "/start 本說明"
         )
 
@@ -1007,8 +1286,9 @@ class TgControlBot:
 
     # ---------- 帳號控制 ----------
 
-    async def _acc_delete_confirm(self, account_id: str):
-        """刪除確認頁：回 (文字, 鍵盤)。"""
+    async def _acc_delete_confirm(self, account_id: str, admin_id: str,
+                                  chat_id: int):
+        """刪除確認頁：簽發一次性 token（綁 管理員/聊天/帳號/期限 5 分鐘）。"""
         acc = next(
             (
                 a
@@ -1018,21 +1298,41 @@ class TgControlBot:
             None,
         )
         name = self._acc_label(acc) if acc else account_id
+        token = secrets.token_hex(8)
+        self._del_confirms[token] = (
+            account_id, str(admin_id), int(chat_id), time.time() + 300,
+        )
         body = (
             f"🗑 確認刪除｜{name}（{account_id}）\n"
             "──────────────\n"
-            "刪除後人設、記憶、收發紀錄一併清掉（session 也要重新登入）。"
+            "刪除後人設、記憶、收發紀錄一併清掉（session 也要重新登入）。\n"
+            "5 分鐘內無動作自動失效；「✅ 確認刪除」按第二次會提示已過期。"
         )
         rows = [
             [
-                cb("acc.del.yes:" + account_id, "✅ 確認刪除"),
+                cb("acc.del.yes:" + token, "✅ 確認刪除"),
                 cb("acc.del.no:" + account_id, "↩️ 再想想"),
             ],
         ]
         return body, types.ReplyInlineMarkup(kbrows(rows))
 
-    async def _groups_menu(self, account_id: str):
-        """群組勾選頁：回 (文字, 鍵盤)。勾選狀態暫存 self._group_selections。"""
+    def _group_state(self, key: tuple) -> dict:
+        """群組勾選狀態（按 管理員/聊天/帳號 隔離，10 分鐘期限，觸即續期）。"""
+        st = self._group_selections.get(key)
+        now = time.time()
+        if st is None or now > st.get("exp", 0):
+            st = {"sel": set(), "page": 0, "q": "", "exp": now + 600,
+                  "primed": False}
+            self._group_selections[key] = st
+        else:
+            st["exp"] = now + 600
+        return st
+
+    async def _groups_menu(self, account_id: str, admin_id: str,
+                           chat_id: int):
+        """群組勾選頁：分頁＋搜尋，勾選狀態按 管理員/聊天/帳號 隔離。"""
+        key = (str(admin_id), int(chat_id), str(account_id))
+        st = self._group_state(key)
         data = await self.manager.status()
         acc = next(
             (a for a in data.get("accounts", []) if a["id"] == account_id), None
@@ -1042,45 +1342,79 @@ class TgControlBot:
                 kbrows([[cb("back.home", "🔙 回主菜單")]])
             )
         name = self._acc_label(acc)
-        selected_now = set(acc.get("groups") or [])
-        if account_id not in self._group_selections:
+        if not st["primed"]:
             # 首次進入：預設＝目前已設定的群組
-            self._group_selections[account_id] = set(selected_now)
-        sel = self._group_selections[account_id]
+            st["sel"] = set(acc.get("groups") or [])
+            st["primed"] = True
         # 群組清單：優先用 worker 的（運行中），沒有才臨時抓
         available = acc.get("groups_available") or []
         if not available:
             available, err = await self.manager.list_available_groups(account_id)
+            if err:
+                return f"⚠️ 抓群組清單失敗：{err}", types.ReplyInlineMarkup(
+                    kbrows([[cb("back.acc:" + account_id, "🔙 回帳號操作")]])
+                )
+        q = str(st.get("q", "")).lower()
+        filtered = available
+        if q:
+            filtered = [
+                g for g in available
+                if q in str(g.get("title") or "").lower() or q in str(g.get("id"))
+            ]
+        total = len(filtered)
+        page_size = 8
+        n_pages = max(1, (total + page_size - 1) // page_size)
+        st["page"] = max(0, min(int(st.get("page", 0)), n_pages - 1))
+        page = st["page"]
         lines = [
             f"📍 群組勾選｜{name}（{account_id}）",
             "──────────────",
-            f"勾選要讓這個帳號駐留的群組（已選 {len(sel)} 個）",
+            f"已選 {len(st['sel'])} 個｜第 {page + 1}/{n_pages} 頁（共 {total} 個）",
         ]
-        if not available:
-            lines.append("（還沒有任何群組資料，先讓帳號上線收過訊息）")
+        if q:
+            lines.append(f"搜尋：{st['q']}（/gsearch {account_id} 新關鍵字，"
+                         f"/gsearch {account_id} 清除）")
+        if not filtered:
+            lines.append("（沒有符合的群組。先讓帳號上線收過訊息，或換關鍵字）")
         rows = []
-        for g in available[:30]:
+        for g in filtered[page * page_size:(page + 1) * page_size]:
             gid = int(g["id"])
             title = str(g.get("title") or f"群組 {gid}")[:24]
-            mark = "✅" if gid in sel else "▫️"
+            mark = "✅" if gid in st["sel"] else "▫️"
             rows.append([cb(f"g:{gid}:{account_id}", f"{mark} {title}")])
+        nav = []
+        if page > 0:
+            nav.append(cb(f"gp:{page - 1}:{account_id}", "⬅️ 上頁"))
+        if page < n_pages - 1:
+            nav.append(cb(f"gp:{page + 1}:{account_id}", "➡️ 下頁"))
+        if nav:
+            rows.append(nav)
         rows.append([
             cb("g.save:" + account_id, "💾 保存群組"),
             cb("back.acc:" + account_id, "🔙 回帳號操作"),
         ])
         return "\n".join(lines), types.ReplyInlineMarkup(kbrows(rows))
 
-    async def _groups_save(self, account_id: str) -> str:
-        sel = self._group_selections.get(account_id)
-        if sel is None:
-            return "⚠️ 勾選狀態不存在，請重新進入群組頁"
+    async def _groups_save(self, account_id: str, admin_id: str,
+                           chat_id: int) -> str:
+        key = (str(admin_id), int(chat_id), str(account_id))
+        st = self._group_state(key)
+        sel = st["sel"]
         err = await self.manager.save_groups(account_id, sorted(sel))
         if err:
             return f"⚠️ 保存失敗：{err}"
-        self._group_selections.pop(account_id, None)
+        self._group_selections.pop(key, None)
+        # save_groups 會即時更新運行中 worker 的群組＋標 setup_complete，
+        # 不再誤報「重啟後生效」（#9 真實生效回報）。
+        running = any(
+            a.get("id") == account_id and a.get("is_running")
+            for a in (await self.manager.status()).get("accounts", [])
+        )
+        eff = ("運行中帳號已即時切換群組（立即生效，不需重啟）"
+               if running else "已保存，帳號啟動時按此清單進群")
         return (
-            f"💾 已保存 {len(sel)} 個群組（{account_id}）。\n"
-            "運行中的帳號重啟後生效。"
+            f"💾 已保存 {len(sel)} 個群組（{account_id}）。\n{eff}。\n"
+            "setup_complete 已標記，可 /startacc 上線。"
         )
 
     def _model_info(self) -> str:
@@ -1097,7 +1431,8 @@ class TgControlBot:
             f"影片生成：{cfg.video_model}",
             f"語音：{cfg.speech_model}",
             "",
-            "改模型＝改 Railway 環境變數（AI_MODEL 等）＋重新部署。",
+            "作用範圍：環境變數級，所有帳號共用；重部署後才生效。\n"
+            "安全改法：Railway 改 AI_MODEL 等＋重部署（勿把 API key 傳到聊天）。",
         ]
         return "\n".join(lines)
 
@@ -1133,6 +1468,123 @@ class TgControlBot:
             for a in data.get("accounts", [])
         )
         lines.append(f"門控暫緩累計：{held}")
+        return "\n".join(lines)
+
+    # ---------- 每帳號開關／人設編輯／日誌（#10） ----------
+
+    # 人設白名單：聊天輸入的 JSON 只收這些欄位，key/secret/hash 進不來
+    _PERSONA_FIELDS = (
+        "name", "nickname", "gender", "age", "city", "job", "occupation",
+        "personality", "speaking_style", "catchphrase", "likes", "dislikes",
+        "bio", "intro", "mbti", "education", "hobbies", "chat_style",
+    )
+
+    async def _acc_flag_toggle(self, account_id: str, flag: str) -> str:
+        """每帳號 回覆/主動 開關：db＋運行中 worker 即時更新（不需重啟）。"""
+        acc = await self.manager.db.get_account(account_id)
+        if not acc:
+            return f"找不到帳號 {account_id}"
+        new = 0 if int(acc.get(flag) or 0) else 1
+        await self.manager.db.update_account(account_id, **{flag: new})
+        worker = (getattr(self.manager, "workers", {}) or {}).get(str(account_id))
+        if worker is not None:
+            setattr(worker, flag, bool(new))  # worker 每則訊息都重讀此值
+        label = "回覆" if flag == "reply_enabled" else "主動"
+        return (
+            f"{'✅' if new else '⛔'} {self._acc_label(acc)} {label}開關："
+            f"{'開' if new else '關'}（運行中 worker 已即時生效）"
+        )
+
+    async def _persona_edit(self, account_id: str) -> str:
+        """人設安全編輯說明：白名單欄位，密鑰類不會被存進來。"""
+        acc = await self.manager.db.get_account(account_id)
+        if not acc:
+            return f"找不到帳號 {account_id}"
+        return (
+            f"✏️ 人設編輯｜{self._acc_label(acc)}（{account_id}）\n"
+            "──────────────\n"
+            "回：/personasave " + account_id + " {JSON}\n"
+            "只收白名單欄位（其餘忽略）：\n"
+            + ", ".join(self._PERSONA_FIELDS) + "\n"
+            "（API key/密碼不在此列，傳錯也不會被存）"
+        )
+
+    async def _persona_save(self, account_id: str, raw: str) -> str:
+        """/personasave 的核心：JSON 解析→白名單→存 db→運行中 worker 即時刷。"""
+        try:
+            data = json.loads(raw)
+        except Exception as e:
+            return f"⚠️ 不是 JSON：{e}"
+        if not isinstance(data, dict):
+            return "⚠️ 人設要 JSON 物件（{...}）"
+        allowed = {k: v for k, v in data.items() if k in self._PERSONA_FIELDS}
+        if not allowed:
+            return "⚠️ 沒有有效欄位（白名單：" + ", ".join(self._PERSONA_FIELDS[:6]) + "…）"
+        acc = await self.manager.db.get_account(account_id)
+        if not acc:
+            return f"找不到帳號 {account_id}"
+        persona = acc.get("persona") or {}
+        if isinstance(persona, str):
+            try:
+                persona = json.loads(persona)
+            except Exception:
+                persona = {}
+        persona.update(allowed)
+        await self.manager.db.update_account(
+            account_id, persona=json.dumps(persona, ensure_ascii=False)
+        )
+        worker = (getattr(self.manager, "workers", {}) or {}).get(str(account_id))
+        if worker is not None and hasattr(worker, "persona"):
+            worker.persona = persona  # 即時生效（system prompt 每則都重組）
+        dropped = sorted(set(data) - set(self._PERSONA_FIELDS))
+        extra = (f"\n忽略非白名單欄位：{', '.join(dropped)}") if dropped else ""
+        return (
+            f"✅ 已更新 {account_id} 人設（{len(allowed)} 欄位）{extra}\n"
+            + ("運行中 worker 已即時生效" if worker is not None else "啟動時生效")
+        )
+
+    async def _persona_save_cmd(self, args: list[str]) -> str:
+        if not args:
+            return "用法：/personasave <帳號> {JSON}"
+        return await self._persona_save(args[0], " ".join(args[1:]))
+
+    async def _gsearch(self, args: list[str], event):
+        """/gsearch <帳號> [關鍵字]：群組勾選頁搜尋（空關鍵字＝清除）。回 (文字,鍵盤)。"""
+        if not args:
+            return "用法：/gsearch <帳號> [關鍵字]", self._reply_menu
+        admin = str(getattr(event, "sender_id", "") or "")
+        chat = int(getattr(event, "chat_id", 0) or 0)
+        key = (admin, chat, args[0])
+        st = self._group_state(key)
+        st["q"] = " ".join(args[1:]).strip()
+        st["page"] = 0
+        return await self._groups_menu(args[0], admin, chat)
+
+    async def _acc_logs(self, account_id: str, n: int = 15) -> str:
+        """帳號最近收發紀錄（#10 日誌頁）。"""
+        acc = await self.manager.db.get_account(account_id)
+        name = self._acc_label(acc) if acc else account_id
+        try:
+            cur = await self.manager.db._c.execute(
+                "SELECT group_id, sender_name, role, content, timestamp "
+                "FROM messages WHERE account_id = ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (str(account_id), n),
+            )
+            rows = list(await cur.fetchall())
+        except Exception as e:
+            return f"⚠️ 讀日誌失敗：{e}"
+        rows = list(reversed(rows))  # 舊→新
+        lines = [f"📜 {name} 最近 {len(rows)} 則", "──────────────"]
+        for r in rows:
+            ts = _fmt_ts(float(r[4] or 0))
+            role = "水軍" if str(r[2]) == "assistant" else "真人"
+            lines.append(
+                f"[{ts}] {role}·{str(r[1] or '?')[:10]}@{r[0]}："
+                f"{str(r[3] or '')[:60]}"
+            )
+        if not rows:
+            lines.append("（還沒有紀錄）")
         return "\n".join(lines)
 
     def _find_account_sync(self, accounts: list[dict], target: str) -> dict | None:
@@ -1192,19 +1644,20 @@ class TgControlBot:
         mark = "🟢" if verb == "啟動" else "⚪"
         return f"{mark} {acc.get('name')} 已{verb}"
 
-    async def _acc_delete(self, args: list[str]) -> str:
+    async def _acc_delete(self, args: list[str], event):
+        # #3：所有入口（/deleteacc 文字、inline 按鈕）共用一次性、有期限、
+        # 綁 管理員/聊天/帳號 的確認，取消立即失效、重複點不會二次刪。
         if not args:
-            return (await self._acct_list()) + "\n\n刪除：/deleteacc <帳號>"
+            return (await self._acct_list()) + "\n\n刪除：/deleteacc <帳號>", self._reply_menu
         target = args[0]
         accounts = await self.manager.db.list_accounts()
         acc = self._find_account_sync(accounts, target)
         if acc is None:
             names = "、".join(str(a.get("name")) for a in accounts)
-            return f"找不到帳號「{target}」；現有：{names}"
-        err = await self.manager.delete(acc["id"])
-        if err:
-            return f"⚠️ 刪除失敗：{err}"
-        return f"🗑️ 已刪除 {acc.get('name')}（含記憶）"
+            return f"找不到帳號「{target}」；現有：{names}", self._reply_menu
+        admin = str(getattr(event, "sender_id", "") or "")
+        chat = int(getattr(event, "chat_id", 0) or 0)
+        return await self._acc_delete_confirm(acc["id"], admin, chat)
 
     async def _feature_toggle(self, name: str, args: list[str]) -> str:
         # 三個獨立開關：
@@ -1244,35 +1697,47 @@ class TgControlBot:
     async def _add_start(self, args: list[str], event):
         if self.login_service is None:
             return "⚠️ 登入服務未初始化", self._reply_menu
-        # 有 Mini App：優先讓主人按按鈕在 Mini App 填（免在聊天傳驗證碼/密碼）
+        # 有 Mini App：優先讓主人按按鈕在 Mini App 填（免在聊天傳驗證碼/密碼）。
+        # token 綁定 管理員＋聊天：別人拿到同一連結也對不上流程。
+        admin = str(getattr(event, "sender_id", "") or "")
+        chat = int(getattr(event, "chat_id", 0) or 0)
         if args:
-            # 直接帶手機號：照舊走 start 發驗證碼
+            # 帶手機號：先發驗證碼並把 auth_id 綁進此 token 的 flow
+            token = self._mini_mint(admin, chat)
             try:
                 r = await self.login_service.start(args[0])
             except Exception as e:
+                self._mini_flows.pop(token, None)
                 return f"⚠️ {e}", self._reply_menu
+            flow = self._mini_flows.get(token)
+            if flow and isinstance(r, dict) and r.get("auth_id"):
+                flow.auth_id = str(r["auth_id"])
+                flow.stage = "code"
             return (
-                f"驗證碼已傳送至 {r.get('phone_hint')}（5 分鐘內有效）\n"
-                f"按下面「📱 開 Mini App 輸入驗證碼」繼續",
-                self._mini_app_keyboard(),
+                f"驗證碼已傳送至 {r.get('phone_hint', args[0])}（5 分鐘內有效）\n"
+                "按下面「📱 開 Mini App」輸入驗證碼繼續",
+                self._mini_keyboard_token(token, admin, chat),
             )
-        token = secrets.token_urlsafe(16)
-        self._mini_tokens[token] = time.time() + self._MINI_TOKEN_TTL
+        token = self._mini_mint(admin, chat)
         return (
             "➕ 新增帳號：按「📱 開 Mini App」填手機號＋驗證碼＋名稱\n"
             "（全程在 Mini App 內，不會把驗證碼/密碼傳到聊天）",
-            self._mini_app_keyboard(token),
+            self._mini_keyboard_token(token, admin, chat),
         )
 
-    def _mini_app_keyboard(self, token: str | None = None):
-        """Mini App 入口按鈕：url 帶 token（?t=...），30 分鐘有效。"""
-        tok = token or secrets.token_urlsafe(16)
-        if token is None:
-            self._mini_tokens[tok] = time.time() + self._MINI_TOKEN_TTL
+    def _mini_keyboard_token(self, token: str, admin_id: str = "",
+                             chat_id: int = 0):
+        """Mini App 入口按鈕：url 帶 token（?t=...，30 分鐘有效）。
+
+        admin/chat 放 URL 只作 initData 缺失時的備援身分；TG 客戶端內
+        initData（HMAC 簽章）優先。
+        """
         base = getattr(self.settings, "dashboard_public_url", "") or (
             "http://localhost:" + str(self.settings.dashboard_port)
         )
-        url = f"{base}/tg/addacc?t={tok}"
+        url = f"{base}/tg/addacc?t={token}"
+        if admin_id:
+            url += f"&admin={admin_id}&chat={chat_id}"
         return types.ReplyInlineMarkup(
             kbrows([[types.KeyboardButtonUrl("📱 開 Mini App 新增帳號", url)]])
         )
@@ -1296,20 +1761,9 @@ class TgControlBot:
         return f"狀態：{r.get('status')}"
 
     async def _add_pass(self, args: list[str], event) -> str:
-        if self.login_service is None:
-            return "⚠️ 登入服務未初始化"
-        if not args:
-            return "用法：/pass xxx"
-        auth_id = await self._last_auth_id()
-        if not auth_id:
-            return "⚠️ 流程不存在或已過期"
-        try:
-            r = await self.login_service.submit_password(auth_id, args[0])
-        except Exception as e:
-            return f"⚠️ {e}"
-        if r.get("status") == "authorized":
-            return "✅ 驗證成功！回：/name 台北-美玲（帳號名稱）"
-        return f"狀態：{r.get('status')}"
+        # #5：兩步密碼不再進聊天（會留在 TG 訊息紀錄），改在 Mini App 密碼頁輸入
+        return ("🔑 兩步驗證密碼請在 Mini App 內輸入（別傳到聊天）\n"
+                "按上面「📱 開 Mini App」→ 密碼頁輸入。")
 
     async def _add_name(self, args: list[str], event) -> str:
         if self.login_service is None:

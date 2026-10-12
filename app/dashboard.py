@@ -75,10 +75,15 @@ class Dashboard:
         self.config = config
         self.manager = manager
         self.login_service = login_service
+        self.bot = None  # #11：main 建 bot 後 attach_bot()，/health 含 bot 狀態
         self.app = FastAPI(title="SDF 控制台")
         self._sessions: dict[str, float] = {}
         self._login_attempts: dict[str, list[float]] = {}
         self._setup_routes()
+
+    def attach_bot(self, bot) -> None:
+        """#11：讓 /health 能看到 bot 健康（防 health 3/3 但 bot 無法操作）。"""
+        self.bot = bot
 
     # ---------- 工具 ----------
 
@@ -182,6 +187,12 @@ class Dashboard:
         }
         if ai_calls_24h is not None:
             payload["ai_calls_24h"] = ai_calls_24h
+        # #11：bot 健康也要在 /health 看得到（以前 bot task 掛了，health 仍 3/3）
+        if self.bot is not None:
+            try:
+                payload["bot"] = self.bot.state()
+            except Exception:
+                payload["bot"] = {"connected": False, "last_error": "state() 失敗"}
         return payload
 
     # ---------- 路由 ----------
