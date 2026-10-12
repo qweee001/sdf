@@ -33,10 +33,21 @@ async def async_main() -> None:
 
     # Telegram 控制台 bot 要先建（物件建立不連 TG），讓 Mini App 路由能在
     # uvicorn startup 前掛到 dashboard.app；run() 的 task 仍在 uvicorn 後再開。
+    # 注意：dashboard 在 __init__ 就 app.mount("/", StaticFiles) 掛根路徑，
+    # include_router 會把 bot 路由排到 mount「後面」而被它先吃掉（GET 404 /
+    # POST 405）。所以掛完再把它們的 routes 移到最前面。
     bot = make_bot(settings, manager, login_service)
     if bot is not None:
-        dashboard.app.include_router(bot.app)
-        print("Mini App 路由已掛到控制台", flush=True)
+        _app = dashboard.app
+        _routes = _app.router.routes
+        _n = len(_routes)
+        _app.include_router(bot.app)
+        # FastAPI 1.x 用 lazy _IncludedRouter：include 後 routes 尾端多出一個物件。
+        # 把該物件移到最前面，讓 /tg* 先於 dashboard 的根 static mount 匹配。
+        if len(_routes) > _n:
+            _inc = _routes.pop()
+            _routes.insert(0, _inc)
+        print("Mini App 路由已掛到控制台（前置於 static mount）", flush=True)
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
