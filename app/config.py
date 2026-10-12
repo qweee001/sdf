@@ -78,6 +78,11 @@ class Settings:
     ai_api_key: str
     ai_base_url: str
     ai_model: str
+    # 主聊天端點（Ollama Cloud / 自架 OpenAI 相容）。空＝跟 AI_BASE_URL 同源。
+    # 拆出來是因為 Ollama 的 glm-5.3 要送 top-level reasoning_effort，
+    # 而 Routeway 對未知 top-level 參數回 403，兩邊不能共用同一 client。
+    chat_api_key: str
+    chat_base_url: str
     # 主模型拒答或回空時依序改用的備援模型。拒答來自權重裡的對齊，
     # 不是提示詞沒講清楚，換措辭沒用，只能換模型。
     ai_fallback_models: tuple[str, ...]
@@ -85,6 +90,10 @@ class Settings:
     ai_max_tokens: int
     ai_timeout: float
     ai_disable_thinking: bool
+    # glm-5.3 這類 reasoning 模型：reasoning 會吃光 max_tokens 讓 content 回空。
+    # 設 "low" 讓它幾乎不思考、直接出 content（實測 1~2s、reasoning_len=0）。
+    # 空字串＝不送此參數（給不認得它的老端點，如 Routeway 會 403）。
+    ai_reasoning_effort: str
     vision_model: str
     vision_fallback_model: str
     image_model: str
@@ -174,6 +183,16 @@ def load_settings() -> Settings:
             or "http://127.0.0.1:8000/v1"
         ).rstrip("/"),
         ai_model=ai_model,
+        # 主聊天端點：預設跟媒體同源（AI_BASE_URL）；接 Ollama Cloud 時用
+        # CHAT_BASE_URL / CHAT_API_KEY 單獨指定，讓 glm-5.3 能送 reasoning_effort。
+        chat_api_key=os.getenv("CHAT_API_KEY", "").strip(),
+        chat_base_url=(
+            os.getenv("CHAT_BASE_URL", "").strip()
+            or (
+                os.getenv("AI_BASE_URL", "").strip()
+                or "http://127.0.0.1:8000/v1"
+            )
+        ).rstrip("/"),
         ai_fallback_models=tuple(
             model for model in _model_list("AI_FALLBACK_MODELS") if model != ai_model
         ),
@@ -181,6 +200,7 @@ def load_settings() -> Settings:
         ai_max_tokens=_int("AI_MAX_TOKENS", 200),
         ai_timeout=_float("AI_TIMEOUT", 60),
         ai_disable_thinking=_bool("AI_DISABLE_THINKING", False),
+        ai_reasoning_effort=os.getenv("AI_REASONING_EFFORT", "low").strip(),
         vision_model=(
             os.getenv("VISION_MODEL", "").strip()
             or "gemini-3.5-flash-lite"

@@ -130,6 +130,7 @@ def test_manager_injects_same_media_claim_state_into_worker():
         manager.secret_box = SimpleNamespace(decrypt=lambda value: value)
         manager.workers = {}
         manager._ai_client = None
+        manager._chat_client = None
         manager._media_service = None
         manager._voice_library = SimpleNamespace()
         manager.managed_ids = set()

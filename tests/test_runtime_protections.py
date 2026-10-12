@@ -185,6 +185,7 @@ def test_manager_preserves_empty_shared_topic_counts(monkeypatch):
                                      last_human_activity_by_group=AsyncMock(return_value={}))
         manager.secret_box = SimpleNamespace(decrypt=lambda value: "session")
         manager._ai_client = object()
+        manager._chat_client = object()
         manager._media_service = None
 
         class FakeWorker:

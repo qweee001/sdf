@@ -369,6 +369,8 @@ class OrcaMediaService:
                     max_tokens=self.config.ai_max_tokens,
                     extra_headers={"X-Include-Cost": "true"},
                     timeout=self.config.ai_timeout,
+                    **({"reasoning_effort": str(getattr(self.config, "ai_reasoning_effort", "") or "").strip()}
+                       if str(getattr(self.config, "ai_reasoning_effort", "") or "").strip() else {}),
                 )
                 content = response.choices[0].message.content
                 return str(content or "").strip()

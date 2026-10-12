@@ -4364,6 +4364,9 @@ class AccountWorker:
             "max_tokens": 5,
             "timeout": self.config.ai_timeout,
         }
+        effort = str(getattr(self.config, "ai_reasoning_effort", "") or "").strip()
+        if effort:
+            request_kwargs["reasoning_effort"] = effort
         if self.config.ai_disable_thinking:
             request_kwargs["extra_body"] = {
                 "chat_template_kwargs": {"enable_thinking": False}
@@ -4615,6 +4618,11 @@ class AccountWorker:
                 "max_tokens": self.config.ai_max_tokens,
                 "timeout": self.config.ai_timeout,
             }
+            effort = str(getattr(self.config, "ai_reasoning_effort", "") or "").strip()
+            if effort:
+                # top-level：Ollama 的 reasoning 模型（glm-5.3）只認這個位置；
+                # 放 extra_body 會被當未知參數忽略、reasoning 吃光 token 回空。
+                request_kwargs["reasoning_effort"] = effort
             if self.config.ai_disable_thinking:
                 request_kwargs["extra_body"] = {
                     "chat_template_kwargs": {"enable_thinking": False}

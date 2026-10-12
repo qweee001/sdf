@@ -30,6 +30,7 @@ def test_manager_backfills_last_human_activity_before_start():
             "SB", (), {"decrypt": staticmethod(lambda v: "sess")}
         )()
         mgr._ai_client = object()
+        mgr._chat_client = object()
         mgr._media_service = object()
         mgr._parse_groups = lambda raw: [-1002229799107]
         mgr.managed_ids = set()

@@ -49,11 +49,19 @@ class AccountManager:
         self._status: dict[str, dict] = {}
         self._ai_client = AsyncOpenAI(
             base_url=config.ai_base_url,
-            api_key=config.ai_api_key or "sk-placeholder",
+            api_key=config.ai_api_key or "«redacted:sk-…»",
+            timeout=config.ai_timeout,
+        )
+        # 主聊天 client：Ollama Cloud（glm-5.3）需要 top-level reasoning_effort，
+        # Routeway 對未知 top-level 參數回 403，所以拆成獨立 client；
+        # 未設 CHAT_BASE_URL 時與 _ai_client 同源，行為不變。
+        self._chat_client = AsyncOpenAI(
+            base_url=config.chat_base_url,
+            api_key=config.chat_api_key or config.ai_api_key or "«redacted:sk-…»",
             timeout=config.ai_timeout,
         )
         self._media_service = OrcaMediaService(
-            client=self._ai_client,
+            client=self._chat_client,
             db=db,
             config=config,
         )
@@ -288,7 +296,7 @@ class AccountManager:
             session_key=session_key,
             tg_api_id=self.config.tg_api_id,
             tg_api_hash=self.config.tg_api_hash,
-            ai_client=self._ai_client,
+            ai_client=self._chat_client,
             db=self.db,
             config=self.config,
             managed_ids=self.managed_ids,
@@ -685,5 +693,9 @@ class AccountManager:
             pass
         try:
             await self._ai_client.close()
+        except Exception:
+            pass
+        try:
+            await self._chat_client.close()
         except Exception:
             pass
