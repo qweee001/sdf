@@ -9,6 +9,9 @@ from app.bot import TgControlBot, make_bot
 from app.config import load_settings
 
 
+PHONE = "+886912345678"  # 測試用合成號碼（顯示層可能遮成 ****）
+
+
 def _settings(monkeypatch):
     monkeypatch.setenv("BOT_TOKEN", "123456:FAKE-test-token-not-real")
     monkeypatch.setenv("BOT_ADMIN_IDS", "111, 222")
@@ -512,6 +515,30 @@ def _kb_texts(kb) -> list[str]:
     return [b.text for r in kb.rows for b in r.buttons]
 
 
+def _sign_initdata(bot, uid, chat_id=None, auth_date=None):
+    """合成一個合法的 TG initData（HMAC 簽章＋auth_date），用測試 bot_token。
+
+    只用合成密鑰（bot_token 已是 123456:FAKE...）與資料，不碰真實 Telegram。
+    chat_id=None＝user JSON 不自帶 chat_id（TG 標準 initData 常見）。
+    """
+    import hashlib
+    import hmac as _hmac
+    import json as _json
+    import time as _t
+    import urllib.parse
+
+    user = {"id": int(uid)}
+    if chat_id is not None:
+        user["chat_id"] = int(chat_id)
+    user_json = _json.dumps(user, separators=(",", ":"))
+    ad = str(int(auth_date if auth_date is not None else _t.time()))
+    items = [("auth_date", ad), ("user", user_json)]
+    check = "\n".join(f"{k}={v}" for k, v in sorted(items))
+    secret = _hmac.new(b"WebAppData", bot.bot_token.encode(), hashlib.sha256).digest()
+    h = _hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    return urllib.parse.urlencode(dict(items, **{"hash": h}))
+
+
 def test_callback_rejects_non_admin(monkeypatch):
     """BOT_ADMIN_IDS=111,222 時，333 按按鈕被擋＋彈提示；111 按則進入。"""
     import unittest.mock as mock
@@ -556,11 +583,11 @@ def test_acc_delete_confirm_page(monkeypatch):
     assert "確認刪除" in body
     assert "台北-小小" in body
     data = _kb_data(kb)
-    # yes 帶一次性 token（不再是裸 acc id）；no 仍帶 acc id
+    # yes／no 都綁同一份一次性 token（#3：取消不再按帳號亂找）
     assert any(d.startswith("acc.del.yes:") for d in data)
-    assert "acc.del.no:a1" in data
-    # token 已簽發進 _del_confirms
     yes_token = [d.split(":", 1)[1] for d in data if d.startswith("acc.del.yes:")][0]
+    no_token = [d.split(":", 1)[1] for d in data if d.startswith("acc.del.no:")][0]
+    assert yes_token == no_token  # 取消綁定同一份確認
     assert yes_token in bot._del_confirms
     acc_id, adm, chat, exp = bot._del_confirms[yes_token]
     assert (acc_id, adm, chat) == ("a1", "111", 7)
@@ -641,105 +668,111 @@ def test_home_menu_has_model_and_usage(monkeypatch):
 
 
 class _FakeLoginService:
-    """Mini App 流程用的 fake login_service。"""
+    """faithful：回真正 TelegramLoginService 的 status 契約（無 need_password）。
 
-    def __init__(self):
+    need_password=True → submit_code 回 password_required（兩步驗證）；
+    False → submit_code 回 authorized（不需密碼）。auth_id 依呼叫序不同，
+    防「都用 auth-1」掩蓋 A/B 隔離缺陷。
+    """
+
+    def __init__(self, need_password=False):
         self.calls = []
         self.pending = {}
+        self.need_password = need_password
+        self._n = 0
+
+    def _hint(self, phone):
+        return f"{phone[:4]}•••••{phone[-3:]}" if len(phone) > 7 else phone
 
     async def start(self, phone):
         self.calls.append(("start", phone))
-        aid = "auth-1"
+        self._n += 1
+        aid = f"auth-{self._n}"
         self.pending[aid] = type("P", (), {"auth_id": aid, "created_at": 0.0})()
-        # Mini App start 端點要 auth_id；文字 /addacc 路徑仍用 status
         return {
-            "phone_hint": phone[:4] + "****",
+            "phone_hint": self._hint(phone),
             "status": "code_required",
             "auth_id": aid,
+            "expires_in": 300,
         }
 
     async def submit_code(self, auth_id, code):
         self.calls.append(("code", auth_id, code))
-        return {"status": "password_required", "need_password": True}
+        if self.need_password:
+            return {"status": "password_required", "phone_hint": "h",
+                    "expires_in": 300}
+        return {"status": "authorized", "phone_hint": "h", "expires_in": 300}
 
     async def submit_password(self, auth_id, pw):
         self.calls.append(("pass", auth_id, pw))
-        return {"status": "authorized"}
+        return {"status": "authorized", "phone_hint": "h", "expires_in": 300}
 
     async def claim(self, auth_id):
         self.calls.append(("claim", auth_id))
         return type(
-            "V",
-            (),
-            {
-                "session_string": "s:xyz",
+            "V", (), {
+                "session_string": "s:" + str(auth_id),
                 "tg_user_id": 42,
                 "tg_name": "美玲",
                 "avatar": "data:image/png;base64,AA",
             },
         )()
 
-
 def test_mini_app_routes(monkeypatch):
-    """Mini App：/tg/addacc 要令牌；/tgapi/start→code→pass→claim 串起來。"""
+    """Mini App：/tg/addacc 要令牌；/tgapi/start→code→claim（authorized 路徑）。
+
+    身分＝initData（HMAC 簽章）；contract＝真正服務 status（無 need_password）。
+    """
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     mgr = _FakeManager()
-    ls = _FakeLoginService()
+    ls = _FakeLoginService(need_password=False)  # 不需兩步驗證 → authorized
     bot = TgControlBot(_settings(monkeypatch), mgr, login_service=ls)
     host = FastAPI()
-    host.include_router(bot.app)  # bot.app 是 APIRouter，要掛到 app 才能打
+    host.include_router(bot.app)
     client = TestClient(host)
-    # 簽發一個流程令牌（#2：綁 管理員/聊天/auth_id/階段/期限）
     tok = bot._mini_mint("111", 7)
+    init = _sign_initdata(bot, "111")
 
-    # 無令牌 → 400
-    r = client.post("/tgapi/start", json={"phone": "+886****5678"})
+    # 無 token（但身分合法）→ 400
+    r = client.post("/tgapi/start", json={"phone": PHONE, "init_data": init})
     assert r.status_code == 400
-    # 有令牌 → 200（bind auth_id + stage=code）
+    # 有 token + 可信 initData → 200（bind auth_id + stage=code）
     r = client.post(
-        f"/tgapi/start?t={tok}", json={"phone": "+886****5678"}
+        f"/tgapi/start?t={tok}", json={"phone": PHONE, "init_data": init}
     )
     assert r.status_code == 200
-    assert r.json().get("auth_id") == "auth-1"
+    aid = r.json()["auth_id"]
     flow = bot._mini_flows[tok]
-    assert flow.auth_id == "auth-1" and flow.stage == "code"
+    assert flow.auth_id == aid and flow.stage == "code"
     # 錯階段：code 前直接 pass → 400
-    r = client.post(f"/tgapi/pass?t={tok}", json={"password": "cloudpw"})
+    r = client.post(
+        f"/tgapi/pass?t={tok}", json={"password": "cloudpw", "init_data": init}
+    )
     assert r.status_code == 400
-    # code
-    r = client.post(f"/tgapi/code?t={tok}", json={"code": "12345"})
+    # code → authorized → stage=claim，need_password=false
+    r = client.post(f"/tgapi/code?t={tok}", json={"code": "12345", "init_data": init})
     assert r.status_code == 200
-    assert r.json().get("need_password") is True
-    assert bot._mini_flows[tok].stage == "pass"
-    # pass
-    r = client.post(f"/tgapi/pass?t={tok}", json={"password": "cloudpw"})
-    assert r.status_code == 200
-    assert r.json().get("ok") is True
+    assert r.json().get("need_password") is False
     assert bot._mini_flows[tok].stage == "claim"
-    # claim → 建立帳號
-    r = client.post(f"/tgapi/claim?t={tok}", json={"name": "台北-美玲"})
+    # claim → 建立帳號（白名單）
+    r = client.post(
+        f"/tgapi/claim?t={tok}", json={"name": "台北-美玲", "init_data": init}
+    )
     assert r.status_code == 200
     body = r.json()
     assert body.get("ok") is True
     assert body.get("tg_name") == "美玲"
     assert body["account"]["name"] == "台北-美玲"
-    # #6：claim 回傳白名單——session_key 等內部欄位不得外洩
-    raw = r.text
-    assert "SESSION-SECRET-xyz" not in raw
     assert "session_key" not in body["account"]
     assert ("add", "台北-美玲") in mgr.calls
-    # claim 成功後 token 應該被清
     assert tok not in bot._mini_flows
-    # login service 串接
-    assert ("start", "+886****5678") in ls.calls
-    assert ("code", "auth-1", "12345") in ls.calls
-    assert ("pass", "auth-1", "cloudpw") in ls.calls
-
+    assert ("start", PHONE) in ls.calls
+    assert ("code", aid, "12345") in ls.calls
 
 def test_mini_flow_binding(monkeypatch):
-    """#2：token 綁定 管理員/聊天/階段/期限/使用狀態；禁止跨流程、跨 token。"""
+    """#1/#2：initData 身分 + token 綁定 管理員/聊天/階段/期限；fail-closed。"""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -753,45 +786,53 @@ def test_mini_flow_binding(monkeypatch):
     tok_a = bot._mini_mint("111", 7)
     tok_b = bot._mini_mint("222", 8)
 
-    # 跨管理員：token A 帶管理員 222 的 initData → 400
+    # 跨管理員：token A + 管理員 222 的 initData → 400
     r = client.post(
         f"/tgapi/start?t={tok_a}",
-        json={"phone": "+886****1111", "admin_id": "222", "chat_id": 7},
+        json={"phone": PHONE, "init_data": _sign_initdata(bot, "222")},
     )
     assert r.status_code == 400
-    # 跨聊天：token A 帶錯聊天 → 400
+    # 跨聊天：token A + 111 但 initData 自帶 chat_id=999 → 400
     r = client.post(
         f"/tgapi/start?t={tok_a}",
-        json={"phone": "+886****1111", "admin_id": "111", "chat_id": 999},
+        json={"phone": PHONE,
+              "init_data": _sign_initdata(bot, "111", chat_id=999)},
     )
     assert r.status_code == 400
-    # 正確身分 → 成功
+    # 偽造身分：無 initData、只自報 admin/chat → 400（fail-closed 不回落）
     r = client.post(
         f"/tgapi/start?t={tok_a}",
-        json={"phone": "+886****1111", "admin_id": "111", "chat_id": 7},
+        json={"phone": PHONE, "admin_id": "111", "chat_id": 7},
+    )
+    assert r.status_code == 400
+    # 正確身分（111，無 chat_id）→ 200
+    r = client.post(
+        f"/tgapi/start?t={tok_a}",
+        json={"phone": PHONE, "init_data": _sign_initdata(bot, "111")},
     )
     assert r.status_code == 200
-    # 並行：B 流程未 start 就 code → 400（B 的 flow 沒有 auth_id）
+    # 並行：B 流程未 start 就 code → 400
     r = client.post(
         f"/tgapi/code?t={tok_b}",
-        json={"code": "12345", "admin_id": "222", "chat_id": 8},
+        json={"code": "1", "init_data": _sign_initdata(bot, "222")},
     )
     assert r.status_code == 400
-    # 重放：claim 用過 A 的 stage 後再 claim → 400（需先走到 claim 階段）
-    client.post(f"/tgapi/code?t={tok_a}", json={"code": "1", "admin_id": "111", "chat_id": 7})
-    client.post(f"/tgapi/pass?t={tok_a}", json={"password": "p", "admin_id": "111", "chat_id": 7})
-    client.post(f"/tgapi/claim?t={tok_a}", json={"name": "X", "admin_id": "111", "chat_id": 7})
-    r = client.post(f"/tgapi/claim?t={tok_a}", json={"name": "X2", "admin_id": "111", "chat_id": 7})
-    assert r.status_code == 400
-    # 過期：手動把 flow 期限改過去 → 400
+    # 過期：把 A flow 期限改過去 → 400
     tok_c = bot._mini_mint("111", 7)
     bot._mini_flows[tok_c].expires_at = time.time() - 1
     r = client.post(
         f"/tgapi/start?t={tok_c}",
-        json={"phone": "+886****2222", "admin_id": "111", "chat_id": 7},
+        json={"phone": PHONE, "init_data": _sign_initdata(bot, "111")},
     )
     assert r.status_code == 400
-
+    # 重放：A 已 claim 用完 token 再 claim → 400
+    init111 = _sign_initdata(bot, "111")
+    client.post(f"/tgapi/code?t={tok_a}", json={"code": "1", "init_data": init111})
+    client.post(f"/tgapi/claim?t={tok_a}", json={"name": "X", "init_data": init111})
+    r = client.post(
+        f"/tgapi/claim?t={tok_a}", json={"name": "X2", "init_data": init111}
+    )
+    assert r.status_code == 400
 
 def test_mini_initdata_verify(monkeypatch):
     """#2：initData HMAC 驗簽——不能只相信客戶端 user id。"""
@@ -1134,13 +1175,280 @@ def test_mini_routes_with_static_mount(monkeypatch):
 
     client = TestClient(host)
     tok = bot._mini_mint("111", 7)
+    init = _sign_initdata(bot, "111")
+    # GET /tg/addacc?t= → 200（以前被 static 吃掉回 404）
     r = client.get("/tg/addacc?t=" + tok)
     assert r.status_code == 200
     assert "新增水軍帳號" in r.text
-    r = client.post("/tgapi/start?t=" + tok, json={"phone": "+886912345678"})
+    # POST /tgapi/start（可信 initData）→ 200
+    r = client.post(
+        "/tgapi/start?t=" + tok, json={"phone": PHONE, "init_data": init}
+    )
     assert r.status_code == 200
     assert r.json().get("auth_id")
-    r = client.post("/tgapi/start", json={"phone": "+886912345678"})
+    # 無 token 的 POST（身分合法）→ 400（route 存在，不是 405/404）
+    r = client.post("/tgapi/start", json={"phone": PHONE, "init_data": init})
     assert r.status_code == 400
+    # static 根路徑仍正常（/openapi.json 不是 bot 路由）
     r2 = client.get("/openapi.json")
     assert r2.status_code == 200
+
+
+# ======================================================================
+# 2083952 獨立驗收：3 項必修 + 2 疑點的失敗路徑矩陣
+# ======================================================================
+
+
+def test_mini_identity_matrix(monkeypatch):
+    """#1：四個敏感階段的身分缺失／偽造／無效／過期／錯綁定／重放 都要拒絕，
+    且被拒時對應 login_service 不被呼叫。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    mgr = _FakeManager()
+    ls = _FakeLoginService()
+    bot = TgControlBot(_settings(monkeypatch), mgr, login_service=ls)
+    host = FastAPI()
+    host.include_router(bot.app)
+    client = TestClient(host)
+    init111 = _sign_initdata(bot, "111")
+
+    # --- start：無 initData → 400，且 start 不被呼叫 ---
+    t1 = bot._mini_mint("111", 7)
+    r = client.post(f"/tgapi/start?t={t1}", json={"phone": PHONE})
+    assert r.status_code == 400
+    assert not any(c[0] == "start" for c in ls.calls)
+    # --- start：initData 空字串 → 400 ---
+    r = client.post(f"/tgapi/start?t={t1}", json={"phone": PHONE, "init_data": ""})
+    assert r.status_code == 400
+    # --- start：無效簽章（hash 被改）→ 400 ---
+    bad = init111.replace("hash=", "hash=" + "f" * 8)
+    r = client.post(f"/tgapi/start?t={t1}", json={"phone": PHONE, "init_data": bad})
+    assert r.status_code == 400
+    # --- start：auth_date 過舊（>600s）→ 400 ---
+    import time as _t
+    stale = _sign_initdata(bot, "111", auth_date=_t.time() - 700)
+    r = client.post(f"/tgapi/start?t={t1}", json={"phone": PHONE, "init_data": stale})
+    assert r.status_code == 400
+    # --- start：錯管理員（token 簽 111，initData 簽 222）→ 400 ---
+    r = client.post(
+        f"/tgapi/start?t={t1}",
+        json={"phone": PHONE, "init_data": _sign_initdata(bot, "222")},
+    )
+    assert r.status_code == 400
+    # --- start：偽造 admin/chat（無 initData）→ 400 ---
+    r = client.post(
+        f"/tgapi/start?t={t1}",
+        json={"phone": PHONE, "admin_id": "111", "chat_id": 7},
+    )
+    assert r.status_code == 400
+    # --- 合法 start 成功，建一個 code 流程 ---
+    ok = client.post(
+        f"/tgapi/start?t={t1}", json={"phone": PHONE, "init_data": init111}
+    )
+    assert ok.status_code == 200
+    aid = ok.json()["auth_id"]
+    # --- code：無 initData → 400（且 submit_code 不被呼叫）---
+    r = client.post(f"/tgapi/code?t={t1}", json={"code": "12345"})
+    assert r.status_code == 400
+    assert not any(c[0] == "code" for c in ls.calls)
+    # --- code：錯管理員 initData → 400 ---
+    r = client.post(
+        f"/tgapi/code?t={t1}",
+        json={"code": "12345", "init_data": _sign_initdata(bot, "222")},
+    )
+    assert r.status_code == 400
+    # --- 錯 token（不存在）→ 400 ---
+    r = client.post(
+        "/tgapi/code?t=NOPE", json={"code": "12345", "init_data": init111}
+    )
+    assert r.status_code == 400
+
+
+def test_login_contract_password_required(monkeypatch):
+    """#2：需兩步驗證的完整 start→code→pass→claim 閉環（status 契約）。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    mgr = _FakeManager()
+    ls = _FakeLoginService(need_password=True)
+    bot = TgControlBot(_settings(monkeypatch), mgr, login_service=ls)
+    host = FastAPI()
+    host.include_router(bot.app)
+    client = TestClient(host)
+    tok = bot._mini_mint("111", 7)
+    init = _sign_initdata(bot, "111")
+
+    r = client.post(f"/tgapi/start?t={tok}", json={"phone": PHONE, "init_data": init})
+    assert r.status_code == 200
+    aid = r.json()["auth_id"]
+    # code → password_required → stage=pass，need_password=true
+    r = client.post(f"/tgapi/code?t={tok}", json={"code": "12345", "init_data": init})
+    assert r.status_code == 200
+    assert r.json().get("need_password") is True
+    assert bot._mini_flows[tok].stage == "pass"
+    # pass → authorized → stage=claim
+    r = client.post(f"/tgapi/pass?t={tok}", json={"password": "p", "init_data": init})
+    assert r.status_code == 200
+    assert r.json().get("status") == "authorized"
+    assert bot._mini_flows[tok].stage == "claim"
+    # claim 成功
+    r = client.post(f"/tgapi/claim?t={tok}", json={"name": "N", "init_data": init})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert "session_key" not in r.json()["account"]
+    # 串接
+    assert ("start", PHONE) in ls.calls
+    assert ("code", aid, "12345") in ls.calls
+    assert ("pass", aid, "p") in ls.calls
+    assert ("claim", aid) in ls.calls
+
+
+def test_login_contract_unknown_status(monkeypatch):
+    """#2：未知 status → 明確拒絕（不冒稱成功、stage 不變）。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    class WeirdLS(_FakeLoginService):
+        async def submit_code(self, auth_id, code):
+            self.calls.append(("code", auth_id, code))
+            return {"status": "weird_state", "phone_hint": "h", "expires_in": 1}
+
+    mgr = _FakeManager()
+    ls = WeirdLS()
+    bot = TgControlBot(_settings(monkeypatch), mgr, login_service=ls)
+    host = FastAPI()
+    host.include_router(bot.app)
+    client = TestClient(host)
+    tok = bot._mini_mint("111", 7)
+    init = _sign_initdata(bot, "111")
+    client.post(f"/tgapi/start?t={tok}", json={"phone": PHONE, "init_data": init})
+    r = client.post(f"/tgapi/code?t={tok}", json={"code": "1", "init_data": init})
+    assert r.status_code == 400
+    assert bot._mini_flows[tok].stage == "code"  # 沒被推進
+
+
+def test_login_contract_dual_authid_parallel(monkeypatch):
+    """#2：兩個不同 auth_id 並行，A/B 流程互不串（不能用都叫 auth-1 掩蓋）。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    mgr = _FakeManager()
+    ls = _FakeLoginService(need_password=True)
+    bot = TgControlBot(_settings(monkeypatch), mgr, login_service=ls)
+    host = FastAPI()
+    host.include_router(bot.app)
+    client = TestClient(host)
+    tok_a = bot._mini_mint("111", 7)
+    tok_b = bot._mini_mint("222", 8)
+    init_a = _sign_initdata(bot, "111")
+    init_b = _sign_initdata(bot, "222")
+
+    ra = client.post(f"/tgapi/start?t={tok_a}", json={"phone": PHONE, "init_data": init_a})
+    rb = client.post(f"/tgapi/start?t={tok_b}", json={"phone": PHONE, "init_data": init_b})
+    aid_a = ra.json()["auth_id"]
+    aid_b = rb.json()["auth_id"]
+    assert aid_a != aid_b  # 兩個真的不同 auth_id
+    # A code、B code 各自推進，互不影響
+    ra2 = client.post(f"/tgapi/code?t={tok_a}", json={"code": "1", "init_data": init_a})
+    rb2 = client.post(f"/tgapi/code?t={tok_b}", json={"code": "2", "init_data": init_b})
+    assert ra2.status_code == 200 and rb2.status_code == 200
+    assert bot._mini_flows[tok_a].stage == "pass"
+    assert bot._mini_flows[tok_b].stage == "pass"
+    # A pass → A claim；B 仍停 pass（不能拿 B token 走 A 的 claim）
+    client.post(f"/tgapi/pass?t={tok_a}", json={"password": "p", "init_data": init_a})
+    r = client.post(f"/tgapi/claim?t={tok_b}", json={"name": "X", "init_data": init_b})
+    assert r.status_code == 400  # B 還在 pass 階段，不能 claim
+    assert bot._mini_flows[tok_a].stage == "claim"
+    assert bot._mini_flows[tok_b].stage == "pass"
+
+
+def test_delete_confirm_matrix(monkeypatch):
+    """#3：刪除確認 正常/重複/錯chat/錯admin/過期/雙confirm取消指定。"""
+    import time as _t
+
+    mgr = _FakeManager()
+    bot = _bot(monkeypatch, mgr)
+    loop = asyncio.new_event_loop()
+
+    def _yes(kb):
+        return [d for d in _kb_data(kb) if d.startswith("acc.del.yes:")][0]
+
+    def _no(kb):
+        return [d for d in _kb_data(kb) if d.startswith("acc.del.no:")][0]
+
+    try:
+        # 1) 正常確認一次成功
+        _, kb = loop.run_until_complete(bot._acc_delete_confirm("a1", "111", 7))
+        yes = _yes(kb)
+        loop.run_until_complete(bot._dispatch_callback(_CbEvent(111, yes, chat_id=7), yes))
+        assert mgr.calls.count(("delete", "a1")) == 1
+        # 2) 重複點同一 token → 不再刪
+        loop.run_until_complete(bot._dispatch_callback(_CbEvent(111, yes, chat_id=7), yes))
+        assert mgr.calls.count(("delete", "a1")) == 1
+        # 3) 錯聊天室：chat 7 簽的，chat 999 按 → 不刪
+        _, kb = loop.run_until_complete(bot._acc_delete_confirm("a1", "111", 7))
+        yes = _yes(kb)
+        loop.run_until_complete(bot._dispatch_callback(_CbEvent(111, yes, chat_id=999), yes))
+        assert mgr.calls.count(("delete", "a1")) == 1
+        # 4) 錯管理員：111 簽的，222 按 → 不刪
+        _, kb = loop.run_until_complete(bot._acc_delete_confirm("a1", "111", 7))
+        yes = _yes(kb)
+        loop.run_until_complete(bot._dispatch_callback(_CbEvent(222, yes, chat_id=7), yes))
+        assert mgr.calls.count(("delete", "a1")) == 1
+        # 5) 過期：期限改過去 → 不刪
+        _, kb = loop.run_until_complete(bot._acc_delete_confirm("a1", "111", 7))
+        yes = _yes(kb)
+        bot._del_confirms[yes.split(":", 1)[1]] = ("a1", "111", 7, _t.time() - 1)
+        loop.run_until_complete(bot._dispatch_callback(_CbEvent(111, yes, chat_id=7), yes))
+        assert mgr.calls.count(("delete", "a1")) == 1
+        # 6) 雙 confirm：C1、C2 同帳號；取消 C2 → C2 yes 必拒；C1 仍有效
+        _, kb1 = loop.run_until_complete(bot._acc_delete_confirm("a1", "111", 7))
+        yes1 = _yes(kb1)
+        _, kb2 = loop.run_until_complete(bot._acc_delete_confirm("a1", "111", 7))
+        yes2 = _yes(kb2)
+        no2 = _no(kb2)
+        assert yes2.split(":", 1)[1] != yes1.split(":", 1)[1]  # 不同 token
+        loop.run_until_complete(bot._dispatch_callback(_CbEvent(111, no2, chat_id=7), no2))
+        # 取消 C2 後點 C2 yes → 拒（不刪）
+        loop.run_until_complete(bot._dispatch_callback(_CbEvent(111, yes2, chat_id=7), yes2))
+        assert mgr.calls.count(("delete", "a1")) == 1
+        # C1 未取消 → 點 C1 yes 仍刪（策略：取消只失效該份）
+        loop.run_until_complete(bot._dispatch_callback(_CbEvent(111, yes1, chat_id=7), yes1))
+        assert mgr.calls.count(("delete", "a1")) == 2
+    finally:
+        loop.close()
+
+
+def test_persona_save_uses_manager_protection(monkeypatch):
+    """#5：人設保存複用 manager.update_persona 的 fixed-persona 保護。"""
+    mgr = _FakeManager()
+    bot = _bot(monkeypatch, mgr)
+    loop = asyncio.new_event_loop()
+    try:
+        # 一般帳號：update_persona 回 dict → 成功
+        async def up_ok(account_id, persona):
+            mgr.db.accounts[account_id]["persona"] = __import__("json").dumps(persona, ensure_ascii=False)
+            return persona
+
+        mgr.update_persona = up_ok
+        out = loop.run_until_complete(bot._persona_save("a1", '{"name": "小美"}'))
+        assert "已更新" in out
+        # 受保護：update_persona 回 None → 拒絕（不冒稱成功）
+        async def up_blocked(account_id, persona):
+            return None
+
+        mgr.update_persona = up_blocked
+        out = loop.run_until_complete(bot._persona_save("a1", '{"name": "小美"}'))
+        assert "受保護" in out
+    finally:
+        loop.close()
+
+
+def test_model_info_readonly(monkeypatch):
+    """#4：模型頁只讀顯示，不聲稱可編輯。"""
+    bot = _bot(monkeypatch, _FakeManager())
+    out = bot._model_info()
+    assert "只讀顯示" in out
+    assert "尚未完成" in out
+    assert "glm-5.3" in out

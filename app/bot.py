@@ -271,36 +271,61 @@ class _MiniFlow:
     used: bool = False
 
 
-def _tg_initdata_user_id(init_data: str, bot_token: str) -> str | None:
-    """驗證 Telegram WebApp initData（HMAC-SHA256），回傳發送者 user id。
+def _tg_initdata_identity(
+    init_data: str, bot_token: str, max_age: int = 600
+) -> tuple[str | None, int | None]:
+    """驗證 Telegram WebApp initData（HMAC-SHA256＋auth_date 新鮮度）。
+
+    回傳 (user_id, chat_id)：
+    - user_id＝發送者 user.id（可信身分）；
+    - chat_id＝僅當 user JSON 自帶 chat_id 時才有（TG 標準 initData 通常沒有，
+      此時 None＝不強求聊天綁定，改靠 token 簽發時的 callback 上下文）。
+    缺失／簽章失敗／無 user／auth_date 過舊（>max_age 秒）都回 (None, None)。
 
     不能只相信客戶端傳的 user id：initData 是 key=value& 串，
     secret = HMAC_SHA256("WebAppData", bot_token)，再對
     HMAC_SHA256(secret, sorted_data_check_string) 驗簽。
-    回傳 ""＝驗證失敗／無 user 欄位；成功回 user.id 字串。
     """
     if not init_data:
-        return None
+        return None, None
     try:
         params = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
     except Exception:
-        return None
+        return None, None
     if "hash" not in params:
-        return None
+        return None, None
     hash_v = params["hash"]
     check_items = {k: v for k, v in params.items() if k != "hash"}
     check_str = "\n".join(f"{k}={v}" for k, v in sorted(check_items.items()))
     secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
     digest = hmac.new(secret, check_str.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(digest, str(hash_v)):
-        return None
-    user = check_items.get("user")
-    if not user:
-        return None
+        return None, None
+    user_raw = check_items.get("user")
+    if not user_raw:
+        return None, None
     try:
-        return str(json.loads(user).get("id", ""))
+        user = json.loads(user_raw)
     except Exception:
-        return None
+        return None, None
+    uid = user.get("id")
+    if uid is None:
+        return None, None
+    # auth_date 新鮮度：過舊＝重用舊 initData（防重放）
+    auth_date = check_items.get("auth_date")
+    if auth_date:
+        try:
+            if abs(time.time() - int(auth_date)) > max_age:
+                return None, None
+        except (TypeError, ValueError):
+            return None, None
+    chat_id: int | None = None
+    if isinstance(user.get("chat_id"), (int, str)):
+        try:
+            chat_id = int(user["chat_id"])
+        except (TypeError, ValueError):
+            chat_id = None
+    return str(uid), chat_id
 
 
 class TgControlBot:
@@ -498,39 +523,27 @@ class TgControlBot:
 
         async def _flow_for(req: Request, payload: dict,
                             stage: str) -> _MiniFlow | None:
-            """從 token＋initData/payload 驗證出對應階段的流程。"""
+            """fail-closed 身分＋流程驗證。
+
+            可信身分只認 initData（HMAC 簽章＋auth_date 新鮮度）：
+            - 缺 initData／簽章錯／user 缺／auth_date 過舊 → 直接拒（不回落
+              客戶端自報 admin_id/chat_id 或 URL 的 admin/chat）。
+            - initData 的 user.id 必須＝token 簽發的管理員；initData 若自帶
+              chat_id 也要對得上（沒有 chat_id 不強求，靠 token 綁定）。
+            - 再驗 stage／期限／一次性（_mini_flow）。
+            """
             token = _tok(req)
-            # 身分：initData 驗簽（HMAC）優先用；沒 initData 才用 payload 的
-            # admin_id+chat_id（僅在無 initData 時信任，且仍要與 token 綁定一致）
-            admin_id: str | None = None
-            chat_id: int | None = None
             init_data = str(payload.get("init_data") or "")
-            if init_data:
-                uid = _tg_initdata_user_id(init_data, self.bot_token)
-                if not uid:
-                    # initData 存在但驗簽失敗＝客戶端亂傳：當作跨流程拒掉
-                    return None
-                admin_id = uid
-                cid = None
-                try:
-                    params = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
-                    user = json.loads(params.get("user", "{}"))
-                    cid = user.get("chat_id")
-                except Exception:
-                    cid = None
-                if cid is not None:
-                    chat_id = int(cid)
-            if admin_id is None:
-                admin_id = str(payload.get("admin_id") or "") or None
-            if chat_id is None:
-                raw = payload.get("chat_id")
-                if raw not in (None, ""):
-                    try:
-                        chat_id = int(raw)
-                    except (TypeError, ValueError):
-                        chat_id = -1  # 對不上即失敗
-            return self._mini_flow(token, admin_id=admin_id,
-                                   chat_id=chat_id, stage=stage)
+            uid, id_chat = _tg_initdata_identity(init_data, self.bot_token)
+            if uid is None:
+                return None  # 無可信身分（含缺 initData、簽章錯、過舊）
+            # initData 若自帶 chat_id：必須對得上 token 綁定的聊天
+            if id_chat is not None:
+                return self._mini_flow(
+                    token, admin_id=uid, chat_id=id_chat, stage=stage
+                )
+            # 沒有 chat_id（TG 標準 initData 通常沒有）：只綁管理員＋階段
+            return self._mini_flow(token, admin_id=uid, stage=stage)
 
         @router.get("/tg/addacc", response_class=HTMLResponse)
         async def mini_page(req: Request):
@@ -577,10 +590,22 @@ class TgControlBot:
                 r = await self.login_service.submit_code(flow.auth_id, code_v)
             except Exception as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
-            if isinstance(r, dict) and r.get("need_password"):
+            # 真正服務回 status（code_required/password_required/authorized），
+            # 沒有 need_password——用 status 推進階段，未知狀態明確拒絕。
+            status = r.get("status") if isinstance(r, dict) else None
+            if status == "password_required":
                 flow.stage = "pass"
-            return JSONResponse({"ok": True,
-                                 "need_password": bool(r.get("need_password"))})
+                return JSONResponse(
+                    {"ok": True, "need_password": True, "status": status}
+                )
+            if status == "authorized":
+                flow.stage = "claim"
+                return JSONResponse(
+                    {"ok": True, "need_password": False, "status": status}
+                )
+            return JSONResponse(
+                {"error": "未知驗證狀態", "status": status}, status_code=400
+            )
 
         @router.post("/tgapi/pass")
         async def pas(req: Request):
@@ -597,8 +622,14 @@ class TgControlBot:
                 r = await self.login_service.submit_password(flow.auth_id, pw)
             except Exception as e:
                 return JSONResponse({"error": str(e)}, status_code=400)
-            flow.stage = "claim"
-            return JSONResponse({"ok": True})
+            # 只有真正 authorized 才進 claim；未知狀態明確拒絕（不冒稱成功）。
+            status = r.get("status") if isinstance(r, dict) else None
+            if status == "authorized":
+                flow.stage = "claim"
+                return JSONResponse({"ok": True, "status": status})
+            return JSONResponse(
+                {"error": "未知驗證狀態", "status": status}, status_code=400
+            )
 
         @router.post("/tgapi/claim")
         async def claim(req: Request):
@@ -785,16 +816,22 @@ class TgControlBot:
             body, kb = await self._acc_delete_confirm(arg, admin, chat)
             await event.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "acc.del.yes":
-            # arg＝一次性 token：驗 期限/管理員 綁定，按第二次會被擋
+            # arg＝一次性 token：驗 期限/管理員/聊天 綁定，按第二次會被擋。
+            # pop 先拿走再驗證（atomic）：驗證不過也消耗掉，防並行雙擊二次刪。
             info = self._del_confirms.pop(arg, None)
             if info is None:
                 await event.answer("確認已過期，請重新按「🗑 刪除」",
                                    show_alert=True)
                 return
-            acc_id, adm, _cht, exp = info
-            if time.time() > exp or str(adm) != str(
-                getattr(event, "sender_id", "") or ""
+            acc_id, adm, cht, exp = info
+            ev_sid = str(getattr(event, "sender_id", "") or "")
+            ev_chat = int(getattr(event, "chat_id", 0) or 0)
+            if (
+                time.time() > exp
+                or str(adm) != ev_sid
+                or int(cht) != ev_chat
             ):
+                # 錯管理員/錯聊天/過期：確認已消耗（防重放），提示重來
                 await event.answer("確認已過期或不是原按者", show_alert=True)
                 return
             accounts = await self.manager.db.list_accounts()
@@ -807,12 +844,11 @@ class TgControlBot:
             await event.edit(body[:MSG_LIMIT],
                              buttons=await self._home_keyboard())
         elif action == "acc.del.no":
-            # 取消：移除綁定此帳號的確認 token（使「✅ 確認刪除」失效）
-            for tok, (aid, _a, _c, _e) in list(self._del_confirms.items()):
-                if aid == arg:
-                    self._del_confirms.pop(tok, None)
-                    break
-            body, kb = await self._account_actions_keyboard(arg)
+            # 取消：arg＝該確認的 token（綁定特定確認，不會誤刪別份）。
+            # pop 掉指定 token；同帳號的其他確認保留（一致策略：只取消這份）。
+            info = self._del_confirms.pop(arg, None)
+            acc_id = info[0] if info else arg
+            body, kb = await self._account_actions_keyboard(acc_id)
             await event.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "acc.groups":
             admin = str(getattr(event, "sender_id", "") or "")
@@ -1311,7 +1347,7 @@ class TgControlBot:
         rows = [
             [
                 cb("acc.del.yes:" + token, "✅ 確認刪除"),
-                cb("acc.del.no:" + account_id, "↩️ 再想想"),
+                cb("acc.del.no:" + token, "↩️ 再想想"),
             ],
         ]
         return body, types.ReplyInlineMarkup(kbrows(rows))
@@ -1420,7 +1456,7 @@ class TgControlBot:
     def _model_info(self) -> str:
         cfg = self.manager.config
         lines = [
-            "🧩 目前模型設定",
+            "🧩 目前模型設定（只讀顯示）",
             "──────────────",
             f"主聊天：{cfg.ai_model}",
             f"  端點：{cfg.chat_base_url}",
@@ -1431,8 +1467,11 @@ class TgControlBot:
             f"影片生成：{cfg.video_model}",
             f"語音：{cfg.speech_model}",
             "",
-            "作用範圍：環境變數級，所有帳號共用；重部署後才生效。\n"
-            "安全改法：Railway 改 AI_MODEL 等＋重部署（勿把 API key 傳到聊天）。",
+            "作用範圍：環境變數級，所有帳號共用；重部署後才生效。",
+            "Bot 內安全編輯尚未完成（此頁＝只讀，不是改動）。",
+            "目前安全改法：Railway 改 AI_MODEL 等環境變數＋重部署"
+            "（勿把 API key 傳到聊天）。",
+            "（未來 Bot 內編輯＝表單＋服務層寫入，禁止聊天輸入密鑰）",
         ]
         return "\n".join(lines)
 
@@ -1510,7 +1549,8 @@ class TgControlBot:
         )
 
     async def _persona_save(self, account_id: str, raw: str) -> str:
-        """/personasave 的核心：JSON 解析→白名單→存 db→運行中 worker 即時刷。"""
+        """/personasave 的核心：JSON 解析→白名單→（優先走 manager.update_persona
+        的 fixed-persona 保護）→存 db→運行中 worker 即時刷。"""
         try:
             data = json.loads(raw)
         except Exception as e:
@@ -1529,18 +1569,42 @@ class TgControlBot:
                 persona = json.loads(persona)
             except Exception:
                 persona = {}
+        persona = dict(persona)
         persona.update(allowed)
-        await self.manager.db.update_account(
-            account_id, persona=json.dumps(persona, ensure_ascii=False)
-        )
-        worker = (getattr(self.manager, "workers", {}) or {}).get(str(account_id))
-        if worker is not None and hasattr(worker, "persona"):
-            worker.persona = persona  # 即時生效（system prompt 每則都重組）
+        # 優先走 manager.update_persona：複用 fixed live-test / reconciliation
+        # 的「受保護帳號不得改人設」＋雙重檢查＋lifecycle lock（#5）。
+        # 受保護時回 None＝拒絕（不回傳成功）；一般帳號回 dict＝成功。
+        up = getattr(self.manager, "update_persona", None)
+        if callable(up):
+            result: dict | None = await up(account_id, persona)  # type: ignore[union-attr]
+            if result is None:
+                return (
+                    f"⚠️ {account_id} 人設受保護（live test／reconciliation 進行中），"
+                    "未改動"
+                )
+        else:
+            # manager 沒有 update_persona（舊 fake／簡化服務）：直接 db 寫＋刷 worker
+            await self.manager.db.update_account(
+                account_id, persona=json.dumps(persona, ensure_ascii=False)
+            )
+            worker = (
+                (getattr(self.manager, "workers", {}) or {}).get(str(account_id))
+            )
+            if worker is not None and hasattr(worker, "persona"):
+                worker.persona = persona
+            result = persona
         dropped = sorted(set(data) - set(self._PERSONA_FIELDS))
         extra = (f"\n忽略非白名單欄位：{', '.join(dropped)}") if dropped else ""
+        worker = (
+            (getattr(self.manager, "workers", {}) or {}).get(str(account_id))
+        )
         return (
             f"✅ 已更新 {account_id} 人設（{len(allowed)} 欄位）{extra}\n"
-            + ("運行中 worker 已即時生效" if worker is not None else "啟動時生效")
+            + (
+                "運行中 worker 已即時生效"
+                if worker is not None
+                else "啟動時生效"
+            )
         )
 
     async def _persona_save_cmd(self, args: list[str]) -> str:
@@ -1729,8 +1793,18 @@ class TgControlBot:
                              chat_id: int = 0):
         """Mini App 入口按鈕：url 帶 token（?t=...，30 分鐘有效）。
 
-        admin/chat 放 URL 只作 initData 缺失時的備援身分；TG 客戶端內
-        initData（HMAC 簽章）優先。
+        #1 入口選擇說明（fail-closed）：
+        - 現行用 KeyboardButtonUrl（普通連結，telethon 1.44 無 WebAppInfo 頂層
+          型別、KeyboardButton 不吃 web_app 參數）。TG 客戶端「內」開啟時
+          telegram-web-app.js 仍會注入 initData（HMAC 簽章＋auth_date），
+          _flow_for 認 initData 為唯一可信身分；瀏覽器裸開（無 initData）
+          會被 fail-closed 拒掉。
+        - URL 的 admin/chat 只作「簽發時」綁進 token 的上下文（_mini_mint），
+          _flow_for 不再拿 URL 的 admin/chat 當身分（防偽造）；它只是
+          讓 initData 缺失時仍能綁定到正確流程的輔助欄位。
+        - 要進一步強化可改用「受支持且能取得可信 initData 的入口」
+          （Telegram 正式 Web App / 受保護 web 登入），此處先用
+          initData 簽章驗證達成等價安全，不新增持續權限或密鑰。
         """
         base = getattr(self.settings, "dashboard_public_url", "") or (
             "http://localhost:" + str(self.settings.dashboard_port)
