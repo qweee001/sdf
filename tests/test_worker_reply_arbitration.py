@@ -407,10 +407,10 @@ def test_post_send_record_failure_keeps_image_claim(send_path, record_failure):
         vision_accounts = []
         media_accounts = []
 
-        async def add_message(*args):
+        async def add_message(*args, **kwargs):
             if record_failure == "add_message" and args[0] == "101":
                 raise RuntimeError("post-send add_message failed")
-            db.messages.append(args)
+            db.messages.append((args, kwargs))
 
         async def touch_activity(*args):
             if record_failure == "touch_activity" and args[0] == "101":

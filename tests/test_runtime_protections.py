@@ -91,6 +91,39 @@ def test_direct_send_accepts_proactive_kind_without_using_reply_switch(monkeypat
     asyncio.run(main())
 
 
+@pytest.mark.parametrize("kind", ["reply", "proactive"])
+def test_sender_records_real_tg_message_id(kind, monkeypatch):
+    """發送方自記要帶真實 TG 訊息 ID：Telethon 不為自己發的訊息觸發 on_message，
+    若不抓回 sent_msg.id，自己那筆是 message_id=0、其他帳號記真實 ID，
+    跨帳號去重鍵不同 → 同一則訊息算成兩則（實測 10-13 每則水軍訊息都重複）。"""
+    async def main():
+        worker = running_worker()
+        monkeypatch.setattr("app.worker.asyncio.sleep", AsyncMock())
+        worker.tg_client.send_message = AsyncMock(
+            return_value=SimpleNamespace(id=778899))
+        assert await worker._send_text_recorded(
+            GROUP, "自記帶真實ID", activity_kind=kind, stats_key="replies_sent") is True
+        # add_message 被傳入真實 TG ID（非 0），與收到同一則的其他帳號去重鍵對齊
+        _args, add_kwargs = worker.db.messages[-1]
+        assert add_kwargs.get("message_id") == 778899
+
+    asyncio.run(main())
+
+
+def test_sender_records_zero_when_send_returns_no_id(monkeypatch):
+    """send_message 回傳沒有 id 的物件時退回 0（不崩），保持舊行為。"""
+    async def main():
+        worker = running_worker()
+        monkeypatch.setattr("app.worker.asyncio.sleep", AsyncMock())
+        worker.tg_client.send_message = AsyncMock(return_value=SimpleNamespace())
+        assert await worker._send_text_recorded(
+            GROUP, "無ID退回0", activity_kind="proactive", stats_key="replies_sent") is True
+        _args, add_kwargs = worker.db.messages[-1]
+        assert add_kwargs.get("message_id") == 0
+
+    asyncio.run(main())
+
+
 def test_proactive_prompt_matches_short_reply_and_provenance_rules():
     async def main():
         worker = _worker(101)

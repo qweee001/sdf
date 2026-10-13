@@ -94,6 +94,10 @@ _SIMPLIFIED_PHRASE_PATTERNS = (
     # 台灣人講「吃飯」；「乾」(U+4E7E) 單字在 Big5 是合法繁體，逐字檢查全放行。
     # 收錄三個變體：乾(U+4E7E)飯／幹(U+5E79)飯／干饭（簡體）。
     re.compile(r"乾飯|幹飯|干饭"),
+    # 實測 10-13 小天後「嘴巴說不騷身体很誠實」漏出「身体」（應為「身體」）：
+    # 「体」(U+4F53) 在 Big5 是合法字（單用「体」是古/罕用），逐字檢查放行，
+    # 但「身体/体会/体现/体育」是大陸口語常用詞，台灣人寫「身體/體會/體現/體育」。
+    re.compile(r"身体|体会|体现|体育|集体|具体"),
 )
 # 大陸講法→台灣講法對照（Big5 編得出、逐字簡體檢查過關但仍是大陸講法）。
 # 跟 typo_pairs.txt 同模式，從 app/assets/mainland_tw_terms.txt 讀（錯講=正講），
@@ -4713,6 +4717,7 @@ class AccountWorker:
         live_test_event_id: str | None = None,
         live_test_kind: str | None = None,
         activity_kind: str = "reply",
+        captured_id: list | None = None,
     ) -> bool:
         if len(text) > _MAX_REPLY_CHARS:
             return False
@@ -4797,7 +4802,16 @@ class AccountWorker:
                 await gate.complete(permit, sent=False, detail="activity disabled before send_message RPC")
             return False
         try:
-            await client.send_message(chat_id, text)
+            sent_msg = await client.send_message(chat_id, text)
+            # Telethon 不為「自己發的訊息」觸發 on_message，所以發送方要自己把
+            # TG 訊息 ID 抓回來記進 DB；否則自己那筆是 message_id=0、其他帳號
+            # 收到同一則是真實 TG ID，跨帳號去重鍵不同 → 同一則訊息算成兩則
+            # （實測每則水軍訊息都重複、console 待檢視數灌水）。
+            if captured_id is not None:
+                try:
+                    captured_id.append(int(getattr(sent_msg, "id", 0) or 0))
+                except Exception:
+                    captured_id.append(0)
         except BaseException as exc:
             if permit is not None and gate is not None:
                 await gate.complete(
@@ -4851,8 +4865,9 @@ class AccountWorker:
         live_test_event_id: str | None = None,
         live_test_kind: str | None = None,
     ) -> bool:
+        captured: list[int] = []
         async with self._send_slot():
-            if not await self._send_message_unlocked(
+            ok = await self._send_message_unlocked(
                 chat_id,
                 text,
                 short_delay=short_delay,
@@ -4861,40 +4876,43 @@ class AccountWorker:
                 require_media_enabled=require_media_enabled,
                 live_test_event_id=live_test_event_id,
                 live_test_kind=live_test_kind,
-            ):
-                return False
-            if on_dispatched:
-                on_dispatched()
-            if managed_origin and self.tg_user_id:
-                origin_key = (
-                    int(chat_id),
-                    int(self.tg_user_id),
-                    self._normalized_reply(text),
-                )
-                self.managed_origins[origin_key] = time.time() + 180
-                self.recent_proactive_owners[int(chat_id)] = (
-                    int(self.tg_user_id),
-                    time.time() + 15 * 60,
-                )
-            self.stats[stats_key] += 1
-            await self.db.add_message(
-                self.account_id,
-                chat_id,
-                self.tg_user_id or 0,
-                self.name,
-                "assistant",
-                text,
+                captured_id=captured,
             )
-            # 話題回合：本群 AI 發言計數＋1（真人開題時歸零）
-            if int(chat_id) < 0:
-                self.topic_turn_counts[int(chat_id)] = (
-                    int(self.topic_turn_counts.get(int(chat_id), 0)) + 1
-                )
-            await self.db.touch_activity(
-                self.account_id, chat_id, activity_kind
+        if not ok:
+            return False
+        if on_dispatched:
+            on_dispatched()
+        if managed_origin and self.tg_user_id:
+            origin_key = (
+                int(chat_id),
+                int(self.tg_user_id),
+                self._normalized_reply(text),
             )
-            self._record_sent_emojis(chat_id, text)
-            return True
+            self.managed_origins[origin_key] = time.time() + 180
+            self.recent_proactive_owners[int(chat_id)] = (
+                int(self.tg_user_id),
+                time.time() + 15 * 60,
+            )
+        self.stats[stats_key] += 1
+        await self.db.add_message(
+            self.account_id,
+            chat_id,
+            self.tg_user_id or 0,
+            self.name,
+            "assistant",
+            text,
+            message_id=captured[0] if captured else 0,
+        )
+        # 話題回合：本群 AI 發言計數＋1（真人開題時歸零）
+        if int(chat_id) < 0:
+            self.topic_turn_counts[int(chat_id)] = (
+                int(self.topic_turn_counts.get(int(chat_id), 0)) + 1
+            )
+        await self.db.touch_activity(
+            self.account_id, chat_id, activity_kind
+        )
+        self._record_sent_emojis(chat_id, text)
+        return True
 
     # ---------- 主動發言 ----------
 

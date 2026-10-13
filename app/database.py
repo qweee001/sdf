@@ -53,8 +53,16 @@ class Database:
         parent = os.path.dirname(self.db_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        self._db = await aiosqlite.connect(self.db_path)
+        self._db = await aiosqlite.connect(self.db_path, timeout=30)
         self._db.row_factory = aiosqlite.Row
+        # 三個水軍 worker 共用同一主連線，而 live_test/settings/claim 等路徑用
+        # 獨立連線跑 BEGIN IMMEDIATE 寫鎖。預設 busy_timeout 只有 5s，群組爆量時
+        # 主連線的寫會被獨立連線的寫鎖卡到「database is locked」（實測 19:11 三號
+        # on_message 全炸、proactive 槽位釋放失敗）。WAL 讓讀不擋寫、寫不擋讀，
+        # 加上 30s busy timeout 把短衝突吸收掉。
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA busy_timeout=30000")
+        await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._init_schema()
 
     async def _init_schema(self):
@@ -1271,7 +1279,7 @@ class Database:
         cursor = await self._c.execute(
             "SELECT sender_id, sender_name, role, content, timestamp "
             "FROM messages WHERE account_id = ? AND group_id = ? "
-            "ORDER BY timestamp DESC LIMIT ?",
+            "ORDER BY timestamp DESC, id DESC LIMIT ?",
             (account_id, group_id, limit),
         )
         rows = list(await cursor.fetchall())
