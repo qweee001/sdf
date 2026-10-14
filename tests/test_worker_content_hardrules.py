@@ -59,6 +59,93 @@ def test_big5_shared_char_phrases_are_blocked():
     asyncio.run(main())
 
 
+def test_opencc_char_level_detection():
+    """P1-1：OpenCC s2t 字級判定，抓 Big5 逐字檢查漏掉的簡體字。
+
+    「体」(U+4F53) 在 Big5 是合法字（古/罕用），舊版逐字檢查全放行；
+    OpenCC s2t 會把「体」轉成「體」，字級比對攔下。同樣「天→天、气→氣」
+    這類 Big5 編得出的簡體字也該抓。
+    """
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        # Big5 合法但實為簡體：舊版漏、新版攔
+        assert worker._has_simplified_chars("我嘴巴說不騷身体很誠實") is True
+        assert worker._has_simplified_chars("今天天气真好") is True
+        assert worker._has_simplified_chars("下次有机会我親自下廚") is True
+        # 純繁體（含 s2t 誤殺白名單 吃/台/里/么/游）不誤殺
+        assert worker._has_simplified_chars("我們一起去游泳吧") is False
+        assert worker._has_simplified_chars("我住台中") is False
+        assert worker._has_simplified_chars("好吃") is False
+        assert worker._has_simplified_chars("去旅遊") is False
+        assert worker._has_simplified_chars("我吃飯了") is False
+        assert worker._has_simplified_chars("他是我們里長") is False
+        assert worker._has_simplified_chars("我是家裡的么女") is False
+        # 人名罕用字（Big5 缺收例外）不誤殺
+        assert worker._has_simplified_chars("喆堃") is False
+
+    asyncio.run(main())
+
+
+def test_gender_term_exclusion():
+    """性別詞彙排他（實測 10-14 小小「我前女友」→ 女號講前女友＝性別倒錯）。
+
+    女號禁：前女友/女朋友/我老婆/我太太/老子；男號禁：前男友/我老公。
+    第三方敘述（「她前女友」是講別人）不算穿幫。
+    """
+
+    async def main():
+        # 預設 persona 是女號
+        worker = _worker(sorted(MANAGED)[0])
+        assert worker.persona["gender"] == "女"
+        assert worker._gender_term_violation("我前女友就愛吃甜的") == "前女友"
+        assert worker._gender_term_violation("我女朋友超愛吃甜的") == "女朋友"
+        assert worker._gender_term_violation("我老婆說要回家") == "我老婆"
+        assert worker._gender_term_violation("我太太說要回家") == "我太太"
+        assert worker._gender_term_violation("老子不去了") == "老子"
+        # 女號講「前男友/前任」正確，不攔
+        assert worker._gender_term_violation("我前男友超爛") == ""
+        assert worker._gender_term_violation("我跟前任沒了") == ""
+        # 第三方敘述不攔（講別人不是自認性別）
+        assert worker._gender_term_violation("她前女友又來找她了") == ""
+
+        # 男號
+        male_worker = _worker(sorted(MANAGED)[1])
+        male_worker.persona = dict(male_worker.persona, gender="男")
+        assert male_worker._gender_term_violation("我前男友超愛吃甜的") == "前男友"
+        assert male_worker._gender_term_violation("我老公說要回家") == "我老公"
+        # 男號講「前女友」正確
+        assert male_worker._gender_term_violation("我前女友超愛吃甜的") == ""
+
+    asyncio.run(main())
+
+
+def test_generation_drops_gender_term_reply():
+    """女號回覆含「前女友」→ 重生一次仍違規 → 拒發，drop 原因 gender_term。"""
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker._call_ai = AsyncMock(
+            side_effect=lambda *_a, **_k: "我前女友就愛吃甜的"
+        )
+        event = AsyncMock(
+            sender_id=999,
+            chat_id=-5428680940,
+            id=92,
+            mentioned=False,
+            is_reply=False,
+            reply_to=None,
+            raw_text="你以前談過幾個",
+            media=None,
+        )
+        text = await worker._generate_reply(event)
+        assert text == ""
+        reason = worker._generation_reasons.get(worker._generation_key(event))
+        assert reason == "gender_term"
+
+    asyncio.run(main())
+
+
 def test_taipei_hour_tracks_wall_clock():
     """內部時鐘必須跟著真實台北時間：曾經偏移 0~24 小時，導致 21:48 說出「早安」。"""
 

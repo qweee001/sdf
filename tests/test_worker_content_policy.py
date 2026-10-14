@@ -597,12 +597,15 @@ def test_split_human_burst_falls_back_to_single_when_unsplittable():
     unsplittable = "這是一個沒有標點的長單句測試用例啊"
     assert len(unsplittable) > 16
     assert AccountWorker._split_human_burst(unsplittable) == [unsplittable]
-    over_40 = "一二三四五六七八九十" * 4 + "一二三四"
-    assert len(over_40) > 40
-    assert (
-        AccountWorker._split_human_burst(f"{over_40}。尾巴短訊")
-        == [f"{over_40}。尾巴短訊"]
-    )
+    # 某段超過硬上限（P1-2 後備上限 55）→ 保留原單則：用 56 字元整句（無標點）
+    over_55 = "一二三四五六七八九" * 6 + "一二"
+    assert len(over_55) > 55
+    assert AccountWorker._split_human_burst(over_55) == [over_55]
+    # 切得出多段且各段都不超過硬上限 → 照拆（不再用 40 字一刀切）
+    splittable = "一二三四五六七八九十" * 3 + "。尾巴短訊"
+    assert len("一二三四五六七八九十" * 3) <= 55
+    parts = AccountWorker._split_human_burst(splittable)
+    assert parts == ["一二三四五六七八九十" * 3, "尾巴短訊"]
 
 
 def test_video_topic_reply_is_dropped_if_retry_still_violates_policy():
@@ -638,14 +641,14 @@ def test_send_layer_never_rewrites_text():
 
 
 def test_send_layer_fails_closed_for_text_over_forty_characters():
-    """所有帳號共用發送層；任何繞過生成器的超長文字也不能送出。"""
+    """所有帳號共用發送層；任何繞過生成器的超長文字也不能送出（P1-2 後備上限 55）。"""
     async def main():
         worker = _worker()
         client = _FakeClient()
         worker.tg_client = cast(Any, client)
         worker.is_running = True
 
-        sent = await worker._send_message(-1001, "字" * 41)
+        sent = await worker._send_message(-1001, "字" * 56)
 
         assert sent is False
         assert client.sent == []

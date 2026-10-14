@@ -83,8 +83,9 @@ def test_system_prompt_content():
     assert "繁體中文" in sp
     assert p["city"] in sp
     assert p["name"] in sp
-    assert "每次回覆最多 40 個字元" in sp
-    assert "標點、空格也算" in sp
+    # P1-2：字長改由決策檔位動態決定，不再寫死「最多 40 個字元」
+    assert "字數上限由這次互動決策的長度檔位決定" in sp
+    assert "約 20~55 字元" in sp
     assert "你的固定聊天風格" in sp
     assert p["chat_style"] in sp
     assert "先回應最新消息中的具體內容" in sp
