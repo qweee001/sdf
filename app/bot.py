@@ -900,6 +900,9 @@ class TgControlBot:
         elif action == "acc.persona":
             body, kb = await self._persona_actions_keyboard(arg)
             await event.edit(body[:MSG_LIMIT], buttons=kb)
+        elif action == "acc.master":
+            body, kb = await self._acc_master_toggle(arg)
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "acc.reply":
             body = await self._acc_flag_toggle(arg, "reply_enabled")
             await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
@@ -1059,31 +1062,36 @@ class TgControlBot:
         )
         rep_on = bool(acc and acc.get("reply_enabled", 1))
         pro_on = bool(acc and acc.get("proactive_enabled", 1))
+        both_on = rep_on and pro_on
+        master_txt = "🔕 全部靜音" if both_on else "🔔 全部開啟"
         rows = [
             [
                 cb(
+                    "acc.master:" + account_id, master_txt
+                ),
+                cb(
                     toggle_action + ":" + account_id, toggle_txt
                 ),
+            ],
+            [
                 cb(
                     "acc.persona:" + account_id, "🧬 人設"
                 ),
-            ],
-            [
                 cb(
                     "acc.groups:" + account_id, "📍 群組"
                 ),
+            ],
+            [
                 cb(
                     "priv:" + account_id, "📩 私訊"
                 ),
-            ],
-            [
                 cb("acc.reply:" + account_id,
                    f"💬 回覆：{'開' if rep_on else '關'}"),
                 cb("acc.proactive:" + account_id,
                    f"📣 主動：{'開' if pro_on else '關'}"),
-                cb("acc.logs:" + account_id, "📜 日誌"),
             ],
             [
+                cb("acc.logs:" + account_id, "📜 日誌"),
                 cb(
                     "acc.del:" + account_id, "🗑 刪除"
                 ),
@@ -1533,6 +1541,35 @@ class TgControlBot:
             f"{'✅' if new else '⛔'} {self._acc_label(acc)} {label}開關："
             f"{'開' if new else '關'}（運行中 worker 已即時生效）"
         )
+
+    async def _acc_master_toggle(self, account_id: str) -> tuple[str, object]:
+        """帳號總開關：一鍵把 回覆＋主動 設成同值（全靜音／全開啟），
+        運行中 worker 即時生效、不需重啟。回 (狀態文字, 該帳號操作鍵盤)。"""
+        acc = await self.manager.db.get_account(account_id)
+        if not acc:
+            return f"找不到帳號 {account_id}", await self._home_keyboard()
+        rep = bool(int(acc.get("reply_enabled") or 0))
+        pro = bool(int(acc.get("proactive_enabled") or 0))
+        both_on = rep and pro
+        # 全開（兩者都開）→ 一鍵全靜音；否則 → 一鍵全開啟
+        target = 0 if both_on else 1
+        await self.manager.db.update_account(
+            account_id,
+            reply_enabled=target,
+            proactive_enabled=target,
+        )
+        worker = (getattr(self.manager, "workers", {}) or {}).get(str(account_id))
+        if worker is not None:
+            worker.reply_enabled = bool(target)
+            worker.proactive_enabled = bool(target)
+        on = bool(target)
+        icon = "🔔" if on else "🔕"
+        line = (
+            f"{icon} {self._acc_label(acc)} 總開關：{'全開啟（回覆＋主動）' if on else '全靜音（回覆＋主動都關）'}"
+            "（運行中 worker 已即時生效）"
+        )
+        body, kb = await self._account_actions_keyboard(account_id)
+        return line + "\n──────────────\n" + body, kb
 
     async def _persona_edit(self, account_id: str) -> str:
         """人設安全編輯說明：白名單欄位，密鑰類不會被存進來。"""

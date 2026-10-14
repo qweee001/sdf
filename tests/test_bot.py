@@ -1046,6 +1046,35 @@ def test_account_flag_toggle_updates_worker(monkeypatch):
         loop.close()
 
 
+def test_account_master_toggle_all_off_then_on(monkeypatch):
+    """帳號總開關：全開→一鍵全靜音；再按→一鍵全開啟（db＋worker 即時）。"""
+    mgr = _FakeManager()
+    bot = _bot(monkeypatch, mgr)
+    worker = mgr.workers["a1"]
+    acc = mgr.db.accounts["a1"]
+    acc["reply_enabled"] = 1
+    acc["proactive_enabled"] = 1
+    loop = asyncio.new_event_loop()
+    try:
+        body, kb = loop.run_until_complete(bot._acc_master_toggle("a1"))
+        assert "全靜音" in body
+        assert worker.reply_enabled is False
+        assert worker.proactive_enabled is False
+        assert acc["reply_enabled"] == 0
+        assert acc["proactive_enabled"] == 0
+        # 再按一次：全開
+        body2, _ = loop.run_until_complete(bot._acc_master_toggle("a1"))
+        assert "全開啟" in body2
+        assert worker.reply_enabled is True
+        assert worker.proactive_enabled is True
+        assert acc["reply_enabled"] == 1
+        assert acc["proactive_enabled"] == 1
+        # 帳號操作鍵盤含總開關按鈕
+        _, kb2 = loop.run_until_complete(bot._account_actions_keyboard("a1"))
+        assert "acc.master:a1" in _kb_data(kb2)
+    finally:
+        loop.close()
+
 
 def test_persona_save_whitelist(monkeypatch):
     """#10：人設編輯白名單——密鑰欄位進不來。"""
