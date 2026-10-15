@@ -226,6 +226,41 @@ def kbrows(rows) -> list:
     在序列化時炸 'list' object has no attribute '_bytes'）。"""
     return [types.KeyboardButtonRow(row) for row in rows]
 
+
+async def notrack_balance(key: str, base_url: str = "https://api.notrack.ai/v1",
+                         timeout: float = 20.0) -> float | None:
+    """讀 NoTrack API 的剩餘額度（美元）。
+
+    NoTrack 把餘額放在每個回應的 `x-notrack-balance-usd` header，沒有獨立的
+    /balance 端點——所以發一個最小 chat 請求（1 token）讀 header。失敗回 None
+    （不影響用量頁其餘內容）。key 是 NoTrack 的 sk-notrack-… 格式才有效。
+    用 with_raw_response 拿到原始 httpx Response（openai 2.x 的 ChatCompletion
+    物件本身不帶 headers）。
+    """
+    if not key:
+        return None
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(base_url=base_url.rstrip("/"), api_key=key,
+                             timeout=timeout)
+        try:
+            raw = await client.with_raw_response.chat.completions.create(
+                model="notrack-uncensored",
+                messages=[{"role": "user", "content": "ok"}],
+                max_tokens=1,
+            )
+        finally:
+            await client.close()
+        headers = getattr(raw, "headers", None)
+        if headers is None:
+            return None
+        for k, v in headers.items():
+            if k.lower() == "x-notrack-balance-usd":
+                return float(v)
+        return None
+    except Exception:
+        return None
+
 # 打 / 時的指令下拉（setMyCommands）
 BOT_COMMANDS = [
     types.BotCommand("status", "運行狀態＋24h KPI"),
@@ -1515,6 +1550,21 @@ class TgControlBot:
             for a in data.get("accounts", [])
         )
         lines.append(f"門控暫緩累計：{held}")
+        # NoTrack 額度：主模型走 NoTrack 時顯示剩餘美元（讀 x-notrack-balance-usd）
+        cfg = self.manager.config
+        if "notrack" in str(getattr(cfg, "ai_base_url", "")).lower():
+            bal = await notrack_balance(
+                getattr(cfg, "ai_api_key", "") or "",
+                str(getattr(cfg, "ai_base_url", "")),
+            )
+            if bal is None:
+                lines.append("\n💰 NoTrack 額度：讀取失敗（key 或網路）")
+            else:
+                warn = "⚠️ 快用完了，記得充值" if bal < 0.05 else ""
+                lines.append(
+                    f"\n💰 NoTrack 額度：${bal:.4f}"
+                    + (f"　{warn}" if warn else "")
+                )
         return "\n".join(lines)
 
     # ---------- 每帳號開關／人設編輯／日誌（#10） ----------

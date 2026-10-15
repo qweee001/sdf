@@ -652,6 +652,58 @@ def test_usage_info(monkeypatch):
     assert "門控暫緩" in out
 
 
+def test_notrack_balance_header(monkeypatch):
+    """NoTrack 額度：讀 x-notrack-balance-usd header；無 header/錯誤回 None。"""
+    import unittest.mock as mock
+
+    import app.bot as B
+    import openai as _openai_mod
+
+    class _H:
+        def __init__(self, d):
+            self._d = d
+
+        def get(self, k, d=None):
+            return self._d.get(k, d)
+
+        def items(self):
+            return self._d.items()
+
+    loop = asyncio.new_event_loop()
+
+    def run_balance(raw_headers, side_effect=None):
+        fake_raw = mock.Mock()
+        fake_raw.headers = _H(raw_headers)
+        fake_client = mock.Mock()
+        if side_effect is not None:
+            fake_client.with_raw_response.chat.completions.create = mock.AsyncMock(side_effect=side_effect)
+        else:
+            fake_client.with_raw_response.chat.completions.create = mock.AsyncMock(return_value=fake_raw)
+        fake_client.close = mock.AsyncMock()
+        # openai 是在 notrack_balance 內部 import 的，所以 patch openai 模組本身
+        orig = _openai_mod.AsyncOpenAI
+        _openai_mod.AsyncOpenAI = mock.Mock(return_value=fake_client)
+        try:
+            return loop.run_until_complete(
+                B.notrack_balance("sk-fake", "https://api.notrack.ai/v1")
+            )
+        finally:
+            _openai_mod.AsyncOpenAI = orig
+
+    try:
+        # 有 header → 回 float
+        assert run_balance({"x-notrack-balance-usd": "0.42"}) == 0.42
+        assert run_balance({"x-notrack-balance-usd": "1.00"}) == 1.0
+        # 無 header → None
+        assert run_balance({}) is None
+        # 呼叫拋例外 → None（不炸）
+        assert run_balance({}, side_effect=RuntimeError("boom")) is None
+        # 壞值 → None
+        assert run_balance({"x-notrack-balance-usd": "abc"}) is None
+    finally:
+        loop.close()
+
+
 def test_home_menu_has_model_and_usage(monkeypatch):
     from app.bot import TgControlBot
 
