@@ -101,6 +101,20 @@ _EMOJI_HISTORY_LIMIT = 6
 # 只盯 2-4 字短詞：長到 5 字以上多半是正常句子片段，盯短才不會誤傷。
 _PHRASE_FATIGUE_MIN_REPEAT = 2
 _PHRASE_HISTORY_LIMIT = 8
+# 跨號意象冷卻：任一號用過的核心詞，同群其他號 45 分鐘內避開。
+# 實測「腿軟」是小小講完、RICH／小天後接著抬——worker 私有疲勞記憶防不住。
+_PHRASE_CORE_COOLDOWN_SECONDS = 45 * 60
+_PHRASE_CORE_HISTORY_LIMIT = 24
+_PHRASE_CORE_STOPWORDS = frozenset({
+    "今天", "真的", "可以", "什麼", "一個", "這個", "那個",
+    "自己", "我們", "你們", "他們", "因為", "所以", "但是",
+    "還是", "就是", "不是", "沒有", "還有", "現在", "已經",
+    "不要", "不會", "這樣", "那樣", "怎麼", "然後", "其實",
+    "好像", "應該", "可能", "只是", "如果", "而且", "不過",
+    "雖然", "有點", "一些", "我的", "你的", "他的", "她的",
+})
+_TRAILING_PARTICLE_RE = re.compile(r"[嗎呢啊喔哦啦吧呀嘛了的麼！!？?。，,、\s]+$")
+_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
 
 # 真人「看見但不說」：被 @／直接回覆很少漏接，普通訊息常只是默認
 _SILENT_REPLY_PROBABILITY_DIRECTED = 0.10
@@ -454,6 +468,7 @@ class AccountWorker:
                  failed_reply_claimants: dict[tuple[int, int], set[int]] | None = None,
                  personas: dict | None = None,
                  topic_turn_counts: dict | None = None,
+                 phrase_cores_by_group: dict | None = None,
                  voice_library: Any | None = None,
                  outbound_gate: Any | None = None,
                  reply_enabled: bool = True,
@@ -498,6 +513,10 @@ class AccountWorker:
         self.personas = personas if personas is not None else {}
         # 話題回合計數（群組 → 本回合 AI 已發言數），manager 共享
         self.topic_turn_counts = topic_turn_counts if topic_turn_counts is not None else {}
+        # 跨號核心意象冷卻：群組 → [(core, ts), ...]，manager 注入同一份 dict
+        self.phrase_cores_by_group = (
+            phrase_cores_by_group if phrase_cores_by_group is not None else {}
+        )
         self.on_status_change = on_status_change
         # 指定群組：空集合 = 全部禁止；非空 = 只在這幾個群活動。
         self.selected_groups: set[int] = set(selected_groups or [])
@@ -1991,7 +2010,10 @@ class AccountWorker:
             sender_name = ""
         lines.append(f"最新消息：[{sender_name or '有人'}] {incoming[:60]}")
         if shared_notes:
-            lines.append("本群最近聊過：" + "；".join(shared_notes[:5]))
+            lines.append(
+                "本群最近聊過（背景備忘，別把舊話題拼進當句）："
+                + "；".join(shared_notes[:5])
+            )
         lines.append(time_hint.strip())
         # 動態話題候選：其他人最近 3 則不重複的訊息
         topic_options = []
@@ -3519,7 +3541,12 @@ class AccountWorker:
             shared_notes = []
         if shared_notes:
             shared = "\n".join(f"- {n}" for n in shared_notes[:5])
-            user_message += f"\n本群最近聊過的內容（供接話參考）：\n{shared}"
+            user_message += (
+                "\n本群最近聊過的內容（背景備忘，不是當句要接的話題；"
+                "優先對最新 1–2 則真人句意反應，禁止把幾則前的零散詞硬湊成新梗；"
+                "共享筆記不是你的親身經歷）：\n"
+                f"{shared}"
+            )
         user_message += str(ctx.get("time_hint") or "") if isinstance(ctx, dict) else self._time_hint()
         # ② 原始上下文（上面）＋選中的內容與要求：文字模型照這個生成完整回覆
         if isinstance(decision, dict):
@@ -3528,9 +3555,12 @@ class AccountWorker:
                 user_message += f"\n{directive}"
         if extra_hint:
             user_message += f"\n{extra_hint}"
-        emoji_hint = self._emoji_fatigue_hint(int(event.chat_id or 0))
+        emoji_hint = self._emoji_fatigue_hint(group_id)
         if emoji_hint:
             user_message += f"\n{emoji_hint}"
+        phrase_hint = self._phrase_fatigue_hint(group_id)
+        if phrase_hint:
+            user_message += f"\n{phrase_hint}"
 
         async def call_reply(message: str) -> str:
             if image and self.media_service:
@@ -3608,6 +3638,7 @@ class AccountWorker:
         )
         # 性別詞彙排他（實測：小小「我前女友」）——女號講前女友＝性別倒錯
         gender_violation = self._gender_term_violation(reply)
+        phrase_fatigue = self._phrase_fatigue_hit(group_id, reply)
         if (
             not too_long
             and not format_leak
@@ -3620,6 +3651,7 @@ class AccountWorker:
             and not time_mismatch
             and not place_typo
             and not gender_violation
+            and not phrase_fatigue
         ):
             if image:
                 self.stats["images_understood"] += 1
@@ -3646,6 +3678,8 @@ class AccountWorker:
                 if place_typo
                 else "gender_term"
                 if gender_violation
+                else "phrase_fatigue"
+                if phrase_fatigue
                 else "too_long"
                 if too_long
                 else "near_duplicate"
@@ -3707,6 +3741,11 @@ class AccountWorker:
                 f"上一版講了「{gender_violation}」，但你是{gender_word}生、"
                 "找的是相反性別的對象；換成符合你性別的對象稱謂，其他不要改。"
             )
+        if phrase_fatigue:
+            correction += (
+                f"上一版又把「{phrase_fatigue}」當核心意象；"
+                "換成完全不同的意象或角度，不要再圍繞這個詞寫。"
+            )
         retry_message = (
             f"{user_message}\n"
             f"{correction}"
@@ -3739,6 +3778,7 @@ class AccountWorker:
             retry, expected=self._reply_place_names(event, history)
         )
         retry_gender = self._gender_term_violation(retry)
+        retry_phrase_fatigue = self._phrase_fatigue_hit(group_id, retry)
         if (
             retry_too_long
             or retry_format_leak
@@ -3751,6 +3791,7 @@ class AccountWorker:
             or retry_time_mismatch
             or retry_place_typo
             or retry_gender
+            or retry_phrase_fatigue
         ):
             reason = (
                 "refusal"
@@ -3771,6 +3812,8 @@ class AccountWorker:
                 if retry_place_typo
                 else "gender_term"
                 if retry_gender
+                else "phrase_fatigue"
+                if retry_phrase_fatigue
                 else "too_long"
                 if retry_too_long
                 else "near_duplicate"
@@ -4808,25 +4851,72 @@ class AccountWorker:
             "這次換一個 emoji，或者干脆不要放表情（真人不會每句都掛同一個）"
         )
 
+    @staticmethod
+    def _phrase_core(text: str) -> str:
+        """抽出句子末段 2 字核心意象（去掉語尾），功能詞不記。"""
+        t = _TRAILING_PARTICLE_RE.sub("", str(text or "").replace("\n", " ").strip())
+        runs = _CJK_RUN_RE.findall(t)
+        if not runs:
+            return ""
+        run = runs[-1]
+        if len(run) < 2:
+            return ""
+        core = run[-2:]
+        if core in _PHRASE_CORE_STOPWORDS:
+            return ""
+        return core
+
     def _record_sent_text(self, group_id: int, text: str) -> None:
-        """記住這個群最近發過的句子（詞彙疲勞偵測用）。"""
+        """記住這個群最近發過的句子（詞彙疲勞＋跨號核心冷卻）。"""
         t = str(text or "").replace("\n", " ").strip()
         if not t:
             return
-        bucket = self._recent_texts_by_group.setdefault(int(group_id), [])
+        gid = int(group_id)
+        bucket = self._recent_texts_by_group.setdefault(gid, [])
         bucket.append(t)
         del bucket[:-_PHRASE_HISTORY_LIMIT]
+        core = self._phrase_core(t)
+        if not core:
+            return
+        now = time.time()
+        shared = self.phrase_cores_by_group.setdefault(gid, [])
+        shared[:] = [
+            (c, ts) for c, ts in shared if now - ts < _PHRASE_CORE_COOLDOWN_SECONDS
+        ]
+        for i, (c, _ts) in enumerate(shared):
+            if c == core:
+                shared[i] = (core, now)
+                break
+        else:
+            shared.append((core, now))
+        del shared[:-_PHRASE_CORE_HISTORY_LIMIT]
 
-    def _phrase_fatigue_hint(self, group_id: int) -> str:
-        """同一個短詞（2-4 字）在該群最近幾句當核心意象反覆出鏡時，提示換意象。
+    def _live_shared_cores(self, group_id: int) -> list[str]:
+        """同群冷卻窗內還有效的跨號核心詞（過期的當場清掉）。"""
+        now = time.time()
+        gid = int(group_id)
+        bucket = self.phrase_cores_by_group.get(gid)
+        if not bucket:
+            return []
+        live = [
+            (c, ts) for c, ts in bucket if now - ts < _PHRASE_CORE_COOLDOWN_SECONDS
+        ]
+        if len(live) != len(bucket):
+            bucket[:] = live
+        seen: list[str] = []
+        for c, _ts in live:
+            if c not in seen:
+                seen.append(c)
+        return seen
 
-        實測根因（10-15 群 -1002229799107）：「腿軟」被三號當核心意象連用 5 次、
-        「洗碗」被拖進 2 次——句式都不同、整句去重全部放行，但讀者感受到的
-        是同一個梗被刷了 5 遍。比 emoji 疲勞更隱蔽的機器感。
+    def _fatigued_phrases(self, group_id: int) -> list[tuple[str, int]]:
+        """該群最近句子裡達到疲勞閾值的 2–4 字核心詞，按次數降序。
+
+        hint 與生成後硬擋共用同一份清單，避免提示換意象、送出層卻放行。
         """
         bucket = self._recent_texts_by_group.get(int(group_id)) or []
         if len(bucket) < _PHRASE_FATIGUE_MIN_REPEAT + 1:
-            return ""
+            return []
         # 提取 2-4 字連續漢字段，跨句統計出現次數
         # 用 non-greedy {2,4}? 讓短詞優先匹配（否則貪心匹配會把「腿軟」切成
         # 「到腿軟」，跨句對不齊）。
@@ -4838,18 +4928,53 @@ class AccountWorker:
                 if seg not in seen_in_text:  # 同一句內重複只算一次
                     seen_in_text.add(seg)
                     counts[seg] = counts.get(seg, 0) + 1
-        over = [(seg, n) for seg, n in counts.items() if n >= _PHRASE_FATIGUE_MIN_REPEAT + 1]
-        if not over:
-            return ""
+        over = [
+            (seg, n)
+            for seg, n in counts.items()
+            if n >= _PHRASE_FATIGUE_MIN_REPEAT + 1
+        ]
         over.sort(key=lambda item: (-item[1], item[0]))
-        top_seg, top_count = over[0]
-        others = [s for s, _ in over[1:3]]
-        others_str = ("、" + "、".join(others)) if others else ""
+        return over
+
+    def _phrase_fatigue_hint(self, group_id: int) -> str:
+        """同一個短詞（2-4 字）在該群最近幾句當核心意象反覆出鏡時，提示換意象。
+
+        實測根因（10-15 群 -1002229799107）：「腿軟」被三號當核心意象連用 5 次、
+        「洗碗」被拖進 2 次——句式都不同、整句去重全部放行，但讀者感受到的
+        是同一個梗被刷了 5 遍。比 emoji 疲勞更隱蔽的機器感。
+        """
+        over = self._fatigued_phrases(group_id)
+        shared = self._live_shared_cores(group_id)
+        if not over and not shared:
+            return ""
+        if over:
+            top_seg, top_count = over[0]
+            others = [s for s, _ in over[1:3]]
+            others_str = ("、" + "、".join(others)) if others else ""
+            avoid = "、".join(s for s, _ in over[:2])
+            return (
+                f"你最近在這個群把「{top_seg}」當核心意象用了 {top_count} 次{others_str}，"
+                "真人不會連幾句都在玩同一個梗，這次換一個完全不同的意象或角度，"
+                f"別再圍繞「{avoid}」寫"
+            )
+        listed = "、".join(shared[:3])
         return (
-            f"你最近在這個群把「{top_seg}」當核心意象用了 {top_count} 次{others_str}，"
-            "真人不會連幾句都在玩同一個梗，這次換一個完全不同的意象或角度，"
-            "別再圍繞「" + "、".join(s for s, _ in over[:2]) + "」寫"
+            f"同群其他帳號剛用過「{listed}」，"
+            "短時間內不要再抬同一個核心意象，換完全不同的角度"
         )
+
+    def _phrase_fatigue_hit(self, group_id: int, text: str) -> str:
+        """候選句仍含已疲勞／冷卻中核心詞時回該詞（供 drop／correction），否則空字串。"""
+        body = str(text or "")
+        if not body:
+            return ""
+        for seg, _n in self._fatigued_phrases(group_id):
+            if seg in body:
+                return seg
+        for core in self._live_shared_cores(group_id):
+            if core in body:
+                return core
+        return ""
 
     @staticmethod
     def _proactive_cooldown(group_id: int, slot: int, interval: float) -> float:
@@ -5007,7 +5132,9 @@ class AccountWorker:
         notes_block = ""
         if shared_notes:
             notes_block = (
-                "本群最近聊過的內容（來源未驗證，僅供參考；共享筆記不是你的親身經歷）：\n"
+                "本群最近聊過的內容（背景備忘，不是當句要接的話題；"
+                "禁止把幾則前的零散詞硬湊成新梗；來源未驗證；"
+                "共享筆記不是你的親身經歷）：\n"
                 + "\n".join(f"- {n}" for n in shared_notes[:5])
             )
         # 跨帳號去重：同群其他水軍近 48 小時講過的不要復讀
@@ -5028,7 +5155,8 @@ class AccountWorker:
                     f"一到兩則短訊為主（每則 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元；"
                     "要兩則就用換行分開，像真人想到什麼又補一句），"
                     "不必追問或自我分享，不要編造人設事實以外的經歷，"
-                    "要接得上群組當前話題（食物、天氣、工作、追劇、聚會等），自然口語、"
+                    "優先對最新 1–2 則真人句意反應，不要把幾則前的零散詞硬湊成新梗，"
+                    "自然口語、"
                     "繁體中文、合計 40 字元內（標點、空格也算），結尾不要句號，露骨程度隨你、直接接住上文正在炒的氛圍，不要談群務或硬延伸。"
                     f"\n{context}"
                 )
@@ -5108,6 +5236,14 @@ class AccountWorker:
                 continue
             if self._gender_term_violation(topic):
                 print(f"[{self.name}] proactive-drop: gender term on {topic[:20]!r}", flush=True)
+                continue
+            fatigued = self._phrase_fatigue_hit(group_id, topic)
+            if fatigued:
+                print(
+                    f"[{self.name}] proactive-drop: phrase fatigue {fatigued!r} on {topic[:20]!r}",
+                    flush=True,
+                )
+                already.append(topic[:40])
                 continue
             place_typo = self._place_typo_hint(
                 topic, expected=self._expected_place_names(context, notes_block)

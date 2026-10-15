@@ -44,6 +44,7 @@ class AccountManager:
         self.last_human_activity: dict[int, float] = {}
         self.personas: dict[int, dict] = {}
         self.topic_turn_counts: dict[int, int] = {}
+        self.phrase_cores_by_group: dict[int, list[tuple[str, float]]] = {}
         self.reply_claim_signals: dict[tuple[int, int], asyncio.Event] = {}
         self.failed_reply_claimants: dict[tuple[int, int], set[int]] = {}
         self._status: dict[str, dict] = {}
@@ -269,6 +270,8 @@ class AccountManager:
         # 話題回合計數（群組 → 本回合 AI 發言數），所有水軍 worker 共享
         if getattr(self, "topic_turn_counts", None) is None:
             self.topic_turn_counts = {}
+        if getattr(self, "phrase_cores_by_group", None) is None:
+            self.phrase_cores_by_group = {}
         self.personas = personas
         display_name = str(acc.get("tg_username") or "").strip()
         if persona and display_name and persona.get("name") != display_name:
@@ -315,6 +318,7 @@ class AccountManager:
             failed_reply_claimants=self.failed_reply_claimants,
             personas=self.personas,
             topic_turn_counts=self.topic_turn_counts,
+            phrase_cores_by_group=self.phrase_cores_by_group,
             voice_library=None,
             outbound_gate=(
                 self.live_test.outbound_gate
