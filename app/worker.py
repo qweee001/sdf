@@ -444,6 +444,10 @@ class AccountWorker:
     def _gender_term_violation(self, text):
         return text_guard.gender_term_violation(self.persona, text)
 
+    @staticmethod
+    def _starts_with_gan(text):
+        return text_guard.starts_with_gan(text)
+
     def _place_typo_hint(self, text, *, expected=()):
         return text_guard.place_typo_hint(text, expected=expected)
 
@@ -3662,6 +3666,8 @@ class AccountWorker:
         gender_violation = self._gender_term_violation(reply)
         phrase_fatigue = self._phrase_fatigue_hit(group_id, reply)
         own_echo = self._is_own_echo(reply, self._own_echo_recent(group_id))
+        # 句首「幹」硬擋（實測：小小「幹，光講舌頭就讓我濕了」）——persona 寫了沒用
+        gan_opener = self._starts_with_gan(reply)
         if (
             not too_long
             and not format_leak
@@ -3676,6 +3682,7 @@ class AccountWorker:
             and not gender_violation
             and not phrase_fatigue
             and not own_echo
+            and not gan_opener
         ):
             if image:
                 self.stats["images_understood"] += 1
@@ -3706,6 +3713,8 @@ class AccountWorker:
                 if phrase_fatigue
                 else "own_echo"
                 if own_echo
+                else "gan_opener"
+                if gan_opener
                 else "too_long"
                 if too_long
                 else "near_duplicate"
@@ -3777,6 +3786,11 @@ class AccountWorker:
                 "上一版跟你自己十分鐘內講過的太像（換句式還是同一句）；"
                 "這次直接 drop 重寫，換成完全不同的內容，不要再講濕了／咬／雞雞那套。"
             )
+        if gan_opener:
+            correction += (
+                "上一版用「幹」當句子開頭；不要用幹開頭，要用就放在句中，"
+                "或直接換一句不含句首幹的說法。"
+            )
         retry_message = (
             f"{user_message}\n"
             f"{correction}"
@@ -3811,6 +3825,7 @@ class AccountWorker:
         retry_gender = self._gender_term_violation(retry)
         retry_phrase_fatigue = self._phrase_fatigue_hit(group_id, retry)
         retry_own_echo = self._is_own_echo(retry, self._own_echo_recent(group_id))
+        retry_gan_opener = self._starts_with_gan(retry)
         if (
             retry_too_long
             or retry_format_leak
@@ -3825,6 +3840,7 @@ class AccountWorker:
             or retry_gender
             or retry_phrase_fatigue
             or retry_own_echo
+            or retry_gan_opener
         ):
             reason = (
                 "refusal"
@@ -3849,6 +3865,8 @@ class AccountWorker:
                 if retry_phrase_fatigue
                 else "own_echo"
                 if retry_own_echo
+                else "gan_opener"
+                if retry_gan_opener
                 else "too_long"
                 if retry_too_long
                 else "near_duplicate"
@@ -5309,6 +5327,10 @@ class AccountWorker:
                 continue
             if self._gender_term_violation(topic):
                 print(f"[{self.name}] proactive-drop: gender term on {topic[:20]!r}", flush=True)
+                continue
+            if self._starts_with_gan(topic):
+                print(f"[{self.name}] proactive-drop: gan opener on {topic[:20]!r}", flush=True)
+                already.append(topic[:40])
                 continue
             fatigued = self._phrase_fatigue_hit(group_id, topic)
             if fatigued:

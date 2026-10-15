@@ -2,7 +2,8 @@
 
 涵蓋：繁簡精準守門（OpenCC s2t 兩層）、錯別字提示、地名白名單／形近別字、
 大陸講法指名替代、時段穿幫偵測、性別詞彙排他、拒答／格式殘留偵測、
-群組元話語過濾、真人短訊拆訊、近似重複偵測、影片話題偵測。
+群組元話語過濾、真人短訊拆訊、近似重複偵測、影片話題偵測、
+「幹／干」句首硬擋。
 
 全部為 module-level 純函式：無狀態者直接收 text；人設相關者收 persona dict；
 時段相關者收 taipei_hour（整數時鐘）。worker.py 的 AccountWorker 保留同名
@@ -467,6 +468,26 @@ def has_simplified_chars(text: str) -> bool:
             except UnicodeEncodeError:
                 return True
     return False
+
+# 「幹嘛／幹什麼」是合成詞，不是感嘆開頭；其餘句首「幹／干」都攔。
+# 實測 小小「幹，光講舌頭就讓我濕了」：persona 寫了「不要用幹當開頭」，
+# 模型當建議無視——提示擋不住，必須硬擋。
+_GAN_OPENER_ALLOW = (
+    "幹嘛", "幹什麼", "幹甚么", "幹啥", "幹活", "幹架", "幹勁", "幹部", "幹事", "幹練",
+    "干嘛", "干什么", "干甚么", "干啥", "干活", "干架", "干劲", "干部", "干事", "干练",
+)
+
+
+def starts_with_gan(text: str) -> bool:
+    """句子以「幹／干」起頭則 True（感嘆或動詞當開頭都算）。
+
+    「幹嘛／幹什麼／幹活」這類合成詞放行；句中的幹不攔。
+    """
+    t = unicodedata.normalize("NFKC", text or "").lstrip()
+    if not t or not (t.startswith("幹") or t.startswith("干")):
+        return False
+    return not any(t.startswith(allow) for allow in _GAN_OPENER_ALLOW)
+
 
 def gender_term_violation(persona, text: str) -> str:
     """性別詞彙排他（實測 10-14 小小「我前女友」→ 女號自認男）。

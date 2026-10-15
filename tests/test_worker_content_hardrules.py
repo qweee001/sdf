@@ -365,3 +365,113 @@ def test_generation_drops_reply_when_mainland_term_survives_retry():
         assert reason == "mainland_term"
 
     asyncio.run(main())
+
+
+def test_starts_with_gan_blocks_opener_allows_compounds_and_mid_sentence():
+    """句首「幹／干」硬擋；幹嘛／幹什麼放行；句中幹不攔。
+
+    實測小小「幹，光講舌頭就讓我濕了」：persona 寫了「不要用幹當開頭」，
+    模型當建議無視。
+    """
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        assert worker._starts_with_gan("幹，光講舌頭就讓我濕了") is True
+        assert worker._starts_with_gan("幹光講就濕了") is True
+        assert worker._starts_with_gan("  幹這也太誇張") is True
+        assert worker._starts_with_gan("干，这也太夸张") is True
+        assert worker._starts_with_gan("幹嘛還不去睡") is False
+        assert worker._starts_with_gan("幹什麼啦") is False
+        assert worker._starts_with_gan("感覺不如抱起來幹") is False
+        assert worker._starts_with_gan("那你是被幹的少") is False
+        assert worker._starts_with_gan("") is False
+
+    asyncio.run(main())
+
+
+def test_generation_rewrites_gan_opener():
+    """句首幹 → 帶 correction 重生一次，重生後正常放行。"""
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        replies = iter(["幹，光講舌頭就讓我濕了", "光講就讓我濕了"])
+        worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: next(replies))
+        event = AsyncMock(
+            sender_id=999,
+            chat_id=-5428680940,
+            id=93,
+            mentioned=False,
+            is_reply=False,
+            reply_to=None,
+            raw_text="舌頭那個",
+            media=None,
+        )
+        text = await worker._generate_reply(event)
+        assert text == "光講就讓我濕了"
+        assert worker._call_ai.await_count == 2
+        retry_prompt = worker._call_ai.await_args_list[1].args[1]
+        assert "幹" in retry_prompt and "開頭" in retry_prompt
+
+    asyncio.run(main())
+
+
+def test_generation_drops_reply_when_gan_opener_survives_retry():
+    """兩次都以幹開頭 → 不發送，drop 原因 gan_opener。"""
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker._call_ai = AsyncMock(
+            side_effect=lambda *_a, **_k: "幹，光講舌頭就讓我濕了"
+        )
+        event = AsyncMock(
+            sender_id=999,
+            chat_id=-5428680940,
+            id=94,
+            mentioned=False,
+            is_reply=False,
+            reply_to=None,
+            raw_text="舌頭那個",
+            media=None,
+        )
+        text = await worker._generate_reply(event)
+        assert text == ""
+        reason = worker._generation_reasons.get(worker._generation_key(event))
+        assert reason == "gan_opener"
+
+    asyncio.run(main())
+
+
+def test_proactive_drops_gan_opener():
+    """主動發言句首幹 → drop 後換一句。"""
+
+    async def main():
+        import time
+
+        worker = _worker(sorted(MANAGED)[0])
+
+        class _TopicDB:
+            async def get_group_messages(self, group_id, limit=100):
+                return [
+                    {
+                        "sender_name": "風口浪尖",
+                        "sender_id": 5,
+                        "role": "user",
+                        "content": "今晚有人嗎",
+                        "timestamp": time.time(),
+                    }
+                ]
+
+            async def get_group_shared_notes(self, group_id, account_id, limit=10):
+                return []
+
+            async def recent_bot_texts_by_group(self, group_id):
+                return []
+
+        worker.db = _TopicDB()
+        replies = iter(["幹，今晚好想被幹", "今晚想出門晃晃"])
+        worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: next(replies))
+        topic = await worker._generate_context_topic(-5428680940)
+        assert topic == "今晚想出門晃晃"
+        assert worker._call_ai.await_count == 2
+
+    asyncio.run(main())
