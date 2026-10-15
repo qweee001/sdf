@@ -301,7 +301,7 @@ def load_settings() -> Settings:
         water_cross_talk_probability=(
             1.0
             if acceptance_test_mode
-            else _float("WATER_CROSS_TALK_PROBABILITY", 0.65)
+            else _float("WATER_CROSS_TALK_PROBABILITY", 0.2)
         ),
         proactive_enabled=_bool("PROACTIVE_ENABLED", True),
         proactive_max_per_day=_int("PROACTIVE_MAX_PER_DAY", 4),

@@ -487,6 +487,38 @@ def test_unapproved_model_is_rejected_before_budget_or_api_call():
     asyncio.run(main())
 
 
+def test_agnes_vision_model_is_approved_for_understand():
+    """VISION_MODEL=agnes-3.0-flash 不得被白名單靜默吞掉。"""
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+        service.config.vision_model = "agnes-3.0-flash"
+        text = await service.understand_image(
+            "a1", _image_bytes(), "image/png", "只描述圖片", "使用者傳來的照片"
+        )
+        assert text == "照片裡是一杯咖啡"
+        kwargs = client.chat.completions.create.await_args.kwargs
+        assert kwargs["model"] == "agnes-3.0-flash"
+        assert db.calls[0][0][1:3] == ("vision", 0.10)
+
+    asyncio.run(main())
+
+
+def test_unknown_vision_model_is_still_rejected():
+    async def main():
+        db = _DB()
+        service, client = _service(db=db)
+        service.config.vision_model = "totally-unknown-vision"
+        with pytest.raises(ValueError, match="未核准"):
+            await service.understand_image(
+                "a1", _image_bytes(), "image/png", "只描述圖片", "使用者傳來的照片"
+            )
+        assert db.calls == []
+        client.chat.completions.create.assert_not_awaited()
+
+    asyncio.run(main())
+
+
 def test_image_model_roles_cannot_be_reversed_or_duplicated():
     async def main():
         for primary, fallback in [

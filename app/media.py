@@ -15,6 +15,14 @@ from PIL import Image, ImageOps
 
 
 APPROVED_VISION_MODEL = "gemini-3.5-flash-lite"
+# 生產 VISION_MODEL 可能是 agnes-3.0-flash；舊白名單只認 gemini，
+# understand_image 在 _reserve 靜默 raise「未核准」→ 群圖 images_seen 有進
+# 也認不出。識別要放行這幾個，生成（image/video）維持原白名單。
+APPROVED_VISION_MODELS = frozenset({
+    "gemini-3.5-flash-lite",
+    "agnes-3.0-flash",
+    "qwen3.8-27b-uncensored",
+})
 
 
 @dataclass(frozen=True)
@@ -96,7 +104,12 @@ class OrcaMediaService:
             return False
         field, expected_model, reserve_usd = self._MODEL_BUDGETS[kind]
         configured_model = str(getattr(self.config, field, ""))
-        if configured_model != expected_model:
+        if kind == "vision":
+            if configured_model not in APPROVED_VISION_MODELS:
+                raise ValueError(
+                    f"未核准的 {kind} 模型：{configured_model or '<empty>'}"
+                )
+        elif configured_model != expected_model:
             raise ValueError(
                 f"未核准的 {kind} 模型：{configured_model or '<empty>'}"
             )

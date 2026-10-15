@@ -30,7 +30,7 @@ _BURST_PAUSE_SECONDS = (0.8, 3.5)
 # 每個決策檔位的硬上限（校驗用）。one 最嚴、standard 最寬。
 _DECISION_LENGTH_GUIDE = {
     "one": "一句短話（14 字元內）",
-    "two": "兩則短訊（合計 40 字元內）",
+    "two": "兩句合成一則（合計 40 字元內）",
     "standard": "一句正常長度的話（20~55 字元）",
 }
 _DECISION_LENGTH_CAPS = {"one": 14, "two": 40, "standard": 55}
@@ -102,7 +102,13 @@ except Exception:  # pragma: no cover - 初始化失敗等同缺套件
 #     （他/她/那/這/誰/哪/你/其）＝講別人，放行；前面是「我」或句首＝自稱，攔。
 #   例：「我前女友」攔、「她前女友又來找她了」放行。
 _GENDER_SELF_TERMS = {
-    "女": ("我老婆", "我太太", "老子"),
+    "女": (
+        "我老婆", "我太太", "老子",
+        "我雞雞", "我的雞雞", "割我雞雞", "割我的雞雞", "想割我雞雞",
+        "我睪丸", "我的睪丸", "我老二", "我的老二",
+        "我屌", "我的屌", "我大鵰", "我小弟弟", "本屌",
+        "割我老二", "割我鳥", "割我的鳥", "割我屌",
+    ),
     "男": ("我老公",),
 }
 # 對象詞＋第三方代名詞前綴（命中前綴＝講別人，不攔）
@@ -570,38 +576,62 @@ def may_mention_group_meta(text: str) -> bool:
     )
 
 def split_human_burst(text: str) -> list[str]:
-    """把過長的回覆拆成真人式短訊連發（2~3 則短訊接連發出）。
+    """一律合成一則發送。
 
-    模型仍寫長句時按句末標點切；切不出 ≥2 段、或任何一段超過硬上限
-    就保留原單則（後面的長度檢查照樣把關）。
+    秒連發（同秒兩氣泡）是最容易露出 AI 感的地方；模型若寫出換行或
+    兩句，送訊層併成一則，不再拆成 burst。
     """
     t = str(text or "").strip()
     if not t:
         return []
-    strip_chars = " ，,。．!?！？;；~～… "
-    # 真人一則一句：有換行就按行拆，別把兩行塞進同一則氣泡
-    if "\n" in t:
-        parts = [p.strip(strip_chars) for p in t.split("\n")]
-        parts = [p for p in parts if p]
-        if len(parts) >= 2:
-            return parts[:_MAX_BURST_PARTS]
-    if len(t) <= _HUMAN_LINE_MAX + 2:
-        return [t]
-    parts = [
-        p.strip(strip_chars)
-        for p in re.split(r"[。．！!？?；;\n]+", t)
-        if p.strip(strip_chars)
-    ]
-    if len(parts) < 2:
-        parts = [
-            p.strip(strip_chars)
-            for p in re.split(r"[，,、]+", t)
-            if p.strip(strip_chars)
-        ]
-    parts = [p for p in parts if p]
-    if len(parts) < 2 or any(len(p) > _MAX_REPLY_CHARS_HARD for p in parts):
-        return [t]
-    return parts[:_MAX_BURST_PARTS]
+    t = re.sub(r"[\r\n]+", " ", t)
+    t = re.sub(r" {2,}", " ", t).strip()
+    return [t] if t else []
+
+_OWN_ECHO_STRIP_RE = re.compile(r"[幹干，,。．!！?？\s~～…、；;：:「」『』（）()]+")
+_OWN_ECHO_HEAD_STOP = frozenset({
+    "今天", "真的", "可以", "什麼", "這個", "那個", "不是", "沒有",
+    "還是", "就是", "自己", "我們", "你們", "現在", "已經", "一下",
+})
+_OWN_ECHO_RATIO = 0.68
+_OWN_ECHO_MIN_KEY_LEN = 4
+
+
+def own_echo_key(text: str) -> str:
+    """同號近義複讀用：去掉「幹／標點／空格」後的核心字串。"""
+    normalized = unicodedata.normalize("NFKC", text or "").casefold()
+    return _OWN_ECHO_STRIP_RE.sub("", normalized)
+
+
+def is_own_echo(text: str, recent: list[str]) -> bool:
+    """同號 10 分鐘內近義複讀：正規化後相同、包含、書擋（光講…濕了）或高相似。
+
+    提示擋不住「幹，光講舌頭就讓我濕了」→「幹光講就濕了」這種換句式複讀。
+    """
+    key = own_echo_key(text)
+    if len(key) < _OWN_ECHO_MIN_KEY_LEN:
+        return False
+    for item in recent:
+        prev = own_echo_key(item)
+        if len(prev) < _OWN_ECHO_MIN_KEY_LEN:
+            continue
+        if key == prev:
+            return True
+        if key in prev or prev in key:
+            return True
+        short, long_ = (key, prev) if len(key) <= len(prev) else (prev, key)
+        head, tail = short[:2], short[-2:]
+        if head not in _OWN_ECHO_HEAD_STOP:
+            i = long_.find(head)
+            j = long_.rfind(tail)
+            if i >= 0 and j >= i + 2:
+                ratio = difflib.SequenceMatcher(None, key, prev).ratio()
+                if ratio >= 0.5:
+                    return True
+        if difflib.SequenceMatcher(None, key, prev).ratio() >= _OWN_ECHO_RATIO:
+            return True
+    return False
+
 
 def is_near_duplicate(text: str, recent: list[str]) -> bool:
     candidate = normalized_reply(text)

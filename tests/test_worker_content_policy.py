@@ -561,51 +561,45 @@ def test_normal_text_is_not_blocked():
 
 
 def test_split_human_burst_keeps_short_lines_single():
-    """真人節奏：6~16 字的短訊不拆，保持單則發送。"""
+    """一律合成一則：短訊不拆。"""
     assert AccountWorker._split_human_burst("兜兜我硬了") == ["兜兜我硬了"]
     assert AccountWorker._split_human_burst("你的奶大不大？") == ["你的奶大不大？"]
     assert AccountWorker._split_human_burst("") == []
 
 
-def test_split_human_burst_splits_newlines_even_when_short():
-    """一則兩行＝機器的破綻：總長再短也要按行拆成兩則連發。"""
+def test_split_human_burst_merges_newlines_into_one():
+    """秒連發是 AI 感主因：換行兩句合成一則，不再拆兩氣泡。"""
     parts = AccountWorker._split_human_burst("早安餓死了\n士林那家滷肉飯推嗎🤤")
-    assert parts == ["早安餓死了", "士林那家滷肉飯推嗎🤤"]
-    # 多行超過三行時照樣只取前三則
+    assert parts == ["早安餓死了 士林那家滷肉飯推嗎🤤"]
     parts = AccountWorker._split_human_burst("第一行\n第二行\n第三行\n第四行")
-    assert parts == ["第一行", "第二行", "第三行"]
+    assert parts == ["第一行 第二行 第三行 第四行"]
 
 
-def test_split_human_burst_splits_long_reply_into_short_lines():
-    """長回覆按句末標點拆成 2~3 則短訊連發。"""
+def test_split_human_burst_keeps_punctuated_reply_single():
+    """長回覆也不拆成連發。"""
     parts = AccountWorker._split_human_burst("好新的藉口，這話題太露骨了，換個安全的聊吧")
-    assert parts == ["好新的藉口", "這話題太露骨了", "換個安全的聊吧"]
-    assert all(len(p) <= 40 for p in parts)
-
+    assert parts == ["好新的藉口，這話題太露骨了，換個安全的聊吧"]
     parts = AccountWorker._split_human_burst("今天穿那件會透的出門了。有點小刺激")
-    assert parts == ["今天穿那件會透的出門了", "有點小刺激"]
+    assert parts == ["今天穿那件會透的出門了。有點小刺激"]
 
 
-def test_split_human_burst_caps_at_three_parts():
-    """最多 3 則：第 4 段被丟棄，不無限連發。"""
+def test_split_human_burst_never_splits_into_multiple_bubbles():
+    """句號切開也不再變成多則。"""
     parts = AccountWorker._split_human_burst("第一句短訊。第二句短訊。第三句短訊。第四句短訊")
-    assert len(parts) == 3
+    assert parts == ["第一句短訊。第二句短訊。第三句短訊。第四句短訊"]
 
 
 def test_split_human_burst_falls_back_to_single_when_unsplittable():
-    """切不出多段（無標點長單句）或某段超硬上限時，保留原單則。"""
+    """無標點長單句仍是單則。"""
     unsplittable = "這是一個沒有標點的長單句測試用例啊"
     assert len(unsplittable) > 16
     assert AccountWorker._split_human_burst(unsplittable) == [unsplittable]
-    # 某段超過硬上限（P1-2 後備上限 55）→ 保留原單則：用 56 字元整句（無標點）
     over_55 = "一二三四五六七八九" * 6 + "一二"
     assert len(over_55) > 55
     assert AccountWorker._split_human_burst(over_55) == [over_55]
-    # 切得出多段且各段都不超過硬上限 → 照拆（不再用 40 字一刀切）
     splittable = "一二三四五六七八九十" * 3 + "。尾巴短訊"
-    assert len("一二三四五六七八九十" * 3) <= 55
     parts = AccountWorker._split_human_burst(splittable)
-    assert parts == ["一二三四五六七八九十" * 3, "尾巴短訊"]
+    assert parts == [splittable]
 
 
 def test_video_topic_reply_is_dropped_if_retry_still_violates_policy():

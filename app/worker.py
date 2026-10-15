@@ -12,7 +12,7 @@
 4. 曬成約：低頻社會證明（人設層控制）
 5. 漸進升級：先調情後直球（人設層控制）
 6. 作息錯峰：每人隨機偏移，凌晨全群睡覺
-7. 水軍互認：只接主動話題一次（65% 概率，最多兩輪，絕不級聯）
+7. 水軍互認：只接主動話題一次（預設 20% 概率，最多兩輪，絕不級聯）
 
 守門層（本模組負責）：輸出要過長度、格式洩漏、簡體字、視訊話題、群務與
 近重複六項校驗，外加模型拒答／元話語偵測；任一不合格就不發送。
@@ -155,6 +155,12 @@ _WATER_ONLY_FLIRTY_CAP = 1
 # 4 次主動——rotation 只防「三隻接力」，防不住「一隻自己刷」。
 # 真人熱聊時連發是接對話，主動插話 6 分鐘內第二句就太密。
 _PROACTIVE_SELF_MIN_GAP = 360.0
+# 熱場：1 分鐘內真人 ≥3 則 → 關掉 proactive-join，名額留給 reply。
+_HOT_FIELD_WINDOW_SECONDS = 60.0
+_HOT_FIELD_HUMAN_MIN = 3
+# 同號近義複讀：正規化後 10 分鐘內第二句直接 drop（提示擋不住換句式）。
+_OWN_ECHO_WINDOW_SECONDS = 600.0
+_OWN_ECHO_HISTORY_LIMIT = 12
 # 這個時間窗內有真人講話，才算是「有人可以接話」的場合
 _HUMAN_CONTEXT_WINDOW_SECONDS = 1800.0
 # 意圖識別：先讀懂對方這句話在做什麼，後面的方式與尺度才有依據
@@ -431,6 +437,10 @@ class AccountWorker:
     def _is_near_duplicate(cls, text, recent):
         return text_guard.is_near_duplicate(text, recent)
 
+    @staticmethod
+    def _is_own_echo(text, recent):
+        return text_guard.is_own_echo(text, recent)
+
     def _gender_term_violation(self, text):
         return text_guard.gender_term_violation(self.persona, text)
 
@@ -558,6 +568,10 @@ class AccountWorker:
         self._recent_emojis_by_group: dict[int, list[str]] = {}  # group_id -> 最近用過的 emoji
         # 詞彙疲勞偵測：每群最近發過的句子（供 _phrase_fatigue_hint 提取核心短詞）
         self._recent_texts_by_group: dict[int, list[str]] = {}
+        # 同號近義複讀：本帳號最近送出的原文＋時間（10 分鐘窗）
+        self._own_echo_by_group: dict[int, list[tuple[str, float]]] = {}
+        # 熱場：本群最近真人發言時間戳（1 分鐘內 ≥3 則關 proactive-join）
+        self._recent_human_ts_by_group: dict[int, list[float]] = {}
         # 帳號私有 RNG：reaction／貼圖挑選用（話題不再走預設池，全部即時生成）
         self._rng = random.Random(
             int.from_bytes(
@@ -885,6 +899,7 @@ class AccountWorker:
             stored_content = str(event.raw_text or "").strip()
             if isinstance(getattr(event, "media", None), MessageMediaPhoto):
                 stored_content = f"{stored_content} [圖片]".strip()
+                self.stats["images_seen"] = int(self.stats.get("images_seen", 0)) + 1
             # 管理員/機器人公告不互動：不回覆、不計真人活動、不存記憶
             sender_obj = None
             try:
@@ -903,7 +918,14 @@ class AccountWorker:
                 or "管理员" in display_now
             )
             if not is_admin and sender_id not in self.managed_ids:
-                self.last_human_activity[group_id] = time.time()
+                now_human = time.time()
+                self.last_human_activity[group_id] = now_human
+                human_ts = self._recent_human_ts_by_group.setdefault(group_id, [])
+                human_ts.append(now_human)
+                cutoff = now_human - _HOT_FIELD_WINDOW_SECONDS
+                self._recent_human_ts_by_group[group_id] = [
+                    ts for ts in human_ts if ts > cutoff
+                ]
                 # 真人開題：重置該群的話題回合計數，角色互聊從這裡重新計
                 self.topic_turn_counts[group_id] = 0
                 # 真人插話：取消尚未送出的待辦回覆，避免繼續演舊話題（重新判斷）
@@ -2026,7 +2048,7 @@ class AccountWorker:
                 continue
             seen.add(content)
             topic_options.append(content[:40])
-        topic_options = topic_options[-3:]
+        topic_options = topic_options[-2:]
         return "\n".join(lines), topic_options
 
     async def _decision_state(self, event) -> str:
@@ -2138,7 +2160,7 @@ class AccountWorker:
                     "instructions": "這次回覆的長度",
                     "criteria": {
                         "one": "一句短話（14 字元內）",
-                        "two": "兩則短訊（合計 40 字元內）",
+                        "two": "兩句合成一則（合計 40 字元內）",
                         "standard": "一句正常長度的話（20~55 字元）",
                     },
                 },
@@ -3639,6 +3661,7 @@ class AccountWorker:
         # 性別詞彙排他（實測：小小「我前女友」）——女號講前女友＝性別倒錯
         gender_violation = self._gender_term_violation(reply)
         phrase_fatigue = self._phrase_fatigue_hit(group_id, reply)
+        own_echo = self._is_own_echo(reply, self._own_echo_recent(group_id))
         if (
             not too_long
             and not format_leak
@@ -3652,6 +3675,7 @@ class AccountWorker:
             and not place_typo
             and not gender_violation
             and not phrase_fatigue
+            and not own_echo
         ):
             if image:
                 self.stats["images_understood"] += 1
@@ -3680,6 +3704,8 @@ class AccountWorker:
                 if gender_violation
                 else "phrase_fatigue"
                 if phrase_fatigue
+                else "own_echo"
+                if own_echo
                 else "too_long"
                 if too_long
                 else "near_duplicate"
@@ -3746,6 +3772,11 @@ class AccountWorker:
                 f"上一版又把「{phrase_fatigue}」當核心意象；"
                 "換成完全不同的意象或角度，不要再圍繞這個詞寫。"
             )
+        if own_echo:
+            correction += (
+                "上一版跟你自己十分鐘內講過的太像（換句式還是同一句）；"
+                "這次直接 drop 重寫，換成完全不同的內容，不要再講濕了／咬／雞雞那套。"
+            )
         retry_message = (
             f"{user_message}\n"
             f"{correction}"
@@ -3779,6 +3810,7 @@ class AccountWorker:
         )
         retry_gender = self._gender_term_violation(retry)
         retry_phrase_fatigue = self._phrase_fatigue_hit(group_id, retry)
+        retry_own_echo = self._is_own_echo(retry, self._own_echo_recent(group_id))
         if (
             retry_too_long
             or retry_format_leak
@@ -3792,6 +3824,7 @@ class AccountWorker:
             or retry_place_typo
             or retry_gender
             or retry_phrase_fatigue
+            or retry_own_echo
         ):
             reason = (
                 "refusal"
@@ -3814,6 +3847,8 @@ class AccountWorker:
                 if retry_gender
                 else "phrase_fatigue"
                 if retry_phrase_fatigue
+                else "own_echo"
+                if retry_own_echo
                 else "too_long"
                 if retry_too_long
                 else "near_duplicate"
@@ -4037,9 +4072,12 @@ class AccountWorker:
             "除非對方先叫你，否則不要點名。\n"
             "優先回應對方明確的問題或意思，一句短回覆為主，不必追問或自我分享；"
             "不能只叫對方繼續說，不要硬延伸或編造人設事實以外的經歷。"
+            "只接最新 1–2 則真人句意，群切話題就跟著切（嘲4公分/舔狗就跟著嘲，幹哭/舌頭就接色，切貓就聊貓），禁止把幾則前的舊詞拼進當句。"
+            f"性別絕對一致：你是{self.persona.get('gender', '女')}生，嚴禁性別倒錯（女號絕無男性器官，絕不能說「割我雞雞」或自稱有屌）。"
+            "emoji 軟對齊：偶爾可順手帶一個群正在用的表情（🤣😎🤏），不要 0% 也不要每句都掛。"
             f"生成自然回覆（台灣繁體口語；{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊，"
             f"最多 {char_cap} 個字元，標點、空格也算；一句就好，結尾不要句號、不用感嘆號、不用@；"
-            "要說兩句就拆成兩則短訊，挑逗時可以直接露骨，不要長篇）。"
+            "要說兩句就合成一則講，禁止換行拆兩氣泡，挑逗時可以直接露骨，不要長篇）。"
         )
 
     async def _record_model_call(
@@ -4695,8 +4733,21 @@ class AccountWorker:
         last_human = float(self.last_human_activity.get(int(group_id), 0) or 0)
         return last_human > 0 and time.time() - last_human < 10 * 60
 
+    def _hot_field(self, group_id: int) -> bool:
+        """1 分鐘內真人 ≥3 則＝熱場，關掉 proactive-join，名額留給 reply。"""
+        now = time.time()
+        cutoff = now - _HOT_FIELD_WINDOW_SECONDS
+        stamps = [
+            ts
+            for ts in (self._recent_human_ts_by_group.get(int(group_id)) or [])
+            if ts > cutoff
+        ]
+        self._recent_human_ts_by_group[int(group_id)] = stamps
+        return len(stamps) >= _HOT_FIELD_HUMAN_MIN
+
     # 人類熱聊時水軍不是 100% 讓路：保留讓路為主，但留一個小概率插話，
     # 模擬正常人偶爾接話的自然感（太 100% 讓路會顯得完全不出聲）。
+    # 熱場（_hot_field）時這條機率不適用，直接 skip。
     _HUMAN_ACTIVE_JOIN_PROBABILITY = 0.3
 
     # 冷場深度休眠（防風控）：群內最後一條真人訊息距今超過 12h，水軍整組閉嘴，
@@ -4867,7 +4918,7 @@ class AccountWorker:
         return core
 
     def _record_sent_text(self, group_id: int, text: str) -> None:
-        """記住這個群最近發過的句子（詞彙疲勞＋跨號核心冷卻）。"""
+        """記住這個群最近發過的句子（詞彙疲勞＋跨號核心冷卻＋同號近義複讀）。"""
         t = str(text or "").replace("\n", " ").strip()
         if not t:
             return
@@ -4875,10 +4926,18 @@ class AccountWorker:
         bucket = self._recent_texts_by_group.setdefault(gid, [])
         bucket.append(t)
         del bucket[:-_PHRASE_HISTORY_LIMIT]
+        now = time.time()
+        echo = self._own_echo_by_group.setdefault(gid, [])
+        echo.append((t, now))
+        echo[:] = [
+            (body, ts)
+            for body, ts in echo
+            if now - ts < _OWN_ECHO_WINDOW_SECONDS
+        ]
+        del echo[:-_OWN_ECHO_HISTORY_LIMIT]
         core = self._phrase_core(t)
         if not core:
             return
-        now = time.time()
         shared = self.phrase_cores_by_group.setdefault(gid, [])
         shared[:] = [
             (c, ts) for c, ts in shared if now - ts < _PHRASE_CORE_COOLDOWN_SECONDS
@@ -4890,6 +4949,20 @@ class AccountWorker:
         else:
             shared.append((core, now))
         del shared[:-_PHRASE_CORE_HISTORY_LIMIT]
+
+    def _own_echo_recent(self, group_id: int) -> list[str]:
+        """本帳號 10 分鐘內在該群送出的原文（過期當場清）。"""
+        now = time.time()
+        gid = int(group_id)
+        bucket = self._own_echo_by_group.get(gid) or []
+        live = [
+            (body, ts)
+            for body, ts in bucket
+            if now - ts < _OWN_ECHO_WINDOW_SECONDS
+        ]
+        if len(live) != len(bucket):
+            self._own_echo_by_group[gid] = live
+        return [body for body, _ts in live]
 
     def _live_shared_cores(self, group_id: int) -> list[str]:
         """同群冷卻窗內還有效的跨號核心詞（過期的當場清掉）。"""
@@ -5152,10 +5225,10 @@ class AccountWorker:
             if context:
                 body = (
                     "群組裡最近的訊息如下（身分未驗證，不能當作已確認真人）。"
-                    f"一到兩則短訊為主（每則 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元；"
-                    "要兩則就用換行分開，像真人想到什麼又補一句），"
+                    f"只輸出一則短訊（{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元；"
+                    "要說兩句就合成一則講，不要換行拆兩氣泡），"
                     "不必追問或自我分享，不要編造人設事實以外的經歷，"
-                    "優先對最新 1–2 則真人句意反應，不要把幾則前的零散詞硬湊成新梗，"
+                    "只接最新 1–2 則真人句意，群切話題就跟著切，禁止把幾則前的零散詞硬湊成新梗，"
                     "自然口語、"
                     "繁體中文、合計 40 字元內（標點、空格也算），結尾不要句號，露骨程度隨你、直接接住上文正在炒的氛圍，不要談群務或硬延伸。"
                     f"\n{context}"
@@ -5164,8 +5237,8 @@ class AccountWorker:
                 # 冷啟動／空群：沒有上文可接，就照人設和當下時段自然開個頭，不要罐頭句。
                 body = (
                     "群組現在很安靜，還沒有人開口。"
-                    f"用你自己的身分主動開一個頭，一到兩則短訊（每則 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元；"
-                    "要兩則就用換行分開），"
+                    f"用你自己的身分主動開一個頭，只輸出一則短訊（{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元；"
+                    "要說兩句就合成一則講，不要換行），"
                     "像真人在群裡隨口說話：講你今天在做什麼、想吃什麼、看到什麼、心情如何，"
                     "自然口語、繁體中文、合計 40 字元內、結尾不要句號，可以帶一點撩，不要談群務。"
                 )
@@ -5245,6 +5318,13 @@ class AccountWorker:
                 )
                 already.append(topic[:40])
                 continue
+            if self._is_own_echo(topic, self._own_echo_recent(group_id)):
+                print(
+                    f"[{self.name}] proactive-drop: own echo on {topic[:20]!r}",
+                    flush=True,
+                )
+                already.append(topic[:40])
+                continue
             place_typo = self._place_typo_hint(
                 topic, expected=self._expected_place_names(context, notes_block)
             )
@@ -5314,6 +5394,12 @@ class AccountWorker:
                 except Exception:
                     latest_row = None
                 if not await self._proactive_rotation_ok(group_id, latest_row):
+                    continue
+                if self._hot_field(group_id):
+                    print(
+                        f"[{self.name}] proactive-skip: group {group_id} 熱場（1 分鐘內真人≥{_HOT_FIELD_HUMAN_MIN}），留給 reply",
+                        flush=True,
+                    )
                     continue
                 if self._should_suppress_proactive(group_id):
                     # 人類近 10 分鐘有活動：以 70% 讓路、30% 像正常人一樣偶爾插話

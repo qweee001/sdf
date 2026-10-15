@@ -31,7 +31,7 @@ def test_defaults_present():
     assert s.memory_ttl_hours == 24
     assert s.min_typing_delay < s.max_typing_delay
     assert s.proactive_max_per_day >= 1
-    assert s.water_cross_talk_probability == 0.65
+    assert s.water_cross_talk_probability == 0.2
     assert s.proactive_loop_min_seconds == 240
     assert s.proactive_loop_max_seconds == 720
     assert s.acceptance_test_mode is False
