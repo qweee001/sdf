@@ -1128,6 +1128,50 @@ def test_account_master_toggle_all_off_then_on(monkeypatch):
         loop.close()
 
 
+def test_global_master_toggle_home_menu(monkeypatch):
+    """全局總開關（主選單）：一鍵切換所有帳號 reply+proactive。"""
+    mgr = _FakeManager()
+    bot = _bot(monkeypatch, mgr)
+    worker = mgr.workers["a1"]
+    acc = mgr.db.accounts["a1"]
+    acc["reply_enabled"] = 1
+    acc["proactive_enabled"] = 1
+    # list_accounts 要回帶 reply/proactive 欄位（_acc_master_all_toggle 用它判斷）
+    async def _list_accs():
+        return [{
+            "id": "a1", "name": "台北-小小",
+            "reply_enabled": acc["reply_enabled"],
+            "proactive_enabled": acc["proactive_enabled"],
+        }]
+    mgr.db.list_accounts = _list_accs
+    loop = asyncio.new_event_loop()
+    try:
+        # 主選單鍵盤含全局總開關按鈕
+        kb = loop.run_until_complete(bot._home_keyboard())
+        data = _kb_data(kb)
+        assert "acc.master.all" in data
+
+        # 全開→按→全靜音
+        body, kb2 = loop.run_until_complete(bot._acc_master_all_toggle())
+        assert "全靜音" in body
+        assert worker.reply_enabled is False
+        assert worker.proactive_enabled is False
+        assert acc["reply_enabled"] == 0
+        assert acc["proactive_enabled"] == 0
+        # 回主選單
+        assert "acc.master.all" in _kb_data(kb2)
+
+        # 再按→全開啟
+        body2, _ = loop.run_until_complete(bot._acc_master_all_toggle())
+        assert "全開啟" in body2
+        assert worker.reply_enabled is True
+        assert worker.proactive_enabled is True
+        assert acc["reply_enabled"] == 1
+        assert acc["proactive_enabled"] == 1
+    finally:
+        loop.close()
+
+
 def test_persona_save_whitelist(monkeypatch):
     """#10：人設編輯白名單——密鑰欄位進不來。"""
     import json as _json

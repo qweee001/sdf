@@ -938,6 +938,9 @@ class TgControlBot:
         elif action == "acc.master":
             body, kb = await self._acc_master_toggle(arg)
             await event.edit(body[:MSG_LIMIT], buttons=kb)
+        elif action == "acc.master.all":
+            body, kb = await self._acc_master_all_toggle()
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "acc.reply":
             body = await self._acc_flag_toggle(arg, "reply_enabled")
             await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
@@ -1068,6 +1071,15 @@ class TgControlBot:
             cb("media", "🖼 媒體識別"),
             cb("imagegen", "📷 圖片生成"),
             cb("voice", "🔊 語音"),
+        ])
+        # 全局總開關：所有帳號 reply+proactive 都開→全靜音；否則→全開啟
+        all_both_on = bool(accs) and all(
+            int(a.get("reply_enabled") or 1) and int(a.get("proactive_enabled") or 1)
+            for a in accs
+        )
+        master_txt = "🔕 全部靜音" if all_both_on else "🔔 全部開啟"
+        rows.append([
+            cb("acc.master.all", master_txt),
         ])
         rows.append([
             cb("model", "🧩 模型"),
@@ -1620,6 +1632,38 @@ class TgControlBot:
         )
         body, kb = await self._account_actions_keyboard(account_id)
         return line + "\n──────────────\n" + body, kb
+
+    async def _acc_master_all_toggle(self) -> tuple[str, object]:
+        """全局總開關（主選單）：一鍵把 所有帳號 的 回覆＋主動 設成同值。
+        所有帳號都開→全靜音；否則→全開啟。回 (狀態文字, 主選單鍵盤)。"""
+        accounts = await self.manager.db.list_accounts()
+        if not accounts:
+            return "還沒有水軍帳號", await self._home_keyboard()
+        # 判斷：所有帳號 reply+proactive 都開？
+        all_both_on = all(
+            int(a.get("reply_enabled") or 0) and int(a.get("proactive_enabled") or 0)
+            for a in accounts
+        )
+        target = 0 if all_both_on else 1
+        on = bool(target)
+        icon = "🔔" if on else "🔕"
+        names = []
+        for a in accounts:
+            await self.manager.db.update_account(
+                a["id"],
+                reply_enabled=target,
+                proactive_enabled=target,
+            )
+            worker = (getattr(self.manager, "workers", {}) or {}).get(str(a["id"]))
+            if worker is not None:
+                worker.reply_enabled = bool(target)
+                worker.proactive_enabled = bool(target)
+            names.append(self._acc_label(a))
+        line = (
+            f"{icon} 全部帳號總開關：{'全開啟（回覆＋主動）' if on else '全靜音（回覆＋主動都關）'}\n"
+            f"{'、'.join(names)}（運行中 worker 已即時生效）"
+        )
+        return line, await self._home_keyboard()
 
     async def _persona_edit(self, account_id: str) -> str:
         """人設安全編輯說明：白名單欄位，密鑰類不會被存進來。"""
