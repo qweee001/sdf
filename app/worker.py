@@ -92,6 +92,15 @@ _LAUGH_MARKS = ("哈哈", "🤣", "😂", "笑死", "lol", "xd", "嘿嘿")
 # emoji 疲勞偵測：實測三號連發五句都以 🤭 收尾，真人不會每句掛同一個表情
 _EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]")
 _EMOJI_HISTORY_LIMIT = 6
+# 詞彙疲勞偵測：emoji 疲勞的姊妹規則——盯「句子核心」而不是 emoji。
+# 實測（10-15 群 -1002229799107）：三號短時間內把「腿軟」講了 5 次
+# （「煮到對方腿軟」「想被幹到腿軟」「想舔到我腿軟嗎」「煮到腿軟就放人嗎」
+# 「腿軟就不會洗碗了」），連「洗碗」也被拖進同一串——同一個詞當核心意象反覆
+# 出鏡，是比整句重複更隱蔽的機器感。整句去重（_recent_proactive_topics）
+# 防不住「換了句式、核心詞不變」的變體，這層防的就是這種。
+# 只盯 2-4 字短詞：長到 5 字以上多半是正常句子片段，盯短才不會誤傷。
+_PHRASE_FATIGUE_MIN_REPEAT = 2
+_PHRASE_HISTORY_LIMIT = 8
 
 # 真人「看見但不說」：被 @／直接回覆很少漏接，普通訊息常只是默認
 _SILENT_REPLY_PROBABILITY_DIRECTED = 0.10
@@ -528,6 +537,8 @@ class AccountWorker:
         # 短句反覆生成再被「repeated topic」drop（實測小天後 12h：163 次 drop 只有 6 次 sent）。
         self._proactive_recent_seen: dict[int, list[str]] = {}
         self._recent_emojis_by_group: dict[int, list[str]] = {}  # group_id -> 最近用過的 emoji
+        # 詞彙疲勞偵測：每群最近發過的句子（供 _phrase_fatigue_hint 提取核心短詞）
+        self._recent_texts_by_group: dict[int, list[str]] = {}
         # 帳號私有 RNG：reaction／貼圖挑選用（話題不再走預設池，全部即時生成）
         self._rng = random.Random(
             int.from_bytes(
@@ -4374,6 +4385,7 @@ class AccountWorker:
             self.account_id, chat_id, activity_kind
         )
         self._record_sent_emojis(chat_id, text)
+        self._record_sent_text(chat_id, text)
         return True
 
     # ---------- 主動發言 ----------
@@ -4796,6 +4808,49 @@ class AccountWorker:
             "這次換一個 emoji，或者干脆不要放表情（真人不會每句都掛同一個）"
         )
 
+    def _record_sent_text(self, group_id: int, text: str) -> None:
+        """記住這個群最近發過的句子（詞彙疲勞偵測用）。"""
+        t = str(text or "").replace("\n", " ").strip()
+        if not t:
+            return
+        bucket = self._recent_texts_by_group.setdefault(int(group_id), [])
+        bucket.append(t)
+        del bucket[:-_PHRASE_HISTORY_LIMIT]
+
+    def _phrase_fatigue_hint(self, group_id: int) -> str:
+        """同一個短詞（2-4 字）在該群最近幾句當核心意象反覆出鏡時，提示換意象。
+
+        實測根因（10-15 群 -1002229799107）：「腿軟」被三號當核心意象連用 5 次、
+        「洗碗」被拖進 2 次——句式都不同、整句去重全部放行，但讀者感受到的
+        是同一個梗被刷了 5 遍。比 emoji 疲勞更隱蔽的機器感。
+        """
+        bucket = self._recent_texts_by_group.get(int(group_id)) or []
+        if len(bucket) < _PHRASE_FATIGUE_MIN_REPEAT + 1:
+            return ""
+        # 提取 2-4 字連續漢字段，跨句統計出現次數
+        # 用 non-greedy {2,4}? 讓短詞優先匹配（否則貪心匹配會把「腿軟」切成
+        # 「到腿軟」，跨句對不齊）。
+        seg_re = re.compile(r"[\u4e00-\u9fff]{2,4}?")
+        counts: dict[str, int] = {}
+        for text in bucket:
+            seen_in_text = set()
+            for seg in seg_re.findall(text):
+                if seg not in seen_in_text:  # 同一句內重複只算一次
+                    seen_in_text.add(seg)
+                    counts[seg] = counts.get(seg, 0) + 1
+        over = [(seg, n) for seg, n in counts.items() if n >= _PHRASE_FATIGUE_MIN_REPEAT + 1]
+        if not over:
+            return ""
+        over.sort(key=lambda item: (-item[1], item[0]))
+        top_seg, top_count = over[0]
+        others = [s for s, _ in over[1:3]]
+        others_str = ("、" + "、".join(others)) if others else ""
+        return (
+            f"你最近在這個群把「{top_seg}」當核心意象用了 {top_count} 次{others_str}，"
+            "真人不會連幾句都在玩同一個梗，這次換一個完全不同的意象或角度，"
+            "別再圍繞「" + "、".join(s for s, _ in over[:2]) + "」寫"
+        )
+
     @staticmethod
     def _proactive_cooldown(group_id: int, slot: int, interval: float) -> float:
         """同群同一時間窗口的冷卻秒數（0.8~2.4 倍間隔，跨窗口不規則）。
@@ -5011,6 +5066,9 @@ class AccountWorker:
             emoji_hint = self._emoji_fatigue_hint(group_id)
             if emoji_hint:
                 body += f"\n{emoji_hint}"
+            phrase_hint = self._phrase_fatigue_hint(group_id)
+            if phrase_hint:
+                body += f"\n{phrase_hint}"
             return body + self._time_hint()
 
         # 生成不出可用的一句就重試（最多 3 次）：重試時把「已經講過的」餵回去，
