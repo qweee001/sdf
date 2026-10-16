@@ -3666,6 +3666,11 @@ class AccountWorker:
         gender_violation = self._gender_term_violation(reply)
         phrase_fatigue = self._phrase_fatigue_hit(group_id, reply)
         own_echo = self._is_own_echo(reply, self._own_echo_recent(group_id))
+        if own_echo:
+            # 近義複讀命中直接丟棄，不再重寫生成
+            print(f"[{self.name}] reply-drop: own echo on {reply[:20]!r}, drop directly without retry", flush=True)
+            self._set_generation_reason(event, "own_echo")
+            return ""
         # 句首「幹」硬擋（實測：小小「幹，光講舌頭就讓我濕了」）——persona 寫了沒用
         gan_opener = self._starts_with_gan(reply)
         if (

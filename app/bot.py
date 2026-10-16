@@ -346,14 +346,15 @@ def _tg_initdata_identity(
     uid = user.get("id")
     if uid is None:
         return None, None
-    # auth_date 新鮮度：過舊＝重用舊 initData（防重放）
+    # auth_date 新鮮度：必須存在且不能過舊（防重放；缺少 auth_date 一律拒絕）
     auth_date = check_items.get("auth_date")
-    if auth_date:
-        try:
-            if abs(time.time() - int(auth_date)) > max_age:
-                return None, None
-        except (TypeError, ValueError):
+    if not auth_date:
+        return None, None
+    try:
+        if abs(time.time() - int(auth_date)) > max_age:
             return None, None
+    except (TypeError, ValueError):
+        return None, None
     chat_id: int | None = None
     if isinstance(user.get("chat_id"), (int, str)):
         try:
@@ -521,6 +522,9 @@ class TgControlBot:
         """
         flow = self._mini_flows.get(token)
         if flow is None:
+            return None
+        if not self.admin_ids or str(flow.admin_id) not in self.admin_ids:
+            self._mini_flows.pop(token, None)
             return None
         if time.time() > flow.expires_at:
             self._mini_flows.pop(token, None)

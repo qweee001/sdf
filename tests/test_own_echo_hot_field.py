@@ -39,7 +39,6 @@ def test_own_echo_drops_reply_without_generating_second_pass_if_retry_also_echoe
         worker._record_sent_text(GROUP, "幹，光講舌頭就讓我濕了")
         worker._call_ai = AsyncMock(side_effect=[
             "幹光講就濕了",
-            "幹光講就濕了",
         ])
         event = AsyncMock(
             sender_id=999,
@@ -54,34 +53,9 @@ def test_own_echo_drops_reply_without_generating_second_pass_if_retry_also_echoe
         event.sender = None
         text = await worker._generate_reply(event)
         assert text == ""
+        assert worker._call_ai.await_count == 1, "命中近義複讀必須直接 drop，不得二次重寫生成"
         reason = worker._generation_reasons.get(worker._generation_key(event))
         assert reason == "own_echo"
-
-    asyncio.run(main())
-
-
-def test_own_echo_reply_rewrites_to_fresh_line():
-    async def main():
-        worker = _worker(101)
-        worker._record_sent_text(GROUP, "幹，光講舌頭就讓我濕了")
-        replies = iter(["幹光講就濕了", "這貓眼睛好圓"])
-        worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: next(replies))
-        event = AsyncMock(
-            sender_id=999,
-            chat_id=GROUP,
-            id=42,
-            mentioned=False,
-            is_reply=False,
-            reply_to=None,
-            raw_text="這隻貓好可愛",
-            media=None,
-        )
-        event.sender = None
-        text = await worker._generate_reply(event)
-        assert text == "這貓眼睛好圓"
-        assert worker._call_ai.await_count == 2
-        retry_prompt = worker._call_ai.await_args_list[1].args[1]
-        assert "十分鐘" in retry_prompt or "太像" in retry_prompt
 
     asyncio.run(main())
 

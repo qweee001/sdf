@@ -147,8 +147,11 @@ def test_generation_rewrites_phrase_fatigue_reply():
     async def main():
         worker = _worker(101)
         group = -5428680940
+        # 用不同號發送以測試「跨號/詞彙疲勞」，避免直接命中本號 10 分鐘 own_echo
+        other_worker = _worker(202)
+        other_worker.phrase_cores_by_group = worker.phrase_cores_by_group
         for text in ("煮到對方腿軟", "想被幹到腿軟", "想舔到我腿軟嗎"):
-            worker._record_sent_text(group, text)
+            other_worker._record_sent_text(group, text)
         replies = iter(["還想被幹到腿軟", "今天想去吃火鍋"])
         worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: next(replies))
         event = AsyncMock(
@@ -178,8 +181,11 @@ def test_generation_drops_reply_when_phrase_fatigue_survives_retry():
     async def main():
         worker = _worker(101)
         group = -5428680940
+        # 用不同號發送以測試「跨號/詞彙疲勞」，避免直接命中本號 10 分鐘 own_echo
+        other_worker = _worker(202)
+        other_worker.phrase_cores_by_group = worker.phrase_cores_by_group
         for text in ("煮到對方腿軟", "想被幹到腿軟", "想舔到我腿軟嗎"):
-            worker._record_sent_text(group, text)
+            other_worker._record_sent_text(group, text)
         worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: "還想被幹到腿軟")
         event = AsyncMock(
             sender_id=999,

@@ -904,9 +904,11 @@ def test_mini_initdata_verify(monkeypatch):
     client = TestClient(host)
     tok = bot._mini_mint("111", 7)
 
-    def sign(uid: str) -> str:
+    def sign(uid: str, auth_date: int | None = None) -> str:
+        import time as _t
         user = _json.dumps({"id": int(uid)}, separators=(",", ":"))
-        items = [("user", user)]
+        ad = str(int(auth_date if auth_date is not None else _t.time()))
+        items = [("auth_date", ad), ("user", user)]
         check = "\n".join(f"{k}={v}" for k, v in sorted(items))
         secret = _hmac.new(b"WebAppData", bot.bot_token.encode(), hashlib.sha256).digest()
         h = _hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
@@ -931,6 +933,25 @@ def test_mini_initdata_verify(monkeypatch):
         f"/tgapi/start?t={tok3}", json={"phone": "+886****5678", "init_data": sign("333")}
     )
     assert r.status_code == 400
+
+    # 漏洞回歸 1：缺少 auth_date 的簽章一律拒絕（fail-closed）→ 400
+    sec = _hmac.new(b"WebAppData", bot.bot_token.encode(), hashlib.sha256).digest()
+    user_no_date = _json.dumps({"id": 111}, separators=(",", ":"))
+    items_no_date = [("user", user_no_date)]
+    check_no_date = "\n".join(f"{k}={v}" for k, v in sorted(items_no_date))
+    h_no_date = _hmac.new(sec, check_no_date.encode(), hashlib.sha256).hexdigest()
+    init_no_date = urllib.parse.urlencode(dict(items_no_date, **{"hash": h_no_date}))
+    tok_nd = bot._mini_mint("111", 7)
+    r = client.post(f"/tgapi/start?t={tok_nd}", json={"phone": "+886****5678", "init_data": init_no_date})
+    assert r.status_code == 400
+
+    # 漏洞回歸 2：管理員被移除後，舊 token 即刻失效（fail-closed）→ 400
+    tok_revoked = bot._mini_mint("111", 7)
+    bot.admin_ids = ("999",)  # 移除 111 的管理員身分
+    r = client.post(f"/tgapi/start?t={tok_revoked}", json={"phone": "+886****5678", "init_data": sign("111")})
+    assert r.status_code == 400
+    bot.admin_ids = ("111", "222")  # 還原
+
 
 
 def test_mini_page_needs_token(monkeypatch):
