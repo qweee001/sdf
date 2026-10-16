@@ -95,13 +95,23 @@ def test_proactive_drops_own_echo():
                 return []
 
         worker.db = _TopicDB()
-        replies = iter(["幹光講就濕了", "今晚想出門晃晃"])
-        worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: next(replies))
+        worker._call_ai = AsyncMock(return_value="幹光講就濕了")
         topic = await worker._generate_context_topic(GROUP)
-        assert topic == "今晚想出門晃晃"
-        assert worker._call_ai.await_count == 2
+        assert topic == ""
+        assert worker._call_ai.await_count == 1, "主動發言命中 own_echo 必須直接 drop，不得在 3 次迴圈中再次生成"
 
     asyncio.run(main())
+
+
+def test_female_persona_blocks_male_genital_claims_with_spaces():
+    from app.text_guard import gender_term_violation
+
+    female = {"gender": "女"}
+    assert gender_term_violation(female, "我 雞雞")
+    assert gender_term_violation(female, "割 我 雞 雞")
+    assert gender_term_violation(female, "我 的 屌")
+    assert gender_term_violation(female, "想 割 我 雞雞")
+
 
 
 def test_hot_field_true_when_three_humans_in_one_minute():

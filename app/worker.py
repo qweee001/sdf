@@ -5333,6 +5333,13 @@ class AccountWorker:
             if self._gender_term_violation(topic):
                 print(f"[{self.name}] proactive-drop: gender term on {topic[:20]!r}", flush=True)
                 continue
+            # 優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型
+            if self._is_own_echo(topic, self._own_echo_recent(group_id)):
+                print(
+                    f"[{self.name}] proactive-drop: own echo on {topic[:20]!r}, drop directly without retry",
+                    flush=True,
+                )
+                return ""
             if self._starts_with_gan(topic):
                 print(f"[{self.name}] proactive-drop: gan opener on {topic[:20]!r}", flush=True)
                 already.append(topic[:40])
@@ -5341,13 +5348,6 @@ class AccountWorker:
             if fatigued:
                 print(
                     f"[{self.name}] proactive-drop: phrase fatigue {fatigued!r} on {topic[:20]!r}",
-                    flush=True,
-                )
-                already.append(topic[:40])
-                continue
-            if self._is_own_echo(topic, self._own_echo_recent(group_id)):
-                print(
-                    f"[{self.name}] proactive-drop: own echo on {topic[:20]!r}",
                     flush=True,
                 )
                 already.append(topic[:40])

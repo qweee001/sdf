@@ -490,19 +490,26 @@ def starts_with_gan(text: str) -> bool:
 
 
 def gender_term_violation(persona, text: str) -> str:
-    """性別詞彙排他（實測 10-14 小小「我前女友」→ 女號自認男）。
+    """性別詞彙排他（含空格/標點變體正規化，避免「我 雞雞」「割 我 雞 雞」繞過）。
 
     回傳違規詞（如「前女友」），沒有回 ""。
-    - 自稱詞（我老婆/我太太/老子/我老公）：出現就攔。
+    - 自稱詞（我老婆/我太太/老子/我雞雞等）：出現就攔。
     - 對象詞（前女友/女朋友/前男友）：前面是第三方前綴（他/她/那/誰…）
       ＝講別人，放行；「我…」或句首＝自稱，攔。
     """
     if not text:
         return ""
     gender = str(persona.get("gender") or "")
+    # 原文直接查
     for term in _GENDER_SELF_TERMS.get(gender, ()):
         if term in text:
             return term
+    # 去除空格與常見標點後再查（防「我 雞雞」「割 我 雞 雞」變體）
+    cleaned = re.sub(r"[\s，,。．!！？?~～…、；;：:「」『』（）()_-]+", "", text)
+    for term in _GENDER_SELF_TERMS.get(gender, ()):
+        if term in cleaned:
+            return term
+
     for term in _GENDER_PARTNER_TERMS.get(gender, ()):
         start = 0
         while True:
