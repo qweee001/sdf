@@ -7,7 +7,7 @@
 
 import asyncio
 import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from app.text_guard import is_own_echo, own_echo_key
 from test_worker_reply_arbitration import _worker
@@ -140,6 +140,30 @@ def test_female_persona_blocks_male_genital_claims():
     assert gender_term_violation(female, "我的屌很大")
     assert gender_term_violation(female, "割我的老二")
     assert not gender_term_violation(male, "幹嘛想割我雞雞")
+
+
+def test_allowed_active_hours_10_to_22():
+    worker = _worker(101)
+    with patch.object(worker, "_taipei_hour", return_value=10.0):
+        assert worker._is_allowed_active_hour() is True
+        assert worker._is_sleeping() is False
+
+    with patch.object(worker, "_taipei_hour", return_value=21.99):
+        assert worker._is_allowed_active_hour() is True
+        assert worker._is_sleeping() is False
+
+    with patch.object(worker, "_taipei_hour", return_value=22.0):
+        assert worker._is_allowed_active_hour() is False
+        assert worker._is_sleeping() is True
+
+    with patch.object(worker, "_taipei_hour", return_value=9.99):
+        assert worker._is_allowed_active_hour() is False
+        assert worker._is_sleeping() is True
+
+    with patch.object(worker, "_taipei_hour", return_value=3.0):
+        assert worker._is_allowed_active_hour() is False
+        assert worker._is_sleeping() is True
+
 
 
 def test_approved_vision_models_allows_agnes():

@@ -802,18 +802,22 @@ class AccountWorker:
             return ""
 
     def _taipei_hour(self) -> float:
-        """台北時間（UTC+8）＋每人錯峰偏移"""
-        return (time.time() / 3600 + 8 + self._schedule_offset) % 24
+        """台北時間（UTC+8）"""
+        return (time.time() / 3600 + 8) % 24
+
+    def _is_allowed_active_hour(self) -> bool:
+        """群組允許發言時段：台北時間 10:00 ~ 22:00（晚上十點到隔天早上十點全面禁言靜音）"""
+        h = self._taipei_hour()
+        return 10.0 <= h < 22.0
 
     def _is_sleeping(self) -> bool:
-        """台北時間凌晨 4-7 點睡覺（每人錯峰偏移）"""
-        h = self._taipei_hour()
-        return (h + 20) % 24 < 3
+        """非允許發言時段（22:00 ~ 10:00）一律視為閉嘴/睡覺時段"""
+        return not self._is_allowed_active_hour()
 
     def _is_busy_hour(self) -> bool:
-        """台北時間工作時間 9-17 點，主動發言降頻"""
+        """台北時間工作時間 13-17 點，主動發言降頻"""
         h = self._taipei_hour()
-        return 9 <= h < 17
+        return 13 <= h < 17
 
     def group_list(self) -> list[dict]:
         """這個帳號所在的群組（供控制台勾選指定群組）"""
@@ -988,9 +992,8 @@ class AccountWorker:
                     int(self.stats.get("silent_skips", 0)) + 1
                 )
                 return
-            # 睡著的人（凌晨 4-7 錯峰窗）基本沒看手機：被@也只有兩成接得住，
-            # 治「半夜三點秒回」的機器感
-            if self._is_sleeping() and random.random() >= _SLEEP_REPLY_PROBABILITY:
+            # 晚上 22:00 ~ 早上 10:00 嚴格禁言：不回覆（即使被@也閉嘴）
+            if not self._is_allowed_active_hour():
                 self.stats["silent_skips"] = (
                     int(self.stats.get("silent_skips", 0)) + 1
                 )
