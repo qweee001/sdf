@@ -304,11 +304,11 @@ def load_settings() -> Settings:
             else _float("WATER_CROSS_TALK_PROBABILITY", 0.2)
         ),
         proactive_enabled=_bool("PROACTIVE_ENABLED", True),
-        proactive_max_per_day=_int("PROACTIVE_MAX_PER_DAY", 15),
+        proactive_max_per_day=_int("PROACTIVE_MAX_PER_DAY", 30),
         proactive_min_interval_minutes=(
             1.0
             if acceptance_test_mode
-            else _float("PROACTIVE_MIN_INTERVAL_MINUTES", 45)
+            else _float("PROACTIVE_MIN_INTERVAL_MINUTES", 2)
         ),
         proactive_loop_min_seconds=(
             5.0

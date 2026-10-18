@@ -149,12 +149,8 @@ _PROACTIVE_ROTATION_MIN_GAP = 90.0
 _MAX_WATER_ONLY_STREAK = 2
 # 純水軍串時露骨度上限：沒有真人參與，越撩越兇只會更像機器人
 _WATER_ONLY_FLIRTY_CAP = 1
-# 自我節流：同一帳號在該群最近一次發言（主動或回覆都算）後 N 秒內，
-# 就算輪替判斷「輪到我」也先閉嘴。實測（10-08 群 111 13:44~13:57）：
-# 真人熱聊時每個 cycle 都獨立擲 30% 接話，同一帳號連續中獎、13 分鐘連發
-# 4 次主動——rotation 只防「三隻接力」，防不住「一隻自己刷」。
-# 真人熱聊時連發是接對話，主動插話 6 分鐘內第二句就太密。
-_PROACTIVE_SELF_MIN_GAP = 360.0
+# 自我節流：同一帳號在該群最近一次發言後 N 秒內暫緩主動發言（縮短至 90 秒，不再卡 6 分鐘）
+_PROACTIVE_SELF_MIN_GAP = 90.0
 # 熱場：1 分鐘內真人 ≥3 則 → 關掉 proactive-join，名額留給 reply。
 _HOT_FIELD_WINDOW_SECONDS = 60.0
 _HOT_FIELD_HUMAN_MIN = 3
@@ -250,8 +246,8 @@ def _dialog_member_count(dialog) -> int:
             return count
     return 0
 
-# 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
-_MAX_TOPIC_TURNS = 5
+# 话题回合：每个真人开启的话题，水軍最多接 N 句，大幅放寬至 10 句
+_MAX_TOPIC_TURNS = 10
 _HIGH_TRAFFIC_HUMANS_5M = 14
 _HIGH_TRAFFIC_MAX_ORDINARY_5M = 2
 _MAX_ORDINARY_CLAIMS_10M = 8
