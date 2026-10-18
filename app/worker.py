@@ -116,9 +116,9 @@ _PHRASE_CORE_STOPWORDS = frozenset({
 _TRAILING_PARTICLE_RE = re.compile(r"[嗎呢啊喔哦啦吧呀嘛了的麼！!？?。，,、\s]+$")
 _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
 
-# 真人「看見但不說」：被 @／直接回覆很少漏接，普通訊息常只是默認
-_SILENT_REPLY_PROBABILITY_DIRECTED = 0.10
-_SILENT_REPLY_PROBABILITY_ORDINARY = 0.35
+# 真人「看見但不說」：被 @／直接回覆很少漏接，普通訊息偶爾默認
+_SILENT_REPLY_PROBABILITY_DIRECTED = 0.05
+_SILENT_REPLY_PROBABILITY_ORDINARY = 0.10
 # 睡著的人（凌晨 4-7 點錯峰窗口）基本沒看手機：被@也只有兩成機率接住
 _SLEEP_REPLY_PROBABILITY = 0.20
 # reaction 輕回應改成 sticker 的機率（sticker 比重點表情多一分「用心」）
@@ -251,7 +251,7 @@ def _dialog_member_count(dialog) -> int:
     return 0
 
 # 话题回合：每个真人开启的话题，水軍最多接 N 句，之后留空间给真人
-_MAX_TOPIC_TURNS = 3
+_MAX_TOPIC_TURNS = 5
 _HIGH_TRAFFIC_HUMANS_5M = 14
 _HIGH_TRAFFIC_MAX_ORDINARY_5M = 2
 _MAX_ORDINARY_CLAIMS_10M = 8

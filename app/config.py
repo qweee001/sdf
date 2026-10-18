@@ -296,7 +296,7 @@ def load_settings() -> Settings:
         decision_typo_threshold=_bounded_float(
             "DECISION_TYPO_THRESHOLD", 0.5, 0.1, 0.95
         ),
-        base_reply_probability=_float("BASE_REPLY_PROBABILITY", 0.35),
+        base_reply_probability=_float("BASE_REPLY_PROBABILITY", 0.70),
         reply_enabled=_bool("REPLY_ENABLED", True),
         water_cross_talk_probability=(
             1.0
@@ -304,7 +304,7 @@ def load_settings() -> Settings:
             else _float("WATER_CROSS_TALK_PROBABILITY", 0.2)
         ),
         proactive_enabled=_bool("PROACTIVE_ENABLED", True),
-        proactive_max_per_day=_int("PROACTIVE_MAX_PER_DAY", 4),
+        proactive_max_per_day=_int("PROACTIVE_MAX_PER_DAY", 15),
         proactive_min_interval_minutes=(
             1.0
             if acceptance_test_mode
