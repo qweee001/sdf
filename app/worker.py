@@ -879,8 +879,10 @@ class AccountWorker:
         # 記錄該待辦回覆屬於哪個群組，供真人插話時精準取消（重新判斷）
         try:
             task._sdf_group_id = int(getattr(event, "chat_id", 0) or 0)
+            task._sdf_sched_at = time.time()
         except Exception:
             task._sdf_group_id = 0
+            task._sdf_sched_at = time.time()
         self._reply_tasks.add(task)
         task.add_done_callback(self._reply_tasks.discard)
 
@@ -936,11 +938,16 @@ class AccountWorker:
                 ]
                 # 真人開題：重置該群的話題回合計數，角色互聊從這裡重新計
                 self.topic_turn_counts[group_id] = 0
-                # 真人插話：取消尚未送出的待辦回覆，避免繼續演舊話題（重新判斷）
+                # 真人插話：只在已經有 2 則以上真人新訊息積壓，或被點名插話時才取消，避免單則插話造成 100% 啞火
                 cancelled = 0
+                now_t = time.time()
                 for task in list(self._reply_tasks):
                     try:
                         if getattr(task, "_sdf_group_id", None) == group_id:
+                            sched_t = getattr(task, "_sdf_sched_at", 0.0)
+                            # 如果該回覆任務才剛排程不到 3 秒，不輕易取消，給它機會發送
+                            if sched_t and (now_t - sched_t) < 3.0:
+                                continue
                             task.cancel()
                             cancelled += 1
                     except Exception:
@@ -998,11 +1005,11 @@ class AccountWorker:
                     int(self.stats.get("silent_skips", 0)) + 1
                 )
                 return
-            # 人味延遲：被@/回覆 → 5-20 秒；普通 → 8-45 秒
+            # 人味延遲：被@/回覆 → 3-8 秒；普通 → 4-12 秒（避免真人密集聊天時因等待過長被全數取消）
             delay = (
-                random.uniform(5, 20)
+                random.uniform(3, 8)
                 if is_hot
-                else random.uniform(8, _REPLY_TASK_WINDOW_SECONDS)
+                else random.uniform(4, 12)
             )
             self._schedule_reply(
                 event,
