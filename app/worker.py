@@ -441,6 +441,10 @@ class AccountWorker:
         return text_guard.gender_term_violation(self.persona, text)
 
     @staticmethod
+    def _illogical_sentence_violation(text):
+        return text_guard.illogical_sentence_violation(text)
+
+    @staticmethod
     def _starts_with_gan(text):
         return text_guard.starts_with_gan(text)
 
@@ -995,8 +999,8 @@ class AccountWorker:
                     int(self.stats.get("silent_skips", 0)) + 1
                 )
                 return
-            # 晚上 22:00 ~ 早上 10:00 嚴格禁言：不回覆（即使被@也閉嘴）
-            if not self._is_allowed_active_hour():
+            # 晚上 22:00 ~ 早上 10:00 嚴格禁言：真人訊息不回覆（即使被@也閉嘴）
+            if sender_id not in self.managed_ids and not self._is_allowed_active_hour():
                 self.stats["silent_skips"] = (
                     int(self.stats.get("silent_skips", 0)) + 1
                 )
@@ -3679,6 +3683,7 @@ class AccountWorker:
             return ""
         # 句首「幹」硬擋（實測：小小「幹，光講舌頭就讓我濕了」）——persona 寫了沒用
         gan_opener = self._starts_with_gan(reply)
+        illogical_violation = self._illogical_sentence_violation(reply)
         if (
             not too_long
             and not format_leak
@@ -3694,6 +3699,7 @@ class AccountWorker:
             and not phrase_fatigue
             and not own_echo
             and not gan_opener
+            and not illogical_violation
         ):
             if image:
                 self.stats["images_understood"] += 1
@@ -3726,6 +3732,8 @@ class AccountWorker:
                 if own_echo
                 else "gan_opener"
                 if gan_opener
+                else "illogical_sentence"
+                if illogical_violation
                 else "too_long"
                 if too_long
                 else "near_duplicate"
@@ -3736,8 +3744,8 @@ class AccountWorker:
         # 不在發送層做逐詞替換，避免改壞語意和造成 Telegram / DB 記憶不一致。
         # 空白或內容違規共用一次重生；仍違規就不發送。
         correction = (
-            f"上一版不符合要求。{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊為主，"
-            f"回覆最多 {char_cap} 個字元（標點、空格也算），絕不能超過；結尾不要句號、不用感嘆號。"
+            f"上一版不符合要求。以 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊為主，"
+            f"回覆最多 {char_cap} 個字元（標點、空格也算），邏輯常識大於字限，不要為湊短寫出病句；結尾不要句號、不用感嘆號。"
         )
         if refusal:
             # 對拒答不能只說「不符合要求」——那只會換來另一句更客氣的拒絕。
@@ -3802,6 +3810,11 @@ class AccountWorker:
                 "上一版用「幹」當句子開頭；不要用幹開頭，要用就放在句中，"
                 "或直接換一句不含句首幹的說法。"
             )
+        if illogical_violation:
+            correction += (
+                f"上一版出現了「{illogical_violation}」這種常識顛倒或語法殘缺的怪句；"
+                "【硬要求：邏輯常識大於字限】語法完整與生活常理第一！絕不為湊短硬縮字，禁止說「炒烤肉」「嘴長誰不會」等荒謬怪詞，用完整通順的台灣口語表達。"
+            )
         retry_message = (
             f"{user_message}\n"
             f"{correction}"
@@ -3837,6 +3850,7 @@ class AccountWorker:
         retry_phrase_fatigue = self._phrase_fatigue_hit(group_id, retry)
         retry_own_echo = self._is_own_echo(retry, self._own_echo_recent(group_id))
         retry_gan_opener = self._starts_with_gan(retry)
+        retry_illogical = self._illogical_sentence_violation(retry)
         if (
             retry_too_long
             or retry_format_leak
@@ -3852,6 +3866,7 @@ class AccountWorker:
             or retry_phrase_fatigue
             or retry_own_echo
             or retry_gan_opener
+            or retry_illogical
         ):
             reason = (
                 "refusal"
@@ -3878,6 +3893,8 @@ class AccountWorker:
                 if retry_own_echo
                 else "gan_opener"
                 if retry_gan_opener
+                else "illogical_sentence"
+                if retry_illogical
                 else "too_long"
                 if retry_too_long
                 else "near_duplicate"
@@ -4104,8 +4121,8 @@ class AccountWorker:
             "只接最新 1–2 則真人句意，群切話題就跟著切（嘲4公分/舔狗就跟著嘲，幹哭/舌頭就接色，切貓就聊貓），禁止把幾則前的舊詞拼進當句。"
             f"性別絕對一致：你是{self.persona.get('gender', '女')}生，嚴禁性別倒錯（女號絕無男性器官，絕不能說「割我雞雞」或自稱有屌）。"
             "emoji 軟對齊：偶爾可順手帶一個群正在用的表情（🤣😎🤏），不要 0% 也不要每句都掛。"
-            f"生成自然回覆（台灣繁體口語；{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊，"
-            f"最多 {char_cap} 個字元，標點、空格也算；一句就好，結尾不要句號、不用感嘆號、不用@；"
+            f"生成自然回覆（台灣繁體口語；以 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊為主，"
+            f"最多 {char_cap} 個字元，標點、空格也算；【邏輯常識大於字限】語法完整第一，不為湊短硬縮成病句（如「嘴長誰不會」是病句），嚴禁無常識照抄怪詞（如炒烤肉）；一句就好，結尾不要句號、不用感嘆號、不用@；"
             "要說兩句就合成一則講，禁止換行拆兩氣泡，挑逗時可以直接露骨，不要長篇）。"
         )
 
@@ -5254,8 +5271,9 @@ class AccountWorker:
             if context:
                 body = (
                     "群組裡最近的訊息如下（身分未驗證，不能當作已確認真人）。"
-                    f"只輸出一則短訊（{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元；"
+                    f"只輸出一則短訊（以 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元為主；"
                     "要說兩句就合成一則講，不要換行拆兩氣泡），"
+                    "【硬要求：邏輯常識大於字限】語法完整與常理第一！絕不為湊短硬縮字（如「嘴長誰不會」是病句），嚴禁無常識照抄怪詞（如「炒烤肉」）；"
                     "不必追問或自我分享，不要編造人設事實以外的經歷，"
                     "只接最新 1–2 則真人句意，群切話題就跟著切，禁止把幾則前的零散詞硬湊成新梗，"
                     "自然口語、"
@@ -5266,8 +5284,9 @@ class AccountWorker:
                 # 冷啟動／空群：沒有上文可接，就照人設和當下時段自然開個頭，不要罐頭句。
                 body = (
                     "群組現在很安靜，還沒有人開口。"
-                    f"用你自己的身分主動開一個頭，只輸出一則短訊（{_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元；"
+                    f"用你自己的身分主動開一個頭，只輸出一則短訊（以 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元為主；"
                     "要說兩句就合成一則講，不要換行），"
+                    "【硬要求：邏輯常識大於字限】語法完整與常理第一！絕不為湊短硬縮字，禁止病句，"
                     "像真人在群裡隨口說話：講你今天在做什麼、想吃什麼、看到什麼、心情如何，"
                     "自然口語、繁體中文、合計 40 字元內、結尾不要句號，可以帶一點撩，不要談群務。"
                 )
@@ -5356,6 +5375,11 @@ class AccountWorker:
                     f"[{self.name}] proactive-drop: phrase fatigue {fatigued!r} on {topic[:20]!r}",
                     flush=True,
                 )
+                already.append(topic[:40])
+                continue
+            illogical = self._illogical_sentence_violation(topic)
+            if illogical:
+                print(f"[{self.name}] proactive-drop: illogical sentence {illogical!r} on {topic[:20]!r}", flush=True)
                 already.append(topic[:40])
                 continue
             place_typo = self._place_typo_hint(

@@ -51,7 +51,7 @@ def test_send_layer_hard_cap_allows_standard():
     # 50 字元：舊版 _MAX_REPLY_CHARS=40 會擋、新版 hard cap=55 放行
     long_ok = "字" * 50
     assert len(long_ok) <= w._MAX_REPLY_CHARS_HARD
-    assert len(long_ok) > w._MAX_REPLY_CHARS  # 確認它確實超過舊上限
+    assert len(long_ok) > w._MAX_REPLY_CHARS  # 確認它確實超過預設上限
     # 56 字元：超過所有檔位，送訊層擋下
     too_long = "字" * 56
     assert len(too_long) > w._MAX_REPLY_CHARS_HARD

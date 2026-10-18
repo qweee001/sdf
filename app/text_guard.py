@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - 環境無套件
 # 長度／拆訊常量（回覆長短句形；worker 決策層與拆訊共用）
 # ---------------------------------------------------------------------------
 _MAX_REPLY_CHARS = 40
-_HUMAN_LINE_MIN, _HUMAN_LINE_MAX = 6, 14
+_HUMAN_LINE_MIN, _HUMAN_LINE_MAX = 6, 25
 _MAX_BURST_PARTS = 3
 _BURST_PAUSE_SECONDS = (0.8, 3.5)
 # 每個決策檔位的硬上限（校驗用）。one 最嚴、standard 最寬。
@@ -469,7 +469,34 @@ def has_simplified_chars(text: str) -> bool:
                 return True
     return False
 
-# 「幹嘛／幹什麼」是合成詞，不是感嘆開頭；其餘句首「幹／干」都攔。
+# 常識崩壞與殘缺病句攔截（實測：小小「哥哥想炒哪種烤肉」、RICH「嘴長誰不會」）
+# 為了湊短句或盲目照抄真人怪話導致語法破碎、常識顛倒，嚴重破壞真實感
+_NONSENSE_ILLOGICAL_PATTERNS = (
+    re.compile(r"嘴長(?:在?誰|誰(?:不?會)?)"),
+    re.compile(r"嘴長(?:在|臉|上)"),
+    re.compile(r"(?:出一張|光長)嘴誰(?![不會|會說|會講])"),
+    re.compile(r"^(?:誰不會|不會|誰會)[！？!？。，,\s]*$"),
+    re.compile(r"嘴長(?=[，,。！!？?\s]|$)"),
+    re.compile(r"(?:炒|煮|煎)(?:什麼|甚麼|哪種|哪個|哪樣|些|個)?烤肉"),
+    re.compile(r"(?:炒|煮|煎)(?:什麼|甚麼|哪種|哪個|哪樣|些|個)?生魚片"),
+    re.compile(r"烤(?:稀飯|白飯|米飯)"),
+)
+
+
+def illogical_sentence_violation(text: str) -> str:
+    """檢查是否含有常識崩壞或語法殘缺的怪異病句。
+
+    命中回傳匹配字串，正常回空字串。
+    """
+    if not text:
+        return ""
+    norm = unicodedata.normalize("NFKC", text)
+    for p in _NONSENSE_ILLOGICAL_PATTERNS:
+        m = p.search(norm)
+        if m:
+            return m.group(0)
+    return ""
+
 # 實測 小小「幹，光講舌頭就讓我濕了」：persona 寫了「不要用幹當開頭」，
 # 模型當建議無視——提示擋不住，必須硬擋。
 _GAN_OPENER_ALLOW = (

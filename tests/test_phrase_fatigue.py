@@ -212,8 +212,10 @@ def test_proactive_drops_phrase_fatigue_and_retries():
     async def main():
         worker = _worker(101)
         group = -5428680940
+        other_worker = _worker(202)
+        other_worker.phrase_cores_by_group = worker.phrase_cores_by_group
         for text in ("煮到對方腿軟", "想被幹到腿軟", "想舔到我腿軟嗎"):
-            worker._record_sent_text(group, text)
+            other_worker._record_sent_text(group, text)
 
         class _TopicDB:
             async def get_group_messages(self, group_id, limit=100):

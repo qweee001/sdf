@@ -166,8 +166,33 @@ def test_allowed_active_hours_10_to_22():
 
 
 
+def test_illogical_sentence_violation():
+    from app.text_guard import illogical_sentence_violation
+
+    # 實測病句與常識翻車案例
+    assert illogical_sentence_violation("嘴長誰不會")
+    assert illogical_sentence_violation("哥哥想炒哪種烤肉")
+    assert illogical_sentence_violation("炒烤肉是怎樣")
+    assert illogical_sentence_violation("炒生魚片")
+    assert illogical_sentence_violation("烤稀飯")
+    assert illogical_sentence_violation("煮烤肉")
+    assert illogical_sentence_violation("煎烤肉")
+    assert illogical_sentence_violation("光長嘴誰")
+    assert illogical_sentence_violation("誰不會")
+
+    # 正常口語應放行
+    assert not illogical_sentence_violation("出一張嘴誰不會")
+    assert not illogical_sentence_violation("只會出一張嘴喔")
+    assert not illogical_sentence_violation("想吃哪種烤肉")
+    assert not illogical_sentence_violation("這家烤肉超推")
+    assert not illogical_sentence_violation("烤肉要不要一起去")
+    assert not illogical_sentence_violation("生魚片超新鮮")
+
+
 def test_approved_vision_models_allows_agnes():
     from app.media import APPROVED_VISION_MODELS
     assert "agnes-3.0-flash" in APPROVED_VISION_MODELS
     assert "gemini-3.5-flash-lite" in APPROVED_VISION_MODELS
+
+
 
