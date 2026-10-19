@@ -759,6 +759,12 @@ class TgControlBot:
                 body, kb = await self._acc_delete(rest, event)
             elif name in {"media", "voice", "imagegen"}:
                 body, kb = await self._feature_toggle(name, rest), self._reply_menu
+            elif name in {"check", "selfcheck"}:
+                body, kb = await self._system_self_check()
+            elif name in {"panic", "stopall", "quiet"}:
+                body, kb = await self._acc_panic_stop()
+            elif name in {"test", "preview"}:
+                body, kb = await self._test_reply_preview(rest), self._reply_menu
             elif name == "addacc":
                 body, kb = await self._add_start(rest, event)
             elif name == "code":
@@ -945,6 +951,23 @@ class TgControlBot:
         elif action == "acc.master.all":
             body, kb = await self._acc_master_all_toggle()
             await event.edit(body[:MSG_LIMIT], buttons=kb)
+        elif action == "acc.panic.stop":
+            body, kb = await self._acc_panic_stop()
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
+        elif action == "check":
+            body, kb = await self._system_self_check()
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
+        elif action == "testroom":
+            body = (
+                "💬 試聊預覽室（測試不發群）：\n"
+                "──────────────\n"
+                "用法：/test <角色名> <模擬群聊訊息>\n"
+                "例如：\n"
+                "`/test 小天後 我只有13公分 我退群好了`\n"
+                "`/test 小小 每天被老闆壓榨好想放鬆`\n\n"
+                "回覆只在 Bot 私聊中預覽展示，絕不會發到真實 Telegram 群組！"
+            )
+            await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
         elif action == "acc.reply":
             body = await self._acc_flag_toggle(arg, "reply_enabled")
             await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
@@ -1078,12 +1101,17 @@ class TgControlBot:
         ])
         # 全局總開關：所有帳號 reply+proactive 都開→全靜音；否則→全開啟
         all_both_on = bool(accs) and all(
-            int(a.get("reply_enabled") or 1) and int(a.get("proactive_enabled") or 1)
+            int(a.get("reply_enabled") or 0) and int(a.get("proactive_enabled") or 0)
             for a in accs
         )
         master_txt = "🔕 全部靜音" if all_both_on else "🔔 全部開啟"
         rows.append([
             cb("acc.master.all", master_txt),
+            cb("acc.panic.stop", "🚨 緊急全停"),
+        ])
+        rows.append([
+            cb("check", "🩺 一鍵自檢"),
+            cb("testroom", "💬 試聊預覽"),
         ])
         rows.append([
             cb("model", "🧩 模型"),
@@ -1493,8 +1521,11 @@ class TgControlBot:
     async def _groups_save(self, account_id: str, admin_id: str,
                            chat_id: int) -> str:
         key = (str(admin_id), int(chat_id), str(account_id))
-        st = self._group_state(key)
-        sel = st["sel"]
+        st = self._group_selections.get(key)
+        now = time.time()
+        if st is None or now > st.get("exp", 0):
+            return "⚠️ 群組勾選階段已逾期或失效，未保存任何變更（已保護原群組不被清空）。請重新點進群組選單操作。"
+        sel = st.get("sel", set())
         err = await self.manager.save_groups(account_id, sorted(sel))
         if err:
             return f"⚠️ 保存失敗：{err}"
@@ -1668,6 +1699,129 @@ class TgControlBot:
             f"{'、'.join(names)}（運行中 worker 已即時生效）"
         )
         return line, await self._home_keyboard()
+
+    async def _acc_panic_stop(self) -> tuple[str, object]:
+        """🚨 緊急全停：確定性強制靜音全部帳號＋取消排隊任務，絕不反彈。"""
+        accounts = await self.manager.db.list_accounts()
+        if not accounts:
+            return "還沒有水軍帳號", await self._home_keyboard()
+        names = []
+        for a in accounts:
+            await self.manager.db.update_account(
+                a["id"],
+                reply_enabled=0,
+                proactive_enabled=0,
+            )
+            worker = (getattr(self.manager, "workers", {}) or {}).get(str(a["id"]))
+            if worker is not None:
+                worker.reply_enabled = False
+                worker.proactive_enabled = False
+                # 取消在排隊的回覆與主動發送任務
+                for t in list(getattr(worker, "_reply_tasks", set())):
+                    t.cancel()
+            names.append(self._acc_label(a))
+        msg = (
+            "🚨 【緊急全停已生效】\n"
+            "──────────────\n"
+            f"受影響帳號：{'、'.join(names)}\n"
+            "狀態：回覆(reply)=0，主動(proactive)=0，排隊中任務已全部取消！\n"
+            "如需恢復發言，請至主選單點擊「🔔 全部開啟」或進入個別帳號開啟。"
+        )
+        return msg, await self._home_keyboard()
+
+    async def _system_self_check(self) -> tuple[str, object]:
+        """🩺 一鍵自檢：深入檢查連線、發言權限、模型連通性與未發言診斷。"""
+        data = await self.manager.status()
+        accounts = data.get("accounts", [])
+        lines = [
+            "🩺 系統健康自檢報告",
+            "──────────────",
+        ]
+        if not accounts:
+            lines.append("⚠️ 目前無水軍帳號")
+            return "\n".join(lines), await self._home_keyboard()
+
+        cfg = self.manager.config
+        lines.append(f"🧩 主模型：{cfg.ai_model}")
+        lines.append(f"🎯 決策模型：{cfg.decision_model} (端點: {cfg.decision_base_url})")
+
+        # 檢測帳號與狀態
+        for a in accounts:
+            name = self._acc_label(a)
+            state = a.get("state", "unknown")
+            is_run = a.get("is_running", False)
+            rep = "開" if a.get("reply_enabled") else "關"
+            pro = "開" if a.get("proactive_enabled") else "關"
+            stats = a.get("stats", {})
+            rep_sent = stats.get("replies_sent", 0)
+            pro_sent = stats.get("proactive_sent", 0)
+            claimed = stats.get("human_claimed", 0)
+            seen = stats.get("images_seen", 0)
+            understood = stats.get("images_understood", 0)
+
+            status_icon = "🟢" if state == "connected" and is_run else "🔴"
+            lines.append(
+                f"\n{status_icon} 【{name}】狀態: {state}\n"
+                f"  - 開關: 回覆[{rep}] 主動[{pro}]\n"
+                f"  - 發言統計: 搶答送出 {rep_sent} / 主動 {pro_sent} (命中真人 {claimed})\n"
+                f"  - 識圖統計: 見圖 {seen} / 成功理解 {understood}"
+            )
+            # 診斷為什麼沒發言
+            if is_run and rep == "開" and rep_sent == 0:
+                lines.append("  💡 診斷: 帳號正常監聽中，尚未觸發回覆或正處於防撞冷卻")
+
+        lines.append("\n✅ 自檢完成，系統核心通訊正常。")
+        return "\n".join(lines), await self._home_keyboard()
+
+    async def _test_reply_preview(self, args: list[str]) -> str:
+        """💬 試聊預覽室：模擬群聊對話，私聊預覽回覆，絕不外發到真實 Telegram 群。"""
+        if len(args) < 2:
+            return (
+                "⚠️ 用法錯誤！請使用：/test <角色名> <模擬訊息>\n"
+                "例如：\n"
+                "/test 小天後 我只有13公分 我退群好了\n"
+                "/test 小小 每天被老闆壓榨好想放鬆"
+            )
+        bot_target = args[0]
+        sim_text = " ".join(args[1:])
+
+        accounts = await self.manager.db.list_accounts()
+        target_acc = None
+        for a in accounts:
+            label = self._acc_label(a)
+            if bot_target in label or bot_target == a["id"]:
+                target_acc = a
+                break
+        if not target_acc:
+            names = "、".join(self._acc_label(a) for a in accounts)
+            return f"⚠️ 找不到角色「{bot_target}」，現有角色：{names}"
+
+        worker = (getattr(self.manager, "workers", {}) or {}).get(str(target_acc["id"]))
+        if not worker:
+            return f"⚠️ 角色「{self._acc_label(target_acc)}」尚未啟動，請先啟動帳號"
+
+        # 構建沙盒上下文並呼叫模型
+        system_prompt = get_system_prompt(worker.persona)
+        sim_context = (
+            f"最近對話：\n"
+            f"[真人測試群友 sender_id=99999] {sim_text}\n"
+            f"最新消息：[真人測試群友 sender_id=99999]（身分未驗證） {sim_text}\n"
+            f"回覆指引：台灣繁體口語短訊，自然接話或成人調情，40字以內，結尾不帶句號。"
+        )
+        try:
+            raw = await worker._call_ai(system_prompt, sim_context, purpose="test_preview")
+            reply = (raw or "").strip()
+            return (
+                f"💬 【試聊預覽室】\n"
+                f"──────────────\n"
+                f"👤 測試角色：{self._acc_label(target_acc)}\n"
+                f"📥 模擬輸入：{sim_text}\n"
+                f"📤 角色擬真回覆：\n\n"
+                f"👉 **「{reply}」**\n\n"
+                f"🔒 此為沙盒預覽測試，未發送至任何群組。"
+            )
+        except Exception as e:
+            return f"⚠️ 測試回覆生成失敗：{e}"
 
     async def _persona_edit(self, account_id: str) -> str:
         """人設安全編輯說明：白名單欄位，密鑰類不會被存進來。"""

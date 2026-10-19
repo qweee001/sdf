@@ -3184,6 +3184,20 @@ class AccountWorker:
                     detail="quiet hour active before send_file RPC",
                 )
             return False
+        if not self.is_running or int(chat_id) not in self.selected_groups:
+            if bound_asset is not None:
+                await self._release_bound_reservation(
+                    gate,
+                    bound_asset,
+                    detail="account stopped or group unselected before send_file RPC",
+                )
+            elif permit is not None and gate is not None:
+                await gate.complete(
+                    permit,
+                    sent=False,
+                    detail="account stopped or group unselected before send_file RPC",
+                )
+            return False
         rpc_started = False
         if permit is not None and gate is not None:
             if not await gate.mark_rpc_started(permit):
