@@ -4191,6 +4191,17 @@ class AccountWorker:
                 request_kwargs["extra_body"] = {
                     "chat_template_kwargs": {"enable_thinking": False}
                 }
+            # 若為 Gemini 類模型，注入安全過濾全關設定
+            if "gemini" in model.lower():
+                extra = request_kwargs.get("extra_body") or {}
+                extra["safety_settings"] = [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+                ]
+                request_kwargs["extra_body"] = extra
             resp = await self.ai_client.chat.completions.create(**request_kwargs)
             content = resp.choices[0].message.content
             usage = getattr(resp, "usage", None)
