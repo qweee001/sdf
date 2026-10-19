@@ -1791,6 +1791,9 @@ class AccountWorker:
         if not self._activity_enabled(activity_kind):
             print(f"[{self.name}] final-gate-block: {activity_kind} 功能已關閉 {chat_id}", flush=True)
             return False
+        if not self._is_allowed_active_hour():
+            print(f"[{self.name}] final-gate-block: 處於禁言時段 {chat_id}", flush=True)
+            return False
         return True
 
     async def _send_group_reaction(self, event) -> bool:
@@ -3167,6 +3170,20 @@ class AccountWorker:
             kwargs["voice_note"] = True
         elif asset.kind == "video":
             kwargs["supports_streaming"] = True
+        if not self._is_allowed_active_hour():
+            if bound_asset is not None:
+                await self._release_bound_reservation(
+                    gate,
+                    bound_asset,
+                    detail="quiet hour active before send_file RPC",
+                )
+            elif permit is not None and gate is not None:
+                await gate.complete(
+                    permit,
+                    sent=False,
+                    detail="quiet hour active before send_file RPC",
+                )
+            return False
         rpc_started = False
         if permit is not None and gate is not None:
             if not await gate.mark_rpc_started(permit):
@@ -4410,6 +4427,10 @@ class AccountWorker:
             if permit is not None and gate is not None:
                 await gate.complete(permit, sent=False, detail="activity disabled before send_message RPC")
             return False
+        if not self._is_allowed_active_hour():
+            if permit is not None and gate is not None:
+                await gate.complete(permit, sent=False, detail="quiet hour active before send_message RPC")
+            return False
         try:
             sent_msg = await client.send_message(chat_id, text)
             # Telethon 不為「自己發的訊息」觸發 on_message，所以發送方要自己把
@@ -5352,10 +5373,20 @@ class AccountWorker:
                 get_system_prompt(self.persona), build_prompt(hint), purpose="proactive"
             )
             topic = (raw or "").strip()
-            if not topic or self._is_refusal(topic):
+            if not topic:
                 continue
             # 不管最後被哪條規則 drop（或放行）都記：模型下一 cycle 要看到「這些已經出過」
             _note_seen(topic)
+            # 最高優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型
+            # 即使同時命中簡體、時段或性別違規，只要屬於複讀就一律直接放棄當輪發言
+            if self._is_own_echo(topic, self._own_echo_recent(group_id)):
+                print(
+                    f"[{self.name}] proactive-drop: own echo on {topic[:20]!r}, drop directly without retry",
+                    flush=True,
+                )
+                return ""
+            if self._is_refusal(topic):
+                continue
             # 主動發言自己開口，穿幫成本最高：時段不合或混入簡體字就換一句
             if self._has_time_mismatch(topic):
                 print(f"[{self.name}] proactive-drop: time mismatch on {topic[:20]!r}", flush=True)
@@ -5369,13 +5400,18 @@ class AccountWorker:
             if self._gender_term_violation(topic):
                 print(f"[{self.name}] proactive-drop: gender term on {topic[:20]!r}", flush=True)
                 continue
-            # 優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型
-            if self._is_own_echo(topic, self._own_echo_recent(group_id)):
+            # 群層級詞語疲勞：同一個詞在群內被不同帳號連用 3+ 次就該換一句
+            fatigued = self._phrase_fatigue_hit(group_id, topic)
+            if fatigued:
                 print(
-                    f"[{self.name}] proactive-drop: own echo on {topic[:20]!r}, drop directly without retry",
+                    f"[{self.name}] proactive-drop: phrase fatigue {fatigued!r} on {topic[:20]!r}",
                     flush=True,
                 )
-                return ""
+                hint = (
+                    f"不要再用「{fatigued}」這個詞或類似說法，群裡剛才已經提過太多次；"
+                    "換一個完全不同的話題角度。"
+                )
+                continue
             if self._starts_with_gan(topic):
                 print(f"[{self.name}] proactive-drop: gan opener on {topic[:20]!r}", flush=True)
                 already.append(topic[:40])

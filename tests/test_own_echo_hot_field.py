@@ -9,6 +9,8 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from app.text_guard import is_own_echo, own_echo_key
 from test_worker_reply_arbitration import _worker
 
@@ -163,6 +165,42 @@ def test_allowed_active_hours_10_to_22():
     with patch.object(worker, "_taipei_hour", return_value=3.0):
         assert worker._is_allowed_active_hour() is False
         assert worker._is_sleeping() is True
+
+
+def test_proactive_drops_echo_even_with_compound_violations():
+    async def _run():
+        from app.persona import generate_persona
+        worker = _worker(101)
+        worker.config.ai_timeout = 5
+        worker.persona = generate_persona()
+        worker.persona["gender"] = "女"
+
+        # 模擬 10 分鐘內發過「好想喝咖啡」
+        worker._own_echo_by_group[12345] = [("好想喝咖啡", time.time())]
+
+        # 模擬 AI 生成了包含簡體字且是複讀的句子「好想喝咖啡呀」（同時命中簡體/拒答/複讀）
+        # 必須直接 return ""，調用次數剛好為 1，絕不重試第二次
+        worker._call_ai = AsyncMock(return_value="好想喝咖啡呀")
+
+        with patch.object(worker, "_taipei_hour", return_value=14.0):
+            res = await worker._generate_context_topic(12345)
+            assert res == ""
+            assert worker._call_ai.call_count == 1
+    asyncio.run(_run())
+
+
+def test_send_message_unlocked_blocks_during_quiet_hours():
+    async def _run():
+        worker = _worker(101)
+        worker.is_running = True
+        fake_client = AsyncMock()
+        worker.tg_client = fake_client
+
+        with patch.object(worker, "_is_allowed_active_hour", return_value=False):
+            sent = await worker._send_message_unlocked(12345, "早安")
+            assert sent is False
+            fake_client.send_message.assert_not_called()
+    asyncio.run(_run())
 
 
 
