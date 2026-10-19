@@ -22,6 +22,7 @@ APPROVED_VISION_MODELS = frozenset({
     "gemini-3.5-flash-lite",
     "agnes-3.0-flash",
     "qwen3.8-27b-uncensored",
+    "gemini-4-argon",
 })
 
 
@@ -387,6 +388,13 @@ class OrcaMediaService:
                     max_tokens=self.config.ai_max_tokens,
                     extra_headers={"X-Include-Cost": "true"},
                     timeout=self.config.ai_timeout,
+                    **({"safety_settings": [
+                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+                    ]} if "gemini" in model.lower() else {}),
                     **({"reasoning_effort": str(getattr(self.config, "ai_reasoning_effort", "") or "").strip()}
                        if str(getattr(self.config, "ai_reasoning_effort", "") or "").strip() else {}),
                 )

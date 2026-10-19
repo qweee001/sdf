@@ -197,6 +197,7 @@ def test_approved_vision_models_allows_agnes():
     from app.media import APPROVED_VISION_MODELS
     assert "agnes-3.0-flash" in APPROVED_VISION_MODELS
     assert "gemini-3.5-flash-lite" in APPROVED_VISION_MODELS
+    assert "gemini-4-argon" in APPROVED_VISION_MODELS
 
 
 
