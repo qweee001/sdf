@@ -273,6 +273,7 @@ BOT_COMMANDS = [
     types.BotCommand("media", "媒體識別開關（看懂圖/影片，on/off）"),
     types.BotCommand("imagegen", "圖片生成開關（被要求時發圖/影片，on/off）"),
     types.BotCommand("voice", "語音開關（on/off）"),
+    types.BotCommand("send", "指定水軍發訊息：/send <角色/帳號> [群ID] <內容>"),
     types.BotCommand("addacc", "新增帳號（TG 驗證碼流程）"),
     types.BotCommand("help", "說明"),
 ]
@@ -765,6 +766,8 @@ class TgControlBot:
                 body, kb = await self._acc_panic_stop()
             elif name in {"test", "preview"}:
                 body, kb = await self._test_reply_preview(rest), self._reply_menu
+            elif name in {"send", "say", "msg"}:
+                body, kb = await self._send_as_account(rest), self._reply_menu
             elif name == "addacc":
                 body, kb = await self._add_start(rest, event)
             elif name == "code":
@@ -977,6 +980,24 @@ class TgControlBot:
         elif action == "acc.logs":
             body = await self._acc_logs(arg)
             await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
+        elif action == "acc.send":
+            body = (
+                f"✉️ 指定發言｜{arg}\n"
+                "──────────────\n"
+                "用法：/send " + arg + " <想發送的訊息內容>\n"
+                "若要指定群組：/send " + arg + " <群組ID> <訊息內容>\n\n"
+                "例如：\n"
+                f"`/send {arg} 大家晚上好呀`\n"
+                f"`/send {arg} -1002229799107 今晚好冷有人要吃宵夜嗎`\n\n"
+                "（此指令由該水軍 Telegram 帳號直接發送到該群）"
+            )
+            await event.edit(
+                body[:MSG_LIMIT],
+                buttons=types.ReplyInlineMarkup(kbrows([[
+                    cb("back.acc:" + arg, "🔙 回帳號操作"),
+                    cb("back.home", "🏠 主菜單"),
+                ]])),
+            )
         elif action == "persona.edit":
             body = await self._persona_edit(arg)
             await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
@@ -1158,6 +1179,9 @@ class TgControlBot:
                 ),
                 cb(
                     "acc.groups:" + account_id, "📍 群組"
+                ),
+                cb(
+                    "acc.send:" + account_id, "✉️ 發言"
                 ),
             ],
             [
@@ -1822,6 +1846,67 @@ class TgControlBot:
             )
         except Exception as e:
             return f"⚠️ 測試回覆生成失敗：{e}"
+
+    async def _send_as_account(self, args: list[str]) -> str:
+        """✉️ 控制指定水軍帳號向其所在群發送一條訊息。"""
+        if len(args) < 2:
+            return (
+                "⚠️ 用法：/send <角色名/帳號ID> [群組ID] <訊息內容>\n"
+                "例如：\n"
+                "/send 小天後 哥哥們晚上好呀\n"
+                "/send 小小 -1002229799107 今晚好冷有人要吃火鍋嗎"
+            )
+        target_name = args[0]
+        accounts = await self.manager.db.list_accounts()
+        target_acc = None
+        for a in accounts:
+            label = self._acc_label(a)
+            if target_name in label or target_name == a["id"]:
+                target_acc = a
+                break
+        if not target_acc:
+            names = "、".join(self._acc_label(a) for a in accounts)
+            return f"⚠️ 找不到帳號「{target_name}」，現有帳號：{names}"
+
+        worker = (getattr(self.manager, "workers", {}) or {}).get(str(target_acc["id"]))
+        if not worker or not worker.is_running or not worker.tg_client:
+            return f"⚠️ 帳號「{self._acc_label(target_acc)}」未在運行中，請先啟動上線"
+
+        # 判斷是否有給群組 ID
+        chat_id = None
+        content_tokens = args[1:]
+        try:
+            potential_gid = int(content_tokens[0])
+            if potential_gid < 0:
+                chat_id = potential_gid
+                content_tokens = content_tokens[1:]
+        except (ValueError, IndexError):
+            pass
+
+        if not chat_id:
+            # 沒指定群組，預設取該帳號的第一個群組
+            if not worker.selected_groups:
+                return f"⚠️ 帳號「{self._acc_label(target_acc)}」尚未綁定任何群組"
+            chat_id = next(iter(worker.selected_groups))
+
+        msg_text = " ".join(content_tokens).strip()
+        if not msg_text:
+            return "⚠️ 請輸入要發送的訊息內容"
+
+        try:
+            sent_msg = await worker.tg_client.send_message(int(chat_id), msg_text)
+            mid = getattr(sent_msg, "id", "ok")
+            worker._record_sent_text(int(chat_id), msg_text)
+            return (
+                f"✅ 【發送成功】\n"
+                f"──────────────\n"
+                f"發送帳號：{self._acc_label(target_acc)}（{target_acc['id']}）\n"
+                f"目標群組：{chat_id}\n"
+                f"訊息 ID：{mid}\n"
+                f"內容：{msg_text}"
+            )
+        except Exception as e:
+            return f"⚠️ 發送失敗：{e}"
 
     async def _persona_edit(self, account_id: str) -> str:
         """人設安全編輯說明：白名單欄位，密鑰類不會被存進來。"""
