@@ -1590,6 +1590,10 @@ class AccountWorker:
                     recent_texts.append(str(m.get("content") or ""))
         except Exception:
             pass
+        # 帳號輪替均衡：若自己是該群最近發過言的水軍，施加 120 秒冷卻讓位給其他姐妹
+        if last_water_sender and last_water_sender == int(self.tg_user_id or 0):
+            if len(candidates) > 1:
+                candidates = [uid for uid in candidates if uid != int(self.tg_user_id or 0)]
         # Apply the recent-speaker cap before either continuity or fallback selection.
         candidates = [
             uid for uid in candidates
@@ -2503,6 +2507,13 @@ class AccountWorker:
             # F07: 初始延遲移進受管區塊（以前在 try 外）——延遲期間被真人插話/
             # 停機取消時，CancelledError 直接外傳，跳過釋放 claim，群組槽位鎖死。
             await asyncio.sleep(delay)
+            # 防撞防同秒搶話：檢查群內最近一則是否為同群其他水軍剛發送（10秒內），是則錯開 6~12 秒
+            try:
+                recent_water = await self.db.recent_bot_texts_by_group(int(event.chat_id or 0))
+                if recent_water:
+                    await asyncio.sleep(random.uniform(5.0, 10.0))
+            except Exception:
+                pass
             media_kind = (
                 None
                 if managed_followup
