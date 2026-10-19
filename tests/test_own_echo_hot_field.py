@@ -219,8 +219,15 @@ def test_illogical_sentence_violation():
     assert illogical_sentence_violation("誰不會")
     assert illogical_sentence_violation("貴婦哥哥帶我去買")
     assert illogical_sentence_violation("找個富婆哥哥")
+    assert illogical_sentence_violation("今晚要不要來讓我試試你的深淺")
+    assert illogical_sentence_violation("試你的深淺")
+    assert illogical_sentence_violation("量看你的深淺")
+    assert illogical_sentence_violation("試試我的長短")
 
-    # 正常口語應放行
+    # 合法表達：絕不誤殺
+    assert not illogical_sentence_violation("今晚來試試我的深淺")
+    assert not illogical_sentence_violation("讓我試試你的長短")
+    assert not illogical_sentence_violation("鑑定你的粗細")
     assert not illogical_sentence_violation("出一張嘴誰不會")
     assert not illogical_sentence_violation("只會出一張嘴喔")
     assert not illogical_sentence_violation("想吃哪種烤肉")
