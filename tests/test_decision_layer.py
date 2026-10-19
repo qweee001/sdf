@@ -432,7 +432,7 @@ def test_generate_reply_injects_flirty_guide(monkeypatch):
     assert "延續話題：「有人去散步嗎」" in msg
     assert "安慰：表達理解、支持，接住對方的情緒" in msg
     assert "內容要點：表達自己的狀態或感受" in msg
-    assert "長度：一句短話（14 字元內）" in msg
+    assert "長度：一句短話（20 字元內）" in msg
     assert "露骨程度：明顯勾引，露骨主動" in msg
 
     # 沒有決策 → 不注入

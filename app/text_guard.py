@@ -24,20 +24,20 @@ except ImportError:  # pragma: no cover - 環境無套件
 # ---------------------------------------------------------------------------
 # 長度／拆訊常量（回覆長短句形；worker 決策層與拆訊共用）
 # ---------------------------------------------------------------------------
-_MAX_REPLY_CHARS = 40
-_HUMAN_LINE_MIN, _HUMAN_LINE_MAX = 6, 25
+_MAX_REPLY_CHARS = 50
+_HUMAN_LINE_MIN, _HUMAN_LINE_MAX = 6, 50
 _MAX_BURST_PARTS = 3
 _BURST_PAUSE_SECONDS = (0.8, 3.5)
-# 每個決策檔位的硬上限（校驗用）。one 最嚴、standard 最寬。
+# 每個決策檔位的硬上限（校驗用）。one 最嚴、standard 最寬。字限放寬至 50。
 _DECISION_LENGTH_GUIDE = {
-    "one": "一句短話（14 字元內）",
-    "two": "兩句合成一則（合計 40 字元內）",
-    "standard": "一句正常長度的話（20~55 字元）",
+    "one": "一句短話（20 字元內）",
+    "two": "兩句合成一則（合計 50 字元內）",
+    "standard": "一句正常長度的話（20~50 字元）",
 }
-_DECISION_LENGTH_CAPS = {"one": 14, "two": 40, "standard": 55}
-# 沒有決策（或決策沒選長度）時退回的預設上限＝舊版固定 40。
+_DECISION_LENGTH_CAPS = {"one": 20, "two": 50, "standard": 50}
+# 沒有決策（或決策沒選長度）時退回的預設上限＝放寬至 50。
 _DEFAULT_REPLY_CHAR_CAP = _MAX_REPLY_CHARS
-# 送訊層／拆訊層的「通用後備上限」＝所有檔位最寬者（55）。
+# 送訊層／拆訊層的「通用後備上限」＝所有檔位最寬者（50）。
 _MAX_REPLY_CHARS_HARD = max(_DECISION_LENGTH_CAPS.values())
 
 _SIMPLIFIED_PHRASE_PATTERNS = (

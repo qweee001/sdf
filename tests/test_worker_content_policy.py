@@ -208,14 +208,14 @@ def test_reply_over_forty_characters_is_regenerated_once():
     async def main():
         worker = _worker()
         valid_retry = "這次控制在六十個字元內"
-        worker._call_ai = AsyncMock(side_effect=["字" * 41, valid_retry])
+        worker._call_ai = AsyncMock(side_effect=["字" * 51, valid_retry])
 
         reply = await worker._generate_reply(_FakeEvent())
 
         assert reply == valid_retry
         assert worker._call_ai.await_count == 2
         retry_prompt = worker._call_ai.await_args_list[1].args[1]
-        assert "最多 40 個字元" in retry_prompt
+        assert "最多 50 個字元" in retry_prompt
 
     asyncio.run(main())
 
@@ -223,7 +223,7 @@ def test_reply_over_forty_characters_is_regenerated_once():
 def test_reply_is_dropped_when_retry_is_still_over_forty_characters():
     async def main():
         worker = _worker()
-        worker._call_ai = AsyncMock(side_effect=["甲" * 41, "乙" * 41])
+        worker._call_ai = AsyncMock(side_effect=["甲" * 51, "乙" * 51])
 
         reply = await worker._generate_reply(_FakeEvent())
 
@@ -254,7 +254,7 @@ def test_generation_prompt_requires_at_most_forty_characters():
 
     prompt = worker._build_user_message(_FakeEvent(), [])
 
-    assert "最多 40 個字元" in prompt
+    assert "最多 50 個字元" in prompt
     assert "標點、空格也算" in prompt
 
 
@@ -325,7 +325,7 @@ def test_second_policy_violation_is_audited_by_policy_stage():
         worker.tg_client = cast(Any, client)
         worker.tg_user_id = 456
         worker.is_running = True
-        worker._call_ai = AsyncMock(side_effect=["甲" * 41, "乙" * 41])
+        worker._call_ai = AsyncMock(side_effect=["甲" * 51, "乙" * 51])
 
         await worker._reply_later(_FakeEvent(), 0)
 
@@ -1025,7 +1025,7 @@ def test_group_meta_shares_existing_single_retry_with_length_video_and_repetitio
         assert worker._call_ai.await_count == 2
         assert classifier.await_count == 2
         correction = worker._call_ai.await_args_list[1].args[1]
-        assert "最多 40 個字元" in correction
+        assert "最多 50 個字元" in correction
         assert "不要提及或複述禁止話題" in correction
         assert "群務" in correction
         assert "換開頭、句型和語氣" in correction
