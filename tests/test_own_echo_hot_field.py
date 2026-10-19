@@ -179,6 +179,8 @@ def test_illogical_sentence_violation():
     assert illogical_sentence_violation("煎烤肉")
     assert illogical_sentence_violation("光長嘴誰")
     assert illogical_sentence_violation("誰不會")
+    assert illogical_sentence_violation("貴婦哥哥帶我去買")
+    assert illogical_sentence_violation("找個富婆哥哥")
 
     # 正常口語應放行
     assert not illogical_sentence_violation("出一張嘴誰不會")
@@ -187,6 +189,8 @@ def test_illogical_sentence_violation():
     assert not illogical_sentence_violation("這家烤肉超推")
     assert not illogical_sentence_violation("烤肉要不要一起去")
     assert not illogical_sentence_violation("生魚片超新鮮")
+    assert not illogical_sentence_violation("貴婦名牌包")
+    assert not illogical_sentence_violation("大氣的哥哥")
 
 
 def test_approved_vision_models_allows_agnes():
