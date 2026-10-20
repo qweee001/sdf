@@ -34,6 +34,7 @@ from fastapi import Request
 
 from .config import Settings
 from .manager import AccountManager
+from .persona import get_system_prompt
 
 log = logging.getLogger("sdf.bot")
 
