@@ -47,6 +47,7 @@ class AccountManager:
         self.phrase_cores_by_group: dict[int, list[tuple[str, float]]] = {}
         self.reply_claim_signals: dict[tuple[int, int], asyncio.Event] = {}
         self.failed_reply_claimants: dict[tuple[int, int], set[int]] = {}
+        self.group_send_locks: dict[int, asyncio.Lock] = {}
         self._status: dict[str, dict] = {}
         self._ai_client = AsyncOpenAI(
             base_url=config.ai_base_url,
@@ -316,6 +317,7 @@ class AccountManager:
             last_human_activity=self.last_human_activity,
             reply_claim_signals=self.reply_claim_signals,
             failed_reply_claimants=self.failed_reply_claimants,
+            group_send_locks=self.group_send_locks,
             personas=self.personas,
             topic_turn_counts=self.topic_turn_counts,
             phrase_cores_by_group=self.phrase_cores_by_group,

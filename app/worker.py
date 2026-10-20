@@ -480,6 +480,7 @@ class AccountWorker:
                  last_human_activity: dict | None = None,
                  reply_claim_signals: dict[tuple[int, int], asyncio.Event] | None = None,
                  failed_reply_claimants: dict[tuple[int, int], set[int]] | None = None,
+                 group_send_locks: dict[int, asyncio.Lock] | None = None,
                  personas: dict | None = None,
                  topic_turn_counts: dict | None = None,
                  phrase_cores_by_group: dict | None = None,
@@ -522,6 +523,9 @@ class AccountWorker:
         )
         self.failed_reply_claimants = (
             failed_reply_claimants if failed_reply_claimants is not None else {}
+        )
+        self.group_send_locks = (
+            group_send_locks if group_send_locks is not None else {}
         )
         # 全水軍帳號的 TG id → 人設（供「興趣關聯選人」用，manager 共享）
         self.personas = personas if personas is not None else {}
@@ -1808,27 +1812,29 @@ class AccountWorker:
             return False
         is_photo = isinstance(getattr(event, "media", None), MessageMediaPhoto)
         emoji = self._pick_reaction(str(event.raw_text or ""), is_photo)
-        try:
-            # Telethon 1.44 沒有 send_reaction 便利方法，直接送原始 TL 請求
-            await self.tg_client(
-                SendReactionRequest(
-                    peer=int(event.chat_id),
-                    msg_id=int(event.id),
-                    reaction=[ReactionEmoji(emoticon=emoji)],
+        send_lock = self.group_send_locks.setdefault(int(event.chat_id), asyncio.Lock())
+        async with send_lock:
+            try:
+                # Telethon 1.44 沒有 send_reaction 便利方法，直接送原始 TL 請求
+                await self.tg_client(
+                    SendReactionRequest(
+                        peer=int(event.chat_id),
+                        msg_id=int(event.id),
+                        reaction=[ReactionEmoji(emoticon=emoji)],
+                    )
                 )
-            )
-            self.stats["reactions_sent"] = (
-                int(self.stats.get("reactions_sent", 0)) + 1
-            )
-            print(
-                f"[{self.name}] reaction-sent: {emoji} → msg {int(event.id)}",
-                flush=True,
-            )
-            return True
-        except Exception as e:
-            self.stats["errors"] += 1
-            print(f"[{self.name}] reaction error: {e}", flush=True)
-            return False
+                self.stats["reactions_sent"] = (
+                    int(self.stats.get("reactions_sent", 0)) + 1
+                )
+                print(
+                    f"[{self.name}] reaction-sent: {emoji} → msg {int(event.id)}",
+                    flush=True,
+                )
+                return True
+            except Exception as e:
+                self.stats["errors"] += 1
+                print(f"[{self.name}] reaction error: {e}", flush=True)
+                return False
 
     async def _send_group_sticker(self, event) -> bool:
         """對群訊息只發一張本機 sticker（不发文字），回傳是否成功。
@@ -1842,42 +1848,41 @@ class AccountWorker:
         if not await self._outbound_guard(event):
             return False
         path = self._rng.choice(self._stickers)
-        try:
-            uploaded = await self.tg_client.upload_file(path)
-            media = InputMediaUploadedDocument(
-                file=uploaded,
-                mime_type="image/webp",
-                attributes=[
-                    DocumentAttributeFilename(file_name=Path(path).name),
-                    DocumentAttributeSticker(
-                        alt=Path(path).stem,
-                        stickerset=InputStickerSetEmpty(),
-                    ),
-                ],
-            )
-            # Telethon 的 send_message 沒有 media 參數（那是 send_file），
-            # 傳 media= 會在執行期 TypeError、貼圖永遠送不出去；而且測試替身
-            # 是 Mock，照單全收，所以這個 bug 在測試裡看不出來。改用 TL 原語。
-            await self.tg_client(
-                SendMediaRequest(
-                    peer=int(event.chat_id),
-                    media=media,
-                    message="",
-                    random_id=random.getrandbits(63),
+        send_lock = self.group_send_locks.setdefault(int(event.chat_id), asyncio.Lock())
+        async with send_lock:
+            try:
+                uploaded = await self.tg_client.upload_file(path)
+                media = InputMediaUploadedDocument(
+                    file=uploaded,
+                    mime_type="image/webp",
+                    attributes=[
+                        DocumentAttributeFilename(file_name=Path(path).name),
+                        DocumentAttributeSticker(
+                            alt=Path(path).stem,
+                            stickerset=InputStickerSetEmpty(),
+                        ),
+                    ],
                 )
-            )
-            self.stats["stickers_sent"] = (
-                int(self.stats.get("stickers_sent", 0)) + 1
-            )
-            print(
-                f"[{self.name}] sticker-sent: {Path(path).name} → msg {int(event.id)}",
-                flush=True,
-            )
-            return True
-        except Exception as e:
-            self.stats["errors"] += 1
-            print(f"[{self.name}] sticker error: {e}", flush=True)
-            return False
+                await self.tg_client(
+                    SendMediaRequest(
+                        peer=int(event.chat_id),
+                        media=media,
+                        message="",
+                        random_id=random.getrandbits(63),
+                    )
+                )
+                self.stats["stickers_sent"] = (
+                    int(self.stats.get("stickers_sent", 0)) + 1
+                )
+                print(
+                    f"[{self.name}] sticker-sent: {Path(path).name} → msg {int(event.id)}",
+                    flush=True,
+                )
+                return True
+            except Exception as e:
+                self.stats["errors"] += 1
+                print(f"[{self.name}] sticker error: {e}", flush=True)
+                return False
 
     async def _acknowledge_group(self, event) -> bool:
         """真人輕回應：不發文字，只在 sticker 與 reaction 之間挑一個。"""
@@ -3045,7 +3050,10 @@ class AccountWorker:
             getattr(self.config, "media_generation_enabled", False)
         ):
             return False
-        kind = str(live_test_kind or asset.kind)
+        # 同群原子鎖排隊（媒體發送也納入全局原子鎖）
+        send_lock = self.group_send_locks.setdefault(int(chat_id), asyncio.Lock())
+        async with send_lock:
+            kind = str(live_test_kind or asset.kind)
         gate = self.outbound_gate
         if bound_asset is not None:
             if not self._valid_bound_media_before_reserve(
@@ -4461,28 +4469,35 @@ class AccountWorker:
             if permit is not None and gate is not None:
                 await gate.complete(permit, sent=False, detail="quiet hour active before send_message RPC")
             return False
-        try:
-            sent_msg = await client.send_message(chat_id, text)
-            # Telethon 不為「自己發的訊息」觸發 on_message，所以發送方要自己把
-            # TG 訊息 ID 抓回來記進 DB；否則自己那筆是 message_id=0、其他帳號
-            # 收到同一則是真實 TG ID，跨帳號去重鍵不同 → 同一則訊息算成兩則
-            # （實測每則水軍訊息都重複、console 待檢視數灌水）。
-            if captured_id is not None:
-                try:
-                    captured_id.append(int(getattr(sent_msg, "id", 0) or 0))
-                except Exception:
-                    captured_id.append(0)
-        except BaseException as exc:
+        if not self.is_running or int(chat_id) not in self.selected_groups:
             if permit is not None and gate is not None:
-                await gate.complete(
-                    permit,
-                    sent=False,
-                    rpc_started=rpc_started,
-                    detail=f"{type(exc).__name__}: {exc}",
-                )
-            if isinstance(exc, FloodWaitError):
-                self._note_flood_wait(exc)
-            raise
+                await gate.complete(permit, sent=False, detail="account stopped or group unselected before send_message RPC")
+            return False
+        # 同群原子鎖排隊（解決多號並發與撞話）：
+        send_lock = self.group_send_locks.setdefault(int(chat_id), asyncio.Lock())
+        async with send_lock:
+            try:
+                sent_msg = await client.send_message(chat_id, text)
+                # Telethon 不為「自己發的訊息」觸發 on_message，所以發送方要自己把
+                # TG 訊息 ID 抓回來記進 DB；否則自己那筆是 message_id=0、其他帳號
+                # 收到同一則是真實 TG ID，跨帳號去重鍵不同 → 同一則訊息算成兩則
+                # （實測每則水軍訊息都重複、console 待檢視數灌水）。
+                if captured_id is not None:
+                    try:
+                        captured_id.append(int(getattr(sent_msg, "id", 0) or 0))
+                    except Exception:
+                        captured_id.append(0)
+            except BaseException as exc:
+                if permit is not None and gate is not None:
+                    await gate.complete(
+                        permit,
+                        sent=False,
+                        rpc_started=rpc_started,
+                        detail=f"{type(exc).__name__}: {exc}",
+                    )
+                if isinstance(exc, FloodWaitError):
+                    self._note_flood_wait(exc)
+                raise
         if (
             permit is not None
             and gate is not None

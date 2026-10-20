@@ -1730,6 +1730,8 @@ class TgControlBot:
         if not accounts:
             return "還沒有水軍帳號", await self._home_keyboard()
         names = []
+        cancelled_total = 0
+        still_running_total = 0
         for a in accounts:
             await self.manager.db.update_account(
                 a["id"],
@@ -1741,60 +1743,89 @@ class TgControlBot:
                 worker.reply_enabled = False
                 worker.proactive_enabled = False
                 # 取消在排隊的回覆與主動發送任務
-                for t in list(getattr(worker, "_reply_tasks", set())):
+                tasks = list(getattr(worker, "_reply_tasks", set()))
+                cancelled_total += len(tasks)
+                for t in tasks:
                     t.cancel()
+                if worker.is_running:
+                    still_running_total += 1
             names.append(self._acc_label(a))
         msg = (
             "🚨 【緊急全停已生效】\n"
             "──────────────\n"
             f"受影響帳號：{'、'.join(names)}\n"
-            "狀態：回覆(reply)=0，主動(proactive)=0，排隊中任務已全部取消！\n"
+            f"🚫 已取消排隊中任務：{cancelled_total} 個\n"
+            f"🔄 正在收尾監聽帳號：{still_running_total} 個\n"
+            "狀態：回覆(reply)=0，主動(proactive)=0（已持久化寫入 DB，重啟後依然保持靜音）！\n\n"
             "如需恢復發言，請至主選單點擊「🔔 全部開啟」或進入個別帳號開啟。"
         )
         return msg, await self._home_keyboard()
 
     async def _system_self_check(self) -> tuple[str, object]:
-        """🩺 一鍵自檢：深入檢查連線、發言權限、模型連通性與未發言診斷。"""
-        data = await self.manager.status()
-        accounts = data.get("accounts", [])
+        """🩺 一鍵自檢：真實檢測 Telegram 連線、資料庫連通、群組權限、模型狀態與發言診斷。"""
         lines = [
-            "🩺 系統健康自檢報告",
+            "🩺 系統健康真實自檢報告",
             "──────────────",
         ]
-        if not accounts:
-            lines.append("⚠️ 目前無水軍帳號")
-            return "\n".join(lines), await self._home_keyboard()
+        # 1. 檢測資料庫實體連通性
+        db_ok = False
+        try:
+            db_res = await self.manager.db._c.execute("SELECT COUNT(*) FROM accounts")
+            acc_count = (await db_res.fetchone())[0]
+            db_ok = True
+            lines.append(f"🗄 資料庫連通：🟢 正常（WAL模式，收錄帳號: {acc_count}）")
+        except Exception as e:
+            lines.append(f"🗄 資料庫連通：🔴 異常（{e}）")
 
+        # 2. 檢測配置與模型端點
         cfg = self.manager.config
         lines.append(f"🧩 主模型：{cfg.ai_model}")
         lines.append(f"🎯 決策模型：{cfg.decision_model} (端點: {cfg.decision_base_url})")
 
-        # 檢測帳號與狀態
+        # 3. 檢測各帳號 Telegram Client 與群組權限
+        data = await self.manager.status()
+        accounts = data.get("accounts", [])
+        if not accounts:
+            lines.append("\n⚠️ 目前無水軍帳號")
+            return "\n".join(lines), await self._home_keyboard()
+
         for a in accounts:
             name = self._acc_label(a)
             state = a.get("state", "unknown")
             is_run = a.get("is_running", False)
             rep = "開" if a.get("reply_enabled") else "關"
             pro = "開" if a.get("proactive_enabled") else "關"
+            worker = (getattr(self.manager, "workers", {}) or {}).get(str(a["id"]))
+            
+            # 真實連線與群組權限核查
+            tg_connected = False
+            groups_count = 0
+            if worker and worker.tg_client:
+                tg_connected = bool(getattr(worker.tg_client, "is_connected", lambda: False)())
+                groups_count = len(getattr(worker, "selected_groups", set()))
+
+            status_icon = "🟢" if tg_connected and is_run else "🔴"
+            lines.append(
+                f"\n{status_icon} 【{name}】\n"
+                f"  - Telegram: {'連線正常' if tg_connected else '未連線/離線'}｜群組範圍: {groups_count} 個\n"
+                f"  - 開關狀態: 回覆[{rep}] 主動[{pro}]"
+            )
+
             stats = a.get("stats", {})
             rep_sent = stats.get("replies_sent", 0)
             pro_sent = stats.get("proactive_sent", 0)
             claimed = stats.get("human_claimed", 0)
             seen = stats.get("images_seen", 0)
             understood = stats.get("images_understood", 0)
-
-            status_icon = "🟢" if state == "connected" and is_run else "🔴"
             lines.append(
-                f"\n{status_icon} 【{name}】狀態: {state}\n"
-                f"  - 開關: 回覆[{rep}] 主動[{pro}]\n"
                 f"  - 發言統計: 搶答送出 {rep_sent} / 主動 {pro_sent} (命中真人 {claimed})\n"
                 f"  - 識圖統計: 見圖 {seen} / 成功理解 {understood}"
             )
-            # 診斷為什麼沒發言
+            # 診斷報告
             if is_run and rep == "開" and rep_sent == 0:
                 lines.append("  💡 診斷: 帳號正常監聽中，尚未觸發回覆或正處於防撞冷卻")
 
-        lines.append("\n✅ 自檢完成，系統核心通訊正常。")
+        lines.append("\n📌 備註：付費模型實際對話與額度消耗請至「📈 用量」或使用「💬 試聊預覽」測試。")
         return "\n".join(lines), await self._home_keyboard()
 
     async def _test_reply_preview(self, args: list[str]) -> str:
@@ -1893,20 +1924,33 @@ class TgControlBot:
         if not msg_text:
             return "⚠️ 請輸入要發送的訊息內容"
 
-        try:
-            sent_msg = await worker.tg_client.send_message(int(chat_id), msg_text)
-            mid = getattr(sent_msg, "id", "ok")
-            worker._record_sent_text(int(chat_id), msg_text)
-            return (
-                f"✅ 【發送成功】\n"
-                f"──────────────\n"
-                f"發送帳號：{self._acc_label(target_acc)}（{target_acc['id']}）\n"
-                f"目標群組：{chat_id}\n"
-                f"訊息 ID：{mid}\n"
-                f"內容：{msg_text}"
-            )
-        except Exception as e:
-            return f"⚠️ 發送失敗：{e}"
+        # 統一走底層安全門（時段、急停、活動開關、長度、群組）
+        if not worker._is_allowed_active_hour():
+            return "⚠️ 發送被拒絕：目前處於夜間禁言時段（22:00～10:00）"
+        if not worker.is_running:
+            return "⚠️ 發送被拒絕：帳號已處於停止狀態"
+        if int(chat_id) not in worker.selected_groups:
+            return f"⚠️ 發送被拒絕：目標群組 {chat_id} 已不在該帳號允許範圍內"
+        if len(msg_text) > 55:
+            return f"⚠️ 發送被拒絕：訊息長度（{len(msg_text)}字）超過安全上限 55 字"
+
+        # 同群原子鎖排隊（解決手動與自動發言並發撞車）
+        send_lock = worker.group_send_locks.setdefault(int(chat_id), asyncio.Lock())
+        async with send_lock:
+            try:
+                sent_msg = await worker.tg_client.send_message(int(chat_id), msg_text)
+                mid = getattr(sent_msg, "id", "ok")
+                worker._record_sent_text(int(chat_id), msg_text)
+                return (
+                    f"✅ 【發送成功】\n"
+                    f"──────────────\n"
+                    f"發送帳號：{self._acc_label(target_acc)}（{target_acc['id']}）\n"
+                    f"目標群組：{chat_id}\n"
+                    f"訊息 ID：{mid}\n"
+                    f"內容：{msg_text}"
+                )
+            except Exception as e:
+                return f"⚠️ 發送失敗：{e}"
 
     async def _persona_edit(self, account_id: str) -> str:
         """人設安全編輯說明：白名單欄位，密鑰類不會被存進來。"""
