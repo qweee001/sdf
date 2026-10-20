@@ -223,6 +223,8 @@ def test_illogical_sentence_violation():
     assert illogical_sentence_violation("試你的深淺")
     assert illogical_sentence_violation("量看你的深淺")
     assert illogical_sentence_violation("試試我的長短")
+    assert illogical_sentence_violation("把「嗎」字去掉就是答案了")
+    assert illogical_sentence_violation("去掉「嗎」字")
 
     # 合法表達：絕不誤殺
     assert not illogical_sentence_violation("今晚來試試我的深淺")
