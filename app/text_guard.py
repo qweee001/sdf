@@ -547,6 +547,12 @@ def gender_term_violation(persona, text: str) -> str:
         if term in cleaned:
             return term
 
+    # 38 歲熟女 Chen 專屬守衛：嚴禁對男人叫「哥哥」
+    name = str(persona.get("name") or "")
+    if "chen" in name.lower():
+        if "哥哥" in text or "葛格" in text:
+            return "熟女裝嫩稱呼哥哥"
+
     for term in _GENDER_PARTNER_TERMS.get(gender, ()):
         start = 0
         while True:

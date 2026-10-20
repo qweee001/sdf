@@ -143,6 +143,12 @@ def test_female_persona_blocks_male_genital_claims():
     assert gender_term_violation(female, "割我的老二")
     assert not gender_term_violation(male, "幹嘛想割我雞雞")
 
+    female_chen = {"gender": "女", "name": "Chen", "age": 38}
+    assert gender_term_violation(female_chen, "哥哥今晚來嗎")
+    assert gender_term_violation(female_chen, "好想找個哥哥")
+    assert not gender_term_violation(female_chen, "弟弟今晚要來交作業嗎")
+    assert not gender_term_violation(female_chen, "你那根夠不夠硬")
+
 
 def test_allowed_active_hours_10_to_22():
     worker = _worker(101)
