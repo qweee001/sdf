@@ -641,14 +641,16 @@ def may_mention_group_meta(text: str) -> bool:
     )
 
 def split_human_burst(text: str) -> list[str]:
-    """一律合成一則發送。
+    """一律合成一則發送，並在發送淨化層強制剝離引號與多餘格式。
 
     秒連發（同秒兩氣泡）是最容易露出 AI 感的地方；模型若寫出換行或
     兩句，送訊層併成一則，不再拆成 burst。
+    真人群聊隨手打字絕不帶「」『』"" 引號，強制剝離杜絕 AI 書面感。
     """
     t = str(text or "").strip()
     if not t:
         return []
+    t = re.sub(r"[「」『』\"']+", "", t)
     t = re.sub(r"[\r\n]+", " ", t)
     t = re.sub(r" {2,}", " ", t).strip()
     return [t] if t else []

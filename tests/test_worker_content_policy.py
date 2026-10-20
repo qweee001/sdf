@@ -560,6 +560,13 @@ def test_normal_text_is_not_blocked():
     assert all(not AccountWorker._mentions_video_topic(text) for text in normal_texts)
 
 
+def test_split_human_burst_strips_quotes():
+    """真人群聊打字不帶引號：送出前強制剝離「」『』""，杜絕 AI 書面感。"""
+    assert AccountWorker._split_human_burst('把「嗎」字去掉') == ["把嗎字去掉"]
+    assert AccountWorker._split_human_burst('他說『真的假的』') == ["他說真的假的"]
+    assert AccountWorker._split_human_burst('超愛"這種"感覺') == ["超愛這種感覺"]
+
+
 def test_split_human_burst_keeps_short_lines_single():
     """一律合成一則：短訊不拆。"""
     assert AccountWorker._split_human_burst("兜兜我硬了") == ["兜兜我硬了"]
