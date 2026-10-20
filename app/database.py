@@ -42,6 +42,7 @@ class Database:
         self._claim_lock = asyncio.Lock()
         self._settings_lock = asyncio.Lock()
         self._event_lock = asyncio.Lock()
+        self._immediate_tx_lock = asyncio.Lock()
 
     @property
     def _c(self) -> aiosqlite.Connection:
@@ -53,7 +54,7 @@ class Database:
         parent = os.path.dirname(self.db_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        self._db = await aiosqlite.connect(self.db_path, timeout=30)
+        self._db = await aiosqlite.connect(self.db_path, timeout=60)
         self._db.row_factory = aiosqlite.Row
         # 三個水軍 worker 共用同一主連線，而 live_test/settings/claim 等路徑用
         # 獨立連線跑 BEGIN IMMEDIATE 寫鎖。預設 busy_timeout 只有 5s，群組爆量時
@@ -61,7 +62,7 @@ class Database:
         # on_message 全炸、proactive 槽位釋放失敗）。WAL 讓讀不擋寫、寫不擋讀，
         # 加上 30s busy timeout 把短衝突吸收掉。
         await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA busy_timeout=30000")
+        await self._db.execute("PRAGMA busy_timeout=60000")
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._init_schema()
 
@@ -392,22 +393,23 @@ class Database:
         if not values:
             return
         now = time.time()
-        async with self._settings_lock:
-            async with aiosqlite.connect(self.db_path, timeout=30) as settings_db:
-                try:
-                    await settings_db.execute("BEGIN IMMEDIATE")
-                    for key, value in values.items():
-                        await settings_db.execute(
-                            "INSERT INTO runtime_settings (key, value, updated_at) "
-                            "VALUES (?, ?, ?) "
-                            "ON CONFLICT(key) DO UPDATE SET "
-                            "value = excluded.value, updated_at = excluded.updated_at",
-                            (str(key), str(value), now),
-                        )
-                    await settings_db.commit()
-                except BaseException:
-                    await settings_db.rollback()
-                    raise
+        async with self._immediate_tx_lock:
+            async with self._settings_lock:
+                async with aiosqlite.connect(self.db_path, timeout=60) as settings_db:
+                    try:
+                        await settings_db.execute("BEGIN IMMEDIATE")
+                        for key, value in values.items():
+                            await settings_db.execute(
+                                "INSERT INTO runtime_settings (key, value, updated_at) "
+                                "VALUES (?, ?, ?) "
+                                "ON CONFLICT(key) DO UPDATE SET "
+                                "value = excluded.value, updated_at = excluded.updated_at",
+                                (str(key), str(value), now),
+                            )
+                        await settings_db.commit()
+                    except BaseException:
+                        await settings_db.rollback()
+                        raise
 
     # ---------- 有界真人測試 ----------
 
@@ -2028,16 +2030,27 @@ class Database:
     async def ai_call_summary(self, hours: int = 24) -> dict:
         """F16：近 N 小時模型呼叫的成本／品質彙總（按用途分組）。"""
         cutoff = time.time() - max(1, int(hours)) * 3600
-        cursor = await self._c.execute(
-            "SELECT purpose, COUNT(*) AS calls, SUM(retries) AS retries, "
-            "SUM(CASE WHEN cost_status = 'measured' THEN 1 ELSE 0 END) AS measured, "
-            "SUM(prompt_tokens) AS prompt_tokens, "
-            "SUM(completion_tokens) AS completion_tokens, "
-            "AVG(latency_ms) AS avg_latency_ms "
-            "FROM ai_calls WHERE at >= ? GROUP BY purpose",
-            (cutoff,),
-        )
-        rows = await cursor.fetchall()
+        try:
+            cursor = await self._c.execute(
+                "SELECT purpose, COUNT(*) AS calls, SUM(retries) AS retries, "
+                "SUM(CASE WHEN cost_status = 'measured' THEN 1 ELSE 0 END) AS measured, "
+                "SUM(prompt_tokens) AS prompt_tokens, "
+                "SUM(completion_tokens) AS completion_tokens, "
+                "AVG(latency_ms) AS avg_latency_ms "
+                "FROM ai_calls WHERE at >= ? GROUP BY purpose",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+        except Exception as e:
+            return {
+                "by_purpose": {},
+                "totals": {
+                    "calls": 0, "retries": 0, "measured": 0,
+                    "prompt_tokens": 0, "completion_tokens": 0,
+                    "avg_latency_ms": 0.0,
+                },
+                "error": str(e),
+            }
         by_purpose = {
             str(row["purpose"]): {
                 "calls": int(row["calls"]),

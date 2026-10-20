@@ -1621,7 +1621,8 @@ class TgControlBot:
             for a in data.get("accounts", [])
         )
         lines.append(f"門控暫緩累計：{held}")
-        # NoTrack 額度：主模型走 NoTrack 時顯示剩餘美元（讀 x-notrack-balance-usd）
+        res = "\n".join(lines).strip()
+        return res if res else "暫無用量數據"
         cfg = self.manager.config
         if "notrack" in str(getattr(cfg, "ai_base_url", "")).lower():
             bal = await notrack_balance(
