@@ -315,6 +315,13 @@ def test_mainland_term_hint_names_the_replacement():
         assert worker._mainland_term_hint("哥哥們好") == ""
         assert worker._mainland_term_hint("") == ""
 
+        # 新增高危大陸詞攔截驗證
+        assert worker._mainland_term_hint("小姐姐你好") == "「小姐姐」應講「妹子」"
+        assert worker._mainland_term_hint("別口嗨了") == "「口嗨」應講「嘴砲」"
+        assert worker._mainland_term_hint("這部影片太牛逼了") == "「牛逼」應講「超強」"
+        assert worker._mainland_term_hint("叫外賣吃") == "「外賣」應講「外送」"
+        assert worker._mainland_term_hint("搭地鐵去") == "「地鐵」應講「捷運」"
+
     asyncio.run(main())
 
 
