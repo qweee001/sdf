@@ -823,7 +823,7 @@ def expected_place_names(persona, *sources: str) -> tuple[str, ...]:
                 names.append(name)
     return tuple(names)
 
-def time_hint(taipei_hour) -> str:
+def time_hint(taipei_hour, weather_summary: str = "") -> str:
     """現在台北時段的語氣提示：真人晚上聊天的口氣跟中午完全不同。
 
     每段都帶「別說」清單：時段穿幫（下午講早安、吃早餐）是最容易被
@@ -865,7 +865,13 @@ def time_hint(taipei_hour) -> str:
             "深夜",
             "語氣可以更親密一點，可以說「晚了」「該睡了」；別說「早安」「早餐」",
         )
-    return f"\n現在台北時間 {hour:02d} 點（{band}）：{hint}。"
+    res = f"\n現在台北時間 {hour:02d} 點（{band}）：{hint}。"
+    if weather_summary:
+        res += (
+            f"\n【實時環境與天氣（硬規則：聊天若提到天氣/出門/氣溫穿著必須以此為準，絕不可胡編反差天氣）】：{weather_summary}。"
+            "若聊到出門、氣溫、下雨或衣服穿搭，必須符合當前氣溫和天氣現狀（如沒下雨就別說被雨淋濕，氣溫暖和就別說冷到發抖）。"
+        )
+    return res
 
 def has_time_mismatch(text: str, taipei_hour, *, greetings_only: bool = False) -> bool:
     """時段穿幫偵測：主動發言自帶跟現在時段不合的詞（17 點講早安、吃早餐）。

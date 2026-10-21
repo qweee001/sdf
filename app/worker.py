@@ -458,7 +458,13 @@ class AccountWorker:
         return text_guard.expected_place_names(self.persona, *sources)
 
     def _time_hint(self) -> str:
-        return text_guard.time_hint(int(self._taipei_hour()))
+        weather_summary = ""
+        try:
+            from .weather import get_taipei_weather
+            weather_summary = get_taipei_weather()
+        except Exception:
+            pass
+        return text_guard.time_hint(int(self._taipei_hour()), weather_summary=weather_summary)
 
     def _has_time_mismatch(self, text, *, greetings_only: bool = False) -> bool:
         return text_guard.has_time_mismatch(
@@ -2629,11 +2635,16 @@ class AccountWorker:
                 else:
                     deflect_eg = "「平常不隨便發自拍的，表現好再說😏」"
 
-                # A+B 結合：30% 概率隨手發一張本機安全生活隨手拍（手搖飲/居酒屋/美腿無臉照），70% 概率傲嬌反撩推託
+                # A+B 結合：30% 概率隨手發一張本機安全生活隨手拍（依據當前實時時段分流白天/夜晚），70% 概率傲嬌反撩推託
                 should_send_photo = bool(self._lifestyle_photos and self._rng.random() < 0.30)
                 if should_send_photo:
                     try:
-                        chosen_photo = self._rng.choice(self._lifestyle_photos)
+                        # 依照實時台北時間挑選符合光影的圖片（白天 vs 夜間）
+                        is_night = (self._taipei_hour() >= 18.0 or self._taipei_hour() < 6.0)
+                        prefix = "night_" if is_night else "day_"
+                        matched_photos = [p for p in self._lifestyle_photos if Path(p).name.startswith(prefix)]
+                        pool = matched_photos if matched_photos else self._lifestyle_photos
+                        chosen_photo = self._rng.choice(pool)
                         with open(chosen_photo, "rb") as pf:
                             photo_bytes = pf.read()
                         asset = MediaAsset(
