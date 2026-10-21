@@ -1319,9 +1319,9 @@ class Database:
 
 
     async def get_recent_group_replies(
-        self, group_id: int, limit: int = 20
+        self, group_id: int, limit: int = 30
     ) -> list[str]:
-        """跨所有帳號讀取群內近期實際送出的文案，供全群去重。"""
+        """跨所有帳號讀取群內近期實際送出的文案，供全群動態去重（擴展至最近 30 則，跨天跨輪記憶）。"""
         cursor = await self._c.execute(
             "SELECT content FROM messages "
             "WHERE group_id = ? AND role = 'assistant' "
