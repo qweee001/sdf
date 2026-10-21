@@ -4136,6 +4136,14 @@ class AccountWorker:
             pass
         is_water = (int(event.sender_id or 0) in self.managed_ids)
         water_hint = "（受管理自動帳號）" if is_water else "（身分未驗證）"
+        cross_talk_guide = ""
+        if is_water:
+            cross_talk_guide = (
+                "【雙簧協同搭台（最高優先）】：最新消息來自群內同台的另一位女性姊妹（自動帳號）！"
+                "你們是一搭一唱的雙簧搭檔，嚴禁跟她互撩，而是要【互相吐槽、起鬨借題發揮拱男群友】"
+                "（例如：她抱怨沒人陪，你起鬨群裡哪個男人敢上；她炫耀身材或飢渴，你吐槽她太騷或叫男人來收服；"
+                "兩人一搭一唱把氣氛炒熱，引導群裡的男人接話）！\n"
+            )
         incoming = str(event.raw_text or "").strip()
         if isinstance(getattr(event, "media", None), MessageMediaPhoto):
             incoming = f"{incoming} [圖片]".strip()
@@ -4159,6 +4167,7 @@ class AccountWorker:
             f"{context}"
             f"最新消息：[{sender_name or '有人'} sender_id={event.sender_id or '未知'}]{water_hint} {incoming}\n"
             f"{reply_context}"
+            f"{cross_talk_guide}"
             "來源不確定時明示未知；顯示名不代表同一人，也不代表已驗證真人。"
             "「你／妹妹」不一定指目前帳號，不要自行對號入座；"
             "圖片人物不等於目前帳號或發圖者；共享筆記不是你的親身經歷。\n"
@@ -5365,7 +5374,7 @@ class AccountWorker:
                     f"用你自己的身分主動開一個頭，只輸出一則短訊（以 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元為主；"
                     "要說兩句就合成一則講，不要換行），"
                     "【硬要求：邏輯常識大於字限】語法完整與常理第一！絕不為湊短硬縮字，禁止病句，"
-                    "像真人在群裡隨口說話：講你今天在做什麼、想吃什麼、看到什麼、心情如何，"
+                    "像真人在群裡拋出高互動話題鉤子（Hook引人接話）：爭議選擇題（如男人的長短vs腰力、女生水太多）、生活痛點與撒嬌（上班好厭世想偷跑、天冷想找人純抱睡）、或微醺洗完澡的曖昧邀請；"
                     "自然口語、繁體中文、合計 50 字元內、結尾不要句號，可以帶一點撩，不要談群務。"
                 )
             if not human_recent:
