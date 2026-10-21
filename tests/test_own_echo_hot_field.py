@@ -146,7 +146,7 @@ def test_female_persona_blocks_male_genital_claims():
     female_chen = {"gender": "女", "name": "Chen", "age": 38}
     assert gender_term_violation(female_chen, "哥哥今晚來嗎")
     assert gender_term_violation(female_chen, "好想找個哥哥")
-    assert not gender_term_violation(female_chen, "弟弟今晚要來交作業嗎")
+    assert not gender_term_violation(female_chen, "弟弟今晚要來找姊姊嗎")
     assert not gender_term_violation(female_chen, "你那根夠不夠硬")
 
 
@@ -231,9 +231,13 @@ def test_illogical_sentence_violation():
     assert illogical_sentence_violation("試試我的長短")
     assert illogical_sentence_violation("把「嗎」字去掉就是答案了")
     assert illogical_sentence_violation("去掉「嗎」字")
+    # 高頻老梗封殺
+    assert illogical_sentence_violation("今晚來試試我的深淺")
+    assert illogical_sentence_violation("餵飽姊姊上下兩張嘴")
+    assert illogical_sentence_violation("按著後入撞到底")
+    assert illogical_sentence_violation("哪個弟弟敢來交作業")
 
     # 合法表達：絕不誤殺
-    assert not illogical_sentence_violation("今晚來試試我的深淺")
     assert not illogical_sentence_violation("讓我試試你的長短")
     assert not illogical_sentence_violation("鑑定你的粗細")
     assert not illogical_sentence_violation("出一張嘴誰不會")
