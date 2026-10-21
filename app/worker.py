@@ -4337,6 +4337,8 @@ class AccountWorker:
                     {"role": "user", "content": user_message},
                 ],
                 "temperature": self.config.ai_temperature,
+                "frequency_penalty": 0.45,
+                "presence_penalty": 0.35,
                 "max_tokens": self.config.ai_max_tokens,
                 "timeout": self.config.ai_timeout,
             }
