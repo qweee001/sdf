@@ -596,6 +596,13 @@ class AccountWorker:
                 (Path(__file__).resolve().parent / "assets" / "stickers").glob("*.webp")
             )
         ]
+        # 本機安全生活圖庫資產：第一人稱生活隨手拍（無人臉、無日期、無文字）
+        self._lifestyle_photos = [
+            str(p)
+            for p in sorted(
+                (Path(__file__).resolve().parent / "assets" / "photos").glob("*.jpg")
+            )
+        ]
         self._realtime_voice_day = 0
         self._realtime_voice_today = 0
         self._last_realtime_voice = 0.0
@@ -2621,6 +2628,40 @@ class AccountWorker:
                     deflect_eg = "「姊姊又不是二十歲小女生隨便發自拍，想看本人表現好再說😏」"
                 else:
                     deflect_eg = "「平常不隨便發自拍的，表現好再說😏」"
+
+                # A+B 結合：30% 概率隨手發一張本機安全生活隨手拍（手搖飲/居酒屋/美腿無臉照），70% 概率傲嬌反撩推託
+                should_send_photo = bool(self._lifestyle_photos and self._rng.random() < 0.30)
+                if should_send_photo:
+                    try:
+                        chosen_photo = self._rng.choice(self._lifestyle_photos)
+                        with open(chosen_photo, "rb") as pf:
+                            photo_bytes = pf.read()
+                        asset = MediaAsset(
+                            kind="image",
+                            data=photo_bytes,
+                            filename=Path(chosen_photo).name,
+                            mime_type="image/jpeg",
+                        )
+                        if await self._send_media_recorded(
+                            int(event.chat_id),
+                            asset,
+                            "[圖片]",
+                            on_dispatched=mark_telegram_dispatched,
+                        ):
+                            sent = True
+                            if is_human_reply:
+                                self.stats["human_sent"] += 1
+                                human_counted = True
+                            await self._audit_reply(
+                                event,
+                                "sent",
+                                "managed" if managed_followup else "human",
+                            )
+                            sent_audited = True
+                            return
+                    except Exception as pe:
+                        print(f"[{self.name}] lifestyle photo send error: {pe}", flush=True)
+
                 photo_hint = (
                     "【對方索要照片／自拍之真實推託硬規則】：群友在索取自拍或照片！"
                     "真實台灣女生在群裡絕不會輕易發照，嚴禁答應發圖，必須用傲嬌反撩或開條件推託！"
