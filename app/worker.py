@@ -2608,7 +2608,25 @@ class AccountWorker:
                         )
                         sent_audited = True
                         return
-            text = await self._generate_reply(event)
+            photo_hint = ""
+            if media_kind == "image":
+                name = str(self.persona.get("name") or "")
+                if "小小" in name:
+                    deflect_eg = "「這麼急著看喔，約出來開房直接看不更刺激😏」"
+                elif "小天後" in name:
+                    deflect_eg = "「想看就看喔，你哪位啊？想看先請全群喝飲料再說🤏」"
+                elif "RICH" in name or "rich" in name.lower():
+                    deflect_eg = "「平常不隨便給不熟的男人發照片欸，害羞啦～」"
+                elif "chen" in name.lower():
+                    deflect_eg = "「姊姊又不是二十歲小女生隨便發自拍，想看本人表現好再說😏」"
+                else:
+                    deflect_eg = "「平常不隨便發自拍的，表現好再說😏」"
+                photo_hint = (
+                    "【對方索要照片／自拍之真實推託硬規則】：群友在索取自拍或照片！"
+                    "真實台灣女生在群裡絕不會輕易發照，嚴禁答應發圖，必須用傲嬌反撩或開條件推託！"
+                    f"你的專屬口吻參考：{deflect_eg}，45 字內直接回絕反撩，結尾不帶句號。"
+                )
+            text = await self._generate_reply(event, extra_hint=photo_hint)
             vision_succeeded = self._take_successful_vision(event)
             generation_reason = self._take_generation_reason(event)
             allow_media_takeover = (
