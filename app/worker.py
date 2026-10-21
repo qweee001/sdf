@@ -3672,11 +3672,14 @@ class AccountWorker:
         )
         if recent_group_replies:
             examples = "\n".join(
-                f"- {text}" for text in recent_group_replies[:8]
+                f"- {text}" for text in recent_group_replies[:12]
             )
             user_message += (
-                "\n近期群內已發過以下文案，絕不能照抄、近似改寫或沿用相同開頭：\n"
-                f"{examples}\n請改用符合你個人人設的新角度。"
+                "\n【嚴格禁止複讀與套路撞梗（違規直接拋棄）】：\n"
+                "1. 近期群內已發過以下文案，絕不能照抄、近似改寫或沿用相同套路：\n"
+                f"{examples}\n"
+                "2. 嚴禁再使用「試深淺」「撞到底」「餵飽上下兩張嘴」「交作業」等老掉牙爛梗！\n"
+                "3. 請換全新的感官角度勾引（如：體溫、親吻敏感帶、香水味道、絲質睡衣、抱起來、調教、前戲技術挑釁、眼神對視）。\n"
             )
         # 群聊記憶：群組＋成員＋帳號三層隔離的群友記憶，讓接話有根據
         sender_id = int(event.sender_id or 0)

@@ -498,6 +498,10 @@ _NONSENSE_ILLOGICAL_PATTERNS = (
     re.compile(r"(?:很高興為你|有什麼可以幫|祝你有美好的一天|希望這對你有幫助)"),
     re.compile(r"身為一個(?:AI|人工智能|語言模型|女性|台灣人)"),
     re.compile(r"^(?:總結來說|總而言之|綜上所述|整體而言)"),
+    # 2026-10 徹底封殺高頻老梗與固定複讀套路（逼模型換全新角度勾引）
+    re.compile(r"上下(?:兩|二)張嘴"),
+    re.compile(r"撞到底"),
+    re.compile(r"交作業"),
 )
 
 
