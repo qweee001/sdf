@@ -102,8 +102,8 @@ _EMOJI_HISTORY_LIMIT = 6
 _PHRASE_FATIGUE_MIN_REPEAT = 2
 _PHRASE_HISTORY_LIMIT = 8
 # 跨號意象冷卻：任一號用過的核心詞，同群其他號 45 分鐘內避開。
-# 實測「腿軟」是小小講完、RICH／小天後接著抬——worker 私有疲勞記憶防不住。
-_PHRASE_CORE_COOLDOWN_SECONDS = 45 * 60
+# 實測「腿軟」「撞到底」「深淺」是小小講完、RICH／小天後／Chen 接著抬——跨號核心意象鎖定 120 分鐘
+_PHRASE_CORE_COOLDOWN_SECONDS = 120 * 60
 _PHRASE_CORE_HISTORY_LIMIT = 24
 _PHRASE_CORE_STOPWORDS = frozenset({
     "今天", "真的", "可以", "什麼", "一個", "這個", "那個",
@@ -5123,8 +5123,12 @@ class AccountWorker:
 
     @staticmethod
     def _phrase_core(text: str) -> str:
-        """抽出句子末段 2 字核心意象（去掉語尾），功能詞不記。"""
+        """抽出句子核心意象（優先檢查高頻西斯詞彙，其次末段 2 字核心意象）。"""
         t = _TRAILING_PARTICLE_RE.sub("", str(text or "").replace("\n", " ").strip())
+        # 優先抓取高頻西斯/調情關鍵詞（跨號防複讀）
+        for kw in ("深淺", "深浅", "餵飽", "喂饱", "兩張嘴", "两张嘴", "交作業", "交作业", "撞到底", "吸緊"):
+            if kw in t:
+                return kw
         runs = _CJK_RUN_RE.findall(t)
         if not runs:
             return ""

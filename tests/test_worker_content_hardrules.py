@@ -321,6 +321,8 @@ def test_mainland_term_hint_names_the_replacement():
         assert worker._mainland_term_hint("這部影片太牛逼了") == "「牛逼」應講「超強」"
         assert worker._mainland_term_hint("叫外賣吃") == "「外賣」應講「外送」"
         assert worker._mainland_term_hint("搭地鐵去") == "「地鐵」應講「捷運」"
+        assert worker._mainland_term_hint("我剛吃完晚飯") == "「晚飯」應講「晚餐」"
+        assert worker._mainland_term_hint("吃午飯了嗎") == "「午飯」應講「午餐」"
 
     asyncio.run(main())
 

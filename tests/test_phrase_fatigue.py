@@ -343,9 +343,9 @@ def test_shared_core_expires_after_cooldown():
         a._record_sent_text(group, "煮到對方腿軟")
         assert b._phrase_fatigue_hit(group, "想舔到我腿軟嗎") == "腿軟"
         shared[group][:] = [
-            (core, ts - 46 * 60) for core, ts in shared[group]
+            (core, ts - 121 * 60) for core, ts in shared[group]
         ]
-        assert time.time() - shared[group][0][1] > 45 * 60
+        assert time.time() - shared[group][0][1] > 120 * 60
         assert b._phrase_fatigue_hit(group, "想舔到我腿軟嗎") == ""
         assert "腿軟" not in (b._phrase_fatigue_hint(group) or "")
 
@@ -420,6 +420,7 @@ def test_manager_injects_shared_phrase_cores():
         manager.failed_reply_claimants = {}
         manager.topic_turn_counts = {}
         manager.personas = {}
+        manager.group_send_locks = {}
         manager.phrase_cores_by_group = {}
         manager.live_test = SimpleNamespace(
             start_block_error=AsyncMock(return_value=""),
