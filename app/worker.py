@@ -122,7 +122,7 @@ _SILENT_REPLY_PROBABILITY_ORDINARY = 0.10
 # 睡著的人（凌晨 4-7 點錯峰窗口）基本沒看手機：被@也只有兩成機率接住
 _SLEEP_REPLY_PROBABILITY = 0.20
 # reaction 輕回應改成 sticker 的機率（sticker 比重點表情多一分「用心」）
-_STICKER_PROBABILITY = 0.35
+_STICKER_PROBABILITY = 0.50
 # 決策層（System One）：① 選中的內容與要求，寫進生成 prompt 的指示。
 # 露骨尺度完全放開由 Jev 決定：頂檔＝無底線，寫到哪裡算哪裡。
 _DECISION_FLIRTY_GUIDE = {
@@ -3613,8 +3613,15 @@ class AccountWorker:
                 member_notes = []
             if member_notes:
                 notes = "\n".join(f"- {n}" for n in member_notes[:5])
+                vip_hint = ""
+                if len(member_notes) >= 2:
+                    vip_hint = (
+                        "【VIP常客與熟人默契指引】：這位群友是群裡的熟面孔！"
+                        "互動時要有「老朋友」的熟稔感，若合適可順帶調侃他過往的發言或梗（如愛開車、常熬夜、自嘲長短），"
+                        "帶出「我記得你」的人情味與自然互虧，但要緊扣當前話題。\n"
+                    )
                 user_message += (
-                    f"\n與該群友（{int(sender_id)}）之前的互動記錄（僅限這位群友，別混到其他人）：\n{notes}"
+                    f"\n{vip_hint}與該群友（{int(sender_id)}）之前的互動記錄（僅限這位群友，別混到其他人）：\n{notes}"
                 )
         # 群內共同記憶：最近話題／共同活動，接話與主動發言的依據
         try:
