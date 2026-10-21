@@ -669,6 +669,25 @@ def split_human_burst(text: str) -> list[str]:
     t = re.sub(r" {2,}", " ", t).strip()
     return [t] if t else []
 
+
+_EMOJI_PATTERN = re.compile(
+    r"[\U00010000-\U0010ffff]"
+    r"|[\u2600-\u27bf]"
+    r"|[\u2300-\u23ff]"
+    r"|[\ufe00-\ufe0f]"
+    r"|[\u200d]"
+)
+
+
+def strip_emoji(text: str) -> str:
+    """清除字串中的 emoji 表情，並移除因抽除表情遺留的尾端贅空格或贅標點。"""
+    if not text:
+        return ""
+    cleaned = _EMOJI_PATTERN.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"[\s，,、]+$", "", cleaned).strip()
+    return cleaned
+
 _OWN_ECHO_STRIP_RE = re.compile(r"[幹干，,。．!！?？\s~～…、；;：:「」『』（）()]+")
 _OWN_ECHO_HEAD_STOP = frozenset({
     "今天", "真的", "可以", "什麼", "這個", "那個", "不是", "沒有",

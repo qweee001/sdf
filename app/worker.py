@@ -121,6 +121,8 @@ _SILENT_REPLY_PROBABILITY_DIRECTED = 0.05
 _SILENT_REPLY_PROBABILITY_ORDINARY = 0.10
 # 睡著的人（凌晨 4-7 點錯峰窗口）基本沒看手機：被@也只有兩成機率接住
 _SLEEP_REPLY_PROBABILITY = 0.20
+# 依主人指示：發訊控制 70% 概率純文字，30% 概率允許保留 emoji 表情
+_EMOJI_ALLOW_PROBABILITY = 0.30
 # reaction 輕回應改成 sticker 的機率（sticker 比重點表情多一分「用心」）
 _STICKER_PROBABILITY = 0.50
 # 決策層（System One）：① 選中的內容與要求，寫進生成 prompt 的指示。
@@ -424,6 +426,10 @@ class AccountWorker:
     @staticmethod
     def _split_human_burst(text):
         return text_guard.split_human_burst(text)
+
+    @staticmethod
+    def _strip_emoji(text):
+        return text_guard.strip_emoji(text)
 
     @staticmethod
     def _mentions_video_topic(text):
@@ -2722,6 +2728,10 @@ class AccountWorker:
                 return
             # Evidence-bound realtime TTS is reserved for bounded live tests.
             # Ordinary replies always use text; they have no run/event/snapshot envelope.
+            # 依主人指示：精確控制 70% 概率純文字，30% 概率允許保留 emoji 表情
+            if random.random() >= _EMOJI_ALLOW_PROBABILITY:
+                text = self._strip_emoji(text)
+
             # 真人節奏：模型輸出長句時拆成 2~3 則短訊連發（實測 80% 真人訊息間隔 <10s）
             burst = self._split_human_burst(text)
             sent = False
@@ -5739,6 +5749,10 @@ class AccountWorker:
                             flush=True,
                         )
                         continue
+                    # 依主人指示：精確控制 70% 概率純文字，30% 概率允許保留 emoji 表情
+                    if random.random() >= _EMOJI_ALLOW_PROBABILITY:
+                        topic = self._strip_emoji(topic)
+
                     burst = self._split_human_burst(topic)
                     sent = False
                     for i, part in enumerate(burst):
