@@ -1261,11 +1261,15 @@ class Database:
 
     async def add_message(self, account_id: str, group_id: int, sender_id: int,
                           sender_name: str, role: str, content: str,
-                          message_id: int = 0) -> None:
+                          message_id: int = 0, sent_at: float | None = None) -> None:
+        # sent_at：Telegram 原始發送時間。以前一律存 time.time()＝「輪詢進來的
+        # 時間」，整批訊息會被壓在同一個秒數（實測 203 則有 80.7% 落在 :01），
+        # 導致冷卻、熱場、輪替間隔全部被量化到整分鐘，真人節奏量不出來。
+        stamp = float(sent_at) if sent_at and sent_at > 0 else time.time()
         await self._c.execute(
             "INSERT INTO messages (account_id, group_id, sender_id, sender_name, role, content, timestamp, message_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (account_id, group_id, sender_id, sender_name, role, content, time.time(), int(message_id or 0)),
+            (account_id, group_id, sender_id, sender_name, role, content, stamp, int(message_id or 0)),
         )
         # 每群最多留 200 條
         await self._c.execute(

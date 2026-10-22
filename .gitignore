@@ -6,3 +6,9 @@ __pycache__/
 .pytest_cache/
 .hermes/
 .worktrees/
+
+# 語音試聽暫存（本機聽完即可，不進版控）
+voice_candidates/
+voice_refs/
+analysis/
+pytest.log

@@ -9,7 +9,6 @@ FORBIDDEN_GROUP_META = (
     "付費",
     "繳費",
     "管理員",
-    "助理",
     "把關",
     "仙人跳",
     "綁架",
@@ -17,6 +16,8 @@ FORBIDDEN_GROUP_META = (
     "怪人",
     "這群真的可以",
 )
+# 「助理」是例外：群裡真人自己就在講「聯絡助理啊」「讓助理幫你約一個」，
+# 水軍跟著講才對，不再列為禁詞（10-22 實測群紀錄）。
 
 
 def test_static_proactive_pool_is_removed():
@@ -182,7 +183,7 @@ def test_system_prompt_preserves_adult_policy_after_approved_language_cleanup():
     assert "不要複述相關詞" in sp
     # 話題邊界：加 LINE、地名都不主動帶出
     assert "不要主動提交換聯絡方式" in sp
-    assert "不要主動帶地名" in sp
+    assert "完全不帶地名" in sp
 
 
 def test_system_prompt_carries_no_meta_jailbreak_declaration():

@@ -234,6 +234,23 @@ def _dialog_title(dialog) -> str:
     return f"群組 {getattr(dialog, 'id', 0)}"
 
 
+def _event_sent_at(event) -> float:
+    """取 Telegram 訊息的原始發送時間（epoch）。
+
+    Telethon 的 event.date 是 UTC aware datetime；拿不到就回 0，
+    由 add_message 退回 time.time()。
+    """
+    raw = getattr(event, "date", None)
+    if raw is None:
+        msg = getattr(event, "message", None)
+        raw = getattr(msg, "date", None)
+    if raw is None:
+        return 0.0
+    try:
+        return float(raw.timestamp())
+    except Exception:
+        return 0.0
+
 def _voice_duration_seconds(data: bytes) -> int:
     """粗估 OGG/Opus 語音長度（秒）：解析 Ogg page 的 granule position。
 
@@ -285,6 +302,11 @@ _SPEAKER_SHARE_CAP = 0.45
 _SPEAKER_HARD_CAP = 3
 # 話題溫度計：連續這麼多輪色情話題後，強制冷卻插入日常降溫
 _TOPIC_HEAT_MAX_ROUNDS = 4
+# 地點問題訊號：命中才啟用「不准講具體地名」硬攔（平常聊到地名是合理的）
+_PLACE_QUESTION_MARKS = (
+    "住哪", "在哪", "哪裡", "地點", "怎麼約", "約在哪", "哪一區",
+    "住哪區", "哪邊", "近嗎", "遠嗎", "怎麼找",
+)
 # 被質疑真人時甩語音條自證的機率（80%＝四則裡三則直接語音打臉）
 _VOICE_VERIFY_PROBABILITY = 0.80
 _HIGH_TRAFFIC_HUMANS_5M = 14
@@ -1044,6 +1066,8 @@ class AccountWorker:
                 stored_content,
                 # F09: TG 訊息 ID = 事件身分，跨帳號/跨秒去重靠它
                 message_id=int(getattr(event, "id", 0) or 0),
+                # 存 Telegram 原始發送時間，不是輪詢進來的時間
+                sent_at=_event_sent_at(event),
             )
             if not await self._should_reply(event):
                 return
@@ -1776,6 +1800,153 @@ class AccountWorker:
         "RICH": "輕熟氣質組（RICH＋Chen）",
         "Chen": "輕熟氣質組（RICH＋Chen）",
     }
+
+    # ---- 定位配額：已約過＋可再約（A+B）----
+    # 自我推銷的動作標記（出現任一個＝這則在賣自己，不是旁白）
+    _SELF_OFFER_MARKS = (
+        "誰要", "報名", "約我", "有空", "剩週", "這禮拜",
+        "我下午", "我晚上", "我這邊", "來找我", "助理",
+        "敢不敢約", "約得到", "排我",
+    )
+    # 主持人語氣（第三人稱幫別人拉客）
+    _MC_MARKS = ("哪個好哥哥", "哪個哥哥", "讓她", "她那麼", "帶她")
+
+    def _recent_bot_texts(self, group_id: int) -> list[str]:
+        """本程序記憶裡該群最近的水軍發言（跨帳號）。"""
+        bucket = self._recent_texts_by_group.get(int(group_id)) or []
+        return list(bucket[-6:])
+
+    # 自發生活照：食物字詞（群裡主語言）→ 提高發照機率
+    _FOOD_WORDS = (
+        "吃", "午餐", "晚餐", "早餐", "宵夜", "牛排", "牛肉", "豬肉",
+        "火鍋", "燒肉", "壽司", "麵", "飯", "手搖", "飲料", "咖啡",
+        "啤酒", "水果", "鳳梨", "桃", "蝦", "雞排", "甜點",
+    )
+    _photo_last_sent: dict[int, float] = {}
+
+    async def _maybe_lifestyle_photo(self, event) -> bool:
+        """偶爾自己發一張生活照（不是被要才發）。
+
+        讀出來的真實落差：群裡 68 分鐘真人發 12 張食物照，水軍 0 張。
+        食物照就是這個群的主語言，不參加等於站在外面看。
+        機率：聊食物 15%、其他 5%；同群 40 分鐘最多一張。
+        """
+        if not self._lifestyle_photos or not self.media_service:
+            return False
+        if not bool(getattr(self.config, "media_enabled", False)):
+            return False
+        gid = int(event.chat_id or 0)
+        now = time.time()
+        if now - self._photo_last_sent.get(gid, 0.0) < 2400:
+            return False
+        raw = str(getattr(event, "raw_text", "") or "")
+        talking_food = any(w in raw for w in self._FOOD_WORDS)
+        if self._rng.random() >= (0.15 if talking_food else 0.05):
+            return False
+        is_night = self._taipei_hour() >= 18.0 or self._taipei_hour() < 6.0
+        prefix = "night_" if is_night else "day_"
+        pool = [
+            p for p in self._lifestyle_photos if Path(p).name.startswith(prefix)
+        ] or self._lifestyle_photos
+        if not pool:
+            return False
+        chosen = self._rng.choice(pool)
+        try:
+            data = Path(chosen).read_bytes()
+        except OSError:
+            return False
+        asset = MediaAsset(
+            kind="image", data=data, filename=Path(chosen).name,
+            mime_type="image/jpeg",
+        )
+        ok = await self._send_media_recorded(
+            gid, asset, "[圖片]",
+        )
+        if ok:
+            self._photo_last_sent[gid] = now
+            self.stats["photo_proactive_sent"] = (
+                int(self.stats.get("photo_proactive_sent", 0)) + 1
+            )
+            print(f"[{self.name}] photo-sent: {Path(chosen).name}（自發）", flush=True)
+        return ok
+
+    # 男生在問「怎麼約／在哪／什麼時候」的訊號
+    _ASK_BOOKING_MARKS = (
+        "怎麼約", "要怎麼", "在哪", "地點", "哪裡", "住哪", "幾點",
+        "什麼時候", "有空嗎", "可以約", "約嗎", "約妳", "約你",
+        "怎麼找", "找你", "找妳",
+    )
+
+    def _positioning_hint(
+        self, group_id: int, incoming: str = "", history: list[dict] | None = None
+    ) -> str:
+        """定位狀態機：勾引 → 助理成交，並壓制旁白化與 MC 腔。
+
+        讀出來的真實問題（10-22 線上）：11 則水軍發言有 8 則在講別人，
+        只有 2 則講自己，且「哪個好哥哥」一小時用 2 次。4 個帳號變成旁白，
+        沒有人有理由去約她們。這裡在生成前硬性校正，並維持「勾引→推助理」
+        的成交節奏（地點一律不講，由助理接手）。
+        """
+        recent = self._recent_bot_texts(group_id)
+        raw = str(incoming or "")
+        parts: list[str] = []
+
+        # A. 對方在問怎麼約／在哪／何時 → 先勾一句，再收在助理
+        asking = any(m in raw for m in self._ASK_BOOKING_MARKS)
+        last_bot = recent[-1] if recent else ""
+        if asking:
+            already = "助理" in last_bot
+            parts.append(
+                "【成交路徑｜對方在問怎麼約／在哪】：先勾一句（身體、眼神、時間都可以），"
+                "再用一句收在助理（「你自己找助理啊」「叫助理排」）。"
+                "地點不講，讓助理接。25 字內。"
+                if not already
+                else "【對方在問約】：上一則已經推過助理，這一則只要補一句勾引，不要再提助理。20 字內。"
+            )
+
+        if not recent:
+            return ("\n" + "\n".join(parts)) if parts else ""
+
+        self_offer = sum(
+            1 for t in recent if any(m in t for m in self._SELF_OFFER_MARKS)
+        )
+        mc = sum(1 for t in recent if any(m in t for m in self._MC_MARKS))
+
+        # B. 連 3 則都沒賣自己 → 這一輪強制勾引（並收在助理）
+        tail3 = recent[-3:]
+        if len(tail3) == 3 and not any(
+            any(m in t for m in self._SELF_OFFER_MARKS) for t in tail3
+        ):
+            self.stats["position_forced_offer"] = (
+                int(self.stats.get("position_forced_offer", 0)) + 1
+            )
+            print(
+                f"[{self.name}] position: 連續旁白，本輪強制勾引",
+                flush=True,
+            )
+            parts.append(
+                "【定位校正｜這一輪不准只當旁白】：你連續好幾則都在講別人。"
+                "這一則要「賣自己」——勾一句（身體／眼神／聲音／這禮拜剩哪天），"
+                "收在助理。40 字內，講完就停。"
+            )
+        elif self_offer == 0 and len(recent) >= 4:
+            parts.append(
+                "【定位提醒】：最近都旁白，這一則帶一句自己的狀態或空檔。"
+            )
+
+        # C. MC 腔用太凶 → 這一輪禁用
+        if mc >= 3:
+            parts.append(
+                "【這一輪禁用「哪個好哥哥」「讓她」】：改第一人稱，講你自己。"
+            )
+
+        # D. 助理連兩則都提過 → 這則停一下，別變成跳針
+        if len(recent) >= 2 and all("助理" in t for t in recent[-2:]):
+            parts.append("【助理剛連提兩次】：這則不要提助理，專心勾。")
+
+        if not parts:
+            return ""
+        return "\n" + "\n".join(parts)
 
     def _social_dynamics_hint(self, history: list[dict]) -> str:
         """真人社交動力學：偶爾無視、偶爾吐槽拆台，不是每句都捧場。
@@ -2966,6 +3137,18 @@ class AccountWorker:
                         )
                         sent_audited = True
                         return
+            # 自發生活照：群裡主食是食物照，水軍一小時 0 張等於沒參加
+            if media_kind != "image" and await self._maybe_lifestyle_photo(event):
+                if is_human_reply:
+                    self.stats["human_sent"] += 1
+                    human_counted = True
+                await self._audit_reply(
+                    event,
+                    "sent",
+                    "managed" if managed_followup else "human",
+                )
+                sent_audited = True
+                return
             photo_hint = ""
             if media_kind == "image":
                 name = str(self.persona.get("name") or "")
@@ -4013,6 +4196,12 @@ class AccountWorker:
         heat_hint = self._topic_heat_hint(group_id, history)
         if heat_hint:
             user_message += f"\n{heat_hint}"
+        # 定位狀態機：勾引 → 助理成交；連續旁白強制賣自己
+        position_hint = self._positioning_hint(
+            group_id, str(getattr(event, "raw_text", "") or ""), history
+        )
+        if position_hint:
+            user_message += position_hint
         # 多角色社交動力學：不接話／吐槽拆台／小圈圈口吻差異
         social_hint = self._social_dynamics_hint(history)
         if social_hint:
@@ -4165,6 +4354,15 @@ class AccountWorker:
         place_typo = self._place_typo_hint(
             reply, expected=self._reply_place_names(event, history)
         )
+        # 具體地名（不報地名政策）：只在「對方在問地點／怎麼約」時硬攔。
+        # 平常聊天提到「淡水下雨」是合理的，不該因此整句重寫。
+        place_strict = any(
+            m in str(getattr(event, "raw_text", "") or "")
+            for m in _PLACE_QUESTION_MARKS
+        )
+        concrete_place = (
+            text_guard.concrete_place_violation(reply) if place_strict else ""
+        )
         # 性別詞彙排他（實測：小小「我前女友」）——女號講前女友＝性別倒錯
         gender_violation = self._gender_term_violation(reply)
         phrase_fatigue = self._phrase_fatigue_hit(group_id, reply)
@@ -4188,6 +4386,7 @@ class AccountWorker:
             and not repetitive
             and not time_mismatch
             and not place_typo
+            and not concrete_place
             and not gender_violation
             and not phrase_fatigue
             and not own_echo
@@ -4217,6 +4416,8 @@ class AccountWorker:
                 if time_mismatch
                 else "place_typo"
                 if place_typo
+                else "concrete_place"
+                if concrete_place
                 else "gender_term"
                 if gender_violation
                 else "phrase_fatigue"
@@ -4256,6 +4457,11 @@ class AccountWorker:
             correction += (
                 f"上一版用了大陸講法的詞（{mainland_term}）。"
                 "換成台灣講法，其他不要改。"
+            )
+        if concrete_place:
+            correction += (
+                f"上一版出現具體地名（{concrete_place}）。這裡不報地名——"
+                "城市也不要，改成「我這邊」「附近」，或直接叫對方去找助理。"
             )
         if mentions_video:
             correction += (
@@ -4339,6 +4545,9 @@ class AccountWorker:
         retry_place_typo = self._place_typo_hint(
             retry, expected=self._reply_place_names(event, history)
         )
+        retry_concrete_place = (
+            text_guard.concrete_place_violation(retry) if place_strict else ""
+        )
         retry_gender = self._gender_term_violation(retry)
         retry_phrase_fatigue = self._phrase_fatigue_hit(group_id, retry)
         retry_own_echo = self._is_own_echo(retry, self._own_echo_recent(group_id))
@@ -4355,6 +4564,7 @@ class AccountWorker:
             or retry_repetitive
             or retry_time_mismatch
             or retry_place_typo
+            or retry_concrete_place
             or retry_gender
             or retry_phrase_fatigue
             or retry_own_echo
@@ -4378,6 +4588,8 @@ class AccountWorker:
                 if retry_time_mismatch
                 else "place_typo"
                 if retry_place_typo
+                else "concrete_place"
+                if retry_concrete_place
                 else "gender_term"
                 if retry_gender
                 else "phrase_fatigue"

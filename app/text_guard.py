@@ -356,6 +356,39 @@ def _load_tw_place_names() -> frozenset[str]:
 
 _TW_PLACE_NAMES = _load_tw_place_names()
 
+# 地名「不算破口」的例外：這些詞雖然在名單裡，但台灣人日常會直接講，
+# 而且講了不代表暴露住處（捷運站／景點／大區）。要全禁就用這份白名單排除。
+_PLACE_ALLOWED = frozenset({
+    "台灣", "台北", "新北", "桃園", "台中", "台南", "高雄",
+    "基隆", "新竹", "苗栗", "彰化", "南投", "雲林", "嘉義",
+    "屏東", "宜蘭", "花蓮", "台東", "澎湖", "金門", "馬祖",
+    "捷運", "高鐵", "台鐵", "車站", "夜市", "百貨", "好市多",
+})
+
+
+def concrete_place_violation(text: str) -> str:
+    """句中的「具體地名」（區／鄉鎮／路名／景點），回傳命中的地名或 ""。
+
+    規則：城市層級（台北/台中…）與交通設施放行，因為真人日常會直接講；
+    但「士林」「大安」「三重」「竹北」這種區級地名一律視為露餡，要重寫。
+    只認 tw_places.txt 的 3 字以內短地名，避免誤攔一般詞。
+    """
+    if not text or not _TW_PLACE_NAMES:
+        return ""
+    body = str(text)
+    hits: list[str] = []
+    for name in _TW_PLACE_NAMES:
+        if len(name) < 2 or len(name) > 3:
+            continue
+        if name in _PLACE_ALLOWED:
+            continue
+        if name in body:
+            hits.append(name)
+    if not hits:
+        return ""
+    hits.sort(key=len, reverse=True)
+    return hits[0]
+
 
 def _place_distinctive_chars() -> frozenset[str]:
     """只出現一個地名裡的字（壢、士、板…）：這種字被寫成形近別字時才驗。
