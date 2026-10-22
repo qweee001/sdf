@@ -82,7 +82,9 @@ def test_system_prompt_content():
     p = generate_persona()
     sp = get_system_prompt(p)
     assert "繁體中文" in sp
-    assert p["city"] in sp
+    # 2026-10-22 起不報具體地點：提示詞不再出現人設城市，改成位置規則
+    assert p["city"] not in sp
+    assert "不報自己的位置" in sp
     assert p["name"] in sp
     # P1-2：字長改由決策檔位動態決定，不再寫死「最多 40 個字元」
     assert "字數上限由這次互動決策的長度檔位決定" in sp
@@ -183,7 +185,7 @@ def test_system_prompt_preserves_adult_policy_after_approved_language_cleanup():
     assert "不要複述相關詞" in sp
     # 話題邊界：加 LINE、地名都不主動帶出
     assert "不要主動提交換聯絡方式" in sp
-    assert "完全不帶地名" in sp
+    assert "不報自己的位置" in sp
 
 
 def test_system_prompt_carries_no_meta_jailbreak_declaration():
