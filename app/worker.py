@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import hmac
 import inspect
@@ -30,6 +31,7 @@ import math
 import random
 import re
 import secrets
+import sys
 import time
 import unicodedata
 from pathlib import Path
@@ -690,6 +692,7 @@ class AccountWorker:
         self._successful_vision_events: set[tuple[int, int]] = set()
         self._pending_live_video_evidence: dict[str, VideoContextEvidence] = {}
 
+        self._recent_errors: list[str] = []
         self.stats = {
             "replies_sent": 0,
             "errors": 0,
@@ -862,7 +865,21 @@ class AccountWorker:
             self.tg_client = None
         await self._notify_status("stopped", None, "")
 
-    # ---------- 作息 ----------
+    # ---------- 錯誤明細（監控用）----------
+
+    def _bump_error(self) -> None:
+        """errors 計數＋保留最近錯誤明細（/api/status 看得到，不必翻 Railway log）。"""
+        self.stats["errors"] = int(self.stats.get("errors", 0)) + 1
+        exc = sys.exc_info()[1]
+        if exc is None:
+            return
+        try:
+            stamp = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
+            self._recent_errors.append(
+                f"{stamp} {type(exc).__name__}: {str(exc)[:140]}"
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _today_index() -> int:
@@ -1060,7 +1077,7 @@ class AccountWorker:
                         # 群內共同記憶：最近話題／共同活動，供後續接話與主動發言引用
                         await self.db.upsert_group_shared_note(group_id, self.account_id, note)
                     except Exception as exc:
-                        self.stats["errors"] += 1
+                        self._bump_error()
                         print(f"[{self.name}] group_memory write error: {exc}", flush=True)
             sender_kind = "managed" if sender_id in self.managed_ids else "human"
             await self._record_group_event(event, sender_kind)
@@ -1110,7 +1127,7 @@ class AccountWorker:
                 managed_followup=int(event.sender_id or 0) in self.managed_ids,
             )
         except Exception as e:
-            self.stats["errors"] += 1
+            self._bump_error()
             print(f"[{self.name}] on_message error: {e}", flush=True)
 
     async def on_chat_action(self, event):
@@ -1557,7 +1574,7 @@ class AccountWorker:
             if inspect.isawaitable(result):
                 await result
         except Exception as exc:
-            self.stats["errors"] += 1
+            self._bump_error()
             print(f"[{self.name}] group event audit error: {exc}", flush=True)
 
     async def _audit_reply(self, event, stage: str, reason: str) -> None:
@@ -1577,7 +1594,7 @@ class AccountWorker:
                 await result
         except Exception as exc:
             # 诊断失败绝不能触发重新发送。
-            self.stats["errors"] += 1
+            self._bump_error()
             print(f"[{self.name}] reply audit error: {exc}", flush=True)
 
     async def _interaction_pressure(self, group_id: int) -> dict[str, int]:
@@ -1590,7 +1607,7 @@ class AccountWorker:
                 result = await result
             return result if isinstance(result, dict) else {}
         except Exception as exc:
-            self.stats["errors"] += 1
+            self._bump_error()
             print(f"[{self.name}] traffic pressure error: {exc}", flush=True)
             return {}
 
@@ -2073,7 +2090,7 @@ class AccountWorker:
                     result = await result
                 return bool(result)
             except Exception as exc:
-                self.stats["errors"] += 1
+                self._bump_error()
                 print(f"[{self.name}] ordinary admission error: {exc}", flush=True)
                 return False
         await self._audit_reply(event, "claimed", "human")
@@ -2193,7 +2210,7 @@ class AccountWorker:
                 )
                 return True
             except Exception as e:
-                self.stats["errors"] += 1
+                self._bump_error()
                 print(f"[{self.name}] reaction error: {e}", flush=True)
                 return False
 
@@ -2241,7 +2258,7 @@ class AccountWorker:
                 )
                 return True
             except Exception as e:
-                self.stats["errors"] += 1
+                self._bump_error()
                 print(f"[{self.name}] sticker error: {e}", flush=True)
                 return False
 
@@ -2325,7 +2342,7 @@ class AccountWorker:
                 )
                 return True
             except Exception as e:
-                self.stats["errors"] += 1
+                self._bump_error()
                 print(f"[{self.name}] voice error: {e}", flush=True)
                 return False
 
@@ -3264,7 +3281,7 @@ class AccountWorker:
             elif not telegram_dispatched:
                 await self._audit_reply(event, "send", "not_dispatched")
         except Exception as e:
-            self.stats["errors"] += 1
+            self._bump_error()
             failure_reason = type(e).__name__
             self._record_reply_drop(failure_reason)
             await self._audit_reply(
@@ -3304,7 +3321,7 @@ class AccountWorker:
                         allow_media_takeover and not telegram_dispatched,
                     )
                 except Exception as e:
-                    self.stats["errors"] += 1
+                    self._bump_error()
                     self._record_reply_drop("media_claim_finalize_error")
                     print(
                         f"[{self.name}] media claim finalize error: {e}",
@@ -3317,7 +3334,7 @@ class AccountWorker:
                         event, sent or telegram_dispatched
                     )
                 except Exception as e:
-                    self.stats["errors"] += 1
+                    self._bump_error()
                     self._record_reply_drop("reservation_finalize_error")
                     print(
                         f"[{self.name}] followup reservation error: {e}",

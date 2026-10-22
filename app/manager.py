@@ -27,6 +27,21 @@ from .voice_assets import VoiceAssetLibrary
 from .worker import AccountWorker, _FIXED_ACCOUNT_PERSONA_AGES
 
 
+def _first_selected_group(acc: dict) -> int:
+    """帳號第一個勾選的群組（監控用；沒有就 0）。"""
+    raw = acc.get("groups")
+    try:
+        groups = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    except Exception:
+        groups = []
+    for gid in groups:
+        try:
+            return int(gid)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
 class AccountManager:
     def __init__(self, config: Settings, db: Database, secret_box: SecretBox):
         self.config = config
@@ -712,6 +727,12 @@ class AccountManager:
                 "reply_enabled": bool(acc.get("reply_enabled", 1)),
                 "proactive_enabled": bool(acc.get("proactive_enabled", 1)),
                 "stats": worker.stats if worker else {"replies_sent": 0, "errors": 0, "proactive_sent": 0},
+                "recent_errors": (
+                    list(worker._recent_errors)[-12:] if worker else []
+                ),
+                "last_human_at": float(
+                    self.last_human_activity.get(int(gid), 0) or 0
+                ) if (worker and (gid := _first_selected_group(acc))) else 0.0,
             })
         return {
             "accounts": accounts,
