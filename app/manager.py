@@ -739,6 +739,13 @@ class AccountManager:
             "reply_audit": reply_audit,
             "total": len(accounts),
             "running": sum(1 for a in accounts if a["is_running"]),
+            # 部署版本標記：確認 Railway 上跑的是哪一個 commit
+            # （實測 push 成功不等於部署成功，沒這欄位只能靠猜）
+            "deployed_commit": (
+                os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip()[:12]
+                or os.getenv("GIT_COMMIT_SHA", "").strip()[:12]
+                or "unknown"
+            ),
             "media_spend_usd": round(await self.db.media_spend_total(), 6),
             "media_budget_usd": self.config.media_daily_budget_usd,
             "features": self.feature_status(),
