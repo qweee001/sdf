@@ -1862,6 +1862,9 @@ class AccountWorker:
             return False
         if not bool(getattr(self.config, "media_enabled", False)):
             return False
+        # 對方正在發圖／要我們看圖時，先回圖，不要插一張自己的照片
+        if isinstance(getattr(event, "media", None), MessageMediaPhoto):
+            return False
         gid = int(event.chat_id or 0)
         now = time.time()
         if now - self._photo_last_sent.get(gid, 0.0) < 2400:
@@ -2504,16 +2507,15 @@ class AccountWorker:
                 continue
             if float(row.get("timestamp") or 0) > seen_at + 1.0:
                 newer.append(content)
-        if len(newer) <= 1:
+        # 只有表情、標點、極短回聲（「？」「😂」「蛤」）不算換話題
+        meaningful = [
+            c for c in newer
+            if len(re.sub(r"[^㐀-鿿A-Za-z0-9]", "", c)) >= 4
+        ]
+        if not meaningful:
             return True
-        # 2 則以上：只有在完全沒有共同字詞（換話題）時才算過時
         target_grams = _cjk_grams(target)
-        for content in newer:
-            if target_grams & _cjk_grams(content):
-                return True
-        # 完全沒有交集，但仍給一秒緩衝：太短就照發，避免瞬間連丟
-        elapsed = time.time() - seen_at
-        return elapsed < 20.0
+        return any(target_grams & _cjk_grams(c) for c in meaningful)
 
     async def _decision_input(self, event):
         """回 (state, topic_options)。

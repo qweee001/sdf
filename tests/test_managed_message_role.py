@@ -21,7 +21,7 @@ class _RecordingDB(_ClaimDB):
         self.events = []
 
     async def add_message(self, account_id, group_id, sender_id, sender_name, role, content,
-                          message_id=0):
+                          message_id=0, sent_at=None):
         self.recorded.append(
             {
                 "account_id": account_id,
