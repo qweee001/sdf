@@ -1710,17 +1710,33 @@ class AccountWorker:
                     recent_texts.append(str(m.get("content") or ""))
         except Exception:
             pass
-        # 帳號輪替均衡：若自己是該群最近發過言的水軍，施加 120 秒冷卻讓位給其他姐妹
-        if last_water_sender and last_water_sender == int(self.tg_user_id or 0):
-            if len(candidates) > 1:
-                candidates = [uid for uid in candidates if uid != int(self.tg_user_id or 0)]
+        # 帳號輪替均衡：剛發過言的水軍一律讓位，不論是誰在算這一票。
+        # 舊版只排除「自己」（last_water_sender == self），於是四個 worker
+        # 對同一則訊息算出不同的 winner：非最後發言者回傳 last_water_sender，
+        # 最後發言者回傳雜湊抽選 → 誰先 claim 誰贏，等於沒排程，
+        # 而且會出現「同一個機器人連著講兩句」這種一眼假的節奏。
+        if last_water_sender and len(candidates) > 1:
+            candidates = [
+                uid for uid in candidates if uid != last_water_sender
+            ]
         # 發言份額上限（高階輪替配額制）：真人朋友群不會有人刷頻霸屏，
         # 某帳號在近期水軍發言佔比超過 45% 就暫時讓位給其他姐妹。
         candidates = self._apply_speaker_share_cap(candidates, group_msgs)
         if not candidates:
             return 0
-        if last_water_sender in candidates:
-            return int(last_water_sender)
+        # 沉默最久的先講（Pooled Order 的「未發言者優先」）：
+        # 讓輪替真的輪起來，而不是靠雜湊偶然公平。
+        last_seen: dict[int, int] = {}
+        for index, m in enumerate(group_msgs):
+            if str(m.get("role")) != "assistant":
+                continue
+            uid = int(m.get("sender_id") or 0)
+            if uid > 0:
+                last_seen[uid] = index
+        stalest = min(last_seen.get(uid, -1) for uid in candidates)
+        pool = [uid for uid in candidates if last_seen.get(uid, -1) == stalest]
+        if len(pool) < len(candidates):
+            candidates = pool
 
         # 3) 依人設興趣與話題關聯打分
         topic_text = " ".join(recent_texts[-5:]) + " " + str(
