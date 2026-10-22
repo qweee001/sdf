@@ -868,16 +868,26 @@ class AccountWorker:
     # ---------- 錯誤明細（監控用）----------
 
     def _bump_error(self) -> None:
-        """errors 計數＋保留最近錯誤明細（/api/status 看得到，不必翻 Railway log）。"""
+        """errors 計數＋保留最近錯誤明細（/api/status 看得到，不必翻 Railway log）。
+
+        exception 拿不到時（在 except 之外被呼叫、或例外狀態已被清掉），
+        改記呼叫者的函式名與行號——至少知道是哪條路徑在刷錯誤。
+        """
         self.stats["errors"] = int(self.stats.get("errors", 0)) + 1
+        try:
+            frame = sys._getframe(1)
+            where = f"{frame.f_code.co_name}:{frame.f_lineno}"
+        except Exception:
+            where = "unknown"
         exc = sys.exc_info()[1]
-        if exc is None:
-            return
+        detail = (
+            f"{type(exc).__name__}: {str(exc)[:120]}"
+            if exc is not None
+            else f"NO-EXCEPTION-CONTEXT @{where}"
+        )
         try:
             stamp = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
-            self._recent_errors.append(
-                f"{stamp} {type(exc).__name__}: {str(exc)[:140]}"
-            )
+            self._recent_errors.append(f"{stamp} {where} {detail}")
         except Exception:
             pass
 
