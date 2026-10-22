@@ -12,3 +12,6 @@ voice_candidates/
 voice_refs/
 analysis/
 pytest.log
+
+# 本機測試輸出
+*.log
