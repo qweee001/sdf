@@ -234,6 +234,15 @@ def _dialog_title(dialog) -> str:
     return f"群組 {getattr(dialog, 'id', 0)}"
 
 
+def _cjk_grams(text: str) -> set[str]:
+    """句子裡的相鄰二字組（判斷兩句是不是同一話題用）。"""
+    runs = re.findall(r"[\u3400-\u9fff]{2,}", str(text or ""))
+    grams: set[str] = set()
+    for run in runs:
+        for i in range(len(run) - 1):
+            grams.add(run[i:i + 2])
+    return grams
+
 def _event_sent_at(event) -> float:
     """取 Telegram 訊息的原始發送時間（epoch）。
 
@@ -1880,39 +1889,17 @@ class AccountWorker:
     def _positioning_hint(
         self, group_id: int, incoming: str = "", history: list[dict] | None = None
     ) -> str:
-        """定位狀態機：勾引 → 助理成交，並壓制旁白化與 MC 腔。
+        """只留兩條：問怎麼約→勾一句再推助理；連續三則旁白→這則講自己。
 
-        讀出來的真實問題（10-22 線上）：11 則水軍發言有 8 則在講別人，
-        只有 2 則講自己，且「哪個好哥哥」一小時用 2 次。4 個帳號變成旁白，
-        沒有人有理由去約她們。這裡在生成前硬性校正，並維持「勾引→推助理」
-        的成交節奏（地點一律不講，由助理接手）。
+        其餘（MC 腔禁用、助理跳針防護）先不做了，避免提示詞越堆越長。
         """
         recent = self._recent_bot_texts(group_id)
         raw = str(incoming or "")
-        parts: list[str] = []
-
-        # A. 對方在問怎麼約／在哪／何時 → 先勾一句，再收在助理
-        asking = any(m in raw for m in self._ASK_BOOKING_MARKS)
-        last_bot = recent[-1] if recent else ""
-        if asking:
-            already = "助理" in last_bot
-            parts.append(
-                "【成交路徑｜對方在問怎麼約／在哪】：先勾一句（身體、眼神、時間都可以），"
-                "再用一句收在助理（「你自己聯絡助理啊」「讓助理幫你排」）。"
-                "地點不講，讓助理接。25 字內。"
-                if not already
-                else "【對方在問約】：上一則已經推過助理，這一則只要補一句勾引，不要再提助理。20 字內。"
+        if any(m in raw for m in self._ASK_BOOKING_MARKS):
+            return (
+                "\n【對方在問約】：先勾一句，再收在助理（「你自己聯絡助理啊」）。"
+                "地點不講。25 字內。"
             )
-
-        if not recent:
-            return ("\n" + "\n".join(parts)) if parts else ""
-
-        self_offer = sum(
-            1 for t in recent if any(m in t for m in self._SELF_OFFER_MARKS)
-        )
-        mc = sum(1 for t in recent if any(m in t for m in self._MC_MARKS))
-
-        # B. 連 3 則都沒賣自己 → 這一輪強制勾引（並收在助理）
         tail3 = recent[-3:]
         if len(tail3) == 3 and not any(
             any(m in t for m in self._SELF_OFFER_MARKS) for t in tail3
@@ -1920,33 +1907,11 @@ class AccountWorker:
             self.stats["position_forced_offer"] = (
                 int(self.stats.get("position_forced_offer", 0)) + 1
             )
-            print(
-                f"[{self.name}] position: 連續旁白，本輪強制勾引",
-                flush=True,
+            return (
+                "\n【這則講自己】：上一連三則都在講別人，這則賣自己一下"
+                "（身體／聲音／這禮拜剩哪天），收在助理。40 字內。"
             )
-            parts.append(
-                "【定位校正｜這一輪不准只當旁白】：你連續好幾則都在講別人。"
-                "這一則要「賣自己」——勾一句（身體／眼神／聲音／這禮拜剩哪天），"
-                "收在助理。40 字內，講完就停。"
-            )
-        elif self_offer == 0 and len(recent) >= 4:
-            parts.append(
-                "【定位提醒】：最近都旁白，這一則帶一句自己的狀態或空檔。"
-            )
-
-        # C. MC 腔用太凶 → 這一輪禁用
-        if mc >= 3:
-            parts.append(
-                "【這一輪禁用「哪個好哥哥」「讓她」】：改第一人稱，講你自己。"
-            )
-
-        # D. 助理連兩則都提過 → 這則停一下，別變成跳針
-        if len(recent) >= 2 and all("助理" in t for t in recent[-2:]):
-            parts.append("【助理剛連提兩次】：這則不要提助理，專心勾。")
-
-        if not parts:
-            return ""
-        return "\n" + "\n".join(parts)
+        return ""
 
     def _social_dynamics_hint(self, history: list[dict]) -> str:
         """真人社交動力學：偶爾無視、偶爾吐槽拆台，不是每句都捧場。
@@ -2495,31 +2460,42 @@ class AccountWorker:
         }
 
     async def _context_still_fresh(self, event) -> bool:
-        """發送前最後一道：這則之後有沒有「真人」搶先講了新話。
+        """發送前最後一道：這段時間有沒有真人搶先講了「別的話題」。
 
-        有 → 我們要回的那句已經過時（實測會出現回著三句前話題的鬼打牆）。
-        真人插話取消待辦回覆已在 on_message 做掉；這裡補的是生成／審核期間
-        才出現新真人訊息的情況。查不到就放行（寧可少擋，不誤殺）。
+        在 3.5 則/分鐘的群裡，原本「只要有人插話就丟」會丟掉 64%（實測
+        stale_context 25 則 vs 送出 14 則）。真人回晚一點是常態，只有
+        「話題被別人帶走」才真的會回得牛頭不對馬嘴。
+        所以放寬成：≤1 則新真人 → 照發；2 則以上但仍在同一話題 → 照發；
+        只有「連續 2 則以上且完全換話題」才丟。查不到就放行。
         """
         group_id = int(getattr(event, "chat_id", 0) or 0)
         seen_at = float(getattr(event, "_sdf_seen_at", 0) or 0)
         if not group_id or seen_at <= 0:
             return True
         try:
-            recent = await self.db.get_group_messages(group_id, limit=4)
+            recent = await self.db.get_group_messages(group_id, limit=6)
         except Exception:
             return True
         target = str(getattr(event, "raw_text", "") or "").strip()
+        newer: list[str] = []
         for row in recent:
             if str(row.get("role")) == "assistant":
                 continue
             content = str(row.get("content") or "").strip()
             if not content or content == target:
                 continue
-            # 只看「我們看到目標訊息之後」才出現的真人訊息
             if float(row.get("timestamp") or 0) > seen_at + 1.0:
-                return False
-        return True
+                newer.append(content)
+        if len(newer) <= 1:
+            return True
+        # 2 則以上：只有在完全沒有共同字詞（換話題）時才算過時
+        target_grams = _cjk_grams(target)
+        for content in newer:
+            if target_grams & _cjk_grams(content):
+                return True
+        # 完全沒有交集，但仍給一秒緩衝：太短就照發，避免瞬間連丟
+        elapsed = time.time() - seen_at
+        return elapsed < 20.0
 
     async def _decision_input(self, event):
         """回 (state, topic_options)。
@@ -3005,6 +2981,7 @@ class AccountWorker:
         sent_audited = False
         human_counted = False
         allow_media_takeover = False
+        group_id = int(getattr(event, "chat_id", 0) or 0)
         is_human_reply = int(event.sender_id or 0) not in self.managed_ids
         is_media_claim = (
             is_human_reply
@@ -3228,13 +3205,20 @@ class AccountWorker:
                     await self._audit_reply(event, "policy", "gate_held")
                     return
                 # 用字檢查層：對照表＋決策層專問錯別字（跟 ③ 的語意審核分開）
-                text = await self._typo_gate(
-                    event, text, context=await self._decision_state(event)
-                )
-                if not text:
-                    self._record_reply_drop("typo_held")
-                    await self._audit_reply(event, "policy", "typo_held")
-                    return
+                # 熱場（1 分鐘內真人 ≥3）省掉這一層：要三四次模型呼叫，
+                # 在 3.5 則/分鐘的群裡會直接拖到過時，熱場時過時風險大於錯字風險。
+                if self._hot_field(group_id):
+                    self.stats["typo_skipped_hot"] = (
+                        int(self.stats.get("typo_skipped_hot", 0)) + 1
+                    )
+                else:
+                    text = await self._typo_gate(
+                        event, text, context=await self._decision_state(event)
+                    )
+                    if not text:
+                        self._record_reply_drop("typo_held")
+                        await self._audit_reply(event, "policy", "typo_held")
+                        return
                 # 固定說法校正（找助理→聯絡助理），零模型成本
                 text = text_guard.fix_phrases(text)
                 # 發送前最後一道：這段時間有沒有真人搶先講了新話（回過時話題＝當場破戲）
