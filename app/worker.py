@@ -1898,7 +1898,7 @@ class AccountWorker:
             already = "助理" in last_bot
             parts.append(
                 "【成交路徑｜對方在問怎麼約／在哪】：先勾一句（身體、眼神、時間都可以），"
-                "再用一句收在助理（「你自己找助理啊」「叫助理排」）。"
+                "再用一句收在助理（「你自己聯絡助理啊」「讓助理幫你排」）。"
                 "地點不講，讓助理接。25 字內。"
                 if not already
                 else "【對方在問約】：上一則已經推過助理，這一則只要補一句勾引，不要再提助理。20 字內。"
@@ -3235,6 +3235,8 @@ class AccountWorker:
                     self._record_reply_drop("typo_held")
                     await self._audit_reply(event, "policy", "typo_held")
                     return
+                # 固定說法校正（找助理→聯絡助理），零模型成本
+                text = text_guard.fix_phrases(text)
                 # 發送前最後一道：這段時間有沒有真人搶先講了新話（回過時話題＝當場破戲）
                 if not await self._context_still_fresh(event):
                     self._record_reply_drop("stale_context")
@@ -4461,7 +4463,7 @@ class AccountWorker:
         if concrete_place:
             correction += (
                 f"上一版出現具體地名（{concrete_place}）。這裡不報地名——"
-                "城市也不要，改成「我這邊」「附近」，或直接叫對方去找助理。"
+                "城市也不要，改成「我這邊」「附近」，或直接叫對方聯絡助理。"
             )
         if mentions_video:
             correction += (

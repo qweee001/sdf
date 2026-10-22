@@ -720,6 +720,28 @@ def normalized_reply(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text or "").casefold()
     return re.sub(r"[^\w\u3400-\u9fff]+", "", normalized)
 
+# 固定說法校正：不花一次模型呼叫，直接改字。
+# 實測（10-22 群紀錄）真人講「聯絡助理啊」「讓助理幫你約一個」，
+# 「找助理」是水軍自己冒出來的變體，聽起來就不像群裡的話。
+_PHRASE_FIXES = (
+    ("去找助理", "去聯絡助理"),
+    ("找助理", "聯絡助理"),
+    ("叫助理", "讓助理"),
+)
+
+def fix_phrases(text: str) -> str:
+    """把容易走鐘的固定說法直接換成群裡真正在講的版本。"""
+    body = str(text or "")
+    if not body:
+        return body
+    for wrong, right in _PHRASE_FIXES:
+        # 「去聯絡助理」已被前一條換掉，避免變「去聯絡聯絡助理」
+        if wrong == "找助理" and "聯絡助理" in body:
+            continue
+        body = body.replace(wrong, right)
+    return body
+
+
 def may_mention_group_meta(text: str) -> bool:
     """Cheap high-recall filter; semantic classification makes the verdict."""
     normalized = unicodedata.normalize("NFKC", text or "").casefold()
