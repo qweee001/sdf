@@ -211,10 +211,12 @@ def test_manager_preserves_empty_shared_topic_counts(monkeypatch):
         manager.config = load_settings()
         for name in ("workers", "last_human_activity", "active_group_ids", "managed_origins",
                      "human_owners", "recent_proactive_owners", "reply_claim_signals",
-                     "failed_reply_claimants", "topic_turn_counts"):
+                     "failed_reply_claimants", "topic_turn_counts", "group_send_locks",
+                     "phrase_cores_by_group", "personas"):
             setattr(manager, name, {})
         manager.managed_ids = set()
         manager.active_ids = set()
+        manager._voice_library = None
         manager.db = SimpleNamespace(list_accounts=AsyncMock(return_value=[]),
                                      last_human_activity_by_group=AsyncMock(return_value={}))
         manager.secret_box = SimpleNamespace(decrypt=lambda value: "session")

@@ -534,6 +534,44 @@ def starts_with_gan(text: str) -> bool:
     return not any(t.startswith(allow) for allow in _GAN_OPENER_ALLOW)
 
 
+# 女號男性視角禁語（實測 10-21 小小「哥哥的雞巴給你吸到射」＝女號以男性身份
+# 對群友下指令，主謂顛倒、角色認知崩壞）。女性帳號一旦出現「把器官給對方」或
+# 「命令對方舔/跪」這種男性支配句型，直接攔掉重新生成。
+_FEMALE_MALE_PERSPECTIVE_TERMS = (
+    "哥哥的雞巴", "哥的雞巴", "我的雞巴", "我的老二", "我的屌", "我的肉棒",
+    "我的大鵰", "老子的大鵰", "本屌",
+    "給你吸", "幫我吸", "給我吸", "舔我的", "含我的", "吹我的",
+    "吸到射", "射給你", "射在你", "全部射給你",
+ "舔到跪好", "跪下來舔", "跪著舔", "舔到你", "舔到他",
+ "餵我吃", "餵我吃到", "餵我吃到哭", "餵妳吃", "餵妳吃到",
+ "舔就跪", "舌頭別停", "舌頭伸進去",
+ )
+# 女號禁用的男性自稱（第一人稱＋器官＝直接自認是男的）
+_FEMALE_MALE_SELF_TERMS = (
+    "我雞巴", "我老二", "我大鵰", "本屌", "老子",
+    "我肉棒", "我鳥",
+    "我硬了", "我勃起", "我射了", "我想射", "我要射",
+)
+
+def _female_male_perspective_violation(persona, text: str) -> str:
+    """女號講成男聲（器官自稱 / 把器官給對方吸 / 命令對方舔跪）就攔。"""
+    if not text:
+        return ""
+    gender = str(persona.get("gender") or "")
+    if gender != "女":
+        return ""
+    raw = str(text)
+    cleaned = re.sub(
+        r"[\s，,。．!！？?~～…、；;：:「」『』（）()_\-]+", "", raw
+    )
+    for term in _FEMALE_MALE_SELF_TERMS:
+        if term in raw or term in cleaned:
+            return term
+    for term in _FEMALE_MALE_PERSPECTIVE_TERMS:
+        if term in raw or term in cleaned:
+            return term
+    return ""
+
 def gender_term_violation(persona, text: str) -> str:
     """性別詞彙排他（含空格/標點變體正規化，避免「我 雞雞」「割 我 雞 雞」繞過）。
 
@@ -545,6 +583,10 @@ def gender_term_violation(persona, text: str) -> str:
     if not text:
         return ""
     gender = str(persona.get("gender") or "")
+    # 女號男性視角（主謂顛倒）優先攔：比自稱詞更致命的角色崩壞
+    perspective = _female_male_perspective_violation(persona, text)
+    if perspective:
+        return perspective
     # 原文直接查
     for term in _GENDER_SELF_TERMS.get(gender, ()):
         if term in text:

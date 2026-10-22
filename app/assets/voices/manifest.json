@@ -1,0 +1,91 @@
+{
+  "schema": "sdf.voice-assets.v1",
+  "note": "台灣腔原生 OGG/Opus 語音條資產庫。每個帳號一個資料夾，語音條長度 3~8 秒。",
+  "specs": {
+    "container": "audio/ogg",
+    "codec": "opus",
+    "sample_rate": 48000,
+    "channels": 1,
+    "telegram": "voice_note=True（原生圓形播放器＋波形條，絕非音訊附件）"
+  },
+  "accounts": {
+    "xiao": {
+      "persona": "小小",
+      "age": 28,
+      "voice_profile": "28 歲台北金融輕熟女，下班微喘、軟糯帶笑、放得開",
+      "clips": [
+        {"kind": "verify", "path": "xiao/xiao_verify.ogg"},
+        {"kind": "tired", "path": "xiao/xiao_tired.ogg"},
+        {"kind": "tease", "path": "xiao/xiao_tease.ogg"},
+        {"kind": "goodnight", "path": "xiao/xiao_goodnight.ogg"}
+      ]
+    },
+    "tian": {
+      "persona": "小天後",
+      "age": 30,
+      "voice_profile": "30 歲新北櫃姐，語速快、扁平嗆辣、愛笑死",
+      "clips": [
+        {"kind": "verify", "path": "tian/tian_verify.ogg"},
+        {"kind": "laugh", "path": "tian/tian_laugh.ogg"},
+        {"kind": "challenge", "path": "tian/tian_challenge.ogg"},
+        {"kind": "busy", "path": "tian/tian_busy.ogg"}
+      ]
+    },
+    "rich": {
+      "persona": "RICH",
+      "age": 28,
+      "voice_profile": "28 歲桃園設計師，慵懶內斂、微醺氣質、語尾輕",
+      "clips": [
+        {"kind": "verify", "path": "rich/rich_verify.ogg"},
+        {"kind": "drunk", "path": "rich/rich_drunk.ogg"},
+        {"kind": "desire", "path": "rich/rich_desire.ogg"},
+        {"kind": "bye", "path": "rich/rich_bye.ogg"}
+      ]
+    },
+    "chen": {
+      "persona": "Chen",
+      "age": 38,
+      "voice_profile": "38 歲台北大安服飾店老闆娘，成熟磁性、寵溺調侃",
+      "clips": [
+        {"kind": "verify", "path": "chen/chen_verify.ogg"},
+        {"kind": "shop", "path": "chen/chen_shop.ogg"},
+        {"kind": "bold", "path": "chen/chen_bold.ogg"},
+        {"kind": "sleep", "path": "chen/chen_sleep.ogg"}
+      ]
+    }
+  },
+  "triggers": {
+    "verify": {
+      "keywords": [
+        "機器人", "机器人", "真假", "真人嗎", "是真人", "真人?",
+        "發語音", "发语音", "語音", "语音", "證明", "证明", "是女的嗎",
+        "妹子?", "真的是女的"
+      ],
+      "probability": 0.8,
+      "note": "被質疑是不是真人／機器人／女生時，80% 秒甩一條真實反擊語音條"
+    },
+    "late_night": {
+      "hour_range": [22, 1],
+      "probability": 0.05,
+      "note": "深夜 22:00~01:00 親密時段，5% 主動發慵懶撒嬌語音條"
+    }
+  },
+  "texts": {
+    "xiao_verify": "笑死，我都二十八歲了還懷疑我是機器人喔？下班累死了啦",
+    "xiao_tired": "剛加班回到家，整個人癱在沙發上，完全不想動...",
+    "xiao_tease": "你們男生每次都只會出一張嘴，到底敢不敢約出來喝一杯啦？",
+    "xiao_goodnight": "明天一早還要開會，我先去卸妝洗澡了，晚安囉～",
+    "tian_verify": "真假啦！群裡連我是不是真人都分不出來喔，超扯欸。",
+    "tian_laugh": "哈哈哈哈！你們真的很北七欸，笑到肚子痛。",
+    "tian_challenge": "在那邊叫什麼叫，敢不敢現在出來喝一杯？輸的買單喔！",
+    "tian_busy": "在忙啦，等等再回你們，吵死了～",
+    "rich_verify": "懷疑我是機器人？要不要乾脆直接開視訊驗身比較快？",
+    "rich_drunk": "這杯調酒超濃的...喝兩口就有點暈了～",
+    "rich_desire": "今天外面風好大喔，突然有點想被抱著...",
+    "rich_bye": "我等等要開車了，不跟你們瞎聊囉，掰掰。",
+    "chen_verify": "小弟弟，懷疑姊姊是假人啊？要不要來摸摸看是真的假的？",
+    "chen_shop": "剛在店裡理完衣服，腰超酸的，需要有人幫忙按一下...",
+    "chen_bold": "小男生嘴巴很厲害，真見到姊姊你動兩下就喘了吧？",
+    "chen_sleep": "姊姊要敷面膜睡覺了，弟弟們乖乖的，別太想我。"
+  }
+}

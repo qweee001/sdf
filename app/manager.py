@@ -23,6 +23,7 @@ from .database import Database
 from .live_test import BoundedLiveTest
 from .media import OrcaMediaService
 from .persona import generate_persona
+from .voice_assets import VoiceAssetLibrary
 from .worker import AccountWorker, _FIXED_ACCOUNT_PERSONA_AGES
 
 
@@ -34,6 +35,8 @@ class AccountManager:
         self.workers: dict[str, AccountWorker] = {}
         self._lifecycle_locks: dict[str, asyncio.Lock] = {}
         self._feature_lock = asyncio.Lock()
+        # 台灣腔原生語音條資產庫（manifest + 各帳號 OGG 片段）。
+        # 沒有素材或目錄不存在時為 None，語音功能自動靜默跳過。
         self._voice_library = None
         self.managed_ids: set[int] = set()
         self.active_ids: set[int] = set()
@@ -133,8 +136,36 @@ class AccountManager:
             and str(getattr(self.config, "voice_realtime_token", "") or "").strip()
         )
 
+    def _load_voice_library(self):
+        """載入台灣腔語音條資產庫（VOICE_ASSETS_DIR）。
+
+        目錄不存在或沒有 manifest 時回 None——語音功能靜默停用，
+        不影響文字／貼圖／照片等其他炒群能力。
+        """
+        root = str(getattr(self.config, "voice_assets_dir", "") or "").strip()
+        if not root:
+            return None
+        try:
+            lib = VoiceAssetLibrary(root)
+        except Exception as exc:
+            print(f"[manager] voice library load error: {exc}", flush=True)
+            return None
+        if not getattr(lib, "_accounts", None):
+            return None
+        print(
+            f"[manager] voice library ready: {len(lib._accounts)} accounts from {root}",
+            flush=True,
+        )
+        return lib
+
     async def load_runtime_settings(self) -> None:
         await self.live_test.reconcile()
+        # 台灣腔原生語音條資產庫（沒有素材就安靜停用，不影響其他功能）
+        try:
+            self._voice_library = self._load_voice_library()
+        except Exception as exc:
+            print(f"[manager] voice library init error: {exc}", flush=True)
+            self._voice_library = None
         stored = await self.db.get_runtime_settings()
         self.config.media_enabled = self._stored_bool(
             stored.get("media_enabled"), bool(self.config.media_enabled)
@@ -202,6 +233,28 @@ class AccountManager:
     async def _on_status_change(self, account_id: str, state: str,
                                 tg_user_id: int | None, detail: str):
         self._status[account_id] = {"state": state, "detail": detail}
+
+    def _load_voice_library(self):
+        """載入台灣腔語音條資產庫（VOICE_ASSETS_DIR）。
+
+        目錄不存在或沒有 manifest 時回 None——語音功能靜默停用，
+        不影響文字／貼圖／照片等其他炒群能力。
+        """
+        root = str(getattr(self.config, "voice_assets_dir", "") or "").strip()
+        if not root:
+            return None
+        try:
+            lib = VoiceAssetLibrary(root)
+        except Exception as exc:
+            print(f"[manager] voice library load error: {exc}", flush=True)
+            return None
+        if not getattr(lib, "_accounts", None):
+            return None
+        print(
+            f"[manager] voice library ready: {len(lib._accounts)} accounts from {root}",
+            flush=True,
+        )
+        return lib
 
     async def _refresh_managed_ids(self) -> list[dict]:
         accounts = await self.db.list_accounts()
@@ -321,7 +374,7 @@ class AccountManager:
             personas=self.personas,
             topic_turn_counts=self.topic_turn_counts,
             phrase_cores_by_group=self.phrase_cores_by_group,
-            voice_library=None,
+            voice_library=self._voice_library,
             outbound_gate=(
                 self.live_test.outbound_gate
                 if getattr(self, "live_test", None) is not None

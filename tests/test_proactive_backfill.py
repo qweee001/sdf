@@ -41,6 +41,12 @@ def test_manager_backfills_last_human_activity_before_start():
         mgr.recent_proactive_owners = {}
         mgr.reply_claim_signals = {}
         mgr.failed_reply_claimants = {}
+        mgr.group_send_locks = {}
+        mgr.topic_turn_counts = {}
+        mgr.phrase_cores_by_group = {}
+        mgr.personas = {}
+        mgr._voice_library = None
+        mgr._status = {}
 
         acc = {
             "id": "testacct01",

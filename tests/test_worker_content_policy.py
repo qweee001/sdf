@@ -1138,7 +1138,7 @@ def test_near_duplicate_reply_is_regenerated_with_recent_examples():
         assert worker._call_ai.await_count == 2
         first_prompt = worker._call_ai.await_args_list[0].args[1]
         retry_prompt = worker._call_ai.await_args_list[1].args[1]
-        assert "近期群內已發過" in first_prompt
+        assert "最近群內水軍說過的話" in first_prompt
         assert "換開頭、句型和語氣" in retry_prompt
 
     asyncio.run(main())

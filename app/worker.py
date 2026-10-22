@@ -234,6 +234,35 @@ def _dialog_title(dialog) -> str:
     return f"群組 {getattr(dialog, 'id', 0)}"
 
 
+def _voice_duration_seconds(data: bytes) -> int:
+    """粗估 OGG/Opus 語音長度（秒）：解析 Ogg page 的 granule position。
+
+    Opus 一律 48kHz，granule position ÷ 48000 = 秒數。解析不到就回 5
+    （我們的素材都 3~8 秒，Telegram 只用它畫波形比例，不影響播放）。
+    """
+    try:
+        if b"OpusHead" not in data:
+            return 5
+        pos = 0
+        last = 0
+        while True:
+            start = data.find(b"OggS", pos)
+            if start < 0 or start + 27 > len(data):
+                break
+            # Ogg page header: "OggS"(4) + version(1) + type(1) +
+            # granule(8, offset 6) + serial(4) + seq(4) + crc(4) +
+            # segments(1, offset 26) + segment_table
+            granule = int.from_bytes(data[start + 6:start + 14], "little")
+            if granule > 0:
+                last = granule
+            segments = data[start + 26]
+            pos = start + 27 + segments
+        if last <= 0:
+            return 5
+        return max(1, int(last / 48000))
+    except Exception:
+        return 5
+
 def _dialog_member_count(dialog) -> int:
     """群組成員數（拿不到就 0，不影響流程）。"""
     entity = getattr(dialog, "entity", None)
@@ -250,6 +279,14 @@ def _dialog_member_count(dialog) -> int:
 
 # 话题回合：每个真人开启的话题，水軍最多接 N 句，大幅放寬至 10 句
 _MAX_TOPIC_TURNS = 10
+# 高階輪替配額制：單一帳號在近期水軍發言中不得超過 45% 份額（防刷頻霸屏）
+_SPEAKER_SHARE_CAP = 0.45
+# 份額上限失效時的絕對次數保險絲（同一帳號近期最多幾則）
+_SPEAKER_HARD_CAP = 3
+# 話題溫度計：連續這麼多輪色情話題後，強制冷卻插入日常降溫
+_TOPIC_HEAT_MAX_ROUNDS = 4
+# 被質疑真人時甩語音條自證的機率（80%＝四則裡三則直接語音打臉）
+_VOICE_VERIFY_PROBABILITY = 0.80
 _HIGH_TRAFFIC_HUMANS_5M = 14
 _HIGH_TRAFFIC_MAX_ORDINARY_5M = 2
 _MAX_ORDINARY_CLAIMS_10M = 8
@@ -1617,15 +1654,9 @@ class AccountWorker:
         if last_water_sender and last_water_sender == int(self.tg_user_id or 0):
             if len(candidates) > 1:
                 candidates = [uid for uid in candidates if uid != int(self.tg_user_id or 0)]
-        # Apply the recent-speaker cap before either continuity or fallback selection.
-        candidates = [
-            uid for uid in candidates
-            if sum(
-                1 for m in group_msgs
-                if str(m.get("role")) == "assistant"
-                and int(m.get("sender_id") or 0) == uid
-            ) < 3
-        ]
+        # 發言份額上限（高階輪替配額制）：真人朋友群不會有人刷頻霸屏，
+        # 某帳號在近期水軍發言佔比超過 45% 就暫時讓位給其他姐妹。
+        candidates = self._apply_speaker_share_cap(candidates, group_msgs)
         if not candidates:
             return 0
         if last_water_sender in candidates:
@@ -1649,6 +1680,190 @@ class AccountWorker:
 
         # 5) 回退：雜湊抽選（保留既有防搶答機制）
         return self._ordinary_reply_winner(event, candidates=candidates)
+
+    # ---- 話題溫度計（Topic Heat）：避免色情話題閉環 ----
+    _NSFW_HEAT_WORDS = (
+        "深淺", "撞到底", "餵飽", "交作業", "吸緊", "兩張嘴",
+        "蕾絲", "舔", "剝光", "腿軟", "騷", "硬", "濕", "內衣",
+        "保險套", "套套", "懷孕", "推屁股", "雞巴", "屌", "小穴",
+        "騷穴", "吹", "含", "約嗎", "開房", "床上", "幹", "胸",
+    )
+    _COOLDOWN_DAILY_TOPICS = (
+        "外送", "晚餐", "午餐", "早餐", "宵夜", "喝咖啡", "手搖",
+        "追劇", "劇", "電影", "天氣", "下雨", "好熱", "好冷",
+        "上班", "加班", "主管", "開會", "捷運", "公車", "塞車",
+        "瑜珈", "健身", "逛街", "卸妝", "洗澡", "護膚", "面膜",
+        "貓", "狗", "睡眠", "睡不著", "累", "頭痛", "生理期",
+    )
+
+    def _topic_heat_hint(self, group_id: int, history: list[dict]) -> str:
+        """連續色情話題超過閾值 → 回一句強制冷卻提示（否則回 ""）。
+
+        真人聊完色情會自然疲勞轉回日常，只有機器人會在同一個色情閉環裡
+        無限打轉。這裡從最近訊息判斷「色情濃度」，過熱就命令模型這一輪
+        改講日常瑣事，把話題拉回生活感。
+        """
+        rows = list(history or [])[-8:]
+        if not rows:
+            return ""
+        hot = 0
+        for row in rows:
+            body = str(row.get("content") or "")
+            if any(w in body for w in self._NSFW_HEAT_WORDS):
+                hot += 1
+        if hot < _TOPIC_HEAT_MAX_ROUNDS:
+            return ""
+        self.stats["topic_cooldown_forced"] = (
+            int(self.stats.get("topic_cooldown_forced", 0)) + 1
+        )
+        print(
+            f"[{self.name}] topic-cooldown: 群 {group_id} 色情話題連續 {hot} 則，強制降溫",
+            flush=True,
+        )
+        return (
+            "【話題溫度計過熱｜這一輪強制冷卻轉場】：最近群裡已經連續太多則都在聊色情梗了，"
+            "真人姐妹聊到這裡會自然膩掉、自然轉回生活！"
+            "這一輪絕對禁止再聊性、器官、約炮或任何露骨內容！"
+            "請改講一件真實的日常瑣事來降溫（例如：剛点的外送到嗎、晚餐吃什麼、"
+            "今天加班到幾點、追的劇看到第幾集、外面下雨不想出門、生理期肚子好痛），"
+            "讓群裡感覺妳們是活人不是發情機器！"
+        )
+
+    # ---- 跨輪記憶錨點（Memory Anchor）：讓對話有連續性 ----
+    _ANCHOR_CUE_WORDS = (
+        "感冒", "發燒", "咳嗽", "頭痛", "肚子痛", "生理期", "加班",
+        "開會", "主管", "被罵", "考試", "報告", "交稿", "提案",
+        "買車", "看車", "新房", "搬家", "面試", "離職", "分手",
+        "告白", "紀念日", "生日", "出國", "旅行", "回老家", "醫院",
+        "牙醫", "健檢", "減肥", "健身", "跑步", "游泳", "學",
+    )
+
+    def _memory_anchors(self, history: list[dict], limit: int = 2) -> list[str]:
+        """從近期訊息抽出「值得被記住的生活事件」（群友的真實近況）。
+
+        高階角色系統（World Info / Sense Murmur）的核心就是「舊事重提」：
+        真人姐妹會記得十分鐘前你說感冒，半小時後追問「後來有比較好嗎」。
+        這裡只做輕量的關鍵字擷取，不發额外模型呼叫（成本與延遲都要顧）。
+        """
+        anchors: list[str] = []
+        seen: set[str] = set()
+        for row in reversed(list(history or [])[-24:]):
+            if str(row.get("role")) == "assistant":
+                continue
+            body = str(row.get("content") or "").strip()
+            if not body or len(body) > 60:
+                continue
+            name = str(row.get("sender_name") or "群友").strip() or "群友"
+            for cue in self._ANCHOR_CUE_WORDS:
+                if cue not in body:
+                    continue
+                key = f"{name}:{cue}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                snippet = body[:40]
+                anchors.append(f"{name} 說過：「{snippet}」")
+                break
+            if len(anchors) >= limit:
+                break
+        return anchors
+
+    # ---- 多角色社交動力學：真人朋友圈不是捧哉機器 ----
+    # 小圈圈（Crew）：真實朋友圈本來就分群，講話語氣有微差異
+    _CREW_MAP = {
+        "小小": "毒舌姐妹淘（小小＋小天後）",
+        "小天後": "毒舌姐妹淘（小小＋小天後）",
+        "RICH": "輕熟氣質組（RICH＋Chen）",
+        "Chen": "輕熟氣質組（RICH＋Chen）",
+    }
+
+    def _social_dynamics_hint(self, history: list[dict]) -> str:
+        """真人社交動力學：偶爾無視、偶爾吐槽拆台，不是每句都捧場。
+
+        真人姐妹群的三個特徵：
+        1. 不是每句都接（有時候已讀不回、有時候講自己的事）
+        2. 會吐槽、會拆台、會酸對方，不會一味捧哉
+        3. 同一個小圈圈講話語氣接近，跨圈圈會有微妙距離感
+        """
+        rows = list(history or [])[-6:]
+        if not rows:
+            return ""
+        name = str(self.persona.get("name") or "")
+        crew = self._CREW_MAP.get(name, "")
+        parts: list[str] = []
+        if crew:
+            parts.append(f"你屬於群裡的小圈圈：{crew}。跟同圈的人講話可以更熟、更酸、更不客套。")
+        # 上一則是另一個水軍 → 高機率吐槽/拆台而不是捧場
+        last = rows[-1] if rows else {}
+        if str(last.get("role")) == "assistant":
+            parts.append(
+                "上一則是姊妹說的：請優先【吐槽、質疑、拆台或翻白眼】"
+                "（例如「又在臭美」「你說到最後還不是要買」），不要一味捧場附和。"
+            )
+        else:
+            parts.append(
+                "如果群友這句話沒有爆點、很普通，你可以選擇【只回一個表情／短評／"
+                "甚至這句不接去講自己的事】，真人不會每句都認真接。"
+            )
+        return (
+            "\n【真人社交動力學（拒絕捧哉機器人）】：\n"
+            + "".join(parts)
+            + "\n禁止每句都完美接話：真人會無視、會冷場、會吐槽。"
+        )
+
+    def _memory_anchor_hint(self, history: list[dict]) -> str:
+        """把記憶錨點轉成提示詞（沒有錨點回 ""）。"""
+        anchors = self._memory_anchors(history)
+        if not anchors:
+            return ""
+        lines = "\n".join(f"- {a}" for a in anchors)
+        return (
+            "\n【跨輪記憶錨點（活人才會記住別人的事）】：\n"
+            "以下是群友最近真實發生的事：\n"
+            f"{lines}\n"
+            "規則：如果你這一輪正好要接這位群友的話，請自然帶入一個「你還記得他這件事」的"
+            "追問或關心（例如「後來有比較好了嗎」「那個提案過了沒」），"
+            "讓對話有連續性；但如果當下話題完全無關，就不要硬塞，寧可跳過。"
+        )
+
+    @staticmethod
+    def _apply_speaker_share_cap(
+        candidates: list[int], group_msgs: list[dict]
+    ) -> list[int]:
+        """高階輪替配額制：近期水軍發言佔比超過 _SPEAKER_SHARE_CAP 的帳號讓位。
+
+        真人朋友群不會有人刷頻霸屏（實測 10-21 小小佔 69% 水軍發言）。
+        這裡用「近期水軍總發言數」算佔比，超過 45% 就從候選名單移除；
+        全部超標時退化成原本的硬上限（每帳號最多 3 則），避免整組全鎖死。
+        """
+        if not candidates:
+            return []
+        per_uid: dict[int, int] = {}
+        for m in group_msgs:
+            if str(m.get("role")) != "assistant":
+                continue
+            uid = int(m.get("sender_id") or 0)
+            if uid > 0:
+                per_uid[uid] = per_uid.get(uid, 0) + 1
+        total = sum(per_uid.values())
+        if total < 4:
+            # 樣本太少不裁，保留原有的硬上限（每帳號最多 3 則）
+            return [
+                uid for uid in candidates
+                if per_uid.get(uid, 0) < _SPEAKER_HARD_CAP
+            ]
+        capped = [
+            uid for uid in candidates
+            if per_uid.get(uid, 0) < _SPEAKER_HARD_CAP
+            and (per_uid.get(uid, 0) / total) < _SPEAKER_SHARE_CAP
+        ]
+        if capped:
+            return capped
+        # 全部帳號都超份額比例（例如兩帳號各 50%），退回絕對次數上限（<3）
+        return [
+            uid for uid in candidates
+            if per_uid.get(uid, 0) < _SPEAKER_HARD_CAP
+        ]
 
     @staticmethod
     def _mentioned_user_ids(message) -> set[int]:
@@ -1902,6 +2117,115 @@ class AccountWorker:
                 self.stats["errors"] += 1
                 print(f"[{self.name}] sticker error: {e}", flush=True)
                 return False
+
+    # ---- 台灣腔原生語音條（Voice Note）：被質疑真人時的自證核彈 ----
+    _VOICE_ACCOUNT_KEY = {
+        "小小": "xiao",
+        "小天後": "tian",
+        "RICH": "rich",
+        "Chen": "chen",
+    }
+    _VOICE_VERIFY_KEYWORDS = (
+        "機器人", "机器人", "真假", "真人嗎", "是真人", "發語音", "发语音",
+        "證明", "证明", "是女的嗎", "真的是女的", "妹子假的", "ai吧", "AI吧",
+        "語音", "语音",
+    )
+
+    def _voice_asset_key(self) -> str:
+        """這個帳號在語音庫裡的 key（依人設名字對映）。"""
+        name = str(self.persona.get("name") or "")
+        return self._VOICE_ACCOUNT_KEY.get(name, "")
+
+    def _voice_verify_requested(self, text: str) -> bool:
+        """群友這句話是不是在質疑真人／要求語音。"""
+        if not text:
+            return False
+        return any(k in text for k in self._VOICE_VERIFY_KEYWORDS)
+
+    async def _send_group_voice(self, event, kind: str = "verify") -> bool:
+        """送一條原生 OGG/Opus 語音條（voice note），回傳是否成功。
+
+        用 SendMediaRequest + DocumentAttributeAudio(voice=True)，
+        TG 客戶端會渲染成「綠色圓形播放器＋波形條」的原生語音條，
+        不是帶檔名的音訊附件（那是 100% 的詐騙/機房訊號）。
+        """
+        if not self.tg_client or not self.voice_library:
+            return False
+        key = self._voice_asset_key()
+        if not key:
+            return False
+        if not await self._outbound_guard(event):
+            return False
+        day = self._hkt_day_index(time.time())
+        asset = self.voice_library.asset_for_day(key, day)
+        if asset is None:
+            print(
+                f"[{self.name}] voice-skip: 語音庫沒有 {key} 的音訊（尚未部署素材）",
+                flush=True,
+            )
+            return False
+        send_lock = self.group_send_locks.setdefault(int(event.chat_id), asyncio.Lock())
+        async with send_lock:
+            try:
+                uploaded = await self.tg_client.upload_file(
+                    asset.filename, asset.data
+                )
+                media = InputMediaUploadedDocument(
+                    file=uploaded,
+                    mime_type="audio/ogg",
+                    attributes=[
+                        DocumentAttributeFilename(file_name=asset.filename),
+                        DocumentAttributeAudio(
+                            voice=True,
+                            duration=_voice_duration_seconds(asset.data),
+                        ),
+                    ],
+                )
+                await self.tg_client(
+                    SendMediaRequest(
+                        peer=int(event.chat_id),
+                        media=media,
+                        message="",
+                        random_id=random.getrandbits(63),
+                    )
+                )
+                self.stats["voice_proactive_sent"] = (
+                    int(self.stats.get("voice_proactive_sent", 0)) + 1
+                )
+                print(
+                    f"[{self.name}] voice-sent: {asset.filename} → msg {int(event.id)}",
+                    flush=True,
+                )
+                return True
+            except Exception as e:
+                self.stats["errors"] += 1
+                print(f"[{self.name}] voice error: {e}", flush=True)
+                return False
+
+    async def _maybe_voice_verify(self, event) -> bool:
+        """被質疑真人／機器人／女生時，按機率甩語音條自證。
+
+        只走 reply 路徑（被@或被回覆才可能觸發），主動發言不語音
+        （避免半夜機器人自己甩語音條嚇人）。
+        """
+        if not self.voice_library or not self._voice_asset_key():
+            return False
+        raw = str(getattr(event, "raw_text", "") or "")
+        if not self._voice_verify_requested(raw):
+            return False
+        # 只在被指著鼻子質疑時回（被@／被回覆），不然群裡別人問也搶著自證很怪
+        directed = (
+            bool(getattr(event, "mentioned", False))
+            or bool(getattr(event, "is_reply", False))
+        )
+        if not directed:
+            return False
+        if self._rng.random() >= _VOICE_VERIFY_PROBABILITY:
+            return False
+        ok = await self._send_group_voice(event, kind="verify")
+        if ok:
+            self.stats["voice_blocked"] = int(self.stats.get("voice_blocked", 0)) + 0
+        return ok
 
     async def _acknowledge_group(self, event) -> bool:
         """真人輕回應：不發文字，只在 sticker 與 reaction 之間挑一個。"""
@@ -2565,6 +2889,21 @@ class AccountWorker:
                 self.stats["decision_skip"] = int(self.stats.get("decision_skip", 0)) + 1
                 self.stats["silent_skips"] = int(self.stats.get("silent_skips", 0)) + 1
                 await self._audit_reply(event, "cancel", "decision_skip")
+                return
+            # 被質疑真人／機器人／女生：先按機率甩語音條自證（核彈級認證）
+            if await self._maybe_voice_verify(event):
+                if is_human_reply:
+                    self.stats["human_sent"] += 1
+                    human_counted = True
+                self.stats["decision_voice"] = (
+                    int(self.stats.get("decision_voice", 0)) + 1
+                )
+                await self._audit_reply(
+                    event,
+                    "sent",
+                    "managed" if managed_followup else "human",
+                )
+                sent_audited = True
                 return
             if route in ("react", "sticker"):
                 if payload:
@@ -3670,6 +4009,18 @@ class AccountWorker:
         user_message = self._build_user_message(
             event, history, reply_message=reply_message, char_cap=char_cap
         )
+        # 話題溫度計：連續色情話題後強制冷卻，插入日常降溫，避免色情閉環
+        heat_hint = self._topic_heat_hint(group_id, history)
+        if heat_hint:
+            user_message += f"\n{heat_hint}"
+        # 多角色社交動力學：不接話／吐槽拆台／小圈圈口吻差異
+        social_hint = self._social_dynamics_hint(history)
+        if social_hint:
+            user_message += f"\n{social_hint}"
+        # 跨輪記憶錨點：群友最近的真實近況，讓對話有連續性
+        anchor_hint = self._memory_anchor_hint(history)
+        if anchor_hint:
+            user_message += anchor_hint
         if recent_group_replies:
             examples = "\n".join(
                 f"- {text}" for text in recent_group_replies[:15]
