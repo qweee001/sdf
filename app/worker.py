@@ -994,12 +994,14 @@ class AccountWorker:
         task = asyncio.create_task(
             self._reply_later(event, delay, managed_followup=managed_followup)
         )
-        # 記錄該待辦回覆屬於哪個群組，供真人插話時精準取消（重新判斷）
+        # 記錄該待辦回覆屬於哪個群組與目標對象，供真人插話時精準取消
         try:
             task._sdf_group_id = int(getattr(event, "chat_id", 0) or 0)
+            task._sdf_target_sender = int(getattr(event, "sender_id", 0) or 0)
             task._sdf_sched_at = time.time()
         except Exception:
             task._sdf_group_id = 0
+            task._sdf_target_sender = 0
             task._sdf_sched_at = time.time()
         self._reply_tasks.add(task)
         task.add_done_callback(self._reply_tasks.discard)
@@ -1056,16 +1058,31 @@ class AccountWorker:
                 ]
                 # 真人開題：重置該群的話題回合計數，角色互聊從這裡重新計
                 self.topic_turn_counts[group_id] = 0
-                # 真人插話：只在已經有 2 則以上真人新訊息積壓，或被點名插話時才取消，避免單則插話造成 100% 啞火
+                # 真人插話精準取消：路人甲插話不取消正在回給路人乙的任務！
+                # 只在：(1) 同一位群友自己又補話、(2) 新訊息明確 @/回覆 預定接話者、
+                # (3) 該群待辦回覆積壓 >= 2 則、或 (4) 任務已排程超過 15 秒延遲預算時才取消。
                 cancelled = 0
                 now_t = time.time()
-                for task in list(self._reply_tasks):
+                group_tasks = [
+                    t for t in list(self._reply_tasks)
+                    if getattr(t, "_sdf_group_id", None) == group_id
+                ]
+                is_directed_interrupt = bool(
+                    getattr(event, "mentioned", False)
+                    or getattr(event, "is_reply", False)
+                )
+                for task in group_tasks:
                     try:
-                        if getattr(task, "_sdf_group_id", None) == group_id:
-                            sched_t = getattr(task, "_sdf_sched_at", 0.0)
-                            # 如果該回覆任務才剛排程不到 3 秒，不輕易取消，給它機會發送
-                            if sched_t and (now_t - sched_t) < 3.0:
-                                continue
+                        sched_t = float(getattr(task, "_sdf_sched_at", 0.0) or 0.0)
+                        age = (now_t - sched_t) if sched_t else 0.0
+                        if sched_t and age < 4.0:
+                            continue
+                        same_sender = (
+                            int(getattr(task, "_sdf_target_sender", 0) or 0) == sender_id
+                        )
+                        over_budget = age > 15.0
+                        backlog = len(group_tasks) >= 2
+                        if same_sender or is_directed_interrupt or over_budget or backlog:
                             task.cancel()
                             cancelled += 1
                     except Exception:
@@ -1247,7 +1264,7 @@ class AccountWorker:
         sender_id = int(event.sender_id or 0)
         self.human_owners[(group_id, sender_id)] = (
             int(self.tg_user_id or 0),
-            time.time() + 15 * 60,
+            time.time() + 90,
         )
         self.stats["human_claimed"] += 1
 
@@ -1532,9 +1549,14 @@ class AccountWorker:
             self.recent_proactive_owners.pop(group_id, None)
             recent_owner = 0
         if recent_owner:
-            return await self._claim_human_reply(
+            claimed_recent = await self._claim_human_reply(
                 event, recent_owner, ordinary=True
             )
+            if claimed_recent:
+                # 認領成功後已寫入該群友專屬 human_owners[(group_id, sender_id)]，
+                # 立即消費群級 recent_proactive_owners，避免單次主動發言綁架整群所有真人 15 分鐘。
+                self.recent_proactive_owners.pop(group_id, None)
+            return claimed_recent
         message_id = int(
             getattr(event, "id", 0)
             or getattr(getattr(event, "message", None), "id", 0)
@@ -4964,12 +4986,20 @@ class AccountWorker:
                 cost_status=cost_status,
             )
             if content:
-                return content.strip()
+                return text_guard.auto_convert_to_tw(content.strip())
             return ""
         except Exception as e:
-            # API 層錯誤（如 402 欠費）與「模型回空」分開計數，控制台一眼看得出
+            # API 層錯誤（如 402 欠費）與「模型回空」分開計數，控制台一眼看得出，
+            # 同時寫入 _recent_errors（附帶 purpose/model）供 /api/status 即時診斷。
             self.stats["ai_api_errors"] = int(self.stats.get("ai_api_errors", 0)) + 1
-            print(f"[{self.name}] AI error: {e}", flush=True)
+            try:
+                stamp = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
+                self._recent_errors.append(
+                    f"{stamp} _call_ai({purpose},{model}) {type(e).__name__}: {str(e)[:120]}"
+                )
+            except Exception:
+                pass
+            print(f"[{self.name}] AI error ({purpose},{model}): {e}", flush=True)
             await self._record_model_call(
                 purpose,
                 model,
@@ -5258,7 +5288,7 @@ class AccountWorker:
             self.managed_origins[origin_key] = time.time() + 180
             self.recent_proactive_owners[int(chat_id)] = (
                 int(self.tg_user_id),
-                time.time() + 15 * 60,
+                time.time() + 90,
             )
         self.stats[stats_key] += 1
         await self.db.add_message(

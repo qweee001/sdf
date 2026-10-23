@@ -729,6 +729,55 @@ _PHRASE_FIXES = (
     ("叫助理", "讓助理"),
 )
 
+_SAFE_S2T_PHRASE_MAP = (
+    ("什么", "什麼"),
+    ("怎么", "怎麼"),
+    ("这么", "這麼"),
+    ("那么", "那麼"),
+    ("多么", "多麼"),
+    ("为什么", "為什麼"),
+    ("什幺", "什麼"),
+    ("干净", "乾淨"),
+    ("干燥", "乾燥"),
+    ("干杯", "乾杯"),
+    ("干什么", "幹什麼"),
+    ("家里", "家裡"),
+    ("这里", "這裡"),
+    ("那里", "那裡"),
+    ("哪里", "哪裡"),
+    ("心里", "心裡"),
+    ("里头", "裡頭"),
+    ("身体", "身體"),
+    ("体会", "體會"),
+    ("体现", "體現"),
+    ("体育", "體育"),
+    ("集体", "集體"),
+    ("具体", "具體"),
+)
+
+
+def auto_convert_to_tw(text: str) -> str:
+    """模型原始輸出安全簡轉繁＋大陸詞自動替換（保護 _S2T_FALSE_KILL_CHARS 不誤轉）。"""
+    body = str(text or "")
+    if not body:
+        return body
+    for wrong, right in _SAFE_S2T_PHRASE_MAP:
+        if wrong in body:
+            body = body.replace(wrong, right)
+    for wrong, right in _MAINLAND_TW_TERMS:
+        if wrong in body:
+            body = body.replace(wrong, right)
+    if _S2T_CONVERTER is not None:
+        out_chars = []
+        for ch in body:
+            if ch in _S2T_FALSE_KILL_CHARS or not ch.isprintable():
+                out_chars.append(ch)
+            else:
+                out_chars.append(_S2T_CONVERTER.convert(ch))
+        body = "".join(out_chars)
+    return fix_phrases(body)
+
+
 def fix_phrases(text: str) -> str:
     """把容易走鐘的固定說法直接換成群裡真正在講的版本。"""
     body = str(text or "")
