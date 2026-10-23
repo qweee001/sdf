@@ -669,6 +669,12 @@ class Dashboard:
             if not fields:
                 return JSONResponse({"error": "沒有可更新的開關"}, status_code=400)
             await self.manager.db.update_account(account_id, **fields)
+            worker = (getattr(self.manager, "workers", {}) or {}).get(str(account_id))
+            if worker is not None:
+                if "reply_enabled" in fields:
+                    worker.reply_enabled = bool(fields["reply_enabled"])
+                if "proactive_enabled" in fields:
+                    worker.proactive_enabled = bool(fields["proactive_enabled"])
             acc2 = await self.manager.db.get_account(account_id)
             return JSONResponse({
                 "ok": True,
