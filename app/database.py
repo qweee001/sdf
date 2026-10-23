@@ -1384,11 +1384,12 @@ class Database:
         同一條群訊息會被群內每個水軍帳號各記錄一份；以 (sender_id, TG 訊息 ID)
         去重（F09 事件身分），舊資料無 TG ID 時退回 (sender_id, content, 秒)。
         """
+        raw_limit = max(int(limit) * 5, 60)
         cursor = await self._c.execute(
             "SELECT sender_id, sender_name, role, content, timestamp, message_id "
             "FROM messages WHERE group_id = ? "
             "ORDER BY timestamp DESC, id DESC LIMIT ?",
-            (group_id, limit),
+            (group_id, raw_limit),
         )
         rows = list(await cursor.fetchall())
         seen: set = set()
@@ -1405,6 +1406,8 @@ class Database:
                 continue
             seen.add(key)
             deduped.append(dict(r))
+            if len(deduped) >= int(limit):
+                break
         deduped.reverse()
         return deduped
 

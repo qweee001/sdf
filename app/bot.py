@@ -1121,12 +1121,12 @@ class TgControlBot:
             cb("imagegen", "📷 圖片生成"),
             cb("voice", "🔊 語音"),
         ])
-        # 全局總開關：所有帳號 reply+proactive 都開→全靜音；否則→全開啟
+        # 全局總開關：顯示當前狀態與切換提示，避免誤會當前被靜音
         all_both_on = bool(accs) and all(
             int(a.get("reply_enabled") or 0) and int(a.get("proactive_enabled") or 0)
             for a in accs
         )
-        master_txt = "🔕 全部靜音" if all_both_on else "🔔 全部開啟"
+        master_txt = "🟢 全運行中 (點擊靜音)" if all_both_on else "🔴 已靜音 (點擊全開)"
         rows.append([
             cb("acc.master.all", master_txt),
             cb("acc.panic.stop", "🚨 緊急全停"),

@@ -3262,21 +3262,15 @@ class AccountWorker:
                     self._record_reply_drop("gate_held")
                     await self._audit_reply(event, "policy", "gate_held")
                     return
-                # 用字檢查層：對照表＋決策層專問錯別字（跟 ③ 的語意審核分開）
-                # 熱場（1 分鐘內真人 ≥3）省掉這一層：要三四次模型呼叫，
-                # 在 3.5 則/分鐘的群裡會直接拖到過時，熱場時過時風險大於錯字風險。
-                if self._hot_field(group_id):
-                    self.stats["typo_skipped_hot"] = (
-                        int(self.stats.get("typo_skipped_hot", 0)) + 1
-                    )
-                else:
-                    text = await self._typo_gate(
-                        event, text, context=await self._decision_state(event)
-                    )
-                    if not text:
-                        self._record_reply_drop("typo_held")
-                        await self._audit_reply(event, "policy", "typo_held")
-                        return
+                # 用字檢查層：全面動態審核，不再於熱場跳過！
+                # 即使群內節奏快，也必須保障動態用字與常識語意，杜絕同音別字漏放。
+                text = await self._typo_gate(
+                    event, text, context=await self._decision_state(event)
+                )
+                if not text:
+                    self._record_reply_drop("typo_held")
+                    await self._audit_reply(event, "policy", "typo_held")
+                    return
                 # 固定說法校正（找助理→聯絡助理），零模型成本
                 text = text_guard.fix_phrases(text)
                 # 發送前最後一道：這段時間有沒有真人搶先講了新話（回過時話題＝當場破戲）
@@ -4738,7 +4732,10 @@ class AccountWorker:
             f"[{self.name}] typo-rewrite: {detail} {text[:20]!r}",
             flush=True,
         )
-        hint = f"上一版有用字錯誤（{detail}）。只修這些字，句子長度和語氣不要改。"
+        hint = (
+            f"上一版有用字錯誤或同音別字（{detail}）。"
+            "【高階動態演繹校驗】：請根據完整情境語意自動修正為正確繁體字詞（例如抓床單而非狀單、身體而非身体），保持句子生活感與流暢度，絕不可帶有錯字！"
+        )
         if regen_fn is None:
             fixed = await self._generate_reply(event, extra_hint=hint)
         else:
