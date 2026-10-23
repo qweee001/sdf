@@ -83,16 +83,19 @@ _TRADITIONAL_BIG5_EXCEPTIONS = frozenset(
     }
 )
 
-# s2t「字級誤殺」白名單：s2t 把某些台灣日常用字當成簡體去轉（吃→喫、台→臺、
-# 里→裏、么→麼、游→遊、群→羣、准→準），逐字比較會把正常繁體句誤判成混簡體。
-# 實測（opencc-python-reimplemented s2t）確認這七字會被轉掉；加字前必須實測
-# 「純繁體句會被擋」的完整案例。白名單只豁免「字級」比較；整句 s2t 後仍改變的
-# 詞（什么/身体/机会…）照常攔。
-_S2T_FALSE_KILL_CHARS = frozenset("吃台里么游群准")
+# 台灣標準正體字保護白名單：
+# OpenCC 的「s2t」（通用簡轉繁）預設會把台灣標準的「床」硬轉成古體/港式「牀」（如「牀上」），
+# 以及「吃→喫、台→臺、里→裏、么→麼、游→遊、群→羣、准→準」。
+# 台灣教育部標準國字與日常繁體一律寫「床」，絕不寫「牀」！
+_S2T_FALSE_KILL_CHARS = frozenset("床吃台里么游群准")
 try:
-    _S2T_CONVERTER = _OpenCC("s2t") if _OpenCC is not None else None
-except Exception:  # pragma: no cover - 初始化失敗等同缺套件
-    _S2T_CONVERTER = None
+    # 優先使用 s2tw（簡體到台灣繁體標準），避免 s2t 轉出古體字「牀」
+    _S2T_CONVERTER = _OpenCC("s2tw") if _OpenCC is not None else None
+except Exception:  # pragma: no cover
+    try:
+        _S2T_CONVERTER = _OpenCC("s2t") if _OpenCC is not None else None
+    except Exception:
+        _S2T_CONVERTER = None
 # 性別詞彙排他（實測 10-14 小小「我前女友就愛吃甜的」→ 女號講前女友＝性別倒錯）：
 # 女號的對象詞只能是「前男友/男朋友/他」，講「前女友/我老婆」等於自認是男的；
 # 男號講「前男友/我老婆」同理。
@@ -775,6 +778,8 @@ def auto_convert_to_tw(text: str) -> str:
             else:
                 out_chars.append(_S2T_CONVERTER.convert(ch))
         body = "".join(out_chars)
+    # 再次確保不出現港式/古體字「牀」
+    body = body.replace("牀", "床")
     return fix_phrases(body)
 
 
