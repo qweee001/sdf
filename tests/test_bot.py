@@ -107,6 +107,21 @@ class _FakeDB:
     async def list_accounts(self):
         return [{"id": "a1", "name": "台北-小小"}]
 
+    async def set_all_accounts_flags(self, reply_enabled, proactive_enabled):
+        """對齊 Database.set_all_accounts_flags（緊急全停／全部靜音用）。"""
+        for acc in self.accounts.values():
+            acc["reply_enabled"] = int(reply_enabled)
+            acc["proactive_enabled"] = int(proactive_enabled)
+        return len(self.accounts)
+
+    async def rows(self, sql, params=()):
+        """對齊 Database.rows（/logs 用）：沿用本替身的 execute/fetchall。"""
+        await self.execute(sql, params)
+        return list(await self.fetchall())
+
+    async def scalar(self, sql, params=()):
+        return len(self.accounts)
+
     async def get_private_messages(self, account_id, limit=50):
         assert account_id == "a1"
         return list(self.privates)[:limit]

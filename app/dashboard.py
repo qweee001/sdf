@@ -165,8 +165,10 @@ class Dashboard:
         database_ok = False
         ai_calls_24h: int | None = None
         try:
-            cursor = await db._c.execute("SELECT 1")
-            await cursor.fetchone()
+            # 一定要關游標：留著會在 WAL 下維持讀快照，之後主連線寫入
+            # 升級交易就會 database is locked（health 被 Railway 定期打）。
+            async with db._c.execute("SELECT 1") as cursor:
+                await cursor.fetchone()
             database_ok = True
         except Exception:
             database_ok = False

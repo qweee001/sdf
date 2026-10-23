@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import time
 import unicodedata
 from collections.abc import Callable
@@ -49,6 +50,44 @@ class Database:
         if self._db is None:
             raise RuntimeError("資料庫未連線")
         return self._db
+
+    # ---------- 安全的短查詢（必關游標） ----------
+    #
+    # 主連線是所有 worker／dashboard／bot 共用的。用 `cur = await _c.execute(...)`
+    # 然後只 fetch 不 close，會讓那個 statement 一直活著、在 WAL 下維持一個讀快照；
+    # 之後同一條連線要寫入就得「升級交易」，SQLite 直接回 database is locked
+    # （SQLITE_BUSY_SNAPSHOT 不吃 busy_timeout，等再久也沒用）。
+    # 實測：/health 每次被 Railway 打一次就留一個游標，bot 的寫入就開始間歇性失敗。
+    # 這兩個方法用 async with 保證 finalize，外部一律走它們。
+
+    async def scalar(self, sql: str, params: tuple = ()):
+        """單值查詢（游標自動關閉）。查不到回 None。"""
+        async with self._c.execute(sql, params) as cursor:
+            row = await cursor.fetchone()
+        return None if row is None else row[0]
+
+    async def rows(self, sql: str, params: tuple = ()) -> list:
+        """多列查詢（游標自動關閉）。"""
+        async with self._c.execute(sql, params) as cursor:
+            return list(await cursor.fetchall())
+
+    async def _write(self, sql: str, params: tuple = (), attempts: int = 4) -> None:
+        """主連線寫入：遇到 database is locked 就短退避重試。
+
+        共用連線在高併發下偶爾會撞到別的連線持有的寫鎖；busy_timeout 只能吸收
+        「等得到」的衝突，升級失敗要自己重試。
+        """
+        delay = 0.05
+        for attempt in range(attempts):
+            try:
+                await self._c.execute(sql, params)
+                await self._c.commit()
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or attempt == attempts - 1:
+                    raise
+                await asyncio.sleep(delay)
+                delay *= 2
 
     async def connect(self):
         parent = os.path.dirname(self.db_path)
@@ -1239,11 +1278,26 @@ class Database:
             return
         fields["updated_at"] = time.time()
         cols = ", ".join(f"{k} = ?" for k in fields)
-        await self._c.execute(
+        await self._write(
             f"UPDATE accounts SET {cols} WHERE id = ?",
             (*fields.values(), account_id),
         )
-        await self._c.commit()
+
+    async def set_all_accounts_flags(
+        self, reply_enabled: int, proactive_enabled: int
+    ) -> int:
+        """一次寫入切換全部帳號的 回覆／主動 開關，回傳受影響列數。
+
+        緊急全停與全體靜音原本是「逐帳號 update_account」＝N 次獨立交易，
+        群組爆量時每一次都可能撞 database is locked。合成單一 UPDATE 只取一次
+        寫鎖，要嘛全成功要嘛全失敗。
+        """
+        await self._write(
+            "UPDATE accounts SET reply_enabled = ?, proactive_enabled = ?, "
+            "updated_at = ?",
+            (int(reply_enabled), int(proactive_enabled), time.time()),
+        )
+        return int(await self.scalar("SELECT COUNT(*) FROM accounts") or 0)
 
     async def delete_account(self, account_id: str) -> None:
         await self._c.execute("DELETE FROM accounts WHERE id = ?", (account_id,))

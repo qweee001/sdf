@@ -1708,13 +1708,11 @@ class TgControlBot:
         target = 0 if all_both_on else 1
         on = bool(target)
         icon = "🔔" if on else "🔕"
+        # 單一 UPDATE：逐帳號寫入會變成 N 次交易，群組爆量時很容易撞
+        # database is locked（實測 bot 選單按下去直接報錯）。
+        await self.manager.db.set_all_accounts_flags(target, target)
         names = []
         for a in accounts:
-            await self.manager.db.update_account(
-                a["id"],
-                reply_enabled=target,
-                proactive_enabled=target,
-            )
             worker = (getattr(self.manager, "workers", {}) or {}).get(str(a["id"]))
             if worker is not None:
                 worker.reply_enabled = bool(target)
@@ -1734,12 +1732,9 @@ class TgControlBot:
         names = []
         cancelled_total = 0
         still_running_total = 0
+        # 一次寫入全部帳號（原本逐帳號 update＝N 次交易，容易 database is locked）
+        await self.manager.db.set_all_accounts_flags(0, 0)
         for a in accounts:
-            await self.manager.db.update_account(
-                a["id"],
-                reply_enabled=0,
-                proactive_enabled=0,
-            )
             worker = (getattr(self.manager, "workers", {}) or {}).get(str(a["id"]))
             if worker is not None:
                 worker.reply_enabled = False
@@ -1772,8 +1767,9 @@ class TgControlBot:
         # 1. 檢測資料庫實體連通性
         db_ok = False
         try:
-            db_res = await self.manager.db._c.execute("SELECT COUNT(*) FROM accounts")
-            acc_count = (await db_res.fetchone())[0]
+            acc_count = int(
+                await self.manager.db.scalar("SELECT COUNT(*) FROM accounts") or 0
+            )
             db_ok = True
             lines.append(f"🗄 資料庫連通：🟢 正常（WAL模式，收錄帳號: {acc_count}）")
         except Exception as e:
@@ -2049,13 +2045,12 @@ class TgControlBot:
         acc = await self.manager.db.get_account(account_id)
         name = self._acc_label(acc) if acc else account_id
         try:
-            cur = await self.manager.db._c.execute(
+            rows = await self.manager.db.rows(
                 "SELECT group_id, sender_name, role, content, timestamp "
                 "FROM messages WHERE account_id = ? "
                 "ORDER BY timestamp DESC LIMIT ?",
                 (str(account_id), n),
             )
-            rows = list(await cur.fetchall())
         except Exception as e:
             return f"⚠️ 讀日誌失敗：{e}"
         rows = list(reversed(rows))  # 舊→新
