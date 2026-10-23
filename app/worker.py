@@ -1820,7 +1820,55 @@ class AccountWorker:
             "讓群裡感覺妳們是活人不是發情機器！"
         )
 
-    # ---- 跨輪記憶錨點（Memory Anchor）：讓對話有連續性 ----
+    def _tension_ladder_hint(self, group_id: int, incoming_text: str, history: list[dict]) -> str:
+        """情節張力階梯（Tension Ladder）：從生活到露骨勾引的動態階梯式推進。
+
+        L1【生活瑣事】➔ L2【微醺/男女互虧】➔ L3【身體感官勾引】➔ L4【實戰邀約/門檻收斂】
+        單次發言最多跨 1 級，氣氛到了主動升級到 L3 甚至 L4，將露骨勾引演繹得自然且致命誘人！
+        """
+        combined = incoming_text + " " + " ".join(str(r.get("content") or "") for r in (history or [])[-4:])
+        # 判斷當前群內張力層級
+        l4_cues = ("約嗎", "出來", "見面", "開房", "哪裡約", "怎麼約", "助理", "排時間", "試車", "求饒", "誰敢")
+        l3_cues = ("舔", "吸", "濕", "硬", "床單", "敏感帶", "小穴", "雞雞", "屌", "肉棒", "脫", "抱著睡", "嘴巴餵", "大腿", "內衣", "洗澡")
+        l2_cues = ("變態", "色", "妹子", "身材", "肌肉", "嘴砲", "出一張嘴", "男人", "不行", "幾公分", "虛", "微醺", "喝酒", "探班")
+
+        if any(w in combined for w in l4_cues):
+            current_level = 4
+        elif any(w in combined for w in l3_cues):
+            current_level = 3
+        elif any(w in combined for w in l2_cues):
+            current_level = 2
+        else:
+            current_level = 1
+
+        # 主動推進：若群友在 L2，我們直接推進到 L3 露骨感官勾引；若群友在 L3，推進到 L4 成交預約
+        target_level = min(4, current_level + 1)
+        if target_level == 2:
+            return (
+                "【情節張力階梯・L2微醺挑釁】：將話題轉向男女張力，質疑群裡男生的體力與膽量，"
+                "帶點傲嬌或微醺，調侃他們只會嘴砲不敢真來。"
+            )
+        elif target_level == 3:
+            return (
+                "【情節張力階梯・L3露骨感官誘惑】：直接開啟大膽肉體與感官勾引！"
+                "從觸覺、洗完澡的香氣、敏感帶、床上的動作或身體接觸切入，大膽直球誘惑，挑起男人的衝動！"
+            )
+        elif target_level == 4:
+            return (
+                "【情節張力階梯・L4實戰門檻與收斂】：主動開出實戰試車條件或下戰帖！"
+                "「光說不練誰不會」「敢試的別光在群裡叫」，丟出具體門檻並順勢引導去找助理排時間！"
+            )
+        return ""
+
+    def _build_directors_note(self, event, history: list[dict]) -> str:
+        """酒館級 In-Chat @ Depth 末端動態演出指令（Author's Note）。"""
+        name = str(self.persona.get("name") or "妹子")
+        return (
+            f"\\n[導演即時指示（最高執行權重）]：\\n"
+            f"1. 扮演真實的台灣女生 {name}，用自然接地氣的台灣口語短句隨手回覆（20~50字內），不帶句號。\\n"
+            f"2. 緊扣上文核心話題，語意常識第一，拒絕拼湊死板模板；展現自信誘人或傲嬌反差的女人味，不要有任何AI說教感！"
+        )
+
     _ANCHOR_CUE_WORDS = (
         "感冒", "發燒", "咳嗽", "頭痛", "肚子痛", "生理期", "加班",
         "開會", "主管", "被罵", "考試", "報告", "交稿", "提案",
@@ -4234,6 +4282,10 @@ class AccountWorker:
         heat_hint = self._topic_heat_hint(group_id, history)
         if heat_hint:
             user_message += f"\n{heat_hint}"
+        # 情節張力階梯（Tension Ladder）：動態識別階梯並主動升級露骨勾引
+        tension_hint = self._tension_ladder_hint(group_id, str(getattr(event, "raw_text", "") or ""), history)
+        if tension_hint:
+            user_message += f"\n{tension_hint}"
         # 定位狀態機：勾引 → 助理成交；連續旁白強制賣自己
         position_hint = self._positioning_hint(
             group_id, str(getattr(event, "raw_text", "") or ""), history
@@ -4317,6 +4369,12 @@ class AccountWorker:
         phrase_hint = self._phrase_fatigue_hint(group_id)
         if phrase_hint:
             user_message += f"\n{phrase_hint}"
+
+        # 依主人指示：酒館級 Author's Note / In-Chat @ Depth 末端動態注入
+        # 將最高權重的導演演出指令放在整個 Context 的最後一刻，直接引領模型演繹
+        director_note = self._build_directors_note(event, history)
+        if director_note:
+            user_message += f"\n{director_note}"
 
         async def call_reply(message: str) -> str:
             if image and self.media_service:
