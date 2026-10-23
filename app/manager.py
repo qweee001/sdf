@@ -746,6 +746,11 @@ class AccountManager:
                 or os.getenv("GIT_COMMIT_SHA", "").strip()[:12]
                 or "unknown"
             ),
+            "db_diagnostics": (
+                self.db.diagnostics()
+                if callable(getattr(self.db, "diagnostics", None))
+                else {}
+            ),
             "media_spend_usd": round(await self.db.media_spend_total(), 6),
             "media_budget_usd": self.config.media_daily_budget_usd,
             "features": self.feature_status(),

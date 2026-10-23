@@ -44,6 +44,12 @@ class Database:
         self._settings_lock = asyncio.Lock()
         self._event_lock = asyncio.Lock()
         self._immediate_tx_lock = asyncio.Lock()
+        # WAL 是否真的生效（connect 時讀回 journal_mode 驗證）
+        self.journal_mode: str = ""
+        self.last_pragma_warning: str = ""
+        # 寫入鎖重試計數（/api/status 看得到，用來判斷 locked 有多頻繁）
+        self.lock_retries: int = 0
+        self.lock_failures: int = 0
 
     @property
     def _c(self) -> aiosqlite.Connection:
@@ -84,10 +90,24 @@ class Database:
                 await self._c.commit()
                 return
             except sqlite3.OperationalError as exc:
-                if "locked" not in str(exc).lower() or attempt == attempts - 1:
+                if "locked" not in str(exc).lower():
                     raise
+                if attempt == attempts - 1:
+                    self.lock_failures += 1
+                    raise
+                self.lock_retries += 1
                 await asyncio.sleep(delay)
                 delay *= 2
+
+    def diagnostics(self) -> dict:
+        """資料庫鎖的健康資訊（/api/status 用）。"""
+        return {
+            "journal_mode": self.journal_mode,
+            "wal_ok": self.journal_mode == "wal",
+            "pragma_warning": self.last_pragma_warning,
+            "lock_retries": int(self.lock_retries),
+            "lock_failures": int(self.lock_failures),
+        }
 
     async def connect(self):
         parent = os.path.dirname(self.db_path)
@@ -103,6 +123,19 @@ class Database:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA busy_timeout=60000")
         await self._db.execute("PRAGMA synchronous=NORMAL")
+        # 驗證 WAL 真的生效：Railway 的 volume 若不支援 WAL 需要的 shared memory，
+        # 這個 PRAGMA 會靜默失敗（回傳 delete/journal），而 WAL 與 rollback journal
+        # 的鎖行為差很多——不檢查就會一直用錯的假設在 debug。
+        self.journal_mode = str(
+            (await (await self._db.execute("PRAGMA journal_mode")).fetchone())[0]
+        ).lower()
+        if self.journal_mode != "wal":
+            msg = (
+                f"WAL 未生效（journal_mode={self.journal_mode}）："
+                "寫入鎖行為會退化，database is locked 風險大幅上升"
+            )
+            print(f"⚠️ [db] {msg}", flush=True)
+            self.last_pragma_warning = msg
         await self._init_schema()
 
     async def _init_schema(self):

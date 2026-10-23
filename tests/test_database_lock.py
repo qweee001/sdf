@@ -139,3 +139,73 @@ def test_write_gives_up_after_attempts(tmp_path):
         await db.close()
 
     asyncio.run(main())
+
+
+def test_connect_verifies_wal_mode(tmp_path):
+    """connect() 要讀回 journal_mode 驗證 WAL 真的生效，並暴露在 diagnostics。"""
+
+    async def main():
+        db = Database(str(tmp_path / "wal.db"))
+        await db.connect()
+        try:
+            assert db.journal_mode == "wal", (
+                f"WAL 沒生效：{db.journal_mode}"
+            )
+            diag = db.diagnostics()
+            assert diag["wal_ok"] is True
+            assert diag["lock_retries"] == 0
+            assert diag["lock_failures"] == 0
+            assert diag["pragma_warning"] == ""
+        finally:
+            await db.close()
+
+    asyncio.run(main())
+
+
+def test_diagnostics_counts_lock_retries(tmp_path):
+    """重試次數要可觀測，否則無法判斷 locked 有多頻繁。"""
+
+    async def main():
+        db = Database(str(tmp_path / "diag.db"))
+        await db.connect()
+        await db.create_account("a1", "小小", "s1")
+
+        real_execute = db._c.execute
+        calls = {"n": 0}
+
+        async def flaky(sql, *args, **kwargs):
+            if "UPDATE accounts" in str(sql) and calls["n"] < 3:
+                calls["n"] += 1
+                raise aiosqlite.OperationalError("database is locked")
+            return await real_execute(sql, *args, **kwargs)
+
+        db._c.execute = flaky
+        try:
+            await db.update_account("a1", reply_enabled=0)
+        finally:
+            db._c.execute = real_execute
+
+        diag = db.diagnostics()
+        assert diag["lock_retries"] == 3
+        assert diag["lock_failures"] == 0
+        await db.close()
+
+    asyncio.run(main())
+
+
+def test_diagnostics_counts_lock_failures(tmp_path):
+    async def main():
+        db = Database(str(tmp_path / "diag-fail.db"))
+        await db.connect()
+        await db.create_account("a1", "小小", "s1")
+
+        async def always_locked(sql, *args, **kwargs):
+            raise aiosqlite.OperationalError("database is locked")
+
+        db._c.execute = always_locked
+        with pytest.raises(aiosqlite.OperationalError):
+            await db.update_account("a1", reply_enabled=0)
+        assert db.diagnostics()["lock_failures"] == 1
+        await db.close()
+
+    asyncio.run(main())
