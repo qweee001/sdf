@@ -44,6 +44,10 @@ class Database:
         self._settings_lock = asyncio.Lock()
         self._event_lock = asyncio.Lock()
         self._immediate_tx_lock = asyncio.Lock()
+        # 主連線所有寫入序列（execute→commit）共用一把鎖：
+        # 同進程內多個 worker/bot 併發寫同一條連線時，commit 與 rollback 互相
+        # 交錯會把别人未提交的語句一起提交或回滾，正是 locked 連鎖失敗的來源。
+        self._write_lock = asyncio.Lock()
         # WAL 是否真的生效（connect 時讀回 journal_mode 驗證）
         self.journal_mode: str = ""
         self.last_pragma_warning: str = ""
@@ -77,27 +81,51 @@ class Database:
         async with self._c.execute(sql, params) as cursor:
             return list(await cursor.fetchall())
 
-    async def _write(self, sql: str, params: tuple = (), attempts: int = 4) -> None:
-        """主連線寫入：遇到 database is locked 就短退避重試。
+    async def _commit(self) -> None:
+        """提交主連線交易。撞到 locked 就 rollback 再拋，避免殘留交易鎖死連線。
 
-        共用連線在高併發下偶爾會撞到別的連線持有的寫鎖；busy_timeout 只能吸收
-        「等得到」的衝突，升級失敗要自己重試。
+        沒有這一步的話，一次失敗的 commit 會讓連線停在「未結束交易」，
+        之後所有寫入（含控制台按「停止」）都會一直 database is locked。
+        """
+        try:
+            await self._c.commit()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                raise
+            try:
+                await self._c.rollback()
+            except sqlite3.Error:
+                pass
+            self.lock_failures += 1
+            raise
+
+    async def _write(self, sql: str, params: tuple = (), attempts: int = 6) -> None:
+        """主連線寫入：遇到 database is locked 就 rollback＋退避重試。
+
+        busy_timeout 只吸收「等得到」的衝突；升級失敗或連線已卡在未結束交易
+        時，必須先 rollback 才能再寫，否則重試幾次都會是同一個 locked。
         """
         delay = 0.05
-        for attempt in range(attempts):
-            try:
-                await self._c.execute(sql, params)
-                await self._c.commit()
-                return
-            except sqlite3.OperationalError as exc:
-                if "locked" not in str(exc).lower():
-                    raise
-                if attempt == attempts - 1:
-                    self.lock_failures += 1
-                    raise
-                self.lock_retries += 1
-                await asyncio.sleep(delay)
-                delay *= 2
+        async with self._write_lock:
+            for attempt in range(attempts):
+                try:
+                    await self._c.execute(sql, params)
+                    await self._commit()
+                    return
+                except sqlite3.OperationalError as exc:
+                    message = str(exc).lower()
+                    if "locked" not in message and "busy" not in message:
+                        raise
+                    try:
+                        await self._c.rollback()
+                    except sqlite3.Error:
+                        pass
+                    if attempt == attempts - 1:
+                        self.lock_failures += 1
+                        raise
+                    self.lock_retries += 1
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 2.0)
 
     def diagnostics(self) -> dict:
         """資料庫鎖的健康資訊（/api/status 用）。"""
@@ -115,6 +143,7 @@ class Database:
             os.makedirs(parent, exist_ok=True)
         self._db = await aiosqlite.connect(self.db_path, timeout=60)
         self._db.row_factory = aiosqlite.Row
+        await self._init_schema()
         # 三個水軍 worker 共用同一主連線，而 live_test/settings/claim 等路徑用
         # 獨立連線跑 BEGIN IMMEDIATE 寫鎖。預設 busy_timeout 只有 5s，群組爆量時
         # 主連線的寫會被獨立連線的寫鎖卡到「database is locked」（實測 19:11 三號
@@ -1185,7 +1214,7 @@ class Database:
             "(status = 'failed' AND stop_reason LIKE '%stop_failed%'))",
             (str(reason)[:500], str(run_id)),
         )
-        await self._c.commit()
+        await self._commit()
         return cursor.rowcount == 1
 
     async def get_live_test_reconciliation_run(self) -> dict | None:
@@ -1225,7 +1254,7 @@ class Database:
                 str(run_id),
             ),
         )
-        await self._c.commit()
+        await self._commit()
         return cursor.rowcount == 1
 
     async def get_live_test_run(self, run_id: str | None = None) -> dict | None:
@@ -1288,22 +1317,22 @@ class Database:
             "VALUES (?, ?, ?, ?, 0, ?, ?)",
             (account_id, name, session_key, persona, now, now),
         )
-        await self._c.commit()
+        await self._commit()
 
     async def list_accounts(self) -> list[dict]:
-        cursor = await self._c.execute(
+        async with self._c.execute(
             "SELECT id, name, session_key, tg_user_id, tg_username, persona, groups, "
             "setup_complete, enabled, avatar, reply_enabled, proactive_enabled "
             "FROM accounts ORDER BY created_at"
-        )
-        rows = await cursor.fetchall()
+        ) as cursor:
+            rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
     async def get_account(self, account_id: str) -> dict | None:
-        cursor = await self._c.execute(
+        async with self._c.execute(
             "SELECT * FROM accounts WHERE id = ?", (account_id,)
-        )
-        row = await cursor.fetchone()
+        ) as cursor:
+            row = await cursor.fetchone()
         return dict(row) if row else None
 
     async def update_account(self, account_id: str, **fields) -> None:
@@ -1342,7 +1371,7 @@ class Database:
         await self._c.execute("DELETE FROM group_memory WHERE account_id = ?", (account_id,))
         # 回覆認領（槽位鎖）也歸屬帳號；不刪會卡住該帳號之後的認領判斷
         await self._c.execute("DELETE FROM outbound_claims WHERE account_id = ?", (account_id,))
-        await self._c.commit()
+        await self._commit()
 
     # ---------- 記憶 ----------
 
@@ -1365,7 +1394,7 @@ class Database:
             "ORDER BY timestamp DESC LIMIT 200)",
             (account_id, group_id, account_id, group_id),
         )
-        await self._c.commit()
+        await self._commit()
 
     async def get_recent_messages(self, account_id: str, group_id: int,
                                   limit: int = 30) -> list[dict]:
@@ -1455,7 +1484,7 @@ class Database:
                 "(group_id, message_id, sender_kind, observed_at) VALUES (?, ?, ?, ?)",
                 (int(group_id), int(message_id), sender_kind, time.time()),
             )
-            await self._c.commit()
+            await self._commit()
             return cursor.rowcount == 1
 
     async def record_reply_event(
@@ -1484,7 +1513,7 @@ class Database:
                     time.time(),
                 ),
             )
-            await self._c.commit()
+            await self._commit()
             return cursor.rowcount == 1
 
     async def interaction_pressure(
@@ -1676,7 +1705,7 @@ class Database:
             "VALUES (?, ?, ?, ?, ?)",
             (account_id, sender_id, sender_name, preview, time.time()),
         )
-        await self._c.commit()
+        await self._commit()
 
     async def get_private_messages(self, account_id: str, unread_only: bool = False,
                                    limit: int = 50) -> list[dict]:
@@ -1696,12 +1725,12 @@ class Database:
                 "UPDATE private_messages SET read = 1 WHERE id = ? AND account_id = ?",
                 (message_id, account_id),
             )
-            await self._c.commit()
+            await self._commit()
             return
         await self._c.execute(
             "UPDATE private_messages SET read = 1 WHERE id = ?", (message_id,)
         )
-        await self._c.commit()
+        await self._commit()
 
     # ---------- 活躍節奏（防機器感） ----------
 
@@ -1710,7 +1739,7 @@ class Database:
             "INSERT OR REPLACE INTO activity (account_id, group_id, kind, at) VALUES (?, ?, ?, ?)",
             (account_id, group_id, kind, time.time()),
         )
-        await self._c.commit()
+        await self._commit()
 
     async def last_activity(self, account_id: str, group_id: int, kind: str) -> float:
         cursor = await self._c.execute(
@@ -1760,7 +1789,7 @@ class Database:
                 "(claim_key, account_id, claimed_at) VALUES (?, ?, ?)",
                 (key, account_id, time.time()),
             )
-            await self._c.commit()
+            await self._commit()
             return cursor.rowcount == 1
 
     async def release_message_response_claim(
@@ -1774,7 +1803,7 @@ class Database:
                 "DELETE FROM outbound_claims WHERE claim_key = ? AND account_id = ?",
                 (key, account_id),
             )
-            await self._c.commit()
+            await self._commit()
             return cursor.rowcount == 1
 
     @staticmethod
@@ -1806,7 +1835,7 @@ class Database:
                 "WHERE outbound_claims.claimed_at < ?",
                 (key, account_id, now, cutoff),
             )
-            await self._c.commit()
+            await self._commit()
             return cursor.rowcount == 1
 
     async def claim_managed_followup(
@@ -1961,7 +1990,7 @@ class Database:
                 "claimed_at = MAX(claimed_at, excluded.claimed_at)",
                 (cooldown_key, account_id, current),
             )
-            await self._c.commit()
+            await self._commit()
 
     async def release_managed_followup(
         self, group_id: int, message_id: int, account_id: str
@@ -2004,7 +2033,7 @@ class Database:
                 "AND kind = 'proactive' AND at > ?)",
                 (key, account_id, now, group_id, cutoff),
             )
-            await self._c.commit()
+            await self._commit()
             return cursor.rowcount == 1
 
     async def release_proactive_slot(
@@ -2021,7 +2050,7 @@ class Database:
                 "DELETE FROM outbound_claims WHERE claim_key = ? AND account_id = ?",
                 (f"proactive:{int(group_id)}:{int(slot)}", account_id),
             )
-            await self._c.commit()
+            await self._commit()
             return cursor.rowcount > 0
 
     async def claim_daily_voice(
@@ -2119,7 +2148,7 @@ class Database:
                 time.time(),
             ),
         )
-        await self._c.commit()
+        await self._commit()
 
     async def ai_call_summary(self, hours: int = 24) -> dict:
         """F16：近 N 小時模型呼叫的成本／品質彙總（按用途分組）。"""
@@ -2221,7 +2250,7 @@ class Database:
             (int(group_id), int(member_id), account_id,
              int(group_id), int(member_id), account_id),
         )
-        await self._c.commit()
+        await self._commit()
         return True
 
     async def upsert_group_shared_note(self, group_id: int, account_id: str, note: str) -> bool:
@@ -2252,7 +2281,7 @@ class Database:
             "ORDER BY updated_at DESC, id DESC LIMIT 10)",
             (int(group_id), account_id, int(group_id), account_id),
         )
-        await self._c.commit()
+        await self._commit()
         return True
 
     async def get_group_shared_notes(self, group_id: int, account_id: str, limit: int = 10) -> list[str]:
@@ -2277,7 +2306,7 @@ class Database:
         text = (label or "").strip()
         if not text:
             await self._c.execute("DELETE FROM group_labels WHERE group_id = ?", (gid,))
-            await self._c.commit()
+            await self._commit()
             return True
         await self._c.execute(
             "INSERT INTO group_labels (group_id, label, updated_at) VALUES (?, ?, ?) "
@@ -2285,7 +2314,7 @@ class Database:
             "label = excluded.label, updated_at = excluded.updated_at",
             (gid, text[:60], time.time()),
         )
-        await self._c.commit()
+        await self._commit()
         return True
 
     async def get_group_labels(self) -> dict[int, str]:
@@ -2338,7 +2367,7 @@ class Database:
             await self._c.execute(
                 "DELETE FROM record_reviews WHERE record_key = ?", (key,)
             )
-        await self._c.commit()
+        await self._commit()
 
     async def list_record_reviews(self, group_id: int) -> set[str]:
         """這個群已被標記已檢視的 record_key 集合。"""
@@ -2404,4 +2433,4 @@ class Database:
         # F16 成本帳也是旁路帳，一樣會漲：ai_calls 跟 messages 用同一保留期
         # （去重回看窗口），太舊的成本記錄對 24h 儀表板沒用，一併清掉。
         await self._c.execute("DELETE FROM ai_calls WHERE at < ?", (messages_cutoff,))
-        await self._c.commit()
+        await self._commit()

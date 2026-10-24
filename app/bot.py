@@ -393,6 +393,13 @@ class TgControlBot:
         self._last_error = ""
         if not self.admin_ids:
             log.warning("BOT_ADMIN_IDS 為空：fail-closed，任何 TG 使用者都會被擋")
+        self._reply_menu = types.ReplyKeyboardMarkup(
+            [
+                types.KeyboardButtonRow([types.KeyboardButton(l) for l, _ in row])
+                for row in MENU_ROWS
+            ],
+            resize=True,
+        )
         self.app = self._build_mini_app()
 
     # ---------- 生命週期 ----------
@@ -854,7 +861,10 @@ class TgControlBot:
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
         elif action == "acc.stop":
-            body = await self._acc_toggle("stopacc", [arg])
+            try:
+                body = await self._acc_toggle("stopacc", [arg])
+            except Exception as exc:
+                body = f"⚠️ 停止失敗：{exc}"
             await event.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )

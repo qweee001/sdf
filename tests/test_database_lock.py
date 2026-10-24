@@ -141,6 +141,68 @@ def test_write_gives_up_after_attempts(tmp_path):
     asyncio.run(main())
 
 
+def test_failed_commit_rolls_back_so_connection_is_not_poisoned(tmp_path):
+    """commit 撞鎖時必須 rollback：否則殘留交易會讓之後每一次寫入都 locked。"""
+
+    async def main():
+        db = Database(str(tmp_path / "poison.db"))
+        await db.connect()
+        await db.create_account("a1", "小小", "s1")
+
+        real_commit = db._c.commit
+        calls = {"n": 0}
+
+        async def flaky_commit():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise aiosqlite.OperationalError("database is locked")
+            return await real_commit()
+
+        db._c.commit = flaky_commit
+        with pytest.raises(aiosqlite.OperationalError):
+            await db.add_message("a1", -1001, 123, "有人", "user", "一則訊息")
+        db._c.commit = real_commit
+
+        assert db._c.in_transaction is False, "失敗的 commit 留下未結束交易"
+        # 同一條連線之後仍能正常寫入（停止帳號走的就是這條路）
+        await db.update_account("a1", enabled=0)
+        assert int(await db.scalar("SELECT enabled FROM accounts WHERE id = 'a1'")) == 0
+        await db.close()
+
+    asyncio.run(main())
+
+
+def test_single_account_stop_survives_transient_lock(tmp_path):
+    """按「停止」的寫入遇到一次 locked 要自己退避重試，不能把錯誤丟給使用者。"""
+
+    async def main():
+        db = Database(str(tmp_path / "stop.db"))
+        await db.connect()
+        await db.create_account("a1", "小天後", "s1")
+
+        real_commit = db._c.commit
+        calls = {"n": 0}
+
+        async def flaky_commit():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise aiosqlite.OperationalError("database is locked")
+            return await real_commit()
+
+        db._c.commit = flaky_commit
+        try:
+            await db.update_account("a1", enabled=0)
+        finally:
+            db._c.commit = real_commit
+
+        assert calls["n"] >= 2, "應先撞鎖再一次成功"
+        assert int(await db.scalar("SELECT enabled FROM accounts WHERE id = 'a1'")) == 0
+        assert db._c.in_transaction is False
+        await db.close()
+
+    asyncio.run(main())
+
+
 def test_connect_verifies_wal_mode(tmp_path):
     """connect() 要讀回 journal_mode 驗證 WAL 真的生效，並暴露在 diagnostics。"""
 

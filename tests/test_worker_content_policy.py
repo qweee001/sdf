@@ -173,6 +173,70 @@ def _set_classifier_effects(worker, *effects):
     return create
 
 
+def test_managed_women_exchange_keeps_recipient_and_body_referents():
+    worker = _worker()
+    worker.persona = {"name": "小小", "gender": "女", "age": 22}
+    worker.tg_user_id = 101
+    worker.managed_ids = {101, 202}
+    worker.personas = {202: {"name": "RICH", "gender": "女"}}
+    event = _FakeEvent()
+    event.sender_id = 202
+    event.raw_text = "敢不敢直接來我被窩裡"
+    history = [{"sender_id": 202, "sender_name": "RICH", "role": "assistant", "content": event.raw_text}]
+    prompt = worker._build_user_message(event, history)
+    assert "RICH" in prompt and "女性" in prompt
+    assert "生殖器" in prompt and "不要" in prompt
+    assert "人稱" in prompt and "對象" in prompt
+
+
+def test_reply_to_woman_does_not_get_generic_male_seduction_directive():
+    worker = _worker()
+    worker.persona = {"name": "小小", "gender": "女", "age": 22}
+    worker.tg_user_id = 101
+    worker.managed_ids = {101, 202}
+    worker.personas = {202: {"name": "RICH", "gender": "女"}}
+    event = _FakeEvent()
+    event.sender_id = 202
+    event.raw_text = "來我被窩聊聊"
+    note = worker._build_directors_note(event, [])
+    assert "女性" in note and "對象" in note
+    assert "男群友" not in note
+
+
+def test_managed_woman_reply_does_not_inject_generic_male_tension():
+    async def main():
+        worker = _worker()
+        worker.persona.update({"name": "小小", "gender": "女", "age": 22})
+        worker.tg_user_id = 101
+        worker.managed_ids = {101, 202}
+        worker.personas = {202: {"name": "RICH", "gender": "女"}}
+        event = _FakeEvent()
+        event.sender_id = 202
+        event.raw_text = "敢不敢直接來我被窩裡看你怎麼舔"
+        event.is_reply = False
+        event.mentioned = False
+        event.media = None
+        event.sender = None
+        worker.db.get_recent_messages = AsyncMock(return_value=[
+            {"sender_id": 202, "sender_name": "RICH", "role": "assistant", "content": event.raw_text}
+        ])
+        worker._call_ai = AsyncMock(return_value="你被窩裡有電暖器喔")
+        await worker._generate_reply(event)
+        prompt = worker._call_ai.await_args.args[1]
+        assert "【同伴接話】" in prompt
+        assert "L3極致露骨色誘" not in prompt
+
+    asyncio.run(main())
+
+
+def test_sibling_reply_not_forced_into_booking_handoff():
+    worker = _worker()
+    worker.persona.update({"name": "小小", "gender": "女", "age": 22})
+    worker.managed_ids = {101, 202}
+    assert worker._positioning_hint(-1001, "怎麼約你？")
+    assert worker._positioning_hint(-1001, "怎麼約你？", is_managed=True) == ""
+
+
 def test_video_topic_reply_is_regenerated_instead_of_rewritten():
     async def main():
         worker = _worker()
