@@ -1058,31 +1058,27 @@ class AccountWorker:
                 ]
                 # 真人開題：重置該群的話題回合計數，角色互聊從這裡重新計
                 self.topic_turn_counts[group_id] = 0
-                # 真人插話精準取消：路人甲插話不取消正在回給路人乙的任務！
-                # 只在：(1) 同一位群友自己又補話、(2) 新訊息明確 @/回覆 預定接話者、
-                # (3) 該群待辦回覆積壓 >= 2 則、或 (4) 任務已排程超過 15 秒延遲預算時才取消。
+                # 真人插話精準取消：路人甲插話絕不取消正在回給路人乙的任務！
+                # 只有在：(1) 同一位群友自己又補話（避免自言自語對不上）、
+                # (2) 任務已嚴重超時（> 25 秒）時才取消。
+                # 嚴禁因「群裡有人發了別的 reply」或「積壓 >= 2」就誤殺正在進行的色誘/回覆任務！
                 cancelled = 0
                 now_t = time.time()
                 group_tasks = [
                     t for t in list(self._reply_tasks)
                     if getattr(t, "_sdf_group_id", None) == group_id
                 ]
-                is_directed_interrupt = bool(
-                    getattr(event, "mentioned", False)
-                    or getattr(event, "is_reply", False)
-                )
                 for task in group_tasks:
                     try:
                         sched_t = float(getattr(task, "_sdf_sched_at", 0.0) or 0.0)
                         age = (now_t - sched_t) if sched_t else 0.0
-                        if sched_t and age < 4.0:
+                        if sched_t and age < 5.0:
                             continue
                         same_sender = (
                             int(getattr(task, "_sdf_target_sender", 0) or 0) == sender_id
                         )
-                        over_budget = age > 15.0
-                        backlog = len(group_tasks) >= 2
-                        if same_sender or is_directed_interrupt or over_budget or backlog:
+                        over_budget = age > 25.0
+                        if same_sender or over_budget:
                             task.cancel()
                             cancelled += 1
                     except Exception:
@@ -1218,15 +1214,24 @@ class AccountWorker:
         """只把 @我 或真正回覆我自己的訊息視為定向訊息。"""
         if event.mentioned:
             return True
-        if not (event.is_reply and event.reply_to):
+        if not getattr(event, "is_reply", False):
             return False
         try:
             replied = await event.get_reply_message()
+            if replied is not None:
+                return int(getattr(replied, "sender_id", 0) or 0) == int(
+                    self.tg_user_id or 0
+                )
         except Exception:
-            return False
-        return int(getattr(replied, "sender_id", 0) or 0) == int(
-            self.tg_user_id or 0
+            pass
+        reply_to = getattr(event, "reply_to", None) or getattr(
+            getattr(event, "message", None), "reply_to", None
         )
+        if reply_to:
+            target_uid = self._reply_target_user_id(getattr(event, "message", None) or event)
+            if target_uid and target_uid == int(self.tg_user_id or 0):
+                return True
+        return False
 
     @staticmethod
     def _reply_claim_key(event) -> tuple[int, int]:
@@ -1854,9 +1859,10 @@ class AccountWorker:
             )
         elif current_level == 3:
             return (
-                "【情節張力階梯・L3極致露骨色誘】：全面釋放女性性感誘惑！"
-                "大膽描繪肉體細節（如洗澡後的沐浴乳香味、貼身衣物勒痕、敏感帶被碰觸的反應、小穴濕熱、想被用力按在床上親吻揉捏），"
-                "言語大膽直球，直接激發男群友強烈的性衝動與肉體渴望！絕不主動提助理！"
+                "【情節張力階梯・L3極致露骨色誘（直球勾引、慾火焚身）】：全面釋放女性性感誘惑！"
+                "針對男生的接話（如抱著睡、親吻、撫摸）強烈推進性誘惑！"
+                "大膽直球描繪肉體反應與細節（如洗澡後的沐浴乳香味、貼身真絲衣服滑開、敏感帶被碰觸的微喘、小穴濕熱發燙、想被用力按在床上親吻揉捏、想被大肉棒深深幹進去塞滿），"
+                "言語露骨火辣，直接激發男群友強烈的性衝動與肉體渴望，讓他滿腦子只想上你幹你！絕不主動提助理！"
             )
         elif current_level == 4:
             # 對方明確求約時，勾一下後隨口推助理
@@ -2586,14 +2592,10 @@ class AccountWorker:
         }
 
     async def _context_still_fresh(self, event) -> bool:
-        """發送前最後一道：這段時間有沒有真人搶先講了「別的話題」。
-
-        在 3.5 則/分鐘的群裡，原本「只要有人插話就丟」會丟掉 64%（實測
-        stale_context 25 則 vs 送出 14 則）。真人回晚一點是常態，只有
-        「話題被別人帶走」才真的會回得牛頭不對馬嘴。
-        所以放寬成：≤1 則新真人 → 照發；2 則以上但仍在同一話題 → 照發；
-        只有「連續 2 則以上且完全換話題」才丟。查不到就放行。
-        """
+        """發送前最後一道：只要對話還在進行，絕不輕易丟棄色誘與回覆。"""
+        # 回覆定向指向自己的（例如阿龍回覆小小），永遠保持鮮活，絕不 drop
+        if await self._is_directed_at_me(event):
+            return True
         group_id = int(getattr(event, "chat_id", 0) or 0)
         seen_at = float(getattr(event, "_sdf_seen_at", 0) or 0)
         if not group_id or seen_at <= 0:
@@ -2612,12 +2614,11 @@ class AccountWorker:
                 continue
             if float(row.get("timestamp") or 0) > seen_at + 1.0:
                 newer.append(content)
-        # 只有表情、標點、極短回聲（「？」「😂」「蛤」）不算換話題
         meaningful = [
             c for c in newer
             if len(re.sub(r"[^㐀-鿿A-Za-z0-9]", "", c)) >= 4
         ]
-        if not meaningful:
+        if len(meaningful) <= 2:
             return True
         target_grams = _cjk_grams(target)
         return any(target_grams & _cjk_grams(c) for c in meaningful)
@@ -4458,6 +4459,10 @@ class AccountWorker:
         # 1. 廢除龐雜死板的單詞/正則攔截鏈，改為 instant_word_fix 本地就地自癒
         # 2. 僅保留真實安全與對話底線（拒答、格式標記、嚴重超長、無腦複讀）
         # --------------------------------------------------------------
+        # 回覆長度上限放寬：
+        # 為滿足主人「深入勾引、露骨誘惑、情節拉扯、激發肉體衝動」，
+        # 允許上限放寬至 65 字元，絕不因稍微寫長或五感描寫豐富就判定 too_long 丟棄！
+        char_cap = max(char_cap, 65)
         reply, _ = text_guard.instant_word_fix(reply)
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)
