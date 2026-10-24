@@ -1867,12 +1867,36 @@ class AccountWorker:
         return ""
 
     def _build_directors_note(self, event, history: list[dict]) -> str:
-        """酒館級 In-Chat @ Depth 末端動態演出指令（Author's Note）。"""
+        """酒館級 In-Chat @ Depth 末端動態演出指令（Author's Note）。
+
+        隨機抽取演出維度與切入視角，打破每天開頭「光會/笑死」與單一質疑句型。
+        """
+        import random
         name = str(self.persona.get("name") or "妹子")
+
+        # 動態心境切換（打破固定套路）
+        mood_options = [
+            "【心境：隨性放鬆/生活瑣事】：以真實日常生活（手搖飲、上班摸魚、外送、天氣、追劇）的輕鬆口吻隨意聊，展現普通女生的日常真實感。",
+            "【心境：傲嬌調皮/輕微嘴賤】：不順著對方的話走，隨口戳他一下、拆他的台，像調皮女生捉弄男生一樣好玩。",
+            "【心境：感官曖昧/微醺撩撥】：從身體感官（剛洗完澡的香氣、真絲衣服、敏感帶、眼神交流）切入，字句帶著熱氣與引誘，極致撩人。",
+            "【心境：直球性感/性張力拉滿】：大膽露骨直球挑逗，挑釁對方的體力與尺寸，直接激起男人的生理衝動與勝負欲！",
+        ]
+        chosen_mood = random.choice(mood_options)
+
+        # 動態句式引導（嚴禁固定詞開頭）
+        syntax_guides = [
+            "開頭禁止使用「光會」「笑死」「只會」「連…都」「去什麼」等固定套路詞！",
+            "用自然第一人稱或直觀動作開場（如「我剛剛…」「等等」「好啦」「其實…」「真的假的」）。",
+            "用簡短感官或反問句破題，打破模板化問答！",
+        ]
+        chosen_syntax = random.choice(syntax_guides)
+
         return (
-            f"\\n[導演即時指示（最高執行權重）]：\\n"
-            f"1. 扮演真實的台灣女生 {name}，用自然接地氣的台灣口語短句隨手回覆（20~50字內），不帶句號。\\n"
-            f"2. 緊扣上文核心話題，語意常識第一，拒絕拼湊死板模板；展現自信誘人或傲嬌反差的女人味，不要有任何AI說教感！"
+            f"\\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\\n"
+            f"1. 扮演真實的台灣女生 {name}，以 15~45 字內的極致自然口語短句隨性說話，不帶句號。\\n"
+            f"2. {chosen_mood}\\n"
+            f"3. {chosen_syntax}\\n"
+            f"4. 嚴禁任何客服推銷感；只有對方主動苦苦求約時才隨手提助理，平時全心當個鮮活撩人的台灣女生！"
         )
 
     _ANCHOR_CUE_WORDS = (
@@ -4818,6 +4842,16 @@ class AccountWorker:
         if not model:
             return ""
         started = time.monotonic()
+        # --------------------------------------------------------------
+        # 動態神經多樣性（動態採樣與解碼懲罰）：
+        # 1. 每次生成動態在 0.88 ~ 1.08 浮動，打破固定隨機數造成的固定詞頻依賴
+        # 2. 提高 presence_penalty / frequency_penalty，壓制固定句型（「光會」「笑死」）
+        # --------------------------------------------------------------
+        import random
+        dyn_temp = round(random.uniform(0.88, 1.05), 2)
+        dyn_freq = round(random.uniform(0.55, 0.75), 2)
+        dyn_pres = round(random.uniform(0.45, 0.65), 2)
+
         try:
             request_kwargs = {
                 "model": model,
@@ -4825,9 +4859,9 @@ class AccountWorker:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
                 ],
-                "temperature": self.config.ai_temperature,
-                "frequency_penalty": 0.45,
-                "presence_penalty": 0.35,
+                "temperature": dyn_temp,
+                "frequency_penalty": dyn_freq,
+                "presence_penalty": dyn_pres,
                 "max_tokens": self.config.ai_max_tokens,
                 "timeout": self.config.ai_timeout,
             }
