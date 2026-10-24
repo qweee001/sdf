@@ -429,6 +429,90 @@ def _load_typo_pairs() -> tuple[tuple[str, str], ...]:
 
 _TYPO_PAIRS = _load_typo_pairs()
 
+# ---------------------------------------------------------------------------
+# 零延遲用字防火牆（本地確定性修正，不呼叫模型）
+#
+# 目的：把「每則訊息都可能多花 2~4 秒叫決策模型審錯字」的成本拿掉。
+# 常見別字／古體字／大陸詞在這裡 O(n) 直接改掉，改完就走，不進模型。
+# 只有出現「語料裡從沒見過的罕用字」時才升級給模型審核。
+# ---------------------------------------------------------------------------
+
+# 古體／港式異體字 → 台灣教育部標準字
+_VARIANT_CHAR_MAP = {
+    "牀": "床",   # 港式古體（OpenCC s2t 會誤轉）
+    "喫": "吃",
+    "裏": "裡",
+    "麽": "麼",
+    "祇": "只",
+    "儘": "盡",
+    "綫": "線",
+    "邨": "村",
+    "牠": "牠",   # 保留（台灣動物用字合法）
+    "牠": "牠",
+    "妳": "妳",   # 保留（女性第二人稱合法）
+}
+
+
+def instant_word_fix(text: str) -> tuple[str, bool]:
+    """本地零成本修正：常見別字、古體字、大陸詞。
+
+    回 (修正後文字, 是否有改動)。有改動代表已經在本地修好，不需要再叫模型。
+    """
+    body = str(text or "")
+    if not body:
+        return body, False
+    original = body
+    # 1) 古體／異體字
+    for wrong, right in _VARIANT_CHAR_MAP.items():
+        if wrong != right and wrong in body:
+            body = body.replace(wrong, right)
+    # 2) 常見同音別字（因該→應該、以經→已經…）
+    for wrong, right in _TYPO_PAIRS:
+        if wrong in body:
+            body = body.replace(wrong, right)
+    # 3) 簡體詞與大陸詞
+    for wrong, right in _SAFE_S2T_PHRASE_MAP:
+        if wrong in body:
+            body = body.replace(wrong, right)
+    for wrong, right in _MAINLAND_TW_TERMS:
+        if wrong in body:
+            body = body.replace(wrong, right)
+    return body, body != original
+
+
+def _build_common_charset() -> frozenset[str]:
+    """建立「常用字集」：以專案自身語料（人設＋詞表）為基準。
+
+    罕用字＝不在這個集合裡的 CJK 字，才值得花模型呼叫去審。
+    """
+    chars: set[str] = set()
+    base = Path(__file__).resolve().parent
+    for rel in ("assets/mainland_tw_terms.txt", "assets/typo_pairs.txt"):
+        try:
+            chars.update((base / rel).read_text(encoding="utf-8"))
+        except OSError:
+            continue
+    try:
+        chars.update((base / "persona.py").read_text(encoding="utf-8"))
+    except OSError:
+        pass
+    return frozenset(chars)
+
+
+_COMMON_CHARS = _build_common_charset()
+
+
+def needs_model_review(text: str) -> bool:
+    """只有出現語料裡從沒見過的 CJK 字，才需要升級給模型審用字。
+
+    正常回覆（生活口語、露骨詞、常見梗）全部落在常用字集內 → 直接放行，
+    省掉一次模型呼叫與 2~4 秒延遲。
+    """
+    for ch in str(text or ""):
+        if "\u3400" <= ch <= "\u9fff" and ch not in _COMMON_CHARS:
+            return True
+    return False
+
 def _is_cjk_text(text: str) -> bool:
     return bool(text) and all("\u3400" <= ch <= "\u9fff" for ch in text)
 
