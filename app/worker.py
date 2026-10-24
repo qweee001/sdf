@@ -1821,18 +1821,17 @@ class AccountWorker:
         )
 
     def _tension_ladder_hint(self, group_id: int, incoming_text: str, history: list[dict]) -> str:
-        """情節張力階梯（Tension Ladder）：從生活到露骨勾引的動態階梯式推進。
+        """情節張力階梯（Tension Ladder）：從生活到極致露骨色誘的動態階梯式推進。
 
-        L1【生活瑣事】➔ L2【微醺/男女互虧】➔ L3【身體感官勾引】➔ L4【實戰邀約/門檻收斂】
-        單次發言最多跨 1 級，氣氛到了主動升級到 L3 甚至 L4，將露骨勾引演繹得自然且致命誘人！
+        95% 全力專注在感官誘惑、肉體描寫、性挑釁、讓男群友慾火焚身；
+        僅 5% 且對方明確開口求約時才順帶提助理。
         """
         combined = incoming_text + " " + " ".join(str(r.get("content") or "") for r in (history or [])[-4:])
-        # 判斷當前群內張力層級
-        l4_cues = ("約嗎", "出來", "見面", "開房", "哪裡約", "怎麼約", "助理", "排時間", "試車", "求饒", "誰敢")
-        l3_cues = ("舔", "吸", "濕", "硬", "床單", "敏感帶", "小穴", "雞雞", "屌", "肉棒", "脫", "抱著睡", "嘴巴餵", "大腿", "內衣", "洗澡")
-        l2_cues = ("變態", "色", "妹子", "身材", "肌肉", "嘴砲", "出一張嘴", "男人", "不行", "幾公分", "虛", "微醺", "喝酒", "探班")
+        l4_cues = ("怎麼約", "哪裡約", "多少錢", "今晚可以嗎", "可以約嗎", "想約你", "約出來", "跟妳睡")
+        l3_cues = ("舔", "吸", "濕", "硬", "床單", "敏感帶", "小穴", "雞雞", "屌", "肉棒", "脫", "抱著睡", "嘴巴餵", "大腿", "內衣", "洗澡", "幹", "插", "高潮")
+        l2_cues = ("變態", "色", "妹子", "身材", "肌肉", "嘴砲", "出一張嘴", "男人", "不行", "幾公分", "虛", "微醺", "喝酒", "探班", "想你")
 
-        if any(w in combined for w in l4_cues):
+        if any(w in incoming_text for w in l4_cues):
             current_level = 4
         elif any(w in combined for w in l3_cues):
             current_level = 3
@@ -1841,22 +1840,24 @@ class AccountWorker:
         else:
             current_level = 1
 
-        # 主動推進：若群友在 L2，我們直接推進到 L3 露骨感官勾引；若群友在 L3，推進到 L4 成交預約
-        target_level = min(4, current_level + 1)
-        if target_level == 2:
+        # 95% 全力推升肉體色誘與性衝動
+        if current_level == 1:
             return (
-                "【情節張力階梯・L2微醺挑釁】：將話題轉向男女張力，質疑群裡男生的體力與膽量，"
-                "帶點傲嬌或微醺，調侃他們只會嘴砲不敢真來。"
+                "【情節張力階梯・L2微醺挑釁】：帶點微醺曖昧或傲嬌，調侃現場男生的體力與膽量，"
+                "質疑他們只敢嘴砲不敢實戰，挑起男人的勝負欲！"
             )
-        elif target_level == 3:
+        elif current_level in (2, 3):
+            # 85% 機率大膽露骨色誘，15% 挑逗體位
             return (
-                "【情節張力階梯・L3露骨感官誘惑】：直接開啟大膽肉體與感官勾引！"
-                "從觸覺、洗完澡的香氣、敏感帶、床上的動作或身體接觸切入，大膽直球誘惑，挑起男人的衝動！"
+                "【情節張力階梯・L3極致露骨色誘】：全面釋放女性性感誘惑！"
+                "大膽描繪肉體細節（如洗澡後的沐浴乳香味、敏感帶被碰觸的反應、貼身衣物勒痕、小穴濕熱、想被用力按在床上親吻揉捏），"
+                "言語大膽直球，直接激發男群友強烈的性衝動與肉體渴望！絕不主動提助理！"
             )
-        elif target_level == 4:
+        elif current_level == 4:
+            # 對方明確求約時，勾一下後隨口推助理
             return (
-                "【情節張力階梯・L4實戰門檻與收斂】：主動開出實戰試車條件或下戰帖！"
-                "「光說不練誰不會」「敢試的別光在群裡叫」，丟出具體門檻並順勢引導去找助理排時間！"
+                "【情節張力階梯・L4實戰收斂】：對方已經急著想約了！"
+                "先大膽開撩讓對方心癢難耐（例如「看你本事能不能讓我腿軟」），最後隨性丟一句「自己去找助理排啦」，不要有業務廣告味！"
             )
         return ""
 
@@ -1996,27 +1997,16 @@ class AccountWorker:
     def _positioning_hint(
         self, group_id: int, incoming: str = "", history: list[dict] | None = None
     ) -> str:
-        """只留兩條：問怎麼約→勾一句再推助理；連續三則旁白→這則講自己。
+        """依主人指示：95% 專注情緒拉扯、接梗、調情、色誘露骨，提助理壓到 5%。
 
-        其餘（MC 腔禁用、助理跳針防護）先不做了，避免提示詞越堆越長。
+        只有對方明確問「怎麼約/在哪/今晚要不要」時才勾一下推助理；
+        徹底廢除「每三則強制賣自己推助理」的死板機制！
         """
-        recent = self._recent_bot_texts(group_id)
         raw = str(incoming or "")
         if any(m in raw for m in self._ASK_BOOKING_MARKS):
             return (
-                "\n【對方在問約】：先勾一句，再收在助理（「你自己聯絡助理啊」）。"
-                "地點不講。25 字內。"
-            )
-        tail3 = recent[-3:]
-        if len(tail3) == 3 and not any(
-            any(m in t for m in self._SELF_OFFER_MARKS) for t in tail3
-        ):
-            self.stats["position_forced_offer"] = (
-                int(self.stats.get("position_forced_offer", 0)) + 1
-            )
-            return (
-                "\n【這則講自己】：上一連三則都在講別人，這則賣自己一下"
-                "（身體／聲音／這禮拜剩哪天），收在助理。40 字內。"
+                "\n【對方在問約】：先大膽勾一句，最後隨性推給助理（「你自己聯絡助理啊」）。"
+                "不講地點，絕不當業務。25 字內。"
             )
         return ""
 
