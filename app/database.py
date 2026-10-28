@@ -39,15 +39,13 @@ class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self._db: aiosqlite.Connection | None = None
-        self._media_budget_lock = asyncio.Lock()
-        self._claim_lock = asyncio.Lock()
-        self._settings_lock = asyncio.Lock()
-        self._event_lock = asyncio.Lock()
-        self._immediate_tx_lock = asyncio.Lock()
-        # 主連線所有寫入序列（execute→commit）共用一把鎖：
-        # 同進程內多個 worker/bot 併發寫同一條連線時，commit 與 rollback 互相
-        # 交錯會把别人未提交的語句一起提交或回滾，正是 locked 連鎖失敗的來源。
         self._write_lock = asyncio.Lock()
+        self._media_budget_lock = asyncio.Lock()
+        # 跨協程所有寫入主連線 self._c 必須共用同一把鎖，避免交易交錯與 SQLITE_BUSY 衝突
+        self._claim_lock = self._write_lock
+        self._settings_lock = asyncio.Lock()
+        self._event_lock = self._write_lock
+        self._immediate_tx_lock = asyncio.Lock()
         # WAL 是否真的生效（connect 時讀回 journal_mode 驗證）
         self.journal_mode: str = ""
         self.last_pragma_warning: str = ""
@@ -1378,23 +1376,33 @@ class Database:
     async def add_message(self, account_id: str, group_id: int, sender_id: int,
                           sender_name: str, role: str, content: str,
                           message_id: int = 0, sent_at: float | None = None) -> None:
-        # sent_at：Telegram 原始發送時間。以前一律存 time.time()＝「輪詢進來的
-        # 時間」，整批訊息會被壓在同一個秒數（實測 203 則有 80.7% 落在 :01），
-        # 導致冷卻、熱場、輪替間隔全部被量化到整分鐘，真人節奏量不出來。
+        # sent_at：Telegram 原始發送時間。
         stamp = float(sent_at) if sent_at and sent_at > 0 else time.time()
-        await self._c.execute(
-            "INSERT INTO messages (account_id, group_id, sender_id, sender_name, role, content, timestamp, message_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (account_id, group_id, sender_id, sender_name, role, content, stamp, int(message_id or 0)),
-        )
-        # 每群最多留 200 條
-        await self._c.execute(
-            "DELETE FROM messages WHERE account_id = ? AND group_id = ? AND id NOT IN "
-            "(SELECT id FROM messages WHERE account_id = ? AND group_id = ? "
-            "ORDER BY timestamp DESC LIMIT 200)",
-            (account_id, group_id, account_id, group_id),
-        )
-        await self._commit()
+        delay = 0.05
+        async with self._write_lock:
+            for attempt in range(6):
+                try:
+                    await self._c.execute(
+                        "INSERT INTO messages (account_id, group_id, sender_id, sender_name, role, content, timestamp, message_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (account_id, group_id, sender_id, sender_name, role, content, stamp, int(message_id or 0)),
+                    )
+                    await self._commit()
+                    return
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc).lower()
+                    if "locked" not in msg and "busy" not in msg:
+                        raise
+                    try:
+                        await self._c.rollback()
+                    except sqlite3.Error:
+                        pass
+                    if attempt == 5:
+                        self.lock_failures += 1
+                        raise
+                    self.lock_retries += 1
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 1.0)
 
     async def get_recent_messages(self, account_id: str, group_id: int,
                                   limit: int = 30) -> list[dict]:
@@ -1478,14 +1486,32 @@ class Database:
         """跨觀察帳號只記一次 Telegram 平台事件，不保存內容或身分。"""
         if not group_id or message_id <= 0 or sender_kind not in {"human", "managed"}:
             return False
-        async with self._event_lock:
-            cursor = await self._c.execute(
-                "INSERT OR IGNORE INTO group_events "
-                "(group_id, message_id, sender_kind, observed_at) VALUES (?, ?, ?, ?)",
-                (int(group_id), int(message_id), sender_kind, time.time()),
-            )
-            await self._commit()
-            return cursor.rowcount == 1
+        delay = 0.05
+        async with self._write_lock:
+            for attempt in range(6):
+                try:
+                    cursor = await self._c.execute(
+                        "INSERT OR IGNORE INTO group_events "
+                        "(group_id, message_id, sender_kind, observed_at) VALUES (?, ?, ?, ?)",
+                        (int(group_id), int(message_id), sender_kind, time.time()),
+                    )
+                    await self._commit()
+                    return cursor.rowcount == 1
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc).lower()
+                    if "locked" not in msg and "busy" not in msg:
+                        raise
+                    try:
+                        await self._c.rollback()
+                    except sqlite3.Error:
+                        pass
+                    if attempt == 5:
+                        self.lock_failures += 1
+                        raise
+                    self.lock_retries += 1
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 1.0)
+        return False
 
     async def record_reply_event(
         self,
@@ -1499,7 +1525,7 @@ class Database:
         """持久保存阶段和原因；绝不保存 prompt、输入或回复正文。"""
         if not group_id or message_id <= 0 or not stage or not reason:
             return False
-        async with self._event_lock:
+        async with self._write_lock:
             cursor = await self._c.execute(
                 "INSERT OR IGNORE INTO reply_events "
                 "(group_id, message_id, account_id, stage, reason, at) "
@@ -1735,11 +1761,10 @@ class Database:
     # ---------- 活躍節奏（防機器感） ----------
 
     async def touch_activity(self, account_id: str, group_id: int, kind: str) -> None:
-        await self._c.execute(
+        await self._write(
             "INSERT OR REPLACE INTO activity (account_id, group_id, kind, at) VALUES (?, ?, ?, ?)",
             (account_id, group_id, kind, time.time()),
         )
-        await self._commit()
 
     async def last_activity(self, account_id: str, group_id: int, kind: str) -> float:
         cursor = await self._c.execute(
@@ -2219,70 +2244,84 @@ class Database:
     async def upsert_group_member_note(
         self, group_id: int, member_id: int, account_id: str, note: str
     ) -> bool:
-        """把一條群友備註寫入。
-
-        F10: 語義從「覆蓋最新」改為「累積」——同一 key 不再互蓋，新事實追加。
-        只擋「同 key 同內容 60 秒內重複」，避免刷屏把記憶灌爆；
-        每組 (group, member, account) 最多留 10 筆（超出刪最舊）。
-        過期由 cleanup_expired 清。"""
+        """把一條群友備註寫入。"""
         note = (note or "").strip()
         if not group_id or not member_id or not account_id or not note:
             return False
         now = time.time()
-        dup = await self._c.execute(
-            "SELECT 1 FROM group_memory "
-            "WHERE group_id = ? AND member_id = ? AND account_id = ? "
-            "AND note = ? AND updated_at > ? LIMIT 1",
-            (int(group_id), int(member_id), account_id, note, now - 60),
-        )
-        if not await dup.fetchone():
-            await self._c.execute(
-                "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (int(group_id), int(member_id), account_id, note, now),
-            )
-        # 容量上限：同 key 只留最近 10 筆
-        await self._c.execute(
-            "DELETE FROM group_memory WHERE group_id = ? AND member_id = ? AND account_id = ? "
-            "AND id NOT IN (SELECT id FROM group_memory "
-            "WHERE group_id = ? AND member_id = ? AND account_id = ? "
-            "ORDER BY updated_at DESC, id DESC LIMIT 10)",
-            (int(group_id), int(member_id), account_id,
-             int(group_id), int(member_id), account_id),
-        )
-        await self._commit()
-        return True
+        delay = 0.05
+        async with self._write_lock:
+            for attempt in range(6):
+                try:
+                    dup = await self._c.execute(
+                        "SELECT 1 FROM group_memory "
+                        "WHERE group_id = ? AND member_id = ? AND account_id = ? "
+                        "AND note = ? AND updated_at > ? LIMIT 1",
+                        (int(group_id), int(member_id), account_id, note, now - 60),
+                    )
+                    if not await dup.fetchone():
+                        await self._c.execute(
+                            "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (int(group_id), int(member_id), account_id, note, now),
+                        )
+                    await self._commit()
+                    return True
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc).lower()
+                    if "locked" not in msg and "busy" not in msg:
+                        raise
+                    try:
+                        await self._c.rollback()
+                    except sqlite3.Error:
+                        pass
+                    if attempt == 5:
+                        self.lock_failures += 1
+                        raise
+                    self.lock_retries += 1
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 1.0)
+        return False
 
     async def upsert_group_shared_note(self, group_id: int, account_id: str, note: str) -> bool:
-        """把一條群組共同記憶寫入（member_id=0，跨群組隔離）。
-
-        F10: 同樣從「單筆覆蓋」改為「累積最近 10 筆」＋60 秒同內容去重。
-        過期由 cleanup_expired 清。"""
+        """把一條群組共同記憶寫入（member_id=0，跨群組隔離）。"""
         if not group_id or not account_id or not note or not note.strip():
             return False
         note = note.strip()
         now = time.time()
-        dup = await self._c.execute(
-            "SELECT 1 FROM group_memory "
-            "WHERE group_id = ? AND member_id = 0 AND account_id = ? "
-            "AND note = ? AND updated_at > ? LIMIT 1",
-            (int(group_id), account_id, note, now - 60),
-        )
-        if not await dup.fetchone():
-            await self._c.execute(
-                "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
-                "VALUES (?, 0, ?, ?, ?)",
-                (int(group_id), account_id, note, now),
-            )
-        await self._c.execute(
-            "DELETE FROM group_memory WHERE group_id = ? AND member_id = 0 AND account_id = ? "
-            "AND id NOT IN (SELECT id FROM group_memory "
-            "WHERE group_id = ? AND member_id = 0 AND account_id = ? "
-            "ORDER BY updated_at DESC, id DESC LIMIT 10)",
-            (int(group_id), account_id, int(group_id), account_id),
-        )
-        await self._commit()
-        return True
+        delay = 0.05
+        async with self._write_lock:
+            for attempt in range(6):
+                try:
+                    dup = await self._c.execute(
+                        "SELECT 1 FROM group_memory "
+                        "WHERE group_id = ? AND member_id = 0 AND account_id = ? "
+                        "AND note = ? AND updated_at > ? LIMIT 1",
+                        (int(group_id), account_id, note, now - 60),
+                    )
+                    if not await dup.fetchone():
+                        await self._c.execute(
+                            "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
+                            "VALUES (?, 0, ?, ?, ?)",
+                            (int(group_id), account_id, note, now),
+                        )
+                    await self._commit()
+                    return True
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc).lower()
+                    if "locked" not in msg and "busy" not in msg:
+                        raise
+                    try:
+                        await self._c.rollback()
+                    except sqlite3.Error:
+                        pass
+                    if attempt == 5:
+                        self.lock_failures += 1
+                        raise
+                    self.lock_retries += 1
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 1.0)
+        return False
 
     async def get_group_shared_notes(self, group_id: int, account_id: str, limit: int = 10) -> list[str]:
         """讀取群組共同記憶（最近話題、共同活動、故事進度），按群組隔離。"""

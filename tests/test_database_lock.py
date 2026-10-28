@@ -154,7 +154,7 @@ def test_failed_commit_rolls_back_so_connection_is_not_poisoned(tmp_path):
 
         async def flaky_commit():
             calls["n"] += 1
-            if calls["n"] == 1:
+            if calls["n"] <= 6:
                 raise aiosqlite.OperationalError("database is locked")
             return await real_commit()
 
