@@ -4720,9 +4720,10 @@ class AccountWorker:
             "timeout": self.config.ai_timeout,
         }
         effort = str(getattr(self.config, "ai_reasoning_effort", "") or "").strip()
-        if effort:
+        is_gemini_family = any(k in model.lower() for k in ("gemini", "agnes"))
+        if effort and not is_gemini_family:
             request_kwargs["reasoning_effort"] = effort
-        if self.config.ai_disable_thinking:
+        if self.config.ai_disable_thinking and not is_gemini_family:
             request_kwargs["extra_body"] = {
                 "chat_template_kwargs": {"enable_thinking": False}
             }
@@ -4896,17 +4897,19 @@ class AccountWorker:
                     {"role": "user", "content": user_message},
                 ],
                 "temperature": dyn_temp,
-                "frequency_penalty": dyn_freq,
-                "presence_penalty": dyn_pres,
                 "max_tokens": self.config.ai_max_tokens,
                 "timeout": self.config.ai_timeout,
             }
+            # 只有在非 gemini/agnes 模型才傳 penalty，避免部分上游 API 或 LiteLLM 網關報 400
+            is_gemini_family = any(k in model.lower() for k in ("gemini", "agnes"))
+            if not is_gemini_family:
+                request_kwargs["frequency_penalty"] = dyn_freq
+                request_kwargs["presence_penalty"] = dyn_pres
+
             effort = str(getattr(self.config, "ai_reasoning_effort", "") or "").strip()
-            if effort:
-                # top-level：Ollama 的 reasoning 模型（glm-5.3）只認這個位置；
-                # 放 extra_body 會被當未知參數忽略、reasoning 吃光 token 回空。
+            if effort and not is_gemini_family:
                 request_kwargs["reasoning_effort"] = effort
-            if self.config.ai_disable_thinking:
+            if self.config.ai_disable_thinking and not is_gemini_family:
                 request_kwargs["extra_body"] = {
                     "chat_template_kwargs": {"enable_thinking": False}
                 }
