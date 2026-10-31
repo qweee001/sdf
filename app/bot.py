@@ -774,6 +774,8 @@ class TgControlBot:
                 body, kb = await self._acc_panic_stop()
             elif name in {"test", "preview"}:
                 body, kb = await self._test_reply_preview(rest), self._reply_menu
+            elif name in {"freq", "frequency"}:
+                body, kb = await self._frequency_cmd(rest)
             elif name in {"send", "say", "msg"}:
                 body, kb = await self._send_as_account(rest), self._reply_menu
             elif name == "addacc":
@@ -956,6 +958,20 @@ class TgControlBot:
         elif action == "usage":
             body = await self._usage_info()
             await event.edit(body[:MSG_LIMIT], buttons=await self._home_keyboard())
+        elif action == "freq":
+            body, kb = await self._frequency_menu()
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
+        elif action.startswith("set_freq:"):
+            # 格式：set_freq:<key>:<val> 或 set_freq:<k1>:<v1>:<k2>:<v2>
+            parts = action.split(":")
+            updates = {}
+            for i in range(1, len(parts), 2):
+                if i + 1 < len(parts):
+                    updates[parts[i]] = parts[i+1]
+            if updates:
+                await self.manager.db.set_runtime_settings(updates)
+            body, kb = await self._frequency_menu()
+            await event.edit(body[:MSG_LIMIT], buttons=kb)
         elif action == "acc.persona":
             body, kb = await self._persona_actions_keyboard(arg)
             await event.edit(body[:MSG_LIMIT], buttons=kb)
@@ -1148,6 +1164,7 @@ class TgControlBot:
         rows.append([
             cb("model", "🧩 模型"),
             cb("usage", "📈 用量"),
+            cb("freq", "⚡ 頻率"),
         ])
         rows.append([
             cb("hidekb", "⌨ 隱藏鍵盤"),
@@ -1599,6 +1616,88 @@ class TgControlBot:
             "（未來 Bot 內編輯＝表單＋服務層寫入，禁止聊天輸入密鑰）",
         ]
         return "\n".join(lines)
+
+    async def _frequency_menu(self):
+        """⚡ 互動頻率調節選單。"""
+        cfg = self.manager.config
+        db = self.manager.db
+
+        # 讀取當前設定
+        def_reply = float(getattr(cfg, "base_reply_probability", 0.35))
+        def_cross = float(getattr(cfg, "water_cross_talk_probability", 0.2))
+        def_min = float(getattr(cfg, "proactive_loop_min_seconds", 30.0))
+        def_max = float(getattr(cfg, "proactive_loop_max_seconds", 90.0))
+
+        cur_reply_str = await db.get_runtime_setting("base_reply_probability")
+        cur_cross_str = await db.get_runtime_setting("water_cross_talk_probability")
+        cur_min_str = await db.get_runtime_setting("proactive_loop_min_seconds")
+        cur_max_str = await db.get_runtime_setting("proactive_loop_max_seconds")
+
+        cur_reply = float(cur_reply_str) if cur_reply_str is not None else def_reply
+        cur_cross = float(cur_cross_str) if cur_cross_str is not None else def_cross
+        cur_min = float(cur_min_str) if cur_min_str is not None else def_min
+        cur_max = float(cur_max_str) if cur_max_str is not None else def_max
+
+        body = (
+            "⚡ 互動頻率與節奏調節\\n"
+            "──────────────\\n"
+            f"1. 接話回覆率：{int(cur_reply * 100)}%\\n"
+            f"2. 水軍互撩率：{int(cur_cross * 100)}%\\n"
+            f"3. 主動間隔：{int(cur_min)}s ~ {int(cur_max)}s\\n\\n"
+            "點擊下方按鈕可即時切換檔位（免重啟即時生效）：\\n"
+            "也可使用指令：`/freq <項目> <數值>`\\n"
+            "例如：`/freq reply 0.6`、`/freq cross 0.2`"
+        )
+
+        rows = [
+            [
+                cb("set_freq:base_reply_probability:0.8", "🔥 回覆率 80%"),
+                cb("set_freq:base_reply_probability:0.5", "⚖️ 回覆率 50%"),
+                cb("set_freq:base_reply_probability:0.25", "🤫 回覆率 25%"),
+            ],
+            [
+                cb("set_freq:water_cross_talk_probability:0.4", "👭 互撩 40%"),
+                cb("set_freq:water_cross_talk_probability:0.2", "👭 互撩 20%"),
+                cb("set_freq:water_cross_talk_probability:0.0", "🚫 禁互撩 0%"),
+            ],
+            [
+                cb("set_freq:proactive_loop_min_seconds:30:proactive_loop_max_seconds:90", "⚡ 主動: 密集"),
+                cb("set_freq:proactive_loop_min_seconds:120:proactive_loop_max_seconds:300", "🌱 主動: 正常"),
+                cb("set_freq:proactive_loop_min_seconds:600:proactive_loop_max_seconds:1800", "🍵 主動: 慢速"),
+            ],
+            [
+                cb("back.home", "🏠 回主選單"),
+            ],
+        ]
+        return body, types.ReplyInlineMarkup(kbrows(rows))
+
+    async def _frequency_cmd(self, args: list[str]):
+        if len(args) < 2:
+            body, kb = await self._frequency_menu()
+            return body, kb
+        key_arg, val_arg = args[0].lower(), args[1]
+        db = self.manager.db
+        try:
+            val_f = float(val_arg)
+            if key_arg in {"reply", "base_reply", "rep"}:
+                val_f = max(0.0, min(1.0, val_f))
+                await db.set_runtime_settings({"base_reply_probability": str(val_f)})
+                return f"✅ 接話回覆機率已更新為：{int(val_f * 100)}%", await self._home_keyboard()
+            elif key_arg in {"cross", "water", "crosstalk"}:
+                val_f = max(0.0, min(1.0, val_f))
+                await db.set_runtime_settings({"water_cross_talk_probability": str(val_f)})
+                return f"✅ 水軍互撩機率已更新為：{int(val_f * 100)}%", await self._home_keyboard()
+            elif key_arg in {"proactive", "loop", "interval"}:
+                val_sec = max(5.0, val_f)
+                await db.set_runtime_settings({
+                    "proactive_loop_min_seconds": str(val_sec),
+                    "proactive_loop_max_seconds": str(val_sec * 2),
+                })
+                return f"✅ 主動開話題間隔已更新為：{int(val_sec)}s ~ {int(val_sec * 2)}s", await self._home_keyboard()
+            else:
+                return f"⚠️ 不支援的項目「{key_arg}」，可用：reply、cross、proactive", await self._home_keyboard()
+        except ValueError:
+            return "⚠️ 數值格式錯誤，請輸入數字（例如 /freq reply 0.5）", await self._home_keyboard()
 
     async def _usage_info(self) -> str:
         data = await self.manager.status()

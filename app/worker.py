@@ -1453,10 +1453,9 @@ class AccountWorker:
         # 話題回合已滿：本回合 AI 已發言夠多 → 留空間給真人，不繼續接龍
         if int(self.topic_turn_counts.get(group_id, 0)) >= _MAX_TOPIC_TURNS:
             return False
-        probability = max(
-            0.0,
-            min(1.0, float(self.config.water_cross_talk_probability)),
-        )
+        default_cross = float(getattr(self.config, "water_cross_talk_probability", 0.2))
+        cross_prob = await self._get_runtime_float("water_cross_talk_probability", default_cross)
+        probability = max(0.0, min(1.0, cross_prob))
         probability_key = f"managed-followup:{group_id}:{message_id}".encode()
         score = int.from_bytes(
             hashlib.blake2b(probability_key, digest_size=8).digest(), "big"
@@ -1648,14 +1647,22 @@ class AccountWorker:
             print(f"[{self.name}] traffic pressure error: {exc}", flush=True)
             return {}
 
+    async def _get_runtime_float(self, key: str, default: float) -> float:
+        try:
+            val = await self.db.get_runtime_setting(key)
+            if val is not None and str(val).strip():
+                return float(val)
+        except Exception:
+            pass
+        return default
+
     async def _ordinary_reply_allowed(self, event) -> bool:
         group_id, message_id = self._reply_claim_key(event)
         if not group_id or message_id <= 0:
             return False
-        probability = max(
-            0.0,
-            min(1.0, float(getattr(self.config, "base_reply_probability", 0.35))),
-        )
+        default_prob = float(getattr(self.config, "base_reply_probability", 0.35))
+        base_prob = await self._get_runtime_float("base_reply_probability", default_prob)
+        probability = max(0.0, min(1.0, base_prob))
         if probability <= 0:
             return False
         pressure = await self._interaction_pressure(group_id)
@@ -6176,11 +6183,12 @@ class AccountWorker:
     async def _proactive_loop(self):
         while self.is_running:
             try:
-                # 隨機間隔 4-12 分鐘（錯峰）
-                loop_min = max(1.0, float(self.config.proactive_loop_min_seconds))
-                loop_max = max(
-                    loop_min, float(self.config.proactive_loop_max_seconds)
-                )
+                # 隨機間隔（支援 runtime_settings 動態覆蓋，單位：秒）
+                default_min = max(1.0, float(self.config.proactive_loop_min_seconds))
+                default_max = max(default_min, float(self.config.proactive_loop_max_seconds))
+                loop_min = await self._get_runtime_float("proactive_loop_min_seconds", default_min)
+                loop_max = await self._get_runtime_float("proactive_loop_max_seconds", default_max)
+                loop_max = max(loop_min, loop_max)
                 await asyncio.sleep(random.uniform(loop_min, loop_max))
                 if not self.is_running:
                     return

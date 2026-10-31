@@ -488,6 +488,13 @@ class Database:
         )
         return {str(row["key"]): str(row["value"]) for row in await cursor.fetchall()}
 
+    async def get_runtime_setting(self, key: str) -> str | None:
+        async with self._c.execute(
+            "SELECT value FROM runtime_settings WHERE key = ?", (str(key),)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return str(row[0]) if row else None
+
     async def set_runtime_settings(self, values: dict[str, str]) -> None:
         if not values:
             return
