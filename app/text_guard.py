@@ -520,15 +520,21 @@ def _is_cjk_text(text: str) -> bool:
 # 判定函式（無狀態；純文字進／結果出）
 # ===========================================================================
 def has_format_leak(text: str) -> bool:
-    """輸出中不得殘留 XML 標籤、markdown 標記或提示詞格式標記。"""
+    """輸出中不得殘留 XML 標籤、markdown 標記、英文系統/狀態詞或提示詞格式標記。"""
     if not text:
         return False
-    return bool(
-        re.search(
-            r"</?[a-zA-Z][a-zA-Z0-9_]*>|```|\*\*|__|^\s*#{1,6}\s",
-            text,
-        )
-    )
+    if re.search(
+        r"</?[a-zA-Z][a-zA-Z0-9_]*>|```|\*\*|__|^\s*#{1,6}\s",
+        text,
+    ):
+        return True
+    # 英文系統/狀態/任務元話語洩漏（如 task ready / ready / system / agent / assistant）
+    if re.search(
+        r"(?i)\b(?:task\s+ready|task_ready|task\s*done|system\s*prompt|system\s*message|as\s+an\s+ai|i\s+am\s+an\s+ai|language\s+model)\b",
+        text,
+    ):
+        return True
+    return False
 
 def mainland_term_hint(text: str) -> str:
     """大陸講法偵測＋指名替代：「方便面」應講「泡麵」這種。

@@ -15,6 +15,8 @@ def test_reply_with_answer_tag_is_blocked():
         worker = _worker(sorted(MANAGED)[0])
         assert worker._has_format_leak("好的 <answer> 是啊 </answer>") is True
         assert worker._has_format_leak("好的，累了就早點休息啊") is False
+        assert worker._has_format_leak("task ready") is True
+        assert worker._has_format_leak("system prompt:") is True
 
     asyncio.run(main())
 

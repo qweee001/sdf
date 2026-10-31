@@ -4421,6 +4421,12 @@ class AccountWorker:
         if director_note:
             user_message += f"\n{director_note}"
 
+        def _is_usable_reply(t: str) -> bool:
+            if not t or self._is_refusal(t) or self._has_format_leak(t):
+                return False
+            # 台灣群聊角色對話必須包含中文字元，杜絕「task ready」等純英文/系統狀態穿幫
+            return any("\u3400" <= ch <= "\u9fff" for ch in t)
+
         async def call_reply(message: str) -> str:
             if image and self.media_service:
                 try:
@@ -4441,7 +4447,7 @@ class AccountWorker:
             # 拒答來自權重裡的對齊，不是提示詞沒講清楚；把同一句話再問一次
             # 只會拿到同一句拒絕。所以這裡直接換模型，換不動就原樣回傳，
             # 交由呼叫方的校驗鏈判定不合格。
-            if text and not self._is_refusal(text):
+            if _is_usable_reply(text):
                 return text
             for fallback in self._fallback_models:
                 alternative = await self._call_ai(
@@ -4450,12 +4456,12 @@ class AccountWorker:
                     model=fallback,
                     purpose="reply_fallback",
                 )
-                if alternative and not self._is_refusal(alternative):
+                if _is_usable_reply(alternative):
                     self.stats["refusal_fallbacks"] = (
                         int(self.stats.get("refusal_fallbacks", 0)) + 1
                     )
                     return alternative
-            return text
+            return text if _is_usable_reply(text) else ""
 
         reply = await call_reply(user_message)
         retry_used = False
@@ -4493,8 +4499,9 @@ class AccountWorker:
         refusal = self._is_refusal(reply)
         own_echo = self._is_own_echo(reply, self._own_echo_recent(group_id))
         too_long = len(reply) > char_cap
+        no_cjk = not any("\u3400" <= ch <= "\u9fff" for ch in reply)
 
-        if not format_leak and not refusal and not own_echo and not too_long:
+        if not format_leak and not refusal and not own_echo and not too_long and not no_cjk:
             if image:
                 self.stats["images_understood"] += 1
             self._set_generation_reason(event, "ok")
@@ -6118,6 +6125,10 @@ class AccountWorker:
                 )
                 return ""
             if self._is_refusal(topic):
+                continue
+            if self._has_format_leak(topic):
+                continue
+            if not any("\u3400" <= ch <= "\u9fff" for ch in topic):
                 continue
             # 主動發言自己開口，穿幫成本最高：時段不合或混入簡體字就換一句
             if self._has_time_mismatch(topic):
