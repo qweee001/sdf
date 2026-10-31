@@ -961,9 +961,10 @@ class TgControlBot:
         elif action == "freq":
             body, kb = await self._frequency_menu()
             await event.edit(body[:MSG_LIMIT], buttons=kb)
-        elif action.startswith("set_freq:"):
-            # 格式：set_freq:<key>:<val> 或 set_freq:<k1>:<v1>:<k2>:<v2>
-            parts = action.split(":")
+        elif action == "set_freq" or action.startswith("set_freq:"):
+            # 格式：data 格式「set_freq:<key>:<val>」，因 partition(":")，action 為 set_freq，arg 為後續
+            full_data = f"{action}:{arg}" if arg else action
+            parts = full_data.split(":")
             updates = {}
             for i in range(1, len(parts), 2):
                 if i + 1 < len(parts):
