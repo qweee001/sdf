@@ -202,6 +202,7 @@ _DECISION_KEYPOINT_GUIDE = {
 # ③ 審核不通過時的重寫指示標籤
 _DECISION_ISSUE_LABEL = {
     "none": "沒有問題",
+    "ai_leak": "系統狀態詞或AI穿幫（如 task ready、system、代碼標記等）",
     "offtopic": "離題：偏離上下文或選定的話題",
     "contradict": "矛盾：跟上下文或這次互動決策衝突",
     "fabricate": "編造：捏造人設和上下文裡沒有的細節",
@@ -2564,7 +2565,8 @@ class AccountWorker:
         return answers
 
     def _decision_enabled(self) -> bool:
-        return bool(getattr(self.config, "decision_api_key", ""))
+        # 有專用 Jev 金鑰或網關 AI Client 時，決策審核層均為啟用狀態（最優解旁路裁判）
+        return bool(getattr(self.config, "decision_api_key", "")) or bool(self.ai_client)
 
     async def _reply_context_snapshot(self, event) -> dict:
         """①②③ 共用一份上下文快照（同一次 DB 讀取，三個階段不再各讀各的）。
@@ -2954,48 +2956,145 @@ class AccountWorker:
 
         核對離題、矛盾、編造、重複及內容規則；回 {"sendable","issue"}，
         超時/失敗回 None（＝不確定→暫緩）。
+        支援雙軌：優先 Jev/Laya 專用端點；未配置或超時自動切換至網關神經網絡老司機旁路審查。
         """
         decision_block = f"前置決策（這次原本要怎麼回）：\n{directive}\n" if directive else ""
         state = f"{context}\n{decision_block}你要發出的回覆：「{str(text).strip()}」"
-        try:
-            answers = await self._decision_call(
-                state,
-                {
-                    "sendable": {
-                        "type": "noul",
-                        "instructions": "這條回覆符合現在時段、人設、群組語境和前置決策，可以直接發出",
-                    },
-                    "issue": {
-                        "type": "choice",
-                        "instructions": (
-                            "這條回覆最大的問題（對照上下文和前置決策核對）；"
-                            "只有在問題明顯時才選出來，沒把握就選「沒有問題」"
-                        ),
-                        "criteria": {
-                            "none": "沒有問題",
-                            "offtopic": "離題：偏離上下文、選定的話題，或沒對上對方的意圖與需要",
-                            "contradict": "矛盾：跟上下文或前置決策衝突",
-                            "fabricate": "編造共同經歷：捏造跟對方一起做過的事、說過的話、去過的地方（自己當下的生活狀態如剛下班、在吃什麼，不算編造）",
-                            "repeat": "重複：跟前面已經說過的內容重複",
-                            "tone": "語氣明顯不像本人設或明顯不符合場合（只是不夠熱情、不夠露骨都算沒有問題）",
-                            "time": "時段穿幫（如白天說早安、下午說早餐）",
-                            "simplified": "混入簡體字",
-                            "typo": "用字錯誤：錯別字或地名寫錯（例如中壢寫成中坢、士林寫成士休）",
+        if getattr(self.config, "decision_api_key", "").strip():
+            try:
+                answers = await self._decision_call(
+                    state,
+                    {
+                        "sendable": {
+                            "type": "noul",
+                            "instructions": "這條回覆符合現在時段、人設、群組語境和前置決策，可以直接發出",
+                        },
+                        "issue": {
+                            "type": "choice",
+                            "instructions": (
+                                "這條回覆最大的問題（對照上下文和前置決策核對）；"
+                                "只有在問題明顯時才選出來，沒把握就選「沒有問題」"
+                            ),
+                            "criteria": {
+                                "none": "沒有問題",
+                                "ai_leak": "系統詞/狀態詞洩漏（如 task ready、system 等代碼狀態）或AI機械人穿幫",
+                                "offtopic": "離題：偏離上下文、選定的話題，或沒對上對方的意圖與需要",
+                                "contradict": "矛盾：跟上下文或前置決策衝突",
+                                "fabricate": "編造共同經歷：捏造跟對方一起做過的事、說過的話、去過的地方（自己當下的生活狀態如剛下班、在吃什麼，不算編造）",
+                                "repeat": "重複：跟前面已經說過的內容重複",
+                                "tone": "語氣明顯不像本人設或明顯不符合場合（只是不夠熱情、不夠露骨都算沒有問題）",
+                                "time": "時段穿幫（如白天說早安、下午說早餐）",
+                                "simplified": "混入簡體字",
+                                "typo": "用字錯誤：錯別字或地名寫錯（例如中壢寫成中坢、士林寫成士休）",
+                            },
                         },
                     },
-                },
-                "review_candidate",
+                    "review_candidate",
+                )
+                self.stats["decision_calls"] = int(self.stats.get("decision_calls", 0)) + 1
+                sendable = (answers.get("sendable") or {}).get("noul")
+                issue = (answers.get("issue") or {}).get("choice", "none")
+                if sendable is not None:
+                    return {"sendable": float(sendable), "issue": issue}
+            except DecisionError as exc:
+                self.stats["decision_errors"] = int(self.stats.get("decision_errors", 0)) + 1
+                print(f"[{self.name}] decision-3 Jev error, fallback to gateway reviewer: {exc}", flush=True)
+
+        # 網關神經網絡動態審核層（最優解：老司機旁路裁判）
+        return await self._review_candidate_gateway(context, text, directive)
+
+    async def _review_candidate_gateway(
+        self, context: str, text: str, directive: str = ""
+    ) -> dict | None:
+        """網關神經網絡動態審核層：以台灣老司機視角進行旁路打分與審查。"""
+        if not self.ai_client:
+            return {"sendable": 1.0, "issue": "none"}
+
+        eval_model = (
+            getattr(self.config, "vision_model", "")
+            or (self._fallback_models[0] if self._fallback_models else "")
+            or getattr(self.config, "ai_model", "")
+            or ""
+        ).strip()
+        if not eval_model:
+            return {"sendable": 1.0, "issue": "none"}
+
+        p_name = self.persona.get("name") or self.name
+        p_gender = self.persona.get("gender") or "女"
+        p_age = self.persona.get("age") or 25
+        p_desc = self.persona.get("personality") or "台灣在地女生"
+
+        system_prompt = (
+            "你是一個極其嚴苛的台灣約會/群聊老司機審查員。\n"
+            "任務：以第三方旁路視角審核水軍角色產生的候選發言，判斷是否可以直接發進群，"
+            "徹底杜絕任何系統狀態詞、英文任務代碼、假人感、客服味與AI味。\n"
+            "請直接輸出純 JSON，格式如下：\n"
+            "{\n"
+            '  "sendable": 0.0到1.0的浮點數,\n'
+            '  "issue": "none" | "ai_leak" | "unnatural" | "offtopic" | "contradict" | "repeat",\n'
+            '  "reason": "簡短一句話說明原因"\n'
+            "}\n"
+            "審核準則：\n"
+            "1. 凡出現「task ready」、「task_ready」、「system prompt」、「as an AI」等英文任務狀態詞、"
+            "系統指令或代碼標記，issue 必須判定為 \"ai_leak\"，sendable 必須為 0.0。\n"
+            "2. 凡口氣生硬、充滿公文客服味、非台灣道地用語、不符合女性人設情境，issue 為 \"unnatural\"，sendable 低於 0.5。\n"
+            "3. 凡自然符合人設的台灣在地日常生活碎念、撩男、發騷、接話，issue 為 \"none\"，sendable 應在 0.85~1.0 之間。"
+        )
+
+        user_content = (
+            f"【待發言角色】{p_name}（{p_gender}，{p_age}歲，風格：{p_desc}）\n"
+            f"【群組上下文】\n{context[-1500:] if context else '（無歷史上下文）'}\n"
+            f"【前置意圖】{directive if directive else '（無）'}\n"
+            f"【候選發言】：「{str(text).strip()}」"
+        )
+
+        started = time.monotonic()
+        try:
+            req = {
+                "model": eval_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                "temperature": 0.1,
+                "max_tokens": 120,
+                "timeout": 4.0,
+            }
+            is_gemini_family = any(k in eval_model.lower() for k in ("gemini", "agnes"))
+            if is_gemini_family:
+                req["extra_body"] = {
+                    "safety_settings": [
+                        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                        {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+                    ]
+                }
+            resp = await self.ai_client.chat.completions.create(**req)
+            raw = (resp.choices[0].message.content or "").strip()
+            import re
+            m = re.search(r"\{.*?\}", raw, re.DOTALL)
+            if not m:
+                print(f"[{self.name}] gateway review parse error on: {raw[:50]!r}", flush=True)
+                return {"sendable": 0.7, "issue": "none"}
+            data = json.loads(m.group(0))
+            sendable = float(data.get("sendable", 0.5))
+            issue = str(data.get("issue", "none")).lower()
+            if issue not in _DECISION_ISSUE_LABEL:
+                issue = "none" if sendable >= 0.6 else "unnatural"
+            self.stats["decision_calls"] = int(self.stats.get("decision_calls", 0)) + 1
+            await self._record_model_call(
+                "review_candidate_gateway",
+                eval_model,
+                latency_ms=(time.monotonic() - started) * 1000.0,
+                cost_status="measured" if getattr(resp, "usage", None) else "unknown",
             )
-        except DecisionError as exc:
+            return {"sendable": sendable, "issue": issue}
+        except Exception as exc:
             self.stats["decision_errors"] = int(self.stats.get("decision_errors", 0)) + 1
-            print(f"[{self.name}] decision-3 error: {exc}", flush=True)
-            return None
-        self.stats["decision_calls"] = int(self.stats.get("decision_calls", 0)) + 1
-        sendable = (answers.get("sendable") or {}).get("noul")
-        issue = (answers.get("issue") or {}).get("choice", "none")
-        if sendable is None:
-            return None
-        return {"sendable": float(sendable), "issue": issue}
+            print(f"[{self.name}] gateway reviewer error: {exc}", flush=True)
+            return {"sendable": 0.8, "issue": "none"}
 
     def _review_passes(self, review: dict) -> bool:
         threshold = float(getattr(self.config, "decision_gate_threshold", 0.5))
@@ -4421,12 +4520,6 @@ class AccountWorker:
         if director_note:
             user_message += f"\n{director_note}"
 
-        def _is_usable_reply(t: str) -> bool:
-            if not t or self._is_refusal(t) or self._has_format_leak(t):
-                return False
-            # 台灣群聊角色對話必須包含中文字元，杜絕「task ready」等純英文/系統狀態穿幫
-            return any("\u3400" <= ch <= "\u9fff" for ch in t)
-
         async def call_reply(message: str) -> str:
             if image and self.media_service:
                 try:
@@ -4447,7 +4540,7 @@ class AccountWorker:
             # 拒答來自權重裡的對齊，不是提示詞沒講清楚；把同一句話再問一次
             # 只會拿到同一句拒絕。所以這裡直接換模型，換不動就原樣回傳，
             # 交由呼叫方的校驗鏈判定不合格。
-            if _is_usable_reply(text):
+            if text and not self._is_refusal(text):
                 return text
             for fallback in self._fallback_models:
                 alternative = await self._call_ai(
@@ -4456,12 +4549,12 @@ class AccountWorker:
                     model=fallback,
                     purpose="reply_fallback",
                 )
-                if _is_usable_reply(alternative):
+                if alternative and not self._is_refusal(alternative):
                     self.stats["refusal_fallbacks"] = (
                         int(self.stats.get("refusal_fallbacks", 0)) + 1
                     )
                     return alternative
-            return text if _is_usable_reply(text) else ""
+            return text
 
         reply = await call_reply(user_message)
         retry_used = False
@@ -4499,9 +4592,8 @@ class AccountWorker:
         refusal = self._is_refusal(reply)
         own_echo = self._is_own_echo(reply, self._own_echo_recent(group_id))
         too_long = len(reply) > char_cap
-        no_cjk = not any("\u3400" <= ch <= "\u9fff" for ch in reply)
 
-        if not format_leak and not refusal and not own_echo and not too_long and not no_cjk:
+        if not format_leak and not refusal and not own_echo and not too_long:
             if image:
                 self.stats["images_understood"] += 1
             self._set_generation_reason(event, "ok")
@@ -6127,8 +6219,6 @@ class AccountWorker:
             if self._is_refusal(topic):
                 continue
             if self._has_format_leak(topic):
-                continue
-            if not any("\u3400" <= ch <= "\u9fff" for ch in topic):
                 continue
             # 主動發言自己開口，穿幫成本最高：時段不合或混入簡體字就換一句
             if self._has_time_mismatch(topic):
