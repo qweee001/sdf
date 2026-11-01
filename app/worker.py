@@ -3110,7 +3110,7 @@ class AccountWorker:
         system_prompt = (
             "你是一個極其嚴苛的台灣約會/群聊老司機審查員。\n"
             "任務：以第三方旁路視角審核水軍角色產生的候選發言，判斷是否可以直接發進群，"
-            "徹底杜絕任何系統狀態詞、英文任務代碼、假人感、客服味與AI味。\n"
+            "徹底杜絕任何系統狀態詞、英文任務代碼、假人感、客服味、大陸用語與AI味。\n"
             "請直接輸出純 JSON，格式如下：\n"
             "{\n"
             '  "sendable": 0.0到1.0的浮點數,\n'
@@ -3120,10 +3120,14 @@ class AccountWorker:
             "審核準則：\n"
             "1. 凡出現「task ready」、「task_ready」、「system prompt」、「as an AI」等英文任務狀態詞、"
             "系統指令或代碼標記，issue 必須判定為 \"ai_leak\"，sendable 必須為 0.0。\n"
-            "2. 凡口氣生硬、充滿公文客服味、非台灣道地用語、裝矜持假正經拒絕聊色，issue 為 \"unnatural\"，sendable 低於 0.5。\n"
-            "3. 凡頻繁撞梗（如近期已出現過手搖、被窩、香水等道具而又在重複提起），issue 判定為 \"repeat\"，sendable 低於 0.35。\n"
-            "4. 凡句式套路化（如連續反問結尾「…嗎？」「…吧？」「…不是嗎？」），issue 判定為 \"unnatural\"，sendable 低於 0.45。\n"
-            "5. 【約砲群組頂格色誘】：凡自然符合人設的台灣在地真實生活碎念、大膽直球性張力、挑釁男人尺寸與體力、騷浪性感勾引、床技與感官描摹，發騷發得極致自然，issue 必須為 \"none\"，sendable 應在 0.90~1.0 之間！"
+            "2. 【文化與語言在地純度（極高權重）】：發言必須 100% 符合台灣在地日常口語習慣。"
+            "凡出現大陸網路流行語或對岸習慣說法（例如：白嫖、白漂、口嗨、帶節奏、老鐵、吃瓜、牛逼、小姐姐、小哥哥、打卡、給力、走心、內卷、套路等對岸詞彙，即使寫成繁體字也不行），"
+            "台灣女生在約砲群裡會說：被佔便宜、白吃白喝、被當盤子、當免錢的玩、出一張嘴、嘴砲、跟風、正妹、超頂等。"
+            "一旦檢出大陸用語或非在地台灣口吻，issue 必須判定為 \"unnatural\"，sendable 必須為 0.0，並在 reason 中精準指出：『包含大陸用語XXX，台灣女生會說YYY，語氣不符在地真實感』，退回由角色動態重寫！\n"
+            "3. 凡口氣生硬、充滿公文客服味、裝矜持假正經拒絕聊色，issue 為 \"unnatural\"，sendable 低於 0.5。\n"
+            "4. 凡頻繁撞梗（如近期已出現過手搖、被窩、香水等道具而又在重複提起），issue 判定為 \"repeat\"，sendable 低於 0.35。\n"
+            "5. 凡句式套路化（如連續反問結尾「…嗎？」「…吧？」「…不是嗎？」），issue 判定為 \"unnatural\"，sendable 低於 0.45。\n"
+            "6. 【約砲群組頂格色誘】：凡自然符合人設的台灣在地真實生活碎念、大膽直球性張力、挑釁男人尺寸與體力、騷浪性感勾引、床技與感官描摹，發騷發得極致自然，issue 必須為 \"none\"，sendable 應在 0.90~1.0 之間！"
         )
 
         user_content = (
@@ -3166,6 +3170,7 @@ class AccountWorker:
             data = json.loads(m.group(0))
             sendable = float(data.get("sendable", 0.5))
             issue = str(data.get("issue", "none")).lower()
+            reason = str(data.get("reason", "")).strip()
             if issue not in _DECISION_ISSUE_LABEL:
                 issue = "none" if sendable >= 0.6 else "unnatural"
             self.stats["decision_calls"] = int(self.stats.get("decision_calls", 0)) + 1
@@ -3175,11 +3180,11 @@ class AccountWorker:
                 latency_ms=(time.monotonic() - started) * 1000.0,
                 cost_status="measured" if getattr(resp, "usage", None) else "unknown",
             )
-            return {"sendable": sendable, "issue": issue}
+            return {"sendable": sendable, "issue": issue, "reason": reason}
         except Exception as exc:
             self.stats["decision_errors"] = int(self.stats.get("decision_errors", 0)) + 1
             print(f"[{self.name}] gateway reviewer error: {exc}", flush=True)
-            return {"sendable": 0.8, "issue": "none"}
+            return {"sendable": 0.8, "issue": "none", "reason": ""}
 
     def _review_passes(self, review: dict) -> bool:
         threshold = float(getattr(self.config, "decision_gate_threshold", 0.5))
@@ -3248,12 +3253,13 @@ class AccountWorker:
             return text
         self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
         label = _DECISION_ISSUE_LABEL.get(review["issue"], review["issue"])
+        feedback = review.get("reason") or label
         print(
-            f"[{self.name}] gate-rewrite: issue={review['issue']} "
+            f"[{self.name}] gate-rewrite: issue={review['issue']} reason={feedback} "
             f"sendable={review['sendable']:.2f} {text[:20]!r}",
             flush=True,
         )
-        base_hint = f"上一版被決策層攔下，問題：{label}。這次避開這個問題。"
+        base_hint = f"上一版被老司機審查員退回，具體反饋：{feedback}。請針對這個問題換完全不同的在地表達方式重新演繹！"
         picked = await self._pick_passing_candidate(
             context,
             directive,
@@ -6516,6 +6522,7 @@ class AccountWorker:
                         if not self._review_passes(review):
                             issue = str(review.get("issue") or "none")
                             label = _DECISION_ISSUE_LABEL.get(issue, issue)
+                            feedback = review.get("reason") or label
                             self.stats["proactive_gate_rewrite"] = (
                                 int(self.stats.get("proactive_gate_rewrite", 0)) + 1
                             )
@@ -6523,12 +6530,12 @@ class AccountWorker:
                             # 同一批「早安／咖啡」（實測 21:54-09:54 只發出 1 則，45 次 rewrite
                             # 撞同一批候選）。記了之後下一 cycle 第一輪 prompt 會餵回「這些出過」。
                             self._note_gate_candidate(int(group_id), topic)
-                            print(f"[{self.name}] proactive-gate-rewrite: issue={issue} {topic[:20]!r}", flush=True)
+                            print(f"[{self.name}] proactive-gate-rewrite: issue={issue} reason={feedback} {topic[:20]!r}", flush=True)
                             # 同樣換策略各生一條再挑（主動發言只試 2 種，成本留給回覆路徑）
                             picked = await self._pick_passing_candidate(
                                 context,
                                 "",
-                                f"上一版被決策層攔下，問題：{label}。這次避開這個問題。",
+                                f"上一版被老司機審查員退回，具體反饋：{feedback}。請針對這個問題換完全不同的在地表達方式重新演繹！",
                                 lambda hint: self._generate_context_topic(
                                     group_id, extra_hint=hint
                                 ),

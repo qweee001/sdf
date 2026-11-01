@@ -122,6 +122,44 @@ def test_gateway_reviewer_passes_natural_reply():
   asyncio.run(main())
 
 
+def test_gateway_reviewer_catches_mainland_slang_dynamically():
+  ai_client = AsyncMock()
+  create_mock = AsyncMock(
+      return_value=SimpleNamespace(
+          choices=[
+              SimpleNamespace(
+                  message=SimpleNamespace(
+                      content=json.dumps({
+                          "sendable": 0.0,
+                          "issue": "unnatural",
+                          "reason": "包含大陸網路詞『白嫖』，台灣在地口語應為『被當盤子』『白睡』『白吃白喝』",
+                      })
+                  )
+              )
+          ],
+          usage=SimpleNamespace(prompt_tokens=30, completion_tokens=25),
+      )
+  )
+  ai_client.chat = SimpleNamespace(
+      completions=SimpleNamespace(create=create_mock)
+  )
+
+  worker = _test_worker(ai_client=ai_client, decision_api_key="")
+
+  async def main():
+    review = await worker._review_candidate(
+        context="群友都在聊約會買單",
+        text="養一個月換一頓飯買單，被白嫖成這樣還有臉生氣喔，真沒用",
+    )
+    assert review is not None
+    assert review["sendable"] == 0.0
+    assert review["issue"] == "unnatural"
+    assert "白嫖" in review["reason"]
+    assert worker._review_passes(review) is False
+
+  asyncio.run(main())
+
+
 def test_extract_motifs():
   worker = _test_worker()
   m1 = worker._extract_motifs("外面太陽那麼大，誰買杯冰手搖把姐姐餵飽")
