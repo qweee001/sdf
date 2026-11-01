@@ -141,71 +141,6 @@ def test_reply_prompt_carries_phrase_hint():
     asyncio.run(main())
 
 
-def test_generation_rewrites_phrase_fatigue_reply():
-    """回覆含疲勞核心詞 → 走既有單次 retry，重生後換意象就放行。"""
-
-    async def main():
-        worker = _worker(101)
-        group = -5428680940
-        # 用不同號發送以測試「跨號/詞彙疲勞」，避免直接命中本號 10 分鐘 own_echo
-        other_worker = _worker(202)
-        other_worker.phrase_cores_by_group = worker.phrase_cores_by_group
-        for text in ("煮到對方腿軟", "想被幹到腿軟", "想舔到我腿軟嗎"):
-            other_worker._record_sent_text(group, text)
-        replies = iter(["還想被幹到腿軟", "今天想去吃火鍋"])
-        worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: next(replies))
-        event = AsyncMock(
-            sender_id=999,
-            chat_id=group,
-            id=89,
-            mentioned=False,
-            is_reply=False,
-            reply_to=None,
-            raw_text="今晚有人嗎",
-            media=None,
-        )
-        event.sender = None
-        text = await worker._generate_reply(event)
-        assert text == "今天想去吃火鍋"
-        assert worker._call_ai.await_count == 2
-        retry_prompt = worker._call_ai.await_args_list[1].args[1]
-        assert "腿軟" in retry_prompt
-        assert "核心意象" in retry_prompt
-
-    asyncio.run(main())
-
-
-def test_generation_drops_reply_when_phrase_fatigue_survives_retry():
-    """兩次都還圍著疲勞詞 → 不發送，drop 原因 phrase_fatigue。"""
-
-    async def main():
-        worker = _worker(101)
-        group = -5428680940
-        # 用不同號發送以測試「跨號/詞彙疲勞」，避免直接命中本號 10 分鐘 own_echo
-        other_worker = _worker(202)
-        other_worker.phrase_cores_by_group = worker.phrase_cores_by_group
-        for text in ("煮到對方腿軟", "想被幹到腿軟", "想舔到我腿軟嗎"):
-            other_worker._record_sent_text(group, text)
-        worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: "還想被幹到腿軟")
-        event = AsyncMock(
-            sender_id=999,
-            chat_id=group,
-            id=90,
-            mentioned=False,
-            is_reply=False,
-            reply_to=None,
-            raw_text="今晚有人嗎",
-            media=None,
-        )
-        event.sender = None
-        text = await worker._generate_reply(event)
-        assert text == ""
-        reason = worker._generation_reasons.get(worker._generation_key(event))
-        assert reason == "phrase_fatigue"
-
-    asyncio.run(main())
-
-
 def test_proactive_drops_phrase_fatigue_and_retries():
     """主動生成含疲勞詞 → 既有 3 次 drop 迴圈換一句，換掉就放行。"""
 
@@ -443,5 +378,25 @@ def test_manager_injects_shared_phrase_cores():
 
         assert captured
         assert captured[0]["phrase_cores_by_group"] is manager.phrase_cores_by_group
+
+    asyncio.run(main())
+
+
+def test_gate_rewrites_on_phrase_fatigue_verdict():
+    """撞梗改由裁判動態判定 repeat：帶反饋重寫一次，重寫通過就放行。"""
+
+    async def main():
+        worker = _worker(101)
+        group = -5428680940
+        worker._decision_state = AsyncMock(return_value="群組上下文")
+        worker._recent_bot_lines = AsyncMock(return_value="[Chen] 想被幹到腿軟")
+        worker._review_candidate = AsyncMock(
+            return_value={"sendable": 0.2, "issue": "repeat", "reason": "又用腿軟這個意象"}
+        )
+        worker._pick_passing_candidate = AsyncMock(return_value="今天想去吃火鍋")
+        event = AsyncMock(chat_id=group, id=97, sender_id=999)
+        text = await worker._gate_reply(event, "還想被幹到腿軟")
+        assert text == "今天想去吃火鍋"
+        assert worker.stats.get("gate_pass_after_rewrite", 0) == 1
 
     asyncio.run(main())

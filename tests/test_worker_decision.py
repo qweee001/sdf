@@ -160,6 +160,46 @@ def test_gateway_reviewer_catches_mainland_slang_dynamically():
   asyncio.run(main())
 
 
+def test_group_attention_note_flags_pile_on():
+  """四個女號輪流圍剿同一個男人 → 動態情境提示必須出現。"""
+  w = _test_worker(ai_client=AsyncMock(), decision_api_key="")
+  base = 1_700_000_000.0
+  history = [
+      {"role": "user", "sender_name": "萬英尺", "content": "我最猛", "timestamp": base},
+      {"role": "user", "sender_name": "深情森森", "content": "是喔", "timestamp": base + 1},
+      {"role": "user", "sender_name": "鈴鐺", "content": "哈哈", "timestamp": base + 2},
+  ]
+  bodies = [
+      ("Chen", "萬哥口氣這麼大，等等見面連牽手都不敢吧"),
+      ("RICH", "萬哥胃口這麼大吃得消嗎，小心腰先散掉"),
+      ("小天後", "萬哥找不到你，那你躲來我被窩裡避難啊"),
+      ("小小", "萬哥男女通吃這麼餓喔"),
+  ]
+  for i, (who, body) in enumerate(bodies):
+      history.append({
+          "role": "assistant", "sender_name": who, "content": body,
+          "timestamp": base + 10 + i * 5,
+      })
+
+  note = w._group_attention_note(history)
+  assert "萬英尺" in note
+  assert "不要" in note
+  # 沒被聊到的人要被點名出來當替代目標
+  assert "深情森森" in note or "鈴鐺" in note
+
+
+def test_group_attention_note_silent_when_balanced():
+  w = _test_worker(ai_client=AsyncMock(), decision_api_key="")
+  base = 1_700_000_000.0
+  history = [
+      {"role": "user", "sender_name": "萬英尺", "content": "hi", "timestamp": base},
+      {"role": "user", "sender_name": "鈴鐺", "content": "hi", "timestamp": base + 1},
+      {"role": "assistant", "sender_name": "Chen", "content": "萬哥早", "timestamp": base + 5},
+      {"role": "assistant", "sender_name": "RICH", "content": "鈴鐺早", "timestamp": base + 15},
+  ]
+  assert w._group_attention_note(history) == ""
+
+
 def test_extract_motifs():
   worker = _test_worker()
   m1 = worker._extract_motifs("外面太陽那麼大，誰買杯冰手搖把姐姐餵飽")

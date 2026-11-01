@@ -350,32 +350,6 @@ def test_generation_rewrites_mainland_term():
     asyncio.run(main())
 
 
-def test_generation_drops_reply_when_mainland_term_survives_retry():
-    """兩次都用大陸講法 → 不發送，drop 原因記為 mainland_term。"""
-
-    async def main():
-        worker = _worker(sorted(MANAGED)[0])
-        worker._call_ai = AsyncMock(
-            side_effect=lambda *_a, **_k: "明天一起吃方便面吧"
-        )
-        event = AsyncMock(
-            sender_id=999,
-            chat_id=-5428680940,
-            id=91,
-            mentioned=False,
-            is_reply=False,
-            reply_to=None,
-            raw_text="晚上餓了想吃東西",
-            media=None,
-        )
-        text = await worker._generate_reply(event)
-        assert text == ""
-        reason = worker._generation_reasons.get(worker._generation_key(event))
-        assert reason == "mainland_term"
-
-    asyncio.run(main())
-
-
 def test_starts_with_gan_blocks_opener_allows_compounds_and_mid_sentence():
     """句首「幹／干」硬擋；幹嘛／幹什麼放行；句中幹不攔。
 
@@ -394,58 +368,6 @@ def test_starts_with_gan_blocks_opener_allows_compounds_and_mid_sentence():
         assert worker._starts_with_gan("感覺不如抱起來幹") is False
         assert worker._starts_with_gan("那你是被幹的少") is False
         assert worker._starts_with_gan("") is False
-
-    asyncio.run(main())
-
-
-def test_generation_rewrites_gan_opener():
-    """句首幹 → 帶 correction 重生一次，重生後正常放行。"""
-
-    async def main():
-        worker = _worker(sorted(MANAGED)[0])
-        replies = iter(["幹，光講舌頭就讓我濕了", "光講就讓我濕了"])
-        worker._call_ai = AsyncMock(side_effect=lambda *_a, **_k: next(replies))
-        event = AsyncMock(
-            sender_id=999,
-            chat_id=-5428680940,
-            id=93,
-            mentioned=False,
-            is_reply=False,
-            reply_to=None,
-            raw_text="舌頭那個",
-            media=None,
-        )
-        text = await worker._generate_reply(event)
-        assert text == "光講就讓我濕了"
-        assert worker._call_ai.await_count == 2
-        retry_prompt = worker._call_ai.await_args_list[1].args[1]
-        assert "幹" in retry_prompt and "開頭" in retry_prompt
-
-    asyncio.run(main())
-
-
-def test_generation_drops_reply_when_gan_opener_survives_retry():
-    """兩次都以幹開頭 → 不發送，drop 原因 gan_opener。"""
-
-    async def main():
-        worker = _worker(sorted(MANAGED)[0])
-        worker._call_ai = AsyncMock(
-            side_effect=lambda *_a, **_k: "幹，光講舌頭就讓我濕了"
-        )
-        event = AsyncMock(
-            sender_id=999,
-            chat_id=-5428680940,
-            id=94,
-            mentioned=False,
-            is_reply=False,
-            reply_to=None,
-            raw_text="舌頭那個",
-            media=None,
-        )
-        text = await worker._generate_reply(event)
-        assert text == ""
-        reason = worker._generation_reasons.get(worker._generation_key(event))
-        assert reason == "gan_opener"
 
     asyncio.run(main())
 
@@ -482,5 +404,50 @@ def test_proactive_drops_gan_opener():
         topic = await worker._generate_context_topic(-5428680940)
         assert topic == "今晚想出門晃晃"
         assert worker._call_ai.await_count == 2
+
+    asyncio.run(main())
+
+
+def test_gate_holds_when_reviewer_rejects_and_rewrite_fails():
+    """文風／用語／撞梗不再走正則硬攔，改由 ③ 老司機裁判判定：
+
+    裁判給低分 → 帶裁判反饋重寫一次；重寫仍不合格 → 這條不發。
+    """
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker._decision_state = AsyncMock(return_value="群組上下文")
+        worker._recent_bot_lines = AsyncMock(return_value="[Chen] 明天一起吃泡麵吧")
+        worker._review_candidate = AsyncMock(
+            return_value={
+                "sendable": 0.2,
+                "issue": "repeat",
+                "reason": "開場與前兩則同殼，都在用『明天一起吃』",
+            }
+        )
+        worker._pick_passing_candidate = AsyncMock(return_value=None)
+        event = AsyncMock(chat_id=-5428680940, id=95, sender_id=999)
+        text = await worker._gate_reply(event, "明天一起吃泡麵吧")
+        assert text == ""
+        assert worker.stats.get("gate_held", 0) == 1
+        # 重寫提示必須帶裁判的具體反饋，而不是空泛的「避開問題」
+        hint = worker._pick_passing_candidate.await_args.args[2]
+        assert "明天一起吃" in hint
+
+    asyncio.run(main())
+
+
+def test_gate_passes_when_reviewer_approves():
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker._decision_state = AsyncMock(return_value="群組上下文")
+        worker._recent_bot_lines = AsyncMock(return_value="")
+        worker._review_candidate = AsyncMock(
+            return_value={"sendable": 0.95, "issue": "none", "reason": ""}
+        )
+        event = AsyncMock(chat_id=-5428680940, id=96, sender_id=999)
+        text = await worker._gate_reply(event, "剛洗完澡全身滑溜溜的")
+        assert text == "剛洗完澡全身滑溜溜的"
+        assert worker.stats.get("gate_pass", 0) == 1
 
     asyncio.run(main())

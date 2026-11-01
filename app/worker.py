@@ -1914,6 +1914,72 @@ class AccountWorker:
             )
         return ""
 
+    def _group_attention_note(self, history: list[dict]) -> str:
+        """動態群體注意力分佈感知（不寫死任何人名或規則）。
+
+        真人朋友圈不會四個女生同時圍剿同一個男人。系統從「實際出現過的群友名字」
+        統計近期水軍開火分佈：某人被不同女號輪流點名超過閾值，就把「這人被輪爛了」
+        這個情境事實餵給模型，讓它自己決定換目標或換角度。
+        """
+        rows = list(history or [])
+        if not rows:
+            return ""
+        # 群友名字全部從歷史動態取得，不硬編碼
+        member_names: list[str] = []
+        for row in rows:
+            if str(row.get("role")) == "assistant":
+                continue
+            nm = str(row.get("sender_name") or "").strip()
+            if nm and nm not in member_names and nm != "管理員":
+                member_names.append(nm)
+        if not member_names:
+            return ""
+
+        cutoff = float(rows[-1].get("timestamp") or 0) - 7200.0
+        hits: dict[str, int] = {}
+        senders: dict[str, set] = {}
+        scanned = 0
+        for row in reversed(rows):
+            if str(row.get("role")) != "assistant":
+                continue
+            ts = float(row.get("timestamp") or 0)
+            if ts and cutoff and ts < cutoff:
+                break
+            body = str(row.get("content") or "")
+            who = str(row.get("sender_name") or "")
+            scanned += 1
+            for nm in member_names:
+                # 暱稱匹配：全名、前兩字、末兩字、首字＋哥/姐/妹（萬英尺→萬哥、深情森森→森森）
+                keys = {nm}
+                if len(nm) >= 2:
+                    keys.add(nm[:2])
+                    keys.add(nm[-2:])
+                head = nm[:1]
+                keys.update({head + "哥", head + "姐", head + "妹", head + "大"})
+                keys.discard("")
+                if any(k in body for k in keys):
+                    hits[nm] = hits.get(nm, 0) + 1
+                    senders.setdefault(nm, set()).add(who)
+            if scanned >= 30:
+                break
+        if not hits:
+            return ""
+        top_name, top_hits = max(hits.items(), key=lambda kv: kv[1])
+        top_senders = len(senders.get(top_name, ()))
+        if top_hits < 3 or top_senders < 2:
+            return ""
+        untouch = [n for n in member_names if n not in hits][:3]
+        note = (
+            f"\n[群體注意力分佈（動態情境感知）]：近 {scanned} 則水軍發言中，"
+            f"「{top_name}」被 {top_senders} 個不同女號合計點名 {top_hits} 次，"
+            "已經被全場輪過一輪了。真人不會這樣集中圍剿同一個男人——"
+            "你這則【不要】再跟著點名他或重複同一個梗，"
+        )
+        if untouch:
+            note += f"改自然帶到還沒被聊到的人（{'、'.join(untouch)}），"
+        note += "或干脆轉成自己的生活碎念／直接發騷，把話題拉回自己身上。"
+        return note
+
     def _build_directors_note(self, event, history: list[dict]) -> str:
         """酒館級 In-Chat @ Depth 末端動態演出指令（Author's Note）。
 
@@ -2008,6 +2074,7 @@ class AccountWorker:
             f"2. {chosen_mood}\\n"
             f"3. {chosen_syntax}\\n"
             f"4. 嚴禁任何客服推銷感；只有對方主動苦苦求約時才隨手提助理，平時全心當個鮮活撩人的台灣女生！"
+            f"{self._group_attention_note(history)}"
         )
 
     _ANCHOR_CUE_WORDS = (
@@ -3034,7 +3101,9 @@ class AccountWorker:
                 return _DECISION_LENGTH_CAPS[tier]
         return _DEFAULT_REPLY_CHAR_CAP
 
-    async def _review_candidate(self, context: str, text: str, directive: str = ""):
+    async def _review_candidate(
+        self, context: str, text: str, directive: str = "", recent_bots: str = ""
+    ):
         """③ 審核候選回覆：上下文＋前置決策＋生成文字一起送審。
 
         核對離題、矛盾、編造、重複及內容規則；回 {"sendable","issue"}，
@@ -3084,10 +3153,26 @@ class AccountWorker:
                 print(f"[{self.name}] decision-3 Jev error, fallback to gateway reviewer: {exc}", flush=True)
 
         # 網關神經網絡動態審核層（最優解：老司機旁路裁判）
-        return await self._review_candidate_gateway(context, text, directive)
+        return await self._review_candidate_gateway(context, text, directive, recent_bots)
+
+    async def _recent_bot_lines(self, group_id: int, limit: int = 8) -> str:
+        """取出群裡最近的水軍發言原文（跨帳號），供裁判做動態重複感知。"""
+        try:
+            msgs = await self.db.get_group_messages(int(group_id), limit=max(limit * 4, 24))
+        except Exception:
+            return ""
+        rows = [m for m in msgs if str(m.get("role")) == "assistant"]
+        if not rows:
+            return ""
+        out = []
+        for m in rows[-limit:]:
+            body = str(m.get("content") or "").replace("\n", " ").strip()
+            if body:
+                out.append(f"[{m.get('sender_name') or '?'}] {body[:70]}")
+        return "\n".join(out)
 
     async def _review_candidate_gateway(
-        self, context: str, text: str, directive: str = ""
+        self, context: str, text: str, directive: str = "", recent_bots: str = ""
     ) -> dict | None:
         """網關神經網絡動態審核層：以台灣老司機視角進行旁路打分與審查。"""
         if not self.ai_client:
@@ -3125,14 +3210,23 @@ class AccountWorker:
             "台灣女生在約砲群裡會說：被佔便宜、白吃白喝、被當盤子、當免錢的玩、出一張嘴、嘴砲、跟風、正妹、超頂等。"
             "一旦檢出大陸用語或非在地台灣口吻，issue 必須判定為 \"unnatural\"，sendable 必須為 0.0，並在 reason 中精準指出：『包含大陸用語XXX，台灣女生會說YYY，語氣不符在地真實感』，退回由角色動態重寫！\n"
             "3. 凡口氣生硬、充滿公文客服味、裝矜持假正經拒絕聊色，issue 為 \"unnatural\"，sendable 低於 0.5。\n"
-            "4. 凡頻繁撞梗（如近期已出現過手搖、被窩、香水等道具而又在重複提起），issue 判定為 \"repeat\"，sendable 低於 0.35。\n"
-            "5. 凡句式套路化（如連續反問結尾「…嗎？」「…吧？」「…不是嗎？」），issue 判定為 \"unnatural\"，sendable 低於 0.45。\n"
-            "6. 【約砲群組頂格色誘】：凡自然符合人設的台灣在地真實生活碎念、大膽直球性張力、挑釁男人尺寸與體力、騷浪性感勾引、床技與感官描摹，發騷發得極致自然，issue 必須為 \"none\"，sendable 應在 0.90~1.0 之間！"
+            "4. 【動態重複感知（極高權重）】：把候選發言與【群組上下文】裡最近 8 則水軍發言逐句對照。"
+            "只要出現下列任一狀況，issue 判定為 \"repeat\"，sendable 壓到 0.25 以下，並在 reason 指出重複在哪："
+            "(a) 開場詞或口頭禪相同（例如前幾則都在用「出一張嘴」「光會」「笑死」「X這麼Y」這類同一個殼）；"
+            "(b) 點名攻擊同一個男人（連續多則都在嗆同一位群友）；"
+            "(c) 句型骨架一樣，只是換了名詞。真人不會兩小時內用同一個句式講四次。\n"
+            "5. 【人設聲音對照】：依【待發言角色】的年齡、職業、性格與風格，判斷這句話像不像「這個人本人」會說的話。"
+            "若語氣跑到別的角色身上（例如文靜內斂的設計師突然變成毒舌嗆辣、輕熟女突然用年輕妹子的口吻），issue 判定為 \"unnatural\"，sendable 低於 0.4，"
+            "並在 reason 說明「這句更像誰、她本人應該怎麼說」。\n"
+            "6. 凡句式套路化（連續反問收尾「…嗎？」「…吧？」「…不是嗎？」），issue 判定為 \"unnatural\"，sendable 低於 0.45。\n"
+            "7. 【約砲群組頂格色誘】：凡自然符合人設的台灣在地真實生活碎念、大膽直球性張力、挑釁男人尺寸與體力、騷浪性感勾引、床技與感官描摹，發騷發得極致自然，issue 必須為 \"none\"，sendable 應在 0.90~1.0 之間！"
         )
 
         user_content = (
-            f"【待發言角色】{p_name}（{p_gender}，{p_age}歲，風格：{p_desc}）\n"
+            f"【待發言角色】{p_name}（{p_gender}，{p_age}歲，性格：{p_desc}，"
+            f"聊天風格：{self.persona.get('chat_style') or '?'}）\n"
             f"【群組上下文】\n{context[-1500:] if context else '（無歷史上下文）'}\n"
+            f"【近期水軍發言（用來判斷重複與撞句，逐句對照）】\n{recent_bots or '（無）'}\n"
             f"【前置意圖】{directive if directive else '（無）'}\n"
             f"【候選發言】：「{str(text).strip()}」"
         )
@@ -3243,7 +3337,8 @@ class AccountWorker:
             return ""
         decision = getattr(event, "_sdf_decision", None)
         directive = self._decision_directive(decision) if isinstance(decision, dict) else ""
-        review = await self._review_candidate(context, text, directive)
+        recent_bots = await self._recent_bot_lines(int(getattr(event, "chat_id", 0) or 0))
+        review = await self._review_candidate(context, text, directive, recent_bots)
         if review is None:
             self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
             print(f"[{self.name}] gate-hold: 決策層超時/失敗，暫緩 {text[:20]!r}", flush=True)
@@ -4696,8 +4791,15 @@ class AccountWorker:
         refusal = self._is_refusal(reply)
         own_echo = self._is_own_echo(reply, self._own_echo_recent(group_id))
         too_long = len(reply) > char_cap
+        # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
+        # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
+        # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
+        time_mismatch = self._has_time_mismatch(reply)
+        gender_term = bool(self._gender_term_violation(reply))
+        simplified = self._has_simplified_chars(reply)
+        fact_bad = time_mismatch or gender_term or simplified
 
-        if not format_leak and not refusal and not own_echo and not too_long:
+        if not format_leak and not refusal and not own_echo and not too_long and not fact_bad:
             if image:
                 self.stats["images_understood"] += 1
             self._set_generation_reason(event, "ok")
@@ -4709,6 +4811,12 @@ class AccountWorker:
                 if refusal
                 else "format_leak"
                 if format_leak
+                else "time_mismatch"
+                if time_mismatch
+                else "gender_term"
+                if gender_term
+                else "simplified_chars"
+                if simplified
                 else "own_echo"
                 if own_echo
                 else "too_long"
@@ -4728,6 +4836,12 @@ class AccountWorker:
             )
         if format_leak:
             correction += "嚴禁輸出任何 XML 標籤或 markdown 標記，只輸出純對話文字。"
+        if time_mismatch:
+            correction += f"上一版問候語的時段不對（現在是{self._time_hint().strip() or '此刻'}），請依當前時段講話。"
+        if gender_term:
+            correction += "上一版把你自己寫成有前女友的男性視角，你是女生，不要出現這種自稱。"
+        if simplified:
+            correction += "上一版出現簡體字，請全部改用繁體中文。"
         if own_echo:
             correction += "上一版與你剛講過的話太相似，請換一個完全不同的角度或切入點。"
 
@@ -4754,18 +4868,30 @@ class AccountWorker:
         retry_format_leak = self._has_format_leak(retry)
         retry_refusal = self._is_refusal(retry)
         retry_own_echo = self._is_own_echo(retry, self._own_echo_recent(group_id))
+        retry_time_mismatch = self._has_time_mismatch(retry)
+        retry_gender_term = bool(self._gender_term_violation(retry))
+        retry_simplified = self._has_simplified_chars(retry)
 
         if (
             retry_too_long
             or retry_format_leak
             or retry_refusal
             or retry_own_echo
+            or retry_time_mismatch
+            or retry_gender_term
+            or retry_simplified
         ):
             reason = (
                 "refusal"
                 if retry_refusal
                 else "format_leak"
                 if retry_format_leak
+                else "time_mismatch"
+                if retry_time_mismatch
+                else "gender_term"
+                if retry_gender_term
+                else "simplified_chars"
+                if retry_simplified
                 else "own_echo"
                 if retry_own_echo
                 else "too_long"
@@ -6512,7 +6638,9 @@ class AccountWorker:
                             context = await self._proactive_decision_context(group_id)
                         except Exception:
                             context = ""
-                        review = await self._review_candidate(context, topic)
+                        review = await self._review_candidate(
+                            context, topic, recent_bots=await self._recent_bot_lines(int(group_id))
+                        )
                         if review is None:
                             self.stats["proactive_gate_hold"] = (
                                 int(self.stats.get("proactive_gate_hold", 0)) + 1
