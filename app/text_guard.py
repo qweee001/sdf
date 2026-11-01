@@ -1125,8 +1125,7 @@ def time_hint(taipei_hour, weather_summary: str = "") -> str:
     res = f"\n現在台北時間 {hour:02d} 點（{band}）：{hint}。"
     if weather_summary:
         res += (
-            f"\n【實時環境與天氣（硬規則：聊天若提到天氣/出門/氣溫穿著必須以此為準，絕不可胡編反差天氣）】：{weather_summary}。"
-            "若聊到出門、氣溫、下雨或衣服穿搭，必須符合當前氣溫和天氣現狀（如沒下雨就別說被雨淋濕，氣溫暖和就別說冷到發抖）。"
+            f"\n【室外環境背景參考（非指令，僅供若聊到天氣時符合物理真實）：{weather_summary}。】"
         )
     return res
 
