@@ -103,10 +103,9 @@ _EMOJI_HISTORY_LIMIT = 6
 # 只盯 2-4 字短詞：長到 5 字以上多半是正常句子片段，盯短才不會誤傷。
 _PHRASE_FATIGUE_MIN_REPEAT = 2
 _PHRASE_HISTORY_LIMIT = 8
-# 跨號意象冷卻：任一號用過的核心詞，同群其他號 45 分鐘內避開。
-# 實測「腿軟」「撞到底」「深淺」是小小講完、RICH／小天後／Chen 接著抬——跨號核心意象鎖定 120 分鐘
-_PHRASE_CORE_COOLDOWN_SECONDS = 120 * 60
-_PHRASE_CORE_HISTORY_LIMIT = 24
+# 跨號意象冷卻：任一號用過的核心詞，同群其他號 90 分鐘內避開。
+_PHRASE_CORE_COOLDOWN_SECONDS = 90 * 60
+_PHRASE_CORE_HISTORY_LIMIT = 64
 _PHRASE_CORE_STOPWORDS = frozenset({
     "今天", "真的", "可以", "什麼", "一個", "這個", "那個",
     "自己", "我們", "你們", "他們", "因為", "所以", "但是",
@@ -115,6 +114,24 @@ _PHRASE_CORE_STOPWORDS = frozenset({
     "好像", "應該", "可能", "只是", "如果", "而且", "不過",
     "雖然", "有點", "一些", "我的", "你的", "他的", "她的",
 })
+
+# 高頻日常意象/道具庫（全句動態監控，防止多號反覆連用手搖、香水、被窩等同一套路）
+_LIFESTYLE_MOTIFS = (
+    # 飲品餐飲
+    "手搖", "飲料", "奶茶", "冰手搖", "咖啡", "泡麵", "宵夜", "吃冰", "冰棒",
+    "鹹酥雞", "火鍋", "生魚片", "早餐", "午餐", "甜點", "蛋糕", "麻辣鍋", "滷味",
+    "大腸麵線", "牛肉麵", "串燒", "居酒屋", "壽司",
+    # 衣著居家道具
+    "香水", "細肩帶", "浴袍", "被窩", "賴床", "洗澡", "吹冷氣", "冷氣", "睡衣",
+    "內衣", "短褲", "真絲", "沙發", "拖鞋", "素顏", "化妝", "口紅", "美甲",
+    # 身體與情慾感官
+    "大腿", "鎖骨", "脖子", "腹肌", "抓痕", "體力", "體能", "腰身", "嘴唇",
+    "軟掉", "硬邦邦", "餵飽", "拆開", "夾斷", "撞到底", "深淺", "兩張嘴", "吸緊",
+    "水多", "濕了", "跨坐", "剝落", "舌頭", "後庭",
+    # 外出與生活休閒
+    "兜風", "開車", "捷運", "看電影", "散步", "逛街", "買衣服", "做指甲",
+    "酒吧", "喝一杯", "宿醉", "健身", "瑜珈", "摸魚", "加班", "收店", "展覽",
+)
 _TRAILING_PARTICLE_RE = re.compile(r"[嗎呢啊喔哦啦吧呀嘛了的麼！!？?。，,、\s]+$")
 _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
 
@@ -1139,12 +1156,13 @@ class AccountWorker:
                     int(self.stats.get("silent_skips", 0)) + 1
                 )
                 return
-            # 人味延遲：被@/回覆 → 3-8 秒；普通 → 4-12 秒（避免真人密集聊天時因等待過長被全數取消）
-            delay = (
-                random.uniform(3, 8)
-                if is_hot
-                else random.uniform(4, 12)
-            )
+            # 人味延遲：被@/回覆 → 3-8 秒；普通 → 5-14 秒；姊妹互撩接話 → 45-90 秒（大幅拉開避免雙簧扎堆）
+            if sender_id in self.managed_ids:
+                delay = random.uniform(45.0, 90.0)
+            elif is_hot:
+                delay = random.uniform(3, 8)
+            else:
+                delay = random.uniform(5, 14)
             self._schedule_reply(
                 event,
                 delay,
@@ -1661,6 +1679,21 @@ class AccountWorker:
         group_id, message_id = self._reply_claim_key(event)
         if not group_id or message_id <= 0:
             return False
+
+        # 女號扎堆搶麥保護：非被@/非指定回覆的普通訊息，若過去 90 秒內已有任何水軍發過言，靜默讓位給群友發酵
+        sender_id = int(event.sender_id or 0)
+        owner_id = self._active_owner(self.human_owners.get((group_id, sender_id)))
+        is_my_dialog = owner_id and owner_id == int(self.tg_user_id or 0)
+        if not is_my_dialog:
+            try:
+                spoke = await self.db.group_bot_last_spoke(group_id)
+                if spoke:
+                    last_any_bot = max(float(t or 0.0) for t in spoke.values())
+                    if time.time() - last_any_bot < 90.0:
+                        return False
+            except Exception:
+                pass
+
         default_prob = float(getattr(self.config, "base_reply_probability", 0.35))
         base_prob = await self._get_runtime_float("base_reply_probability", default_prob)
         probability = max(0.0, min(1.0, base_prob))
@@ -1888,22 +1921,43 @@ class AccountWorker:
         import random
         name = str(self.persona.get("name") or "妹子")
 
-        # 動態心境切換（打破固定套路）
+        # 動態心境切換（打破固定套路，擴充豐富日常場景，避免手搖/香水單一偏置）
+        life_scene = random.choice([
+            "捷運人擠人、上班摸魚打混、逛網拍、外送等好久",
+            "宵夜鹹酥雞、跟閨蜜喝酒聊八卦、追劇追到半夜、下雨天不想出門",
+            "做指甲美甲、買新衣服試穿、吹冷氣放空、超商喝咖啡",
+            "剛下班累癱在沙發、擦身體乳、放空滑手機看短影音",
+            "吃麻辣鍋吃太飽、看電影、去健身房動一下、喝杯調酒",
+        ])
         mood_options = [
-            "【心境：隨性放鬆/生活瑣事】：以真實日常生活（手搖飲、上班摸魚、外送、天氣、追劇）的輕鬆口吻隨意聊，展現普通女生的日常真實感。",
+            f"【心境：隨性放鬆/生活瑣事】：以真實日常生活（如：{life_scene}）的輕鬆口吻隨意聊，展現普通女生的日常真實感。",
             "【心境：傲嬌調皮/輕微嘴賤】：不順著對方的話走，隨口戳他一下、拆他的台，像調皮女生捉弄男生一樣好玩。",
-            "【心境：感官曖昧/微醺撩撥】：從身體感官（剛洗完澡的香氣、真絲衣服、敏感帶、眼神交流）切入，字句帶著熱氣與引誘，極致撩人。",
+            "【心境：感官曖昧/微醺撩撥】：從身體感官（剛洗完澡的沐浴香、貼身衣服、敏感帶、眼神交流）切入，字句帶著熱氣與引誘，極致撩人。",
             "【心境：直球性感/性張力拉滿】：大膽露骨直球挑逗，挑釁對方的體力與尺寸，直接激起男人的生理衝動與勝負欲！",
         ]
         chosen_mood = random.choice(mood_options)
 
-        # 動態句式引導（嚴禁固定詞開頭）
-        syntax_guides = [
-            "開頭禁止使用「光會」「笑死」「只會」「連…都」「去什麼」等固定套路詞！",
-            "用自然第一人稱或直觀動作開場（如「我剛剛…」「等等」「好啦」「其實…」「真的假的」）。",
-            "用簡短感官或反問句破題，打破模板化問答！",
-        ]
-        chosen_syntax = random.choice(syntax_guides)
+        # 動態句式引導：檢查近期發言是否連續反問，強制平衡陳述與斷言句型
+        last_bot_asked = False
+        for row in reversed(history or []):
+            if str(row.get("role")) == "assistant":
+                c = str(row.get("content") or "").strip()
+                if c and c[-1] in ("嗎", "吧", "呢", "麼", "？", "?", "呀", "哈"):
+                    last_bot_asked = True
+                break
+
+        if last_bot_asked or random.random() < 0.65:
+            chosen_syntax = (
+                "【句式多元指令（嚴禁連續反問）】：上一句水軍已在發問或近期反問過多！"
+                "這條發言【絕對禁止】以「…嗎？」「…吧？」「…呢？」或任何反問句收尾！"
+                "必須使用自然的陳述句、隨性吐槽、直接下斷言或分享當下動作"
+                "（例如：『看熱鬧的都滾去旁邊』『萬哥根本出一張嘴』『剛收完店累癱在沙發上』），乾脆俐落收尾！"
+            )
+        else:
+            chosen_syntax = (
+                "【句式要求・簡短自然】：開頭禁止使用「光會」「笑死」「只會」「連…都」「去什麼」等固定套路詞！"
+                "用自然第一人稱或直觀動作開場（如「我剛剛…」「等等」「好啦」「其實…」「真的假的」），俐落隨性！"
+            )
 
         # 定向對象優先於抽到的情緒：女性同伴不能被當作男客套用性挑逗。
         peer_gender = ""
@@ -3038,7 +3092,9 @@ class AccountWorker:
             "1. 凡出現「task ready」、「task_ready」、「system prompt」、「as an AI」等英文任務狀態詞、"
             "系統指令或代碼標記，issue 必須判定為 \"ai_leak\"，sendable 必須為 0.0。\n"
             "2. 凡口氣生硬、充滿公文客服味、非台灣道地用語、不符合女性人設情境，issue 為 \"unnatural\"，sendable 低於 0.5。\n"
-            "3. 凡自然符合人設的台灣在地日常生活碎念、撩男、發騷、接話，issue 為 \"none\"，sendable 應在 0.85~1.0 之間。"
+            "3. 凡頻繁撞梗（如近期已出現過手搖、被窩、香水等道具而又在重複提起），issue 判定為 \"repeat\"，sendable 低於 0.35。\n"
+            "4. 凡句式套路化（如連續反問結尾「…嗎？」「…吧？」「…不是嗎？」），issue 判定為 \"unnatural\"，sendable 低於 0.45。\n"
+            "5. 凡自然符合人設的台灣在地日常生活碎念、自信調情、嗆辣吐槽、大膽性張力，issue 為 \"none\"，sendable 應在 0.85~1.0 之間。"
         )
 
         user_content = (
@@ -3248,6 +3304,19 @@ class AccountWorker:
             # F07: 初始延遲移進受管區塊（以前在 try 外）——延遲期間被真人插話/
             # 停機取消時，CancelledError 直接外傳，跳過釋放 claim，群組槽位鎖死。
             await asyncio.sleep(delay)
+            if managed_followup:
+                # 姊妹互撩讓位：若等待 45~90 秒期間已有真人插話聊天，互撩自動放棄，留空間給真人
+                try:
+                    recent_msgs = await self.db.get_group_messages(int(event.chat_id or 0), limit=4)
+                    if any(str(m.get("role")) == "user" for m in recent_msgs):
+                        print(
+                            f"[{self.name}] managed-followup drop: 等待期間真人已接話，姊妹互撩自動讓位給真人",
+                            flush=True,
+                        )
+                        await self._finish_managed_reservation(event, False)
+                        return
+                except Exception:
+                    pass
             # 防撞防同秒搶話：檢查群內最近一則是否為同群其他水軍剛發送（10秒內），是則錯開 6~12 秒
             try:
                 recent_water = await self.db.recent_bot_texts_by_group(int(event.chat_id or 0))
@@ -5825,6 +5894,18 @@ class AccountWorker:
             return ""
         return core
 
+    @classmethod
+    def _extract_motifs(cls, text: str) -> list[str]:
+        """全句多意象萃取：比單一末段更全面，提取日常道具、生活場景與敏感詞彙。"""
+        t = str(text or "").replace("\n", " ").strip()
+        if not t:
+            return []
+        found = [m for m in _LIFESTYLE_MOTIFS if m in t]
+        core = cls._phrase_core(t)
+        if core and core not in found:
+            found.append(core)
+        return found
+
     def _record_sent_text(self, group_id: int, text: str) -> None:
         """記住這個群最近發過的句子（詞彙疲勞＋跨號核心冷卻＋同號近義複讀）。"""
         t = str(text or "").replace("\n", " ").strip()
@@ -5843,20 +5924,20 @@ class AccountWorker:
             if now - ts < _OWN_ECHO_WINDOW_SECONDS
         ]
         del echo[:-_OWN_ECHO_HISTORY_LIMIT]
-        core = self._phrase_core(t)
-        if not core:
-            return
-        shared = self.phrase_cores_by_group.setdefault(gid, [])
-        shared[:] = [
-            (c, ts) for c, ts in shared if now - ts < _PHRASE_CORE_COOLDOWN_SECONDS
-        ]
-        for i, (c, _ts) in enumerate(shared):
-            if c == core:
-                shared[i] = (core, now)
-                break
-        else:
-            shared.append((core, now))
-        del shared[:-_PHRASE_CORE_HISTORY_LIMIT]
+        motifs = self._extract_motifs(t)
+        if motifs:
+            shared = self.phrase_cores_by_group.setdefault(gid, [])
+            shared[:] = [
+                (c, ts) for c, ts in shared if now - ts < _PHRASE_CORE_COOLDOWN_SECONDS
+            ]
+            for core in motifs:
+                for i, (c, _ts) in enumerate(shared):
+                    if c == core:
+                        shared[i] = (core, now)
+                        break
+                else:
+                    shared.append((core, now))
+            del shared[:-_PHRASE_CORE_HISTORY_LIMIT]
 
     def _own_echo_recent(self, group_id: int) -> list[str]:
         """本帳號 10 分鐘內在該群送出的原文（過期當場清）。"""
@@ -5918,31 +5999,29 @@ class AccountWorker:
         return over
 
     def _phrase_fatigue_hint(self, group_id: int) -> str:
-        """同一個短詞（2-4 字）在該群最近幾句當核心意象反覆出鏡時，提示換意象。
-
-        實測根因（10-15 群 -1002229799107）：「腿軟」被三號當核心意象連用 5 次、
-        「洗碗」被拖進 2 次——句式都不同、整句去重全部放行，但讀者感受到的
-        是同一個梗被刷了 5 遍。比 emoji 疲勞更隱蔽的機器感。
-        """
+        """同一個短詞或道具在該群反覆出鏡時，動態提示換意象。"""
         over = self._fatigued_phrases(group_id)
         shared = self._live_shared_cores(group_id)
         if not over and not shared:
             return ""
+        hints = []
         if over:
             top_seg, top_count = over[0]
             others = [s for s, _ in over[1:3]]
             others_str = ("、" + "、".join(others)) if others else ""
             avoid = "、".join(s for s, _ in over[:2])
-            return (
+            hints.append(
                 f"你最近在這個群把「{top_seg}」當核心意象用了 {top_count} 次{others_str}，"
                 "真人不會連幾句都在玩同一個梗，這次換一個完全不同的意象或角度，"
                 f"別再圍繞「{avoid}」寫"
             )
-        listed = "、".join(shared[:3])
-        return (
-            f"同群其他帳號剛用過「{listed}」，"
-            "短時間內不要再抬同一個核心意象，換完全不同的角度"
-        )
+        if shared:
+            listed = "、".join(shared[-5:])
+            hints.append(
+                f"同群其他姐妹剛用過「{listed}」等道具/場景，短時間內嚴禁再提相同意象！"
+                "請換全新的日常角度（如：捷運人擠人、宵夜鹹酥雞、加班摸魚、看恐怖片、買新衣服、做指甲、喝酒聊八卦等）"
+            )
+        return "\n".join(hints)
 
     def _phrase_fatigue_hit(self, group_id: int, text: str) -> str:
         """候選句仍含已疲勞／冷卻中核心詞時回該詞（供 drop／correction），否則空字串。"""
@@ -6354,6 +6433,16 @@ class AccountWorker:
                 if self._proactive_hibernating(group_id):
                     print(f"[{self.name}] proactive-skip: group {group_id} 冷場 >{self._PROACTIVE_HIBERNATION_HOURS:.0f}h 無真人，深度休眠", flush=True)
                     continue
+                # 女號扎堆保護：群內 90 秒內已有任何水軍發言，保持冷卻讓群友聊
+                try:
+                    spoke = await self.db.group_bot_last_spoke(group_id)
+                    if spoke:
+                        last_any_bot = max(float(t or 0.0) for t in spoke.values())
+                        if time.time() - last_any_bot < 90.0:
+                            print(f"[{self.name}] proactive-skip: 群內 {time.time() - last_any_bot:.0f}s 前已有水軍發言，保持冷卻讓群友聊", flush=True)
+                            continue
+                except Exception:
+                    pass
                 interval = max(
                     60.0,
                     self.config.proactive_min_interval_minutes * 60,

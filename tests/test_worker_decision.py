@@ -120,3 +120,67 @@ def test_gateway_reviewer_passes_natural_reply():
     assert worker._review_passes(review) is True
 
   asyncio.run(main())
+
+
+def test_extract_motifs():
+  worker = _test_worker()
+  m1 = worker._extract_motifs("外面太陽那麼大，誰買杯冰手搖把姐姐餵飽")
+  assert "手搖" in m1 or "冰手搖" in m1
+  assert "餵飽" in m1
+
+  m2 = worker._extract_motifs("我剛噴好香水，吃泡麵哪有親我香嗎")
+  assert "香水" in m2
+  assert "泡麵" in m2
+
+  m3 = worker._extract_motifs("剛洗完澡換好細肩帶在吹冷氣")
+  assert "細肩帶" in m3
+  assert "冷氣" in m3 or "吹冷氣" in m3
+
+
+def test_director_note_suppresses_consecutive_questions():
+  worker = _test_worker()
+  event = SimpleNamespace(sender_id=999, chat_id=-1001)
+
+  # 歷史最後一則是反問句
+  history_with_q = [
+      {"role": "user", "content": "今晚有空嗎"},
+      {"role": "assistant", "content": "吃泡麵哪有親我香嗎？"},
+  ]
+  note = worker._build_directors_note(event, history_with_q)
+  assert "嚴禁連續反問" in note
+  assert "絕對禁止" in note
+
+
+def test_ordinary_reply_spacing_cooldown():
+  import time
+
+  worker = _test_worker()
+  worker.tg_user_id = 123
+  event = SimpleNamespace(
+      chat_id=-1001,
+      id=10,
+      sender_id=999,
+      is_reply=False,
+      mentioned=False,
+      raw_text="今天好熱喔",
+  )
+
+  # 模擬 30 秒前群內已有水軍發言（90 秒保護內）
+  worker.db.group_bot_last_spoke = AsyncMock(
+      return_value={456: time.time() - 30.0}
+  )
+
+  async def main():
+    allowed = await worker._ordinary_reply_allowed(event)
+    assert allowed is False, "90 秒內已有水軍發言，普通訊息應靜默讓位"
+
+    # 超過 95 秒，應放行
+    worker.db.group_bot_last_spoke = AsyncMock(
+        return_value={456: time.time() - 95.0}
+    )
+    worker.db.get_runtime_setting = AsyncMock(return_value="1.0")
+    allowed_later = await worker._ordinary_reply_allowed(event)
+    assert allowed_later is True, "超過 90 秒後普通訊息應放行"
+
+  asyncio.run(main())
+
