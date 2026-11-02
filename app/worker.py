@@ -3298,6 +3298,7 @@ class AccountWorker:
         base_hint: str,
         generate: Callable[[str], Awaitable[str]],
         *,
+        recent_bots: str = "",
         limit: int = 3,
     ) -> str:
         """③ 不過時：改用不同策略各生一條候選，逐條審核，挑可發分最高的那條。
@@ -3316,7 +3317,7 @@ class AccountWorker:
             if not candidate:
                 continue
             self.stats["gate_candidates"] = int(self.stats.get("gate_candidates", 0)) + 1
-            review = await self._review_candidate(context, candidate, directive)
+            review = await self._review_candidate(context, candidate, directive, recent_bots)
             if review is None or not self._review_passes(review):
                 continue
             score = float(review.get("sendable") or 0.0)
@@ -3367,6 +3368,7 @@ class AccountWorker:
             directive,
             base_hint,
             lambda hint: self._generate_reply(event, extra_hint=hint),
+            recent_bots=recent_bots,
             limit=_GATE_CANDIDATE_LIMIT,
         )
         if picked:
@@ -6684,6 +6686,7 @@ class AccountWorker:
                             self._note_gate_candidate(int(group_id), topic)
                             print(f"[{self.name}] proactive-gate-rewrite: issue={issue} reason={feedback} {topic[:20]!r}", flush=True)
                             # 同樣換策略各生一條再挑（主動發言只試 2 種，成本留給回覆路徑）
+                            recent_bots_proactive = await self._recent_bot_lines(int(group_id))
                             picked = await self._pick_passing_candidate(
                                 context,
                                 "",
@@ -6691,6 +6694,7 @@ class AccountWorker:
                                 lambda hint: self._generate_context_topic(
                                     group_id, extra_hint=hint
                                 ),
+                                recent_bots=recent_bots_proactive,
                                 limit=2,
                             )
                             if not picked:
