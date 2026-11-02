@@ -1105,7 +1105,7 @@ def time_hint(taipei_hour, weather_summary: str = "") -> str:
     elif hour < 14:
         band, hint = (
             "中午",
-            "午休放鬆，可以順口聊吃飯、午餐外送、下午茶手搖揪團；別說「早餐」「早安」",
+            "午間時段，放鬆聊聊日常話題、美食或輕鬆八卦；自然順著對方話尾聊，不用刻意強調正在午休或吃飯",
         )
     elif hour < 18:
         band, hint = (

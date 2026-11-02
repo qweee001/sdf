@@ -138,8 +138,9 @@ def _worker():
         max_typing_delay=0,
         media_enabled=True,
         media_max_input_bytes=8 * 1024 * 1024,
+        decision_enabled=False,
     )
-    return AccountWorker(
+    w = AccountWorker(
         account_id="w1",
         session_key="k",
         tg_api_id=1,
@@ -151,6 +152,8 @@ def _worker():
         on_status_change=lambda *_args, **_kwargs: None,
         selected_groups=[-1001],
     )
+    w._is_allowed_active_hour = lambda: True
+    return w
 
 
 def _set_classifier_effects(worker, *effects):

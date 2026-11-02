@@ -84,23 +84,27 @@ def _worker(
         voice_media_enabled=False,
         media_max_input_bytes=8 * 1024 * 1024,
         base_reply_probability=1.0,
+        decision_enabled=False,
+        decision_base_url="",
     )
-    return AccountWorker(
+    w = AccountWorker(
         account_id=str(uid),
         session_key="k",
         tg_api_id=1,
         tg_api_hash="h",
         ai_client=cast(Any, None),
-        db=db or _DB(),
+        db=cast(Any, db or _DB()),
         config=cfg,
         managed_ids=managed_ids or set(),
-        on_status_change=None,
+        on_status_change=lambda *_args, **_kwargs: None,
         selected_groups=[-1001],
         media_service=media_service,
-        human_owners=human_owners,
         reply_claim_signals=reply_claim_signals,
         failed_reply_claimants=failed_reply_claimants,
+        human_owners=human_owners,
     )
+    w._is_allowed_active_hour = lambda: True
+    return w
 
 
 def test_media_request_kind_distinguishes_files_from_live_video_calls():

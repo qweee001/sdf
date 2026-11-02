@@ -2715,6 +2715,8 @@ class AccountWorker:
         return answers
 
     def _decision_enabled(self) -> bool:
+        if getattr(self.config, "decision_enabled", None) is False:
+            return False
         # 有專用 Jev 金鑰或網關 AI Client 時，決策審核層均為啟用狀態（最優解旁路裁判）
         return bool(getattr(self.config, "decision_api_key", "")) or bool(self.ai_client)
 
@@ -3218,7 +3220,7 @@ class AccountWorker:
             "5. 【人設聲音對照】：依【待發言角色】的年齡、職業、性格與風格，判斷這句話像不像「這個人本人」會說的話。"
             "若語氣跑到別的角色身上（例如文靜內斂的設計師突然變成毒舌嗆辣、輕熟女突然用年輕妹子的口吻），issue 判定為 \"unnatural\"，sendable 低於 0.4，"
             "並在 reason 說明「這句更像誰、她本人應該怎麼說」。\n"
-            "6. 凡句式套路化（連續反問收尾「…嗎？」「…吧？」「…不是嗎？」），issue 判定為 \"unnatural\"，sendable 低於 0.45。\n"
+            "6. 凡句式套路化（連續反問收尾「…嗎？」「…吧？」「…不是嗎？」），或複讀群組固有標籤（如反覆自稱或複述「這裡是約炮群」這類機械式承認），issue 判定為 \"unnatural\"，sendable 低於 0.45。\n"
             "7. 【群組狀態感知】：先讀【群組上下文】最尾端。若管理員／群主已經發過收工公告（宣布今天到這裡、明天再見、請大家休息之類），"
             "而候選發言仍在繼續情色起鬨、點名群友約砲或延續剛才的葷話題，issue 判定為 \"offtopic\"，sendable 壓到 0.2 以下，"
             "reason 寫「群組已宣布散場，真人在這時候不會再接著起鬨」。這種情況只允許簡短道晚安或直接不發。\n"
@@ -4799,10 +4801,13 @@ class AccountWorker:
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
-        time_mismatch = self._has_time_mismatch(reply)
+        time_mismatch = self._has_time_mismatch(reply, greetings_only=True)
         gender_term = bool(self._gender_term_violation(reply))
         simplified = self._has_simplified_chars(reply)
-        fact_bad = time_mismatch or gender_term or simplified
+        # 群務語意閘：女號不得替群組發言（群規、管理員、收費、保證約到）。
+        # 這是語意分類器判定，不是關鍵詞黑名單；先過高召回預篩，可疑才打模型。
+        group_meta = await self._candidate_mentions_current_group_meta(reply)
+        fact_bad = time_mismatch or gender_term or simplified or group_meta
 
         if not format_leak and not refusal and not own_echo and not too_long and not fact_bad:
             if image:
@@ -4822,10 +4827,13 @@ class AccountWorker:
                 if gender_term
                 else "simplified_chars"
                 if simplified
+                else "group_meta"
+                if group_meta
                 else "own_echo"
                 if own_echo
                 else "too_long"
             )
+            self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
             self._set_generation_reason(event, reason)
             return ""
 
@@ -4847,6 +4855,12 @@ class AccountWorker:
             correction += "上一版把你自己寫成有前女友的男性視角，你是女生，不要出現這種自稱。"
         if simplified:
             correction += "上一版出現簡體字，請全部改用繁體中文。"
+        if group_meta:
+            correction += (
+                "上一版講到群務（群規、管理員、收費、審核、保證約到之類），"
+                "那不是你這個女生會替他宣布的事。不要解釋拒絕原因，"
+                "這一版只講你自己的感受與生活，完全不要提群組怎麼運作。"
+            )
         if own_echo:
             correction += "上一版與你剛講過的話太相似，請換一個完全不同的角度或切入點。"
 
@@ -4873,9 +4887,10 @@ class AccountWorker:
         retry_format_leak = self._has_format_leak(retry)
         retry_refusal = self._is_refusal(retry)
         retry_own_echo = self._is_own_echo(retry, self._own_echo_recent(group_id))
-        retry_time_mismatch = self._has_time_mismatch(retry)
+        retry_time_mismatch = self._has_time_mismatch(retry, greetings_only=True)
         retry_gender_term = bool(self._gender_term_violation(retry))
         retry_simplified = self._has_simplified_chars(retry)
+        retry_group_meta = await self._candidate_mentions_current_group_meta(retry)
 
         if (
             retry_too_long
@@ -4885,6 +4900,7 @@ class AccountWorker:
             or retry_time_mismatch
             or retry_gender_term
             or retry_simplified
+            or retry_group_meta
         ):
             reason = (
                 "refusal"
@@ -4897,10 +4913,13 @@ class AccountWorker:
                 if retry_gender_term
                 else "simplified_chars"
                 if retry_simplified
+                else "group_meta"
+                if retry_group_meta
                 else "own_echo"
                 if retry_own_echo
                 else "too_long"
             )
+            self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
             self._set_generation_reason(event, reason)
             return ""
         self._set_generation_reason(event, "ok")
