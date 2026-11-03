@@ -127,3 +127,25 @@ def test_anchor_dedup_uses_db_own_texts_not_window():
     own = ["害我店裡摸魚滑手機看你們排隊"]
     for _ in range(20):
         assert "服飾店剛拉下鐵門" not in w._pick_life_anchor(anchors, "Chen", [], own)
+
+
+def test_cross_opening_note_flags_shared_group_cliche():
+    w = _worker()
+    w._recent_texts_by_group[-1001] = [
+        "剛洗完澡頭髮還在滴水",
+        "剛洗完澡擦完身體乳",
+        "夜市滷味想到你們",
+        "紅燒肉配白飯超下飯",
+    ]
+    assert "剛洗" in w._cross_opening_note(-1001)
+
+
+def test_cross_opening_note_quiet_without_shared_start():
+    w = _worker()
+    w._recent_texts_by_group[-1001] = [
+        "夜市滷味想到你們",
+        "紅燒肉配白飯超下飯",
+        "怕就別約我又不吃人",
+        "保險套留著自己用啦",
+    ]
+    assert w._cross_opening_note(-1001) == ""

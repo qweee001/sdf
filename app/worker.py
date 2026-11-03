@@ -2100,6 +2100,30 @@ class AccountWorker:
             f"這則不准再用這幾個字起頭，直接從動作中段或場景細節講起）"
         )
 
+    def _cross_opening_note(self, group_id: int) -> str:
+        """跨帳號起手詞撞車：本群近期水軍都拿同一組字開頭就點名換掉。
+
+        「剛洗完澡」這種全群共用的樣板，只看自己那幾則抓不到；這裡吃本群
+        實際送出紀錄，前 2 字重複 ≥2 次就禁用，樣本不足自然不觸發。
+        """
+        texts = [
+            str(t) for t in (self._recent_texts_by_group.get(int(group_id)) or [])
+        ][-12:]
+        toks = [self._opening_token(t) for t in texts]
+        toks = [t for t in toks if t]
+        if len(toks) < 4:
+            return ""
+        df: dict = {}
+        for t in toks:
+            df[t] = df.get(t, 0) + 1
+        hot = [t for t, n in sorted(df.items(), key=lambda kv: -kv[1]) if n >= 2]
+        if not hot:
+            return ""
+        return (
+            f"（這群最近有人用「{'、'.join(hot[:2])}」開頭，"
+            f"你這則別跟人家撞同樣的起頭字）"
+        )
+
     @staticmethod
     def _verbatim_run(a: str, b: str, min_len: int = 6) -> str:
         """a 有沒有整段照抄 b 的連續 ≥min_len 字（複讀真人原句用）。回最長那段。"""
@@ -2214,6 +2238,9 @@ class AccountWorker:
         opening_note = self._opening_repeat_note(own_texts)
         if opening_note:
             chosen_mood += opening_note
+        cross_note = self._cross_opening_note(int(getattr(event, "chat_id", 0) or 0))
+        if cross_note:
+            chosen_mood += cross_note
         echo_note = self._echo_note(last_human)
         if echo_note:
             chosen_mood += echo_note
