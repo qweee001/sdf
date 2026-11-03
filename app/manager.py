@@ -63,6 +63,10 @@ class AccountManager:
         self.personas: dict[int, dict] = {}
         self.topic_turn_counts: dict[int, int] = {}
         self.phrase_cores_by_group: dict[int, list[tuple[str, float]]] = {}
+        # 跨號句子記憶：群組 → 最近水軍發言（與時間戳同索引）。四號共用同一份，
+        # 起手詞／慣用語／疲勞詞才真的跨得過帳號邊界。
+        self.recent_texts_by_group: dict[int, list[str]] = {}
+        self.recent_texts_at: dict[int, list[float]] = {}
         self.reply_claim_signals: dict[tuple[int, int], asyncio.Event] = {}
         self.failed_reply_claimants: dict[tuple[int, int], set[int]] = {}
         self.group_send_locks: dict[int, asyncio.Lock] = {}
@@ -341,6 +345,10 @@ class AccountManager:
             self.topic_turn_counts = {}
         if getattr(self, "phrase_cores_by_group", None) is None:
             self.phrase_cores_by_group = {}
+        if getattr(self, "recent_texts_by_group", None) is None:
+            self.recent_texts_by_group = {}
+        if getattr(self, "recent_texts_at", None) is None:
+            self.recent_texts_at = {}
         self.personas = personas
         display_name = str(acc.get("tg_username") or "").strip()
         if persona and display_name and persona.get("name") != display_name:
@@ -389,6 +397,8 @@ class AccountManager:
             personas=self.personas,
             topic_turn_counts=self.topic_turn_counts,
             phrase_cores_by_group=self.phrase_cores_by_group,
+            recent_texts_by_group=self.recent_texts_by_group,
+            recent_texts_at=self.recent_texts_at,
             voice_library=self._voice_library,
             outbound_gate=(
                 self.live_test.outbound_gate

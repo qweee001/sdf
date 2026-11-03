@@ -323,6 +323,11 @@ def test_mainland_term_hint_names_the_replacement():
         assert worker._mainland_term_hint("搭地鐵去") == "「地鐵」應講「捷運」"
         assert worker._mainland_term_hint("我剛吃完晚飯") == "「晚飯」應講「晚餐」"
         assert worker._mainland_term_hint("吃午飯了嗎") == "「午飯」應講「午餐」"
+        # 白嫖：2026-11-03 20:14 Chen 實際漏放（11-01 曾加、同日被「移除死板替換」誤刪）
+        assert (
+            worker._mainland_term_hint("你連入會費都要問，是想白嫖看圖嗎")
+            == "「白嫖」應講「佔便宜」"
+        )
 
     asyncio.run(main())
 

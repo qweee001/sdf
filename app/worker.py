@@ -590,6 +590,8 @@ class AccountWorker:
                  personas: dict | None = None,
                  topic_turn_counts: dict | None = None,
                  phrase_cores_by_group: dict | None = None,
+                 recent_texts_by_group: dict | None = None,
+                 recent_texts_at: dict | None = None,
                  voice_library: Any | None = None,
                  outbound_gate: Any | None = None,
                  reply_enabled: bool = True,
@@ -681,9 +683,15 @@ class AccountWorker:
         self._proactive_recent_seen: dict[int, list[str]] = {}
         self._recent_emojis_by_group: dict[int, list[str]] = {}  # group_id -> 最近用過的 emoji
         # 詞彙疲勞偵測：每群最近發過的句子（供 _phrase_fatigue_hint 提取核心短詞）
-        self._recent_texts_by_group: dict[int, list[str]] = {}
+        # manager 注入同一份 dict 才叫「跨號」；自己 new 一份的話每個帳號只看得到自己，
+        # 所有跨號去重（起手詞、慣用語、疲勞詞）等於全部失效。
+        self._recent_texts_by_group: dict[int, list[str]] = (
+            recent_texts_by_group if recent_texts_by_group is not None else {}
+        )
         # 與上面同一批句子的時間戳（同索引），供時間窗取用
-        self._recent_texts_at: dict[int, list[float]] = {}
+        self._recent_texts_at: dict[int, list[float]] = (
+            recent_texts_at if recent_texts_at is not None else {}
+        )
         # 每帳號最近抽過的心境索引（避免整個小時同一種語氣）
         self._mood_history: dict[str, list[int]] = {}
         # 同號近義複讀：本帳號最近送出的原文＋時間（10 分鐘窗）
