@@ -2012,40 +2012,43 @@ class AccountWorker:
         pool = [sc for s, sc in scored if s <= low + 1e-9]
         return random.choice(pool)
 
-    def _overused_terms_note(self, history) -> str:
+    def _overused_terms_note(self, group_id: int, history) -> str:
         """全場近期被水軍講爛的生活詞（摸魚／犯睏／手搖這種），動態統計不寫死清單。
 
-        場景錨點只管固定字串，模型自己重組的慣用詞照樣會撞。這裡從近 20 則水軍
-        發言數 2 字詞：先由字元文件頻率自動算出「虛字」（你我是不這種），虛字
-        組成的詞剔掉，剩下的實詞只要被兩個以上女號講過、或同一人反覆講，就是
-        撞車訊號，抓前 8 個叫它換講法。
+        場景錨點只管固定字串，模型自己重組的慣用詞照樣會撞。來源優先用本群
+        實際送出紀錄（跨帳號、不受 30 則對話窗裡水軍只佔兩三則的限制），
+        數 2 字詞文件頻率：先由字元頻率自動推虛字剔除，剩下的實詞只要跨句重複
+        就列進提示，抓前 6 個叫它換講法。
         """
-        rows = [r for r in (history or []) if str(r.get("role")) == "assistant"][-20:]
-        if len(rows) < 3:
+        texts = [
+            str(t) for t in (self._recent_texts_by_group.get(int(group_id)) or [])
+        ][-20:]
+        if len(texts) < 3:
+            texts = [
+                str(r.get("content") or "") for r in (history or [])
+                if str(r.get("role")) == "assistant"
+            ][-20:]
+        if len(texts) < 3:
             return ""
         char_df: dict = {}
-        for r in rows:
-            body = str(r.get("content") or "")
+        for body in texts:
             for ch in set(body):
                 if "一" <= ch <= "鿿":
                     char_df[ch] = char_df.get(ch, 0) + 1
-        stop = {ch for ch, n in char_df.items() if n > len(rows) * 0.5}
+        # 樣本太少時字元頻率不穩（2 則就會把實詞判成虛字），6 則以上才啟用虛字剔除
+        stop = (
+            {ch for ch, n in char_df.items() if n > len(texts) * 0.5}
+            if len(texts) >= 6 else set()
+        )
         df: dict = {}
-        senders: dict = {}
-        for r in rows:
-            body = str(r.get("content") or "")
-            who = str(r.get("sender_name") or "")
+        for body in texts:
             for g in {body[i:i + 2] for i in range(len(body) - 1)}:
                 if not g.strip() or not all("一" <= ch <= "鿿" for ch in g):
                     continue
                 if any(ch in stop for ch in g):
                     continue
                 df[g] = df.get(g, 0) + 1
-                senders.setdefault(g, set()).add(who)
-        hot = [
-            g for g, n in sorted(df.items(), key=lambda kv: (-len(senders.get(kv[0], ())), -kv[1]))
-            if n >= 2
-        ][:8]
+        hot = [g for g, n in sorted(df.items(), key=lambda kv: -kv[1]) if n >= 2][:6]
         if not hot:
             return ""
         return f"（近期大家講爛的詞：{'、'.join(hot)}，這則換個講法別再撞）"
@@ -2111,7 +2114,9 @@ class AccountWorker:
         chosen_mood = random.choice(mood_options)
         if own_recent:
             chosen_mood += own_recent
-        chosen_mood += self._overused_terms_note(history)
+        chosen_mood += self._overused_terms_note(
+            int(getattr(event, "chat_id", 0) or 0), history
+        )
 
         # 動態句式引導：檢查近期發言是否連續反問，強制平衡陳述與斷言句型
         last_bot_asked = False

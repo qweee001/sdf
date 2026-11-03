@@ -104,6 +104,7 @@ def test_directors_note_forbids_question_ending_after_question():
 
 def test_overused_terms_counts_cross_account_reuse():
     w = _worker()
+    gid = -1001
     history = [
         {"role": "assistant", "sender_name": "小小", "content": "下午摸魚看男生的身材", "timestamp": 1.0},
         {"role": "assistant", "sender_name": "Chen", "content": "害我店裡摸魚滑手機", "timestamp": 2.0},
@@ -112,11 +113,24 @@ def test_overused_terms_counts_cross_account_reuse():
         {"role": "assistant", "sender_name": "小小", "content": "摸魚被抓到就慘了", "timestamp": 5.0},
         {"role": "assistant", "sender_name": "Chen", "content": "誰先來餵飽我", "timestamp": 6.0},
     ]
-    note = w._overused_terms_note(history)
+    note = w._overused_terms_note(gid, history)
     assert "講爛的詞" in note
     assert "摸魚" in note
 
 
 def test_overused_terms_empty_when_history_short():
     w = _worker()
-    assert w._overused_terms_note([]) == ""
+    assert w._overused_terms_note(-1001, []) == ""
+
+
+def test_overused_terms_prefers_recorded_group_texts():
+    """本群實際送出紀錄優先：對話窗只有兩則水軍也要抓得出來。"""
+    w = _worker()
+    gid = -1001
+    w._recent_texts_by_group[gid] = [
+        "下午摸魚看男生的身材",
+        "害我店裡摸魚滑手機",
+        "誰先來餵飽我",
+    ]
+    note = w._overused_terms_note(gid, [])
+    assert "摸魚" in note
