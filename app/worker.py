@@ -1990,15 +1990,19 @@ class AccountWorker:
             if str(r.get("role")) == "assistant" and str(r.get("sender_name") or "") == name
         ][-n:]
 
-    def _pick_life_anchor(self, anchors: list, name: str, history) -> str:
+    def _pick_life_anchor(self, anchors: list, name: str, history, own_texts=None) -> str:
         """動態場景去重：同一個帳號不連兩則用同一個生活場景（不靠黑名單）。
 
         anchors 每條是（場景標籤, 場景字串）。先看本帳號近期發言有沒有踩到同一標籤
         （店裡、站櫃這種工作場景最容易被模型照抄），再用字面重疊率當次要訊號，
         取最低分的一組再隨機——剛講過的場景自動排到後面，加新場景只要多寫一條。
+        own_texts 是 DB 取回的本人近期發言（新到舊）；沒有才退回對話窗。
         """
-        rows = self._own_recent_rows(name, history)
-        recent = " ".join(str(r.get("content") or "") for r in rows).strip()
+        if own_texts:
+            recent = " ".join(str(t) for t in own_texts).strip()
+        else:
+            rows = self._own_recent_rows(name, history)
+            recent = " ".join(str(r.get("content") or "") for r in rows).strip()
         if not recent:
             return random.choice([sc for _, sc in anchors])
         scored = []
@@ -2053,19 +2057,112 @@ class AccountWorker:
             return ""
         return f"（近期大家講爛的詞：{'、'.join(hot)}，這則換個講法別再撞）"
 
-    def _recent_own_scene_note(self, name: str, history) -> str:
+    def _recent_own_scene_note(self, name: str, history, own_texts=None) -> str:
         """把你最近用過的開場直接攤在眼前，比叫模型「記得換場景」有效。"""
-        rows = self._own_recent_rows(name, history, 3)
-        lines = [str(r.get("content") or "").strip()[:18].rstrip("，,、 ") for r in rows]
+        if own_texts:
+            lines = [str(t).strip()[:18].rstrip("，,、 ") for t in own_texts[:3]]
+        else:
+            rows = self._own_recent_rows(name, history, 3)
+            lines = [str(r.get("content") or "").strip()[:18].rstrip("，,、 ") for r in rows]
         lines = [ln for ln in lines if ln]
         if not lines:
             return ""
         return f"（你最近講過：{'／'.join(lines)}，這則換個不一樣的場景或切入）"
 
-    def _build_directors_note(self, event, history: list[dict]) -> str:
+    _OPEN_STRIP = "「」『』（(【[ 　~～!！.。…"
+
+    def _opening_token(self, text: str) -> str:
+        """取一句話的起手詞（前 2 個實字）。中文兩字就是一個口頭禪的長度。"""
+        body = str(text or "").lstrip(self._OPEN_STRIP)
+        body = body.lstrip("".join(ch for ch in body[:2] if not ("一" <= ch <= "鿿")))
+        return body[:2] if len(body) >= 2 else ""
+
+    def _opening_repeat_note(self, own_texts) -> str:
+        """動態統計自己近期起手詞：撞過的直接點名禁用，不寫死「笑死」「剛下班」清單。
+
+        只認本人發言（DB 取回），跨帳號的熱詞歸 _overused_terms_note 管；
+        門檻是同一詞在自己近 6 則出現 ≥2 次，或與上一則開頭相同。
+        """
+        toks = [self._opening_token(t) for t in (own_texts or [])[:6]]
+        toks = [t for t in toks if t]
+        if len(toks) < 2:
+            return ""
+        df: dict = {}
+        for t in toks:
+            df[t] = df.get(t, 0) + 1
+        hot = [t for t, n in sorted(df.items(), key=lambda kv: -kv[1]) if n >= 2]
+        if not hot and toks[0] and toks[0] == toks[1]:
+            hot = [toks[0]]
+        if not hot:
+            return ""
+        return (
+            f"（你自己最近 {len(toks)} 則裡「{'、'.join(hot[:2])}」開頭已經用過，"
+            f"這則不准再用這幾個字起頭，直接從動作中段或場景細節講起）"
+        )
+
+    @staticmethod
+    def _verbatim_run(a: str, b: str, min_len: int = 6) -> str:
+        """a 有沒有整段照抄 b 的連續 ≥min_len 字（複讀真人原句用）。回最長那段。"""
+        a, b = str(a or ""), str(b or "")
+        if len(a) < min_len or len(b) < min_len:
+            return ""
+        best = ""
+        for i in range(len(a) - min_len + 1):
+            if a[i:i + min_len] not in b:
+                continue
+            j = i + min_len
+            while j < len(a) and a[i:j + 1] in b:
+                j += 1
+            if j - i > len(best):
+                best = a[i:j]
+        return best
+
+    def _echo_note(self, last_human: str) -> str:
+        """上一句是真人講的：把原句攤出來，明講不准照抄。"""
+        body = str(last_human or "").strip()
+        if len(body) < 6:
+            return ""
+        return (
+            f"（上一句真人原話是「{body[:24]}」，這則不准原句照抄或整段複述，"
+            f"要用自己的話重講、補新的資訊或直接下判斷）"
+        )
+
+    _ASK_TAILS = ("嗎", "吧", "呢", "麼", "？", "?")
+
+    def _ask_tail_repeat(self, own_texts, candidate: str) -> bool:
+        """連續反問偵測：這則又是問句收尾，且自己前兩則也問句收尾。"""
+        body = str(candidate or "").rstrip("」』）) ")
+        if not body or body[-1] not in self._ASK_TAILS:
+            return False
+        prev = [str(t).rstrip("」』）) ") for t in (own_texts or [])[:2]]
+        hits = sum(1 for p in prev if p and p[-1] in self._ASK_TAILS)
+        return hits >= 2
+
+    def _local_veto(self, candidate: str, own_texts, last_human: str) -> str:
+        """生成後的硬性自檢（不叫模型，零成本）：複讀真人／連問／起手詞再撞。
+
+        回空字串＝放行；回字串＝退回理由，直接餵給重寫。
+        """
+        seg = self._verbatim_run(candidate, last_human)
+        if seg:
+            return f"整段照抄真人剛講的「{seg}」，換句話說"
+        if self._ask_tail_repeat(own_texts, candidate):
+            return "連續第三則用問句收尾，改成斷言或動作收"
+        toks = [self._opening_token(t) for t in (own_texts or [])[:6]]
+        toks = [t for t in toks if t]
+        head = self._opening_token(candidate)
+        if head and toks.count(head) >= 2:
+            return f"起手詞「{head}」自己已經用過 {toks.count(head)} 次"
+        return ""
+
+    def _build_directors_note(
+        self, event, history: list[dict], own_texts=None, last_human: str = ""
+    ) -> str:
         """酒館級 In-Chat @ Depth 末端動態演出指令（Author's Note）。
 
         隨機抽取演出維度與切入視角，打破每天開頭「光會/笑死」與單一質疑句型。
+        own_texts＝DB 取回的本帳號近期發言，last_human＝上一句真人原話；
+        兩者用來做本人起手詞與真人複讀的動態去重。
         """
         import random
         name = str(self.persona.get("name") or "妹子")
@@ -2102,8 +2199,8 @@ class AccountWorker:
             ],
         }
         name_key = next((k for k in anchors if k in name), "小小")
-        current_scene = self._pick_life_anchor(anchors[name_key], name, history)
-        own_recent = self._recent_own_scene_note(name, history)
+        current_scene = self._pick_life_anchor(anchors[name_key], name, history, own_texts)
+        own_recent = self._recent_own_scene_note(name, history, own_texts)
 
         mood_options = [
             f"【心境：隨性放鬆/生活瑣事】：{current_scene}。現在用這件事當開場或話題切入，聊出真實感。",
@@ -2114,6 +2211,12 @@ class AccountWorker:
         chosen_mood = random.choice(mood_options)
         if own_recent:
             chosen_mood += own_recent
+        opening_note = self._opening_repeat_note(own_texts)
+        if opening_note:
+            chosen_mood += opening_note
+        echo_note = self._echo_note(last_human)
+        if echo_note:
+            chosen_mood += echo_note
         chosen_mood += self._overused_terms_note(
             int(getattr(event, "chat_id", 0) or 0), history
         )
@@ -2133,7 +2236,7 @@ class AccountWorker:
                 "1. 上一句水軍已在發問或近期反問過多，這條發言【絕對禁止】以「…嗎？」「…吧？」反問收尾！\n"
                 "2. 【絕對禁止】以「外面太陽大」「天氣熱」等天氣氣候作為開頭或話題主軸（當前室外熱是背景，不是聊天話題）！\n"
                 "3. 必須直接針對當前群組最熱門的上一句話題、群友外號或貼圖圖片進行自然吐槽、下斷言或分享當下動作，乾脆俐落收尾。"
-                "\\n4. 上一句水軍就是問句，這則【結尾一定要落在斷言或動作】，不准再用「嗎」「吧」「呢」或問號收尾。"
+                "\n4. 上一句水軍就是問句，這則【結尾一定要落在斷言或動作】，不准再用「嗎」「吧」「呢」或問號收尾。"
             )
         else:
             chosen_syntax = (
@@ -3194,7 +3297,8 @@ class AccountWorker:
         return _DEFAULT_REPLY_CHAR_CAP
 
     async def _review_candidate(
-        self, context: str, text: str, directive: str = "", recent_bots: str = ""
+        self, context: str, text: str, directive: str = "", recent_bots: str = "",
+        last_human: str = "",
     ):
         """③ 審核候選回覆：上下文＋前置決策＋生成文字一起送審。
 
@@ -3245,7 +3349,9 @@ class AccountWorker:
                 print(f"[{self.name}] decision-3 Jev error, fallback to gateway reviewer: {exc}", flush=True)
 
         # 網關神經網絡動態審核層（最優解：老司機旁路裁判）
-        return await self._review_candidate_gateway(context, text, directive, recent_bots)
+        return await self._review_candidate_gateway(
+            context, text, directive, recent_bots, last_human
+        )
 
     async def _recent_bot_lines(self, group_id: int, limit: int = 8) -> str:
         """取出群裡最近的水軍發言原文（跨帳號），供裁判做動態重複感知。"""
@@ -3264,7 +3370,8 @@ class AccountWorker:
         return "\n".join(out)
 
     async def _review_candidate_gateway(
-        self, context: str, text: str, directive: str = "", recent_bots: str = ""
+        self, context: str, text: str, directive: str = "", recent_bots: str = "",
+        last_human: str = "",
     ) -> dict | None:
         """網關神經網絡動態審核層：以台灣老司機視角進行旁路打分與審查。"""
         if not self.ai_client:
@@ -3306,7 +3413,8 @@ class AccountWorker:
             "只要出現下列任一狀況，issue 判定為 \"repeat\"，sendable 壓到 0.25 以下，並在 reason 指出重複在哪："
             "(a) 開場詞或口頭禪相同（例如「剛洗完澡」「剛下班」「出/光出一張嘴」「笑死」「X這麼Y」這類同一個起手式或前情設定）；"
             "(b) 點名攻擊同一個男人（連續多則都在嗆同一位群友）；"
-            "(c) 句型骨架一樣，只是換了名詞。真人不會短時間內反覆用同一個生活起手式（如連著好幾個人都在說剛洗完澡）。"
+            "(c) 句型骨架一樣，只是換了名詞。真人不會短時間內反覆用同一個生活起手式（如連著好幾個人都在說剛洗完澡）；同一角色自己前後兩則開頭兩個字相同（例如連兩則都用「笑死」「剛換」起頭）也算 repeat。"
+            "(d) 直接照抄【真人最後一句】的整段或半句（真人剛講「小萬正在幹鱷魚」，下一則又寫「小萬正在幹鱷魚」），沒換句話說、沒補新資訊，就是複讀機，issue 判 repeat。"
             "5. 【人設聲音對照】：依【待發言角色】的年齡、職業、性格與風格，判斷這句話像不像「這個人本人」會說的話。"
             "若語氣跑到別的角色身上（例如文靜內斂的設計師突然變成毒舌嗆辣、輕熟女突然用年輕妹子的口吻），issue 判定為 \"unnatural\"，sendable 低於 0.4，"
             "並在 reason 說明「這句更像誰、她本人應該怎麼說」。\n"
@@ -3324,6 +3432,7 @@ class AccountWorker:
             f"聊天風格：{self.persona.get('chat_style') or '?'}）\n"
             f"【群組上下文】\n{context[-1500:] if context else '（無歷史上下文）'}\n"
             f"【近期水軍發言（用來判斷重複與撞句，逐句對照）】\n{recent_bots or '（無）'}\n"
+            f"【真人最後一句（候選若照抄這句就是複讀）】{last_human[:80] or '（無）'}\n"
             f"【前置意圖】{directive if directive else '（無）'}\n"
             f"【候選發言】：「{str(text).strip()}」"
         )
@@ -3389,12 +3498,15 @@ class AccountWorker:
         generate: Callable[[str], Awaitable[str]],
         *,
         recent_bots: str = "",
+        own_texts: list[str] | None = None,
+        last_human: str = "",
         limit: int = 3,
     ) -> str:
         """③ 不過時：改用不同策略各生一條候選，逐條審核，挑可發分最高的那條。
 
         借鑑 jev-chat-jarvis 的 A/B/C 候選比較：反覆修同一句容易卡在同一個毛病，
         換策略重寫有一次真正的比較機會。成本只落在難例上（多 2~3 次生成＋審核）。
+        本機自檢（複讀真人／連三問／起手詞再撞）先篩一輪，不合格的不必送模型裁判。
         生不出合格的就回 ""（呼叫方暫緩）。
         """
         best_text = ""
@@ -3406,8 +3518,12 @@ class AccountWorker:
                 continue
             if not candidate:
                 continue
+            if self._local_veto(candidate, own_texts or [], last_human):
+                continue
             self.stats["gate_candidates"] = int(self.stats.get("gate_candidates", 0)) + 1
-            review = await self._review_candidate(context, candidate, directive, recent_bots)
+            review = await self._review_candidate(
+                context, candidate, directive, recent_bots, last_human
+            )
             if review is None or not self._review_passes(review):
                 continue
             score = float(review.get("sendable") or 0.0)
@@ -3435,8 +3551,44 @@ class AccountWorker:
             return ""
         decision = getattr(event, "_sdf_decision", None)
         directive = self._decision_directive(decision) if isinstance(decision, dict) else ""
-        recent_bots = await self._recent_bot_lines(int(getattr(event, "chat_id", 0) or 0))
-        review = await self._review_candidate(context, text, directive, recent_bots)
+        group_id = int(getattr(event, "chat_id", 0) or 0)
+        recent_bots = await self._recent_bot_lines(group_id)
+        # 本機硬性自檢先跑（複讀真人原句／連三問／起手詞再撞），過了才花模型裁判
+        own_texts: list[str] = []
+        last_human = ""
+        try:
+            own_texts = await self.db.recent_replies_by_name(group_id, self.name, 6)
+            rows = await self.db.get_group_messages(group_id, limit=6)
+            last_human = next(
+                (
+                    str(r.get("content") or "")
+                    for r in reversed(rows)
+                    if str(r.get("role")) != "assistant"
+                ),
+                "",
+            )
+        except Exception:
+            pass
+        veto = self._local_veto(text, own_texts, last_human)
+        if veto:
+            self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
+            print(f"[{self.name}] local-veto: {veto} {text[:20]!r}", flush=True)
+            picked = await self._pick_passing_candidate(
+                context,
+                directive,
+                f"上一版被自檢退回，具體問題：{veto}。換個講法重寫。",
+                lambda hint: self._generate_reply(event, extra_hint=hint),
+                recent_bots=recent_bots,
+                own_texts=own_texts,
+                last_human=last_human,
+                limit=_GATE_CANDIDATE_LIMIT,
+            )
+            if picked:
+                return picked
+            return ""
+        review = await self._review_candidate(
+            context, text, directive, recent_bots, last_human
+        )
         if review is None:
             self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
             print(f"[{self.name}] gate-hold: 決策層超時/失敗，暫緩 {text[:20]!r}", flush=True)
@@ -3459,6 +3611,8 @@ class AccountWorker:
             base_hint,
             lambda hint: self._generate_reply(event, extra_hint=hint),
             recent_bots=recent_bots,
+            own_texts=own_texts,
+            last_human=last_human,
             limit=_GATE_CANDIDATE_LIMIT,
         )
         if picked:
@@ -4698,6 +4852,17 @@ class AccountWorker:
             recent_group_replies = await self.db.get_recent_group_replies(
                 group_id, limit=12
             )
+        # 本人近期發言（DB，跨對話窗）＋上一句真人原話：起手詞撞車與複讀的比對基準
+        own_texts: list[str] = []
+        last_human = ""
+        try:
+            own_texts = await self.db.recent_replies_by_name(group_id, self.name, 6)
+        except Exception:
+            own_texts = []
+        for row in reversed(history or []):
+            if str(row.get("role")) != "assistant":
+                last_human = str(row.get("content") or "").strip()
+                break
         system_prompt = get_system_prompt(self.persona)
         # P1-2：本次回覆的字元硬上限依決策長度檔位動態決定（one14/two40/standard55），
         # 沒有決策退回預設 40。
@@ -4814,7 +4979,9 @@ class AccountWorker:
 
         # 依主人指示：酒館級 Author's Note / In-Chat @ Depth 末端動態注入
         # 將最高權重的導演演出指令放在整個 Context 的最後一刻，直接引領模型演繹
-        director_note = self._build_directors_note(event, history)
+        director_note = self._build_directors_note(
+            event, history, own_texts, last_human
+        )
         if director_note:
             user_message += f"\n{director_note}"
 
@@ -6748,15 +6915,40 @@ class AccountWorker:
                         continue
                     # 錯別字層也要用 context，先預設空；決策層啟用時才取
                     context = ""
+                    # 本機自檢基準：本人近期起手詞＋上一句真人原話
+                    try:
+                        own_texts_p = await self.db.recent_replies_by_name(
+                            int(group_id), self.name, 6
+                        )
+                    except Exception:
+                        own_texts_p = []
+                    last_human_p = ""
+                    try:
+                        recent_rows = await self.db.get_group_messages(int(group_id), limit=6)
+                        last_human_p = next(
+                            (
+                                str(r.get("content") or "")
+                                for r in reversed(recent_rows)
+                                if str(r.get("role")) != "assistant"
+                            ),
+                            "",
+                        )
+                    except Exception:
+                        pass
                     # ③ 決策層審核；不合格 → 帶問題重寫一次再審核；仍不合格 → 暫緩（不塞罐頭句）
                     if self._decision_enabled():
                         try:
                             context = await self._proactive_decision_context(group_id)
                         except Exception:
                             context = ""
-                        review = await self._review_candidate(
-                            context, topic, recent_bots=await self._recent_bot_lines(int(group_id))
-                        )
+                        veto_p = self._local_veto(topic, own_texts_p, last_human_p)
+                        if veto_p:
+                            review = {"sendable": 0.2, "issue": "repeat", "reason": veto_p}
+                        else:
+                            review = await self._review_candidate(
+                                context, topic, recent_bots=await self._recent_bot_lines(int(group_id)),
+                                last_human=last_human_p,
+                            )
                         if review is None:
                             self.stats["proactive_gate_hold"] = (
                                 int(self.stats.get("proactive_gate_hold", 0)) + 1
@@ -6785,6 +6977,7 @@ class AccountWorker:
                                     group_id, extra_hint=hint
                                 ),
                                 recent_bots=recent_bots_proactive,
+                                own_texts=own_texts_p,
                                 limit=2,
                             )
                             if not picked:

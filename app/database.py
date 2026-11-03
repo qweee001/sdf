@@ -1468,6 +1468,24 @@ class Database:
         )
         return [str(row["content"]) for row in await cursor.fetchall()]
 
+    async def recent_replies_by_name(
+        self, group_id: int, name: str, limit: int = 8
+    ) -> list[str]:
+        """同一角色自己最近送出的文案（新到舊）。
+
+        對話窗只留 30 則，跨帳號一熱就沖掉自己的發言，光靠 history 抓不到
+        「我上一則用什麼開場」；改由 DB 取，開場詞撞車才有東西可比。
+        """
+        if not name:
+            return []
+        cursor = await self._c.execute(
+            "SELECT content FROM messages "
+            "WHERE group_id = ? AND role = 'assistant' AND sender_name = ? "
+            "ORDER BY timestamp DESC, id DESC LIMIT ?",
+            (int(group_id), str(name), int(limit)),
+        )
+        return [str(row["content"]) for row in await cursor.fetchall()]
+
     async def recent_bot_texts_by_group(
         self, group_id: int, *, hours: float = 48, limit: int = 200
     ) -> list[str]:
