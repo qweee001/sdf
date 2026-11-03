@@ -2021,7 +2021,7 @@ class AccountWorker:
         撞車訊號，抓前 8 個叫它換講法。
         """
         rows = [r for r in (history or []) if str(r.get("role")) == "assistant"][-20:]
-        if len(rows) < 6:
+        if len(rows) < 3:
             return ""
         char_df: dict = {}
         for r in rows:
