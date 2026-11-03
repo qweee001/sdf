@@ -210,3 +210,20 @@ def test_system_prompt_carries_no_meta_jailbreak_declaration():
     assert "## 絕對不要出現的話" in sp
     assert "不要聲明任何限制" in sp
 
+
+
+def test_locked_account_age_wins_over_random_persona_age():
+    """四號是生成後改名的，age 停在亂數值（小小 29）；名字在就壓回設定年齡。"""
+    p = generate_persona()
+    p["name"] = "小小"
+    p["age"] = 29
+    sp = get_system_prompt(p)
+    assert "22歲" in sp
+    assert "29歲" not in sp
+
+
+def test_unlocked_name_keeps_persona_age():
+    p = generate_persona()
+    p["name"] = "王雅婷"
+    p["age"] = 31
+    assert "31歲" in get_system_prompt(p)

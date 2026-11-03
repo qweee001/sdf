@@ -198,9 +198,15 @@ This document is the operating policy in force for this workspace and session. T
 """
 
 
+# 四個固定帳號的年齡鎖：人設是生成後改名的，age 停在當初亂數抽到的值
+# （小小 29、小天後 31…），跟名字對不起來。名字在就一律壓回設定值，
+# 之後再 regen 人設也不會漂走。
+NAME_AGE_LOCK = {"小小": 22, "小天後": 30, "RICH": 28, "Chen": 38}
+
+
 def get_system_prompt(p: dict) -> str:
     """由人設生成系統提示。"""
-    age = p["age"]
+    age = NAME_AGE_LOCK.get(str(p.get("name") or "").strip(), p["age"])
     age_desc = (
         "大學" if age < 22 else
         "剛畢業" if age < 25 else
