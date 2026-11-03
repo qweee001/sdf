@@ -2141,6 +2141,76 @@ class AccountWorker:
                 best = a[i:j]
         return best
 
+    def _content_bigrams(self, corpus: list) -> tuple:
+        """把句子切成「實詞雙字」，虛字由語料字頻自動推（不寫死虛字表）。
+
+        回 (切詞函式, 虛字集)。語料不足 4 句時不判虛字，寧可多切一點。
+        """
+        bodies = [str(t) for t in (corpus or []) if str(t).strip()]
+        char_df: dict = {}
+        for body in bodies:
+            for ch in set(body):
+                if "一" <= ch <= "鿿":
+                    char_df[ch] = char_df.get(ch, 0) + 1
+        stop = (
+            {ch for ch, n in char_df.items() if n > max(2, len(bodies) * 0.5)}
+            if len(bodies) >= 4 else set()
+        )
+
+        def grams(text: str) -> list:
+            body = "".join(ch if "一" <= ch <= "鿿" else "|" for ch in str(text or ""))
+            out = []
+            for i in range(len(body) - 1):
+                g = body[i:i + 2]
+                if "|" in g or g[0] in stop or g[1] in stop:
+                    continue
+                out.append(g)
+            return out
+
+        return grams, stop
+
+    def _idiom_reuse(self, candidate: str, own_texts, cross_texts) -> str:
+        """慣用詞重用：同一句實詞又拿出來講，換句話說（動態，非詞表）。
+
+        自己上一則只要撞一個實詞就退回（連著兩則都「嘴硬」最刺眼）；
+        前兩則撞到兩個實詞、或別人四則內撞兩個實詞（「身體」「誠實」都重複），
+        都算同一個慣用語換皮，退回重寫。
+        """
+        own = [str(t) for t in (own_texts or [])[:3] if str(t).strip()]
+        cross = [str(t) for t in (cross_texts or [])[-4:] if str(t).strip()]
+        corpus = own + cross
+        grams, _stop = self._content_bigrams(corpus)
+        cand = set(grams(candidate))
+        if not cand:
+            return ""
+        # 越冷門的字越能代表同一個慣用語，回報時挑最冷門的兩個（不挑「的時」這種虛組合）
+        char_df: dict = {}
+        for body in corpus:
+            for ch in set(str(body)):
+                char_df[ch] = char_df.get(ch, 0) + 1
+
+        # 只有「兩個字都很冷門」的雙字才算同一個慣用語；「哥是」「還是」這種半虛字不算
+        def strong(hit) -> bool:
+            return any(char_df.get(g[0], 0) <= 1 and char_df.get(g[1], 0) <= 1 for g in hit)
+
+        def top(hit) -> str:
+            ranked = sorted(hit, key=lambda g: (char_df.get(g[0], 0) + char_df.get(g[1], 0), g))
+            return "、".join(ranked[:2])
+
+        if own:
+            hit = cand & set(grams(own[0]))
+            if hit and strong(hit):
+                return f"又跟上一則共用「{top(hit)}」，同一個詞換句話說"
+            for prev in own[1:]:
+                hit = cand & set(grams(prev))
+                if len(hit) >= 2 and strong(hit):
+                    return f"跟前兩則撞了「{top(hit)}」，換個講法"
+        for prev in cross:
+            hit = cand & set(grams(prev))
+            if len(hit) >= 2 and strong(hit):
+                return f"別人也剛用過「{top(hit)}」，別跟著講"
+        return ""
+
     def _echo_note(self, last_human: str) -> str:
         """上一句是真人講的：把原句攤出來，明講不准照抄。"""
         body = str(last_human or "").strip()
@@ -2162,8 +2232,8 @@ class AccountWorker:
         hits = sum(1 for p in prev if p and p[-1] in self._ASK_TAILS)
         return hits >= 2
 
-    def _local_veto(self, candidate: str, own_texts, last_human: str) -> str:
-        """生成後的硬性自檢（不叫模型，零成本）：複讀真人／連問／起手詞再撞。
+    def _local_veto(self, candidate: str, own_texts, last_human: str, group_id: int = 0) -> str:
+        """生成後的硬性自檢（不叫模型，零成本）：複讀真人／連問／起手詞／慣用詞再撞。
 
         回空字串＝放行；回字串＝退回理由，直接餵給重寫。
         """
@@ -2177,7 +2247,13 @@ class AccountWorker:
         head = self._opening_token(candidate)
         if head and toks.count(head) >= 2:
             return f"起手詞「{head}」自己已經用過 {toks.count(head)} 次"
-        return ""
+        if group_id:
+            own_set = {str(t) for t in (own_texts or [])}
+            bucket = self._recent_texts_by_group.get(int(group_id)) or []
+            cross = [t for t in bucket[-6:] if str(t) not in own_set]
+        else:
+            cross = []
+        return self._idiom_reuse(candidate, own_texts, cross)
 
     def _build_directors_note(
         self, event, history: list[dict], own_texts=None, last_human: str = ""
@@ -3442,6 +3518,9 @@ class AccountWorker:
             "(b) 點名攻擊同一個男人（連續多則都在嗆同一位群友）；"
             "(c) 句型骨架一樣，只是換了名詞。真人不會短時間內反覆用同一個生活起手式（如連著好幾個人都在說剛洗完澡）；同一角色自己前後兩則開頭兩個字相同（例如連兩則都用「笑死」「剛換」起頭）也算 repeat。"
             "(d) 直接照抄【真人最後一句】的整段或半句（真人剛講「小萬正在幹鱷魚」，下一則又寫「小萬正在幹鱷魚」），沒換句話說、沒補新資訊，就是複讀機，issue 判 repeat。"
+            "(e) 慣用語或評語換皮重講：同一角色前後兩則共用同一個口頭禪（連著兩則都「嘴硬」）、"
+            "或跟別人四則內撞同一組評語（前面才有人說「嘴巴說不要身體倒是很誠實」，下一則又寫「身體早就誠實了」），"
+            "只換主詞沒換說法，issue 判 repeat，reason 寫出撞的是哪個詞。"
             "5. 【人設聲音對照】：依【待發言角色】的年齡、職業、性格與風格，判斷這句話像不像「這個人本人」會說的話。"
             "若語氣跑到別的角色身上（例如文靜內斂的設計師突然變成毒舌嗆辣、輕熟女突然用年輕妹子的口吻），issue 判定為 \"unnatural\"，sendable 低於 0.4，"
             "並在 reason 說明「這句更像誰、她本人應該怎麼說」。\n"
@@ -3527,6 +3606,7 @@ class AccountWorker:
         recent_bots: str = "",
         own_texts: list[str] | None = None,
         last_human: str = "",
+        group_id: int = 0,
         limit: int = 3,
     ) -> str:
         """③ 不過時：改用不同策略各生一條候選，逐條審核，挑可發分最高的那條。
@@ -3545,7 +3625,7 @@ class AccountWorker:
                 continue
             if not candidate:
                 continue
-            if self._local_veto(candidate, own_texts or [], last_human):
+            if self._local_veto(candidate, own_texts or [], last_human, group_id):
                 continue
             self.stats["gate_candidates"] = int(self.stats.get("gate_candidates", 0)) + 1
             review = await self._review_candidate(
@@ -3596,7 +3676,7 @@ class AccountWorker:
             )
         except Exception:
             pass
-        veto = self._local_veto(text, own_texts, last_human)
+        veto = self._local_veto(text, own_texts, last_human, group_id)
         if veto:
             self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
             print(f"[{self.name}] local-veto: {veto} {text[:20]!r}", flush=True)
@@ -3608,6 +3688,7 @@ class AccountWorker:
                 recent_bots=recent_bots,
                 own_texts=own_texts,
                 last_human=last_human,
+                group_id=group_id,
                 limit=_GATE_CANDIDATE_LIMIT,
             )
             if picked:
@@ -3640,6 +3721,7 @@ class AccountWorker:
             recent_bots=recent_bots,
             own_texts=own_texts,
             last_human=last_human,
+            group_id=group_id,
             limit=_GATE_CANDIDATE_LIMIT,
         )
         if picked:
@@ -6968,7 +7050,9 @@ class AccountWorker:
                             context = await self._proactive_decision_context(group_id)
                         except Exception:
                             context = ""
-                        veto_p = self._local_veto(topic, own_texts_p, last_human_p)
+                        veto_p = self._local_veto(
+                            topic, own_texts_p, last_human_p, int(group_id)
+                        )
                         if veto_p:
                             review = {"sendable": 0.2, "issue": "repeat", "reason": veto_p}
                         else:
@@ -7005,6 +7089,7 @@ class AccountWorker:
                                 ),
                                 recent_bots=recent_bots_proactive,
                                 own_texts=own_texts_p,
+                                group_id=int(group_id),
                                 limit=2,
                             )
                             if not picked:

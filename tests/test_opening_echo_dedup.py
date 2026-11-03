@@ -91,7 +91,7 @@ def test_local_veto_rejects_third_question_ending():
 def test_local_veto_allows_assertion_after_questions():
     w = _worker()
     own = ["萬哥連住哪都問不到，先問到地址再說吧", "今晚是有體力戰幾回合嗎"]
-    assert w._local_veto("萬哥連住哪都問不到，先問到地址再說", own, "") == ""
+    assert "問句" not in (w._local_veto("萬哥連住哪都問不到，先問到地址再說", own, "") or "")
 
 
 def test_local_veto_rejects_repeated_own_opening():
