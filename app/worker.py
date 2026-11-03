@@ -102,7 +102,12 @@ _EMOJI_HISTORY_LIMIT = 6
 # 防不住「換了句式、核心詞不變」的變體，這層防的就是這種。
 # 只盯 2-4 字短詞：長到 5 字以上多半是正常句子片段，盯短才不會誤傷。
 _PHRASE_FATIGUE_MIN_REPEAT = 2
-_PHRASE_HISTORY_LIMIT = 8
+# 這兩個值原本是「則數」上限，水軍密度低時（實測一小時只有 12 則）8 則只等於
+# 40 分鐘，跨號慣用語／起手詞明明還在冷卻窗內就被截掉了。改成時間保留＋大上限，
+# 讓 90 分鐘窗真的走得完，則數只當保險絲。
+_PHRASE_HISTORY_LIMIT = 200
+# 跨號歷史保留窗：等於（略大於）核心詞冷卻窗，句子留著才抓得到整段慣用語。
+_CROSS_TEXT_KEEP_SECONDS = 100 * 60
 # 跨號意象冷卻：任一號用過的核心詞，同群其他號 90 分鐘內避開。
 _PHRASE_CORE_COOLDOWN_SECONDS = 90 * 60
 _PHRASE_CORE_HISTORY_LIMIT = 64
@@ -676,6 +681,10 @@ class AccountWorker:
         self._recent_emojis_by_group: dict[int, list[str]] = {}  # group_id -> 最近用過的 emoji
         # 詞彙疲勞偵測：每群最近發過的句子（供 _phrase_fatigue_hint 提取核心短詞）
         self._recent_texts_by_group: dict[int, list[str]] = {}
+        # 與上面同一批句子的時間戳（同索引），供時間窗取用
+        self._recent_texts_at: dict[int, list[float]] = {}
+        # 每帳號最近抽過的心境索引（避免整個小時同一種語氣）
+        self._mood_history: dict[str, list[int]] = {}
         # 同號近義複讀：本帳號最近送出的原文＋時間（10 分鐘窗）
         self._own_echo_by_group: dict[int, list[tuple[str, float]]] = {}
         # 熱場：本群最近真人發言時間戳（1 分鐘內 ≥3 則關 proactive-join）
@@ -2100,15 +2109,69 @@ class AccountWorker:
             f"這則不准再用這幾個字起頭，直接從動作中段或場景細節講起）"
         )
 
+    def _frame_reuse_note(self, own_texts, group_id: int = 0) -> str:
+        """句型骨架重複：同一組虛動詞在自己近三則裡撐同一種句式，點名換掉。
+
+        實測 Chen 21:04「看你本事」→ 21:06「得看實戰表現」→ 21:35「看你有幾兩重」，
+        三則沒有任何一組實詞相同，逐詞比對抓不到，但句子的骨架都是「看＋評價」。
+        做法仍不吃詞表：算自己三則共用的字，再用語料文件頻率挑最冷門的那幾個
+        （熱字像「的」「就」自然被排掉），只當提示、不硬退，避免誤殺。
+        """
+        own = [str(t) for t in (own_texts or [])[:3] if str(t).strip()]
+        if len(own) < 3:
+            return ""
+        cross = self._cross_recent_texts(group_id, 90 * 60) if group_id else []
+        corpus = own + cross
+        df: dict = {}
+        for body in corpus:
+            for ch in set(body):
+                if "一" <= ch <= "鿿":
+                    df[ch] = df.get(ch, 0) + 1
+        shared: dict = {}
+        for body in own:
+            for ch in set(body):
+                if "一" <= ch <= "鿿":
+                    shared[ch] = shared.get(ch, 0) + 1
+        # 門檻按語料大小浮動（15 句時「看」佔 5 句還算骨架字，「不」佔 7 句是虛字），
+        # 不比絕對次數，才不會因為群裡今天聊得多就整組判死。
+        cap = max(3, round(len(corpus) * 0.4))
+        rare = sorted(
+            [(ch, n) for ch, n in shared.items() if n >= 2 and df.get(ch, 0) <= cap],
+            key=lambda kv: (df.get(kv[0], 0), -kv[1], kv[0]),
+        )
+        if not rare:
+            return ""
+        words = "、".join(f"「{ch}」" for ch, _n in rare[:2])
+        return (
+            f"（你最近三則都是同一種句型骨架在撐，{words}一直重複，"
+            "這則換骨架：直接講結果、或從動作細節進場，別再套同一個句式）"
+        )
+
+    def _cross_recent_texts(self, group_id: int, seconds: float) -> list[str]:
+        """該群在時間窗內的水軍發言（跨帳號）。
+
+        窗看的是牆上時鐘不是則數：這一群一小時只有十幾則水軍發言，
+        「前 4 則」等於 20 分鐘前，冷卻還沒走完就被當成沒事。
+        沒有時間戳（單元測試直接灌清單）時退回全部。
+        """
+        gid = int(group_id)
+        bucket = self._recent_texts_by_group.get(gid) or []
+        stamp = self._recent_texts_at.get(gid) or []
+        if not bucket:
+            return []
+        if len(stamp) != len(bucket):
+            return [str(t) for t in bucket]
+        now = time.time()
+        return [str(t) for t, ts in zip(bucket, stamp) if now - ts < seconds]
+
     def _cross_opening_note(self, group_id: int) -> str:
         """跨帳號起手詞撞車：本群近期水軍都拿同一組字開頭就點名換掉。
 
         「剛洗完澡」這種全群共用的樣板，只看自己那幾則抓不到；這裡吃本群
         實際送出紀錄，前 2 字重複 ≥2 次就禁用，樣本不足自然不觸發。
+        窗走 45 分鐘（見 _cross_recent_texts），避免稀疏發言讓撞車逃掉。
         """
-        texts = [
-            str(t) for t in (self._recent_texts_by_group.get(int(group_id)) or [])
-        ][-12:]
+        texts = self._cross_recent_texts(int(group_id), 45 * 60)
         toks = [self._opening_token(t) for t in texts]
         toks = [t for t in toks if t]
         if len(toks) < 4:
@@ -2177,7 +2240,7 @@ class AccountWorker:
         都算同一個慣用語換皮，退回重寫。
         """
         own = [str(t) for t in (own_texts or [])[:3] if str(t).strip()]
-        cross = [str(t) for t in (cross_texts or [])[-4:] if str(t).strip()]
+        cross = [str(t) for t in (cross_texts or [])[-20:] if str(t).strip()]
         corpus = own + cross
         grams, _stop = self._content_bigrams(corpus)
         cand = set(grams(candidate))
@@ -2210,7 +2273,12 @@ class AccountWorker:
 
         def top(hit) -> str:
             ranked = sorted(hit, key=lambda g: (char_df.get(g[0], 0) + char_df.get(g[1], 0), g))
-            return "、".join(ranked[:2])
+            label = "、".join(ranked[:2])
+            # 夾虛字的慣用語（「出一張嘴」）雙字會被切碎，補上整段三字才看得懂
+            trips = sorted(cand_tri & tri)
+            if trips:
+                label += f"（整段「{trips[0]}」）"
+            return label
 
         if own:
             hit = cand & set(grams(own[0]))
@@ -2278,8 +2346,11 @@ class AccountWorker:
             return f"起手詞「{head}」自己已經用過 {toks.count(head)} 次"
         if group_id:
             own_set = {str(t) for t in (own_texts or [])}
-            bucket = self._recent_texts_by_group.get(int(group_id)) or []
-            cross = [t for t in bucket[-6:] if str(t) not in own_set]
+            cross = [
+                t
+                for t in self._cross_recent_texts(int(group_id), 90 * 60)
+                if str(t) not in own_set
+            ]
         else:
             cross = []
         return self._idiom_reuse(candidate, own_texts, cross)
@@ -2337,7 +2408,18 @@ class AccountWorker:
             "【心境：感官曖昧/微醺撩撥】：從身體感官（剛洗完澡的沐浴香、貼身衣服、敏感帶、眼神交流）切入，字句帶著熱氣與引誘，極致撩人。",
             "【心境：直球性感/性張力拉滿】：大膽露骨直球挑逗，挑釁對方的體力與尺寸，直接激起男人的生理衝動與勝負欲！",
         ]
-        chosen_mood = random.choice(mood_options)
+        # 心境輪替：不用「剛好抽到」決定語氣。實測 Chen 一小時 4 則全落在同一個
+        # 挑戰式語域（看你本事／得看實戰／看你幾兩重），同一種語氣連發比撞詞更像人偶。
+        # 近兩則抽過的心境排除，四選一還剩兩個，仍保隨機感。
+        used_moods = self._mood_history.setdefault(name, [])
+        pool = [
+            i for i in range(len(mood_options))
+            if i not in used_moods[-2:]
+        ] or list(range(len(mood_options)))
+        pick = random.choice(pool)
+        used_moods.append(pick)
+        del used_moods[:-3]
+        chosen_mood = mood_options[pick]
         if own_recent:
             chosen_mood += own_recent
         opening_note = self._opening_repeat_note(own_texts)
@@ -2346,6 +2428,11 @@ class AccountWorker:
         cross_note = self._cross_opening_note(int(getattr(event, "chat_id", 0) or 0))
         if cross_note:
             chosen_mood += cross_note
+        frame_note = self._frame_reuse_note(
+            own_texts, int(getattr(event, "chat_id", 0) or 0)
+        )
+        if frame_note:
+            chosen_mood += frame_note
         echo_note = self._echo_note(last_human)
         if echo_note:
             chosen_mood += echo_note
@@ -6494,10 +6581,21 @@ class AccountWorker:
         if not t:
             return
         gid = int(group_id)
-        bucket = self._recent_texts_by_group.setdefault(gid, [])
-        bucket.append(t)
-        del bucket[:-_PHRASE_HISTORY_LIMIT]
         now = time.time()
+        bucket = self._recent_texts_by_group.setdefault(gid, [])
+        stamp = self._recent_texts_at.setdefault(gid, [])
+        bucket.append(t)
+        stamp.append(now)
+        # 時間優先淘汰：水軍密度低時若只按則數截斷，90 分鐘窗會被吃掉一半
+        keep = [
+            i for i, ts in enumerate(stamp) if now - ts < _CROSS_TEXT_KEEP_SECONDS
+        ]
+        if len(keep) < len(bucket):
+            tail = keep[-(len(bucket)):] if keep else []
+            bucket[:] = [bucket[i] for i in tail]
+            stamp[:] = [stamp[i] for i in tail]
+        del bucket[:-_PHRASE_HISTORY_LIMIT]
+        del stamp[:-_PHRASE_HISTORY_LIMIT]
         echo = self._own_echo_by_group.setdefault(gid, [])
         echo.append((t, now))
         echo[:] = [
@@ -6558,7 +6656,9 @@ class AccountWorker:
 
         hint 與生成後硬擋共用同一份清單，避免提示換意象、送出層卻放行。
         """
-        bucket = self._recent_texts_by_group.get(int(group_id)) or []
+        # 這裡只取最近 8 句：短詞疲勞看的是「連幾句都在玩同一個梗」，
+        # 整份時間窗（100 分鐘）攤開會讓正常複用的字也被判疲勞。
+        bucket = (self._recent_texts_by_group.get(int(group_id)) or [])[-8:]
         if len(bucket) < _PHRASE_FATIGUE_MIN_REPEAT + 1:
             return []
         # 提取 2-4 字連續漢字段，跨句統計出現次數

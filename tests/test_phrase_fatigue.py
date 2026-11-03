@@ -62,14 +62,17 @@ def test_phrase_fatigue_hint_isolated_per_group():
 
 
 def test_phrase_history_is_capped():
-    """歷史句子只留最近 N 條（不無限成長）。"""
+    """歷史句子上限 200 條（保險絲；正常由 100 分鐘時間窗淘汰）。"""
 
     async def main():
         worker = _worker(101)
         group = -1001
-        for i in range(20):
+        for i in range(260):
             worker._record_sent_text(group, f"訊息{i}")
-        assert len(worker._recent_texts_by_group[group]) <= 8
+        assert len(worker._recent_texts_by_group[group]) <= 200
+        assert len(worker._recent_texts_at[group]) == len(
+            worker._recent_texts_by_group[group]
+        )
 
     asyncio.run(main())
 
