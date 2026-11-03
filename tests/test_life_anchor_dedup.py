@@ -100,3 +100,23 @@ def test_directors_note_forbids_question_ending_after_question():
     ]
     note = w._build_directors_note(SimpleNamespace(sender_id=999, sender=None), history)
     assert "結尾一定要落在斷言或動作" in note
+
+
+def test_overused_terms_counts_cross_account_reuse():
+    w = _worker()
+    history = [
+        {"role": "assistant", "sender_name": "小小", "content": "下午摸魚看男生的身材", "timestamp": 1.0},
+        {"role": "assistant", "sender_name": "Chen", "content": "害我店裡摸魚滑手機", "timestamp": 2.0},
+        {"role": "assistant", "sender_name": "RICH", "content": "剛在位置上伸懶腰", "timestamp": 3.0},
+        {"role": "assistant", "sender_name": "小天後", "content": "站櫃站一整天腳很痠", "timestamp": 4.0},
+        {"role": "assistant", "sender_name": "小小", "content": "摸魚被抓到就慘了", "timestamp": 5.0},
+        {"role": "assistant", "sender_name": "Chen", "content": "誰先來餵飽我", "timestamp": 6.0},
+    ]
+    note = w._overused_terms_note(history)
+    assert "講爛的詞" in note
+    assert "摸魚" in note
+
+
+def test_overused_terms_empty_when_history_short():
+    w = _worker()
+    assert w._overused_terms_note([]) == ""

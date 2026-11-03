@@ -2012,6 +2012,44 @@ class AccountWorker:
         pool = [sc for s, sc in scored if s <= low + 1e-9]
         return random.choice(pool)
 
+    def _overused_terms_note(self, history) -> str:
+        """全場近期被水軍講爛的生活詞（摸魚／犯睏／手搖這種），動態統計不寫死清單。
+
+        場景錨點只管固定字串，模型自己重組的慣用詞照樣會撞。這裡從近 20 則水軍
+        發言數 2 字詞：先由字元文件頻率自動算出「虛字」（你我是不這種），虛字
+        組成的詞剔掉，剩下的實詞只要被兩個以上女號講過、或同一人反覆講，就是
+        撞車訊號，抓前 8 個叫它換講法。
+        """
+        rows = [r for r in (history or []) if str(r.get("role")) == "assistant"][-20:]
+        if len(rows) < 6:
+            return ""
+        char_df: dict = {}
+        for r in rows:
+            body = str(r.get("content") or "")
+            for ch in set(body):
+                if "一" <= ch <= "鿿":
+                    char_df[ch] = char_df.get(ch, 0) + 1
+        stop = {ch for ch, n in char_df.items() if n > len(rows) * 0.5}
+        df: dict = {}
+        senders: dict = {}
+        for r in rows:
+            body = str(r.get("content") or "")
+            who = str(r.get("sender_name") or "")
+            for g in {body[i:i + 2] for i in range(len(body) - 1)}:
+                if not g.strip() or not all("一" <= ch <= "鿿" for ch in g):
+                    continue
+                if any(ch in stop for ch in g):
+                    continue
+                df[g] = df.get(g, 0) + 1
+                senders.setdefault(g, set()).add(who)
+        hot = [
+            g for g, n in sorted(df.items(), key=lambda kv: (-len(senders.get(kv[0], ())), -kv[1]))
+            if n >= 2
+        ][:8]
+        if not hot:
+            return ""
+        return f"（近期大家講爛的詞：{'、'.join(hot)}，這則換個講法別再撞）"
+
     def _recent_own_scene_note(self, name: str, history) -> str:
         """把你最近用過的開場直接攤在眼前，比叫模型「記得換場景」有效。"""
         rows = self._own_recent_rows(name, history, 3)
@@ -2073,6 +2111,7 @@ class AccountWorker:
         chosen_mood = random.choice(mood_options)
         if own_recent:
             chosen_mood += own_recent
+        chosen_mood += self._overused_terms_note(history)
 
         # 動態句式引導：檢查近期發言是否連續反問，強制平衡陳述與斷言句型
         last_bot_asked = False
