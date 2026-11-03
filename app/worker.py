@@ -2189,9 +2189,24 @@ class AccountWorker:
             for ch in set(str(body)):
                 char_df[ch] = char_df.get(ch, 0) + 1
 
-        # 只有「兩個字都很冷門」的雙字才算同一個慣用語；「哥是」「還是」這種半虛字不算
+        # 只有「兩個字都很冷門」的雙字才算同一個慣用語；「哥是」「還是」這種半虛字不算。
+        # 三字以上整段重疊（「出一張嘴」這種夾虛字的慣用語）本身就是強訊號。
+        tri = {
+            str(prev)[i:i + 3]
+            for prev in corpus
+            for i in range(len(str(prev)) - 2)
+            if all("一" <= ch <= "鿿" for ch in str(prev)[i:i + 3])
+        }
+        cand_tri = {
+            str(candidate)[i:i + 3]
+            for i in range(len(str(candidate)) - 2)
+            if all("一" <= ch <= "鿿" for ch in str(candidate)[i:i + 3])
+        }
+
         def strong(hit) -> bool:
-            return any(char_df.get(g[0], 0) <= 1 and char_df.get(g[1], 0) <= 1 for g in hit)
+            if any(char_df.get(g[0], 0) <= 1 and char_df.get(g[1], 0) <= 1 for g in hit):
+                return True
+            return bool(cand_tri & tri)
 
         def top(hit) -> str:
             ranked = sorted(hit, key=lambda g: (char_df.get(g[0], 0) + char_df.get(g[1], 0), g))
@@ -2222,15 +2237,29 @@ class AccountWorker:
         )
 
     _ASK_TAILS = ("嗎", "吧", "呢", "麼", "？", "?")
+    _TAIL_DECO = " \t「」『』（）()【】~～!！.。,，、…"
+
+    def _bare_tail(self, text: str) -> str:
+        """剝掉結尾的引號、標點與 emoji（「…嗎🤣」原本會被當成非問句）。"""
+        body = str(text or "").strip()
+        while body:
+            ch = body[-1]
+            if ch in self._TAIL_DECO or (not ch.isascii() and not ("一" <= ch <= "鿿")):
+                body = body[:-1]
+                continue
+            break
+        return body
 
     def _ask_tail_repeat(self, own_texts, candidate: str) -> bool:
-        """連續反問偵測：這則又是問句收尾，且自己前兩則也問句收尾。"""
-        body = str(candidate or "").rstrip("」』）) ")
+        """連續反問偵測：這則又是問句收尾，且自己上一則也問句收尾就退。
+
+        群裡水軍密度低，連續兩則都用問句收尾會變成問卷調查，一律改斷言。
+        """
+        body = self._bare_tail(candidate)
         if not body or body[-1] not in self._ASK_TAILS:
             return False
-        prev = [str(t).rstrip("」』）) ") for t in (own_texts or [])[:2]]
-        hits = sum(1 for p in prev if p and p[-1] in self._ASK_TAILS)
-        return hits >= 2
+        prev = [self._bare_tail(t) for t in (own_texts or [])[:1]]
+        return any(p and p[-1] in self._ASK_TAILS for p in prev)
 
     def _local_veto(self, candidate: str, own_texts, last_human: str, group_id: int = 0) -> str:
         """生成後的硬性自檢（不叫模型，零成本）：複讀真人／連問／起手詞／慣用詞再撞。
@@ -2241,7 +2270,7 @@ class AccountWorker:
         if seg:
             return f"整段照抄真人剛講的「{seg}」，換句話說"
         if self._ask_tail_repeat(own_texts, candidate):
-            return "連續第三則用問句收尾，改成斷言或動作收"
+            return "又是問句收尾，跟上一則一樣，改成斷言或動作收"
         toks = [self._opening_token(t) for t in (own_texts or [])[:6]]
         toks = [t for t in toks if t]
         head = self._opening_token(candidate)

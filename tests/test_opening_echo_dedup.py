@@ -88,6 +88,19 @@ def test_local_veto_rejects_third_question_ending():
     assert "問句" in veto
 
 
+def test_local_veto_rejects_second_question_ending():
+    w = _worker()
+    own = ["晚點還要用嘴巴幹嘛呢"]
+    veto = w._local_veto("送假的幹嘛，是對自己真的沒信心嗎🤣", own, "")
+    assert "問句" in veto
+
+
+def test_question_tail_sees_through_trailing_emoji():
+    w = _worker()
+    assert w._bare_tail("送假的幹嘛，是對自己真的沒信心嗎🤣") == "送假的幹嘛，是對自己真的沒信心嗎"
+    assert w._bare_tail("「這樣好嗎？」") == "「這樣好嗎"
+
+
 def test_local_veto_allows_assertion_after_questions():
     w = _worker()
     own = ["萬哥連住哪都問不到，先問到地址再說吧", "今晚是有體力戰幾回合嗎"]

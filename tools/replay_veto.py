@@ -14,10 +14,14 @@ w = AccountWorker(account_id="w", session_key="k", tg_api_id=1, tg_api_hash="h",
                   managed_ids=set(), on_status_change=lambda *a, **k: None, selected_groups=[-1001])
 w.persona = {"name": "Chen", "gender": "女", "age": 30}
 
-d = json.load(open(r"D:/Hello/AppData/Local/hermes/cache/scratch/rec500.json", encoding="utf-8"))
+import os
+PATH = os.environ.get("REC", r"D:/Hello/AppData/Local/hermes/cache/scratch/rec500.json")
+START = os.environ.get("START", "19:08")
+d = json.load(open(PATH, encoding="utf-8"))
 tz = zoneinfo.ZoneInfo("Asia/Taipei")
 rows = sorted([(datetime.datetime.fromtimestamp(r["timestamp"], tz), r) for r in d["records"]], key=lambda x: x[0])
-start = datetime.datetime(2026, 11, 3, 19, 8, tzinfo=tz)
+_h, _m = (int(x) for x in START.split(":"))
+start = datetime.datetime(2026, 11, 3, _h, _m, tzinfo=tz)
 gid = -1001
 sent = []          # (time, name, text)
 w._recent_texts_by_group[gid] = []

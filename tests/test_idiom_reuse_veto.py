@@ -104,6 +104,19 @@ def test_half_function_bigram_alone_does_not_veto():
     ) == ""
 
 
+def test_vetoes_idiom_that_contains_function_chars():
+    """「出一張嘴」夾了虛字，雙字全被濾掉，靠整段三字重疊抓。"""
+    w = _worker()
+    gid = -1001
+    w._recent_texts_by_group[gid] = [
+        "華哥只會出一張嘴，真讓你上你撐不到十分鐘",
+        "舔這麼久是在品嚐還是在找東西啊，技術這麼差難怪只能出一張嘴",
+    ]
+    assert w._local_veto(
+        "只會出一張嘴的咖，真的上場三分鐘就收工", [], "", gid
+    )
+
+
 def test_allows_line_that_only_shares_function_words():
     w = _worker()
     own = ["只會挑粉的，是技術太爛不敢挑戰多汁熟女的小穴嗎"]
