@@ -262,3 +262,63 @@ def test_ordinary_reply_spacing_cooldown():
 
   asyncio.run(main())
 
+
+
+def test_hot_field_budget_scales_and_stale_override():
+  """熱場額度隨真人密度放大；水軍潛水過久要能強制回場。
+
+  實測 11-03 21:41→21:55 群裡 40 則男群友自聊、水軍 14 分半完全沒出聲。
+  """
+  import time
+
+  worker = _test_worker()
+  worker.tg_user_id = 123
+  event = SimpleNamespace(
+      chat_id=-1001,
+      id=45,  # hash 落點 0.028，熱場 0.15 機率下穩定放行
+      sender_id=999,
+      is_reply=False,
+      mentioned=False,
+      raw_text="我18公分不含頭",
+  )
+  worker.db.get_runtime_setting = AsyncMock(return_value="1.0")
+
+  # 45 則/5 分鐘的熱場，額度已經吃到 2（舊版固定 2 就死在這裡）
+  worker.db.interaction_pressure = AsyncMock(
+      return_value={
+          "human_5m": 45,
+          "human_sent_5m": 1,
+          "ordinary_claimed_5m": 2,
+          "ordinary_claimed_20s": 0,
+          "ordinary_claimed_10m": 2,
+      }
+  )
+
+  async def main():
+    worker.db.group_bot_last_spoke = AsyncMock(
+        return_value={456: time.time() - 120.0}
+    )
+    assert await worker._ordinary_reply_allowed(event) is True
+
+    # 潛水 7 分鐘：額度滿、20 秒鎖踩著也要放行（回場）
+    worker.db.interaction_pressure = AsyncMock(
+        return_value={
+            "human_5m": 45,
+            "human_sent_5m": 1,
+            "ordinary_claimed_5m": 4,
+            "ordinary_claimed_20s": 1,
+            "ordinary_claimed_10m": 4,
+        }
+    )
+    worker.db.group_bot_last_spoke = AsyncMock(
+        return_value={456: time.time() - 420.0}
+    )
+    assert await worker._ordinary_reply_allowed(event) is True
+
+    # 只潛水 2 分鐘 → 額度滿就繼續讓路
+    worker.db.group_bot_last_spoke = AsyncMock(
+        return_value={456: time.time() - 120.0}
+    )
+    assert await worker._ordinary_reply_allowed(event) is False
+
+  asyncio.run(main())

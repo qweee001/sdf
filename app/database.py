@@ -33,6 +33,16 @@ _FIXED_LIVE_TEST_EVENT_CAP = 40
 _FIXED_LIVE_TEST_SCHEDULE_SIZE = 30
 
 
+def hot_budget(human_5m: int) -> int:
+    """熱場 5 分鐘發言額度：真人越兇放越寬（2→5），避免越熱越隱形。"""
+    return 2 + min(3, max(0, int(human_5m)) // 20)
+
+
+def hot_claim_window(human_5m: int) -> int:
+    """熱場群級鎖秒數：極熱（≥30 則/5 分）縮到 12 秒，讓不同帳號輪流露臉。"""
+    return 12 if int(human_5m) >= 30 else 20
+
+
 class Database:
     """資料層 - 簡化 schema，按帳號/群組存記憶，按群組限流防膨脹"""
 
@@ -1635,14 +1645,36 @@ class Database:
                         "COUNT(*) AS n10 "
                         "FROM reply_events WHERE group_id = ? "
                         "AND stage = 'claimed' AND reason = 'human' AND at >= ?",
-                        (now - 20, now - 300, int(group_id), now - 600),
+                        (now - hot_claim_window(human_5m), now - 300, int(group_id), now - 600),
                     )
                     claim_row = await claim_cursor.fetchone()
                     claimed_20s = int((claim_row["n20"] if claim_row else 0) or 0)
                     claimed_5m = int((claim_row["n5"] if claim_row else 0) or 0)
                     claimed_10m = int((claim_row["n10"] if claim_row else 0) or 0)
-                    if claimed_10m >= 8 or (
-                        human_5m >= 14 and (claimed_20s >= 1 or claimed_5m >= 2)
+                    # 回場保底：群很熱但水軍已潛水 ≥6 分鐘 → 本次不受熱場預算限制。
+                    # 真人女生不會在男人狂比尺寸時整段閉嘴，固定上限會讓越熱越隱形。
+                    last_sent_cursor = await event_db.execute(
+                        "SELECT MAX(at) AS last_at FROM reply_events "
+                        "WHERE group_id = ? AND stage = 'sent'",
+                        (int(group_id),),
+                    )
+                    last_sent_row = await last_sent_cursor.fetchone()
+                    last_sent = float((last_sent_row["last_at"] if last_sent_row else 0) or 0)
+                    stale = (
+                        human_5m >= 14
+                        and last_sent > 0
+                        and now - last_sent >= 360
+                    )
+                    if stale:
+                        if claimed_10m >= 12:
+                            await event_db.rollback()
+                            return False
+                    elif claimed_10m >= 8 or (
+                        human_5m >= 14
+                        and (
+                            claimed_20s >= 1
+                            or claimed_5m >= hot_budget(human_5m)
+                        )
                     ):
                         await event_db.rollback()
                         return False

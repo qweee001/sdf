@@ -57,6 +57,7 @@ from telethon.tl.types import (
 from telethon.utils import get_display_name
 
 from .decision import DecisionError, system_one
+from .database import hot_budget
 from .media import MediaAsset, OrcaMediaService
 from .persona import (
     generate_persona,
@@ -345,6 +346,8 @@ _PLACE_QUESTION_MARKS = (
 # 被質疑真人時甩語音條自證的機率（80%＝四則裡三則直接語音打臉）
 _VOICE_VERIFY_PROBABILITY = 0.80
 _HIGH_TRAFFIC_HUMANS_5M = 14
+# 熱場額度不再固定：改由 database.hot_budget() 依真人密度縮放（2→5），
+# 這裡留基準值給測試與文件對照。
 _HIGH_TRAFFIC_MAX_ORDINARY_5M = 2
 _MAX_ORDINARY_CLAIMS_10M = 8
 
@@ -1727,8 +1730,18 @@ class AccountWorker:
                 int(pressure.get("human_sent_5m", 0) or 0),
                 int(pressure.get("ordinary_claimed_5m", 0) or 0),
             )
-            if (
-                already_5m >= _HIGH_TRAFFIC_MAX_ORDINARY_5M
+            # 回場保底與熱度縮放要和 admit_ordinary_reply 的原子判斷一致，
+            # 否則這裡先擋掉，後面的放寬額度永遠吃不到。
+            stale = False
+            try:
+                spoke = await self.db.group_bot_last_spoke(group_id)
+                if spoke:
+                    last_any_bot = max(float(t or 0.0) for t in spoke.values())
+                    stale = time.time() - last_any_bot >= 360.0
+            except Exception:
+                pass
+            if not stale and (
+                already_5m >= hot_budget(human_5m)
                 or int(pressure.get("ordinary_claimed_20s", 0) or 0) >= 1
             ):
                 return False
@@ -3754,6 +3767,7 @@ class AccountWorker:
             "而候選發言仍在繼續情色起鬨、點名群友約砲或延續剛才的葷話題，issue 判定為 \"offtopic\"，sendable 壓到 0.2 以下，"
             "reason 寫「群組已宣布散場，真人在這時候不會再接著起鬨」。這種情況只允許簡短道晚安或直接不發。\n"
             "8. 【事實一致性】：問候語要對得上當前時段（深夜不可能說早安），自稱性別要符合角色設定（女角色不會說自己有前女友或自己有肉棒），"
+            "自稱也要對得上年齡（二十出頭自稱「姊姊」是裝熟，三十幾歲自稱「妹妹」是裝嫩），"
             "地點與生活設定不能自相矛盾。違反者 issue 判 \"contradict\"，sendable 低於 0.3。\n"
             "9. 【約砲群組頂格色誘】：凡自然符合人設的台灣在地真實生活碎念、大膽直球性張力、挑釁男人尺寸與體力、騷浪性感勾引、床技與感官描摹，發騷發得極致自然，issue 必須為 \"none\"，sendable 應在 0.90~1.0 之間！"
         )
@@ -7203,13 +7217,19 @@ class AccountWorker:
                     latest_row = None
                 if not await self._proactive_rotation_ok(group_id, latest_row):
                     continue
+                hot_join = False
                 if self._hot_field(group_id):
-                    print(
-                        f"[{self.name}] proactive-skip: group {group_id} 熱場（1 分鐘內真人≥{_HOT_FIELD_HUMAN_MIN}），留給 reply",
-                        flush=True,
-                    )
-                    continue
-                if self._should_suppress_proactive(group_id):
+                    # 熱場不再 100% 讓路：真人越兇、水軍越隱形是反的。
+                    # 保留小概率插話（其餘交給 reply 路徑），其後不再疊加 10 分鐘抑制。
+                    if random.random() >= 0.25:
+                        print(
+                            f"[{self.name}] proactive-skip: group {group_id} 熱場（1 分鐘內真人≥{_HOT_FIELD_HUMAN_MIN}），留給 reply",
+                            flush=True,
+                        )
+                        continue
+                    hot_join = True
+                    print(f"[{self.name}] proactive-join: group {group_id} 熱場中插話（25%）", flush=True)
+                if not hot_join and self._should_suppress_proactive(group_id):
                     # 人類近 10 分鐘有活動：以 70% 讓路、30% 像正常人一樣偶爾插話
                     if random.random() < 0.7:
                         print(f"[{self.name}] proactive-skip: group {group_id} suppressed (recent human activity)", flush=True)
