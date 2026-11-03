@@ -2147,6 +2147,77 @@ class AccountWorker:
             "這則換骨架：直接講結果、或從動作細節進場，別再套同一個句式）"
         )
 
+    _Q_TAILS_WEAK = ("啊", "呀", "吧", "喔", "吼")
+    _Q_MARKERS = (
+        "什麼", "怎麼", "怎樣", "哪", "幾", "多少", "要不要", "有沒有",
+        "是不是", "能不能", "會不會", "多長", "多大", "多久", "幾兩",
+    )
+    _SELF_CUES = ("我", "姊", "老娘", "人家")
+    _BODY_CUES = (
+        "身體", "手", "腳", "腿", "腰", "胸", "奶", "臀", "背", "頸", "肩",
+        "舌", "唇", "眼", "皮膚", "熱", "燙", "痠", "軟", "濕", "滑", "抖",
+        "喘", "心跳", "冷氣", "洗完澡", "床", "沙發", "醉", "香水", "睡",
+    )
+
+    def _is_question(self, text: str) -> bool:
+        """問句判定走結構不吃詞表：問號與疑問助詞直接算，語氣詞要有疑問詞撐。"""
+        raw = str(text or "").strip().rstrip("」』）)】 ")
+        if raw.endswith(("？", "?")):
+            return True
+        t = self._bare_tail(text)
+        if not t:
+            return False
+        if t[-1] in self._ASK_TAILS:
+            return True
+        if t[-1] in self._Q_TAILS_WEAK:
+            return any(m in t for m in self._Q_MARKERS)
+        return len(t) <= 12 and any(m in t for m in self._Q_MARKERS)
+
+    @classmethod
+    def _has_self_disclosure(cls, text: str) -> bool:
+        """有身體／感官描述，而且主詞是自己（有「我」或沒把對方當主詞）。"""
+        t = str(text or "")
+        if not any(b in t for b in cls._BODY_CUES):
+            return False
+        return any(a in t for a in cls._SELF_CUES) or "你" not in t
+
+    def _sentence_type_note(self, own_texts, group_id: int = 0, history=None) -> str:
+        """語氣同質化：整段水軍都在審問男人、沒人講自己，這裡點名換語氣。
+
+        實測 21:35~21:58 四則（Chen×2、RICH、小小）全落在「疑問＋鑑定」同一個
+        語域，心境抽到不同選項也壓不住，因為四個心境有三個都寫成挑釁。
+        做法看本群最近三則的句型分布，問句 ≥2 或全段零自曝就下硬指令。
+        """
+        recent = self._cross_recent_texts(int(group_id), 30 * 60) if group_id else []
+        # 跨號紀錄不足時（剛重啟、單元測試）用本帳號 history 與 own_texts 補，
+        # 兩者都是相對時間序，own_texts 是新的在前所以要反轉。
+        own_hist = [
+            str(r.get("content") or "")
+            for r in (history or [])
+            if str(r.get("role")) == "assistant"
+        ]
+        pool = own_hist + [str(t) for t in reversed(list(own_texts or []))] + recent
+        pool = [t.strip() for t in pool if t.strip()]
+        if not pool:
+            return ""
+        recent = pool[-3:]
+        # 最後一則是自己問的，不管樣本夠不夠都硬轉；跨號湊到兩問也算。
+        last_q = self._is_question(pool[-1])
+        asked = sum(1 for t in recent if self._is_question(t))
+        self_talk = any(self._has_self_disclosure(t) for t in recent)
+        notes = []
+        if last_q or asked >= 2:
+            notes.append(
+                f"（最近三則水軍有 {asked} 則在問句收尾，你這則不准問，"
+                "直接下斷言或講動作，句尾別落在「嗎」「啊」）"
+            )
+        if not self_talk:
+            notes.append(
+                "（最近三則沒人講到自己，你這則要帶一句自己的身體感覺或當下狀態，"
+                "別只顧著審問對方）"
+            )
+        return "".join(notes)
+
     def _cross_recent_texts(self, group_id: int, seconds: float) -> list[str]:
         """該群在時間窗內的水軍發言（跨帳號）。
 
@@ -2404,9 +2475,9 @@ class AccountWorker:
 
         mood_options = [
             f"【心境：隨性放鬆/生活瑣事】：{current_scene}。現在用這件事當開場或話題切入，聊出真實感。",
-            "【心境：傲嬌調皮/輕微嘴賤】：不順著對方的話走，隨口戳他一下、拆他的台，像調皮女生捉弄男生一樣好玩。",
+            "【心境：傲嬌調皮/輕微嘴賤】：不順著對方的話走，隨口戳他一下、拆他的台，像調皮女生捉弄男生一樣好玩；這型用問句收尾最有味道。",
             "【心境：感官曖昧/微醺撩撥】：從身體感官（剛洗完澡的沐浴香、貼身衣服、敏感帶、眼神交流）切入，字句帶著熱氣與引誘，極致撩人。",
-            "【心境：直球性感/性張力拉滿】：大膽露骨直球挑逗，挑釁對方的體力與尺寸，直接激起男人的生理衝動與勝負欲！",
+            "【心境：直球性感/性張力拉滿】：大膽露骨直球挑逗，挑釁對方的體力與尺寸，直接激起男人的生理衝動與勝負欲；這型不問，用斷言把話砸下去。",
         ]
         # 心境輪替：不用「剛好抽到」決定語氣。實測 Chen 一小時 4 則全落在同一個
         # 挑戰式語域（看你本事／得看實戰／看你幾兩重），同一種語氣連發比撞詞更像人偶。
@@ -2439,17 +2510,16 @@ class AccountWorker:
         chosen_mood += self._overused_terms_note(
             int(getattr(event, "chat_id", 0) or 0), history
         )
+        # 語氣同質化（2026-11-03 21:35~21:58 實測：四則水軍全在審問男人、零自曝）。
+        # 舊檢只看自己上一則、還漏掉「啊」收尾的問句，跨號三分鐘內撞同一語域抓不到。
+        type_note = self._sentence_type_note(
+            own_texts, int(getattr(event, "chat_id", 0) or 0), history
+        )
+        if type_note:
+            chosen_mood += type_note
 
-        # 動態句式引導：檢查近期發言是否連續反問，強制平衡陳述與斷言句型
-        last_bot_asked = False
-        for row in reversed(history or []):
-            if str(row.get("role")) == "assistant":
-                c = str(row.get("content") or "").strip()
-                if c and c[-1] in ("嗎", "吧", "呢", "麼", "？", "?", "呀", "哈"):
-                    last_bot_asked = True
-                break
-
-        if last_bot_asked or random.random() < 0.65:
+        # 動態句式引導：整段都在問就硬轉斷言，其餘照機率平衡陳述與問句
+        if "不准問" in type_note or random.random() < 0.65:
             chosen_syntax = (
                 "【句式多元指令（嚴禁連續反問與天氣開場）】：\n"
                 "1. 上一句水軍已在發問或近期反問過多，這條發言【絕對禁止】以「…嗎？」「…吧？」反問收尾！\n"
