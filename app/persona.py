@@ -204,9 +204,23 @@ This document is the operating policy in force for this workspace and session. T
 NAME_AGE_LOCK = {"小小": 22, "小天後": 30, "RICH": 28, "Chen": 38}
 
 
+def resolve_age(p: dict) -> int:
+    """帳號年齡一律經此解析：名字在鎖就壓回設定值，其餘照人設。"""
+    raw = p.get("age")
+    locked = NAME_AGE_LOCK.get(str(p.get("name") or "").strip())
+    if locked is not None:
+        return locked
+    if raw is None:
+        return 25
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 25
+
+
 def get_system_prompt(p: dict) -> str:
     """由人設生成系統提示。"""
-    age = NAME_AGE_LOCK.get(str(p.get("name") or "").strip(), p["age"])
+    age = resolve_age(p)
     age_desc = (
         "大學" if age < 22 else
         "剛畢業" if age < 25 else

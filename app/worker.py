@@ -61,6 +61,7 @@ from .media import MediaAsset, OrcaMediaService
 from .persona import (
     generate_persona,
     get_system_prompt,
+    resolve_age,
 )
 
 from . import text_guard
@@ -1999,14 +2000,21 @@ class AccountWorker:
             if str(r.get("role")) == "assistant" and str(r.get("sender_name") or "") == name
         ][-n:]
 
-    def _pick_life_anchor(self, anchors: list, name: str, history, own_texts=None) -> str:
+    def _pick_life_anchor(
+        self, anchors: list, name: str, history, own_texts=None, prefer_solo: bool = False
+    ) -> str:
         """動態場景去重：同一個帳號不連兩則用同一個生活場景（不靠黑名單）。
 
         anchors 每條是（場景標籤, 場景字串）。先看本帳號近期發言有沒有踩到同一標籤
         （店裡、站櫃這種工作場景最容易被模型照抄），再用字面重疊率當次要訊號，
         取最低分的一組再隨機——剛講過的場景自動排到後面，加新場景只要多寫一條。
         own_texts 是 DB 取回的本人近期發言（新到舊）；沒有才退回對話窗。
+        prefer_solo＝只從「自｜」開頭（純自曝、不提男人）的場景挑，整段沒人講自己時用。
         """
+        if prefer_solo:
+            solo = [a for a in anchors if str(a[0]).startswith("自｜")]
+            if solo:
+                anchors = solo
         if own_texts:
             recent = " ".join(str(t) for t in own_texts).strip()
         else:
@@ -2181,13 +2189,8 @@ class AccountWorker:
             return False
         return any(a in t for a in cls._SELF_CUES) or "你" not in t
 
-    def _sentence_type_note(self, own_texts, group_id: int = 0, history=None) -> str:
-        """語氣同質化：整段水軍都在審問男人、沒人講自己，這裡點名換語氣。
-
-        實測 21:35~21:58 四則（Chen×2、RICH、小小）全落在「疑問＋鑑定」同一個
-        語域，心境抽到不同選項也壓不住，因為四個心境有三個都寫成挑釁。
-        做法看本群最近三則的句型分布，問句 ≥2 或全段零自曝就下硬指令。
-        """
+    def _recent_bot_pool(self, own_texts, group_id: int = 0, history=None) -> list[str]:
+        """最近的水軍發言（跨號優先，樣本不足用本帳號歷史補），只取最後三則。"""
         recent = self._cross_recent_texts(int(group_id), 30 * 60) if group_id else []
         # 跨號紀錄不足時（剛重啟、單元測試）用本帳號 history 與 own_texts 補，
         # 兩者都是相對時間序，own_texts 是新的在前所以要反轉。
@@ -2198,11 +2201,20 @@ class AccountWorker:
         ]
         pool = own_hist + [str(t) for t in reversed(list(own_texts or []))] + recent
         pool = [t.strip() for t in pool if t.strip()]
-        if not pool:
+        return pool[-3:]
+
+    def _sentence_type_note(self, own_texts, group_id: int = 0, history=None) -> str:
+        """語氣同質化：整段水軍都在審問男人、沒人講自己，這裡點名換語氣。
+
+        實測 21:35~21:58 四則（Chen×2、RICH、小小）全落在「疑問＋鑑定」同一個
+        語域，心境抽到不同選項也壓不住，因為四個心境有三個都寫成挑釁。
+        做法看本群最近三則的句型分布，問句 ≥2 或全段零自曝就下硬指令。
+        """
+        recent = self._recent_bot_pool(own_texts, group_id, history)
+        if not recent:
             return ""
-        recent = pool[-3:]
         # 最後一則是自己問的，不管樣本夠不夠都硬轉；跨號湊到兩問也算。
-        last_q = self._is_question(pool[-1])
+        last_q = self._is_question(recent[-1])
         asked = sum(1 for t in recent if self._is_question(t))
         self_talk = any(self._has_self_disclosure(t) for t in recent)
         notes = []
@@ -2446,13 +2458,16 @@ class AccountWorker:
                 ("跑業務", "「剛跑完業務回到家累死，脫掉高跟鞋和絲襪，只想找個體力好的大氣哥哥來幫我全身按摩」"),
                 ("試穿", "「剛剛在試穿新買的蕾絲丁字褲，勒得好緊好刺激，真想拍給懂欣賞的男人看」"),
                 ("酒吧", "「週末好想去酒吧喝一杯，小妹子喝了酒最不設防，哪個哥哥要帶我走」"),
+                # 純自曝：整句不提男人、不用問句，用來壓「每則都在找男人」的單一形狀
+                ("自｜追劇", "「關燈窩在棉被裡追劇追到出神，冷氣太強腳都冰了，只好自己把腿縮起來夾著」"),
             ],
             "小天後": [
                 # 30歲慵懶傲嬌櫃姐：三重夜貓、專治吹牛、嘴賤挑釁、求被伺候
                 ("站櫃", "「站櫃站了一整天，腳底板和小腿超痠，好想有個耐操的男人把我按在沙發上狠狠揉捏」"),
-                ("櫃上", "「剛剛櫃上有個奧客吹牛自己多有錢多行，真想看看他到了床上是不是也只會出一張嘴」"),
+                ("櫃上", "「剛剛櫃上有個奧客吹牛自己多有錢多行，真上了床不知道撐不撐得住三分鐘」"),
                 ("更衣室", "「現在休息時間躲在更衣室摸魚，真絲內衣被汗弄得貼在胸口，微喘著只想找男人私聊」"),
                 ("打嘴砲", "「整天看群裡男人打嘴砲，真上場能把我弄到求饒抓破床單的到底有沒有半個」"),
+                ("自｜收攤", "「鐵門拉下來整個人癱在椅子上不想動，腳底板熱到發燙，脫了鞋就著地板散熱」"),
             ],
             "RICH": [
                 # 28歲中壢文靜設計師：台大悶騷、文青微醺、反問勾人、想被霸氣征服
@@ -2460,6 +2475,7 @@ class AccountWorker:
                 ("沙發", "「穿著絲質睡袍縮在沙發上看夜景，腿間熱熱的，好想要個溫柔又霸氣的男人直接把我抱進被窩」"),
                 ("畫圖", "「剛畫完人體線條圖，滿腦子都是被按在牆上親吻撫摸的畫面，誰今晚有種來把我餵飽」"),
                 ("香水", "「今天噴了超撩人的木質調香水，自己聞著都心跳好快，只給今晚敢帶我走的男人聞」"),
+                ("自｜收工", "「存檔關機，螢幕一暗房間就只剩檯燈，安靜到連自己吞口水的聲音都聽得到」"),
             ],
             "Chen": [
                 # 38歲大安熟女服飾店闆娘：家庭冷淡出軌、極致飢渴少婦、專吃年下小狼狗
@@ -2467,9 +2483,16 @@ class AccountWorker:
                 ("瑜珈", "「練完瑜珈全身筋骨都拉開了，筋軟的女人有多好伺候，就看哪個識貨的弟弟有福氣體會」"),
                 ("店裡", "「整理進口蕾絲睡衣，看著鏡子裡的腰身線條，小女生哪懂怎麼讓男人舒服到不想下床」"),
                 ("床", "「空蕩蕩的雙人床好涼，姊姊現在慾火正旺，哪個體能強悍的小狼狗敢進來交作業」"),
+                ("自｜打烊", "「算完今天的帳把計算機推開，指節痠，靠著椅背仰頭發呆，脖子後面一片涼」"),
             ],
         }
         name_key = next((k for k in anchors if k in name), "小小")
+        _gid = int(getattr(event, "chat_id", 0) or 0)
+        # 整段水軍都沒人講到自己時，場景一律從純自曝那條挑（不提男人、不用問句）。
+        need_solo = not any(
+            self._has_self_disclosure(t)
+            for t in self._recent_bot_pool(own_texts, _gid, history)
+        )
         current_scene = self._pick_life_anchor(anchors[name_key], name, history, own_texts)
         own_recent = self._recent_own_scene_note(name, history, own_texts)
 
@@ -2490,6 +2513,14 @@ class AccountWorker:
         pick = random.choice(pool)
         used_moods.append(pick)
         del used_moods[:-3]
+        if pick == 0 and need_solo:
+            current_scene = self._pick_life_anchor(
+                anchors[name_key], name, history, own_texts, prefer_solo=True
+            )
+            mood_options[0] = (
+                f"【心境：隨性放鬆/生活瑣事】：{current_scene}。"
+                "現在用這件事當開場，先把自己的狀態講出來，別急著反問對方。"
+            )
         chosen_mood = mood_options[pick]
         if own_recent:
             chosen_mood += own_recent
@@ -3290,7 +3321,7 @@ class AccountWorker:
         group_id = int(event.chat_id or 0)
         persona = self.persona
         lines = [
-            f"你是 {persona.get('name','?')}，{persona.get('age','?')} 歲，"
+            f"你是 {persona.get('name','?')}，{resolve_age(persona)} 歲，"
             f"住{persona.get('city','?')}，聊天風格：{persona.get('chat_style','?')}。"
         ]
         ctx = getattr(event, "_sdf_ctx", None)
@@ -3677,7 +3708,7 @@ class AccountWorker:
 
         p_name = self.persona.get("name") or self.name
         p_gender = self.persona.get("gender") or "女"
-        p_age = self.persona.get("age") or 25
+        p_age = resolve_age(self.persona)
         p_desc = self.persona.get("personality") or "台灣在地女生"
 
         system_prompt = (
