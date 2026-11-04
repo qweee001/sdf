@@ -9,6 +9,7 @@
 
 from types import SimpleNamespace
 from typing import Any, cast
+import time
 
 from app.worker import AccountWorker
 
@@ -140,3 +141,47 @@ def test_idiom_reuse_ignores_tiny_candidate():
     w = _worker()
     own = ["笑死，這也能吹"]
     assert w._idiom_reuse("真假", own, []) == ""
+
+
+def test_idiom_veto_survives_function_char_filtering():
+    """「出一張嘴」的雙字全被虛字濾掉時，靠整段三字退（21:58 實例）。"""
+    w = _worker()
+    gid = -1001
+    cross = list(REAL_1954_2010) + [
+        "華哥只會出一張嘴，真讓你上你撐不到十分鐘",
+        "舔這麼久是在品嚐還是在找東西啊，技術這麼差難怪只能出一張嘴",
+    ]  # 20 則以上，字頻才會被判成虛字
+    w._recent_texts_by_group[gid] = cross
+    v = w._local_veto(
+        "出一張嘴誰不會，有種讓姊姊鑑定一下長短啊", [], "", gid
+    )
+    assert v
+    assert "一張" in v or "出一" in v or "張嘴" in v
+
+
+def test_burst_echo_drops_second_bubble_within_8s():
+    w = _worker()
+    gid = -1001
+    w._recent_texts_by_group[gid] = list(REAL_1954_2010)
+    w._own_echo_by_group[gid] = [
+        ("男生M起來比女生還瘋，被踩兩腳就乖乖躺好了", time.time() - 4)
+    ]
+    assert w._burst_echo("華哥被踩還裝無辜，身體早就誠實了", gid)
+
+
+def test_burst_echo_expires_after_8s():
+    w = _worker()
+    gid = -1001
+    w._recent_texts_by_group[gid] = list(REAL_1954_2010)
+    w._own_echo_by_group[gid] = [
+        ("男生M起來比女生還瘋，被踩兩腳就乖乖躺好了", time.time() - 12)
+    ]
+    assert not w._burst_echo("華哥被踩還裝無辜，身體早就誠實了", gid)
+
+
+def test_burst_echo_allows_new_point_within_8s():
+    w = _worker()
+    gid = -1001
+    w._recent_texts_by_group[gid] = list(REAL_1954_2010)
+    w._own_echo_by_group[gid] = [("鮑魚配晚餐，哥哥挺懂吃的嘛", time.time() - 3)]
+    assert not w._burst_echo("黑鮑要夠深才吸得住，就怕你們沒那個長度", gid)

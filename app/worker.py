@@ -185,6 +185,8 @@ _HOT_FIELD_HUMAN_MIN = 3
 # 同號近義複讀：正規化後 10 分鐘內第二句直接 drop（提示擋不住換句式）。
 _OWN_ECHO_WINDOW_SECONDS = 600.0
 _OWN_ECHO_HISTORY_LIMIT = 12
+# 同號秒連發：8 秒內兩則還在講同一個詞＝同一點講兩次（實測 19:54 三則 8 秒全在「被踩」）。
+_BURST_ECHO_SECONDS = 8.0
 # 這個時間窗內有真人講話，才算是「有人可以接話」的場合
 _HUMAN_CONTEXT_WINDOW_SECONDS = 1800.0
 # 意圖識別：先讀懂對方這句話在做什麼，後面的方式與尺度才有依據
@@ -2358,17 +2360,22 @@ class AccountWorker:
 
         # 只有「兩個字都很冷門」的雙字才算同一個慣用語；「哥是」「還是」這種半虛字不算。
         # 三字以上整段重疊（「出一張嘴」這種夾虛字的慣用語）本身就是強訊號。
-        tri = {
-            str(prev)[i:i + 3]
-            for prev in corpus
-            for i in range(len(str(prev)) - 2)
-            if all("一" <= ch <= "鿿" for ch in str(prev)[i:i + 3])
-        }
-        cand_tri = {
-            str(candidate)[i:i + 3]
-            for i in range(len(str(candidate)) - 2)
-            if all("一" <= ch <= "鿿" for ch in str(candidate)[i:i + 3])
-        }
+        def tri_of(text: str) -> set:
+            body = str(text)
+            return {
+                body[i:i + 3]
+                for i in range(len(body) - 2)
+                if all("一" <= ch <= "鿿" for ch in body[i:i + 3])
+            }
+
+        def cold(hits) -> bool:
+            """整段重疊之外還要有一個冷字，否則「我跟你」這種通用三段也會誤殺。"""
+            return any(any(char_df.get(ch, 0) <= 2 for ch in g) for g in hits)
+
+        tri = set()
+        for prev in corpus:
+            tri |= tri_of(prev)
+        cand_tri = tri_of(candidate)
 
         def strong(hit) -> bool:
             if any(char_df.get(g[0], 0) <= 1 and char_df.get(g[1], 0) <= 1 for g in hit):
@@ -2386,16 +2393,27 @@ class AccountWorker:
 
         if own:
             hit = cand & set(grams(own[0]))
+            tri_hit = cand_tri & tri_of(own[0])
             if hit and strong(hit):
                 return f"又跟上一則共用「{top(hit)}」，同一個詞換句話說"
+            if cold(tri_hit):
+                return f"「{sorted(tri_hit)[0]}」跟上一則同一個慣用語，換句話說"
             for prev in own[1:]:
                 hit = cand & set(grams(prev))
+                tri_hit = cand_tri & tri_of(prev)
                 if len(hit) >= 2 and strong(hit):
                     return f"跟前兩則撞了「{top(hit)}」，換個講法"
+                if tri_hit and cold(tri_hit):
+                    return f"跟前兩則撞了「{sorted(tri_hit)[0]}」，換個講法"
         for prev in cross:
             hit = cand & set(grams(prev))
+            tri_hit = cand_tri & tri_of(prev)
             if len(hit) >= 2 and strong(hit):
                 return f"別人也剛用過「{top(hit)}」，別跟著講"
+            # 複合慣用語（「出一張嘴」）的雙字會被虛字濾掉剩一個，靠整段三字直接退，
+            # 不再要求先湊滿兩個雙字——實測這條是唯一能擋住它一天講四次的路。
+            if tri_hit and cold(tri_hit):
+                return f"別人也剛用過「{sorted(tri_hit)[0]}」，別跟著講"
         return ""
 
     def _echo_note(self, last_human: str) -> str:
@@ -5403,7 +5421,9 @@ class AccountWorker:
         reply, _ = text_guard.instant_word_fix(reply)
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)
-        own_echo = self._is_own_echo(reply, self._own_echo_recent(group_id))
+        own_echo = self._is_own_echo(
+            reply, self._own_echo_recent(group_id)
+        ) or self._burst_echo(reply, group_id)
         too_long = len(reply) > char_cap
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
@@ -5493,7 +5513,9 @@ class AccountWorker:
         retry_too_long = len(retry) > char_cap
         retry_format_leak = self._has_format_leak(retry)
         retry_refusal = self._is_refusal(retry)
-        retry_own_echo = self._is_own_echo(retry, self._own_echo_recent(group_id))
+        retry_own_echo = self._is_own_echo(
+            retry, self._own_echo_recent(group_id)
+        ) or self._burst_echo(retry, group_id)
         retry_time_mismatch = self._has_time_mismatch(retry, greetings_only=True)
         retry_gender_term = bool(self._gender_term_violation(retry))
         retry_simplified = self._has_simplified_chars(retry)
@@ -6755,6 +6777,29 @@ class AccountWorker:
         if len(live) != len(bucket):
             self._own_echo_by_group[gid] = live
         return [body for body, _ts in live]
+
+    def _burst_echo(self, candidate: str, group_id: int) -> bool:
+        """同一帳號 8 秒內連發，第二則還在同一個詞上打轉＝同一點講兩次。
+
+        `is_own_echo` 認的是整句近義複讀，換皮重講會漏；而秒連發根本沒有時間讓
+        裁判或多輪重寫發揮（實測 Chen 19:54:16/20/24 三則 8 秒全在「被踩」）。
+        這裡只比對上一個氣泡，共用一個非虛字雙字就壓掉，其餘照發。
+        """
+        bucket = self._own_echo_by_group.get(int(group_id)) or []
+        if not bucket:
+            return False
+        prev, ts = bucket[-1]
+        if time.time() - ts > _BURST_ECHO_SECONDS:
+            return False
+        corpus = (self._recent_texts_by_group.get(int(group_id)) or [])[-40:]
+        grams, _stop = self._content_bigrams(corpus)
+        shared = set(grams(candidate)) & set(grams(prev))
+        if not shared:
+            return False
+        for g in shared:
+            print(f"[{self.name}] burst-echo: 「{g}」8 秒內重講 {str(candidate)[:18]!r}", flush=True)
+            return True
+        return False
 
     def _live_shared_cores(self, group_id: int) -> list[str]:
         """同群冷卻窗內還有效的跨號核心詞（過期的當場清掉）。"""
