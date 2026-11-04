@@ -107,6 +107,22 @@ def test_line_with_body_cue_is_not_press_box():
     assert not AccountWorker._is_press_box("只要在床上體力好把人按著幹到腿軟")
 
 
+def test_scene_state_counts_as_self_disclosure():
+    """「趁我還在辦公室摸魚」有場景、有「我」，只是沒有身體字——不能判成播報，
+    否則場景錨點寫了照樣被退，白燒一次重寫。"""
+    assert not AccountWorker._is_press_box(
+        "她不想吃雞雞我倒是很想吃，趁我還在辦公室摸魚，哪個哥哥下班要帶來餵飽我的嘴🤣"
+    )
+    assert not AccountWorker._is_press_box("我剛收攤，鐵門拉下來整個人癱在椅子上")
+
+
+def test_report_line_stays_press_box():
+    """18:00 前後實測：整句只有別人的動作＋一句評語。"""
+    assert AccountWorker._is_press_box("尿到鍋裡也太噁了吧，方sir是喝多少")
+    assert AccountWorker._is_press_box("萬哥這麼聽話，叫他往後就往後，對我也沒這麼乖過")
+    assert AccountWorker._is_press_box("森森是誰啊，突然一堆人誇他厲害")
+
+
 # ---- 密度判定 ------------------------------------------------------------
 
 def test_two_of_last_four_is_press_box():
@@ -185,6 +201,50 @@ def test_no_retry_without_pressure():
     w = _worker()
     _sent(w, "剛伸懶腰腰好痠", "床好涼腿夾著", "腳都冰了", "整理睡衣腰好酸")
     assert not w._needs_echo_retry(-1001, "這邏輯我服")
+
+
+# ---- 主動發言路徑（這一群幾乎全靠主動，回覆只有一則） -------------------
+
+def _stub_pick(w: AccountWorker, result: str, calls: list[Any]) -> None:
+    async def fake(*_a, **_k):
+        calls.append(1)
+        return result
+
+    w._pick_passing_candidate = fake  # type: ignore[assignment]
+
+
+def test_proactive_rewrite_replaces_press_line():
+    import asyncio
+
+    w = _worker()
+    _sent(w, "打成蛋餅是怎樣", "娶人妻這麼刺激", "鈴鐺是要休幾天", "體力好腿軟")
+    calls: list[Any] = []
+    _stub_pick(w, "剛收攤腳底板發燙，脫了鞋踩地板散熱", calls)
+    out = asyncio.run(
+        w._proactive_echo_rewrite(-1001, "這邏輯我服", "", [], "")
+    )
+    assert out == "剛收攤腳底板發燙，脫了鞋踩地板散熱"
+    assert calls and w.stats["proactive_echo_rewrite"] == 1
+
+
+def test_proactive_rewrite_skips_without_pressure():
+    import asyncio
+
+    w = _worker()
+    _sent(w, "剛伸懶腰腰好痠", "床好涼腿夾著", "腳都冰了", "整理睡衣腰好酸")
+    calls: list[Any] = []
+    _stub_pick(w, "不該被用到", calls)
+    assert asyncio.run(w._proactive_echo_rewrite(-1001, "這邏輯我服", "", [], "")) == ""
+    assert not calls
+
+
+def test_proactive_rewrite_falls_back_to_original_when_rewrite_fails():
+    import asyncio
+
+    w = _worker()
+    _sent(w, "打成蛋餅是怎樣", "娶人妻這麼刺激", "鈴鐺是要休幾天", "體力好腿軟")
+    _stub_pick(w, "", [])
+    assert asyncio.run(w._proactive_echo_rewrite(-1001, "這邏輯我服", "", [], "")) == ""
 
 
 # ---- 併進導演指令 --------------------------------------------------------

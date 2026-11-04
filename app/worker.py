@@ -2315,6 +2315,9 @@ class AccountWorker:
         "是不是", "能不能", "會不會", "多長", "多大", "多久", "幾兩",
     )
     _SELF_CUES = ("我", "姊", "老娘", "人家")
+    # 自己在幹嘛的狀態句：有場景但沒身體字（「趁我還在辦公室摸魚」）也是自曝，
+    # 否則場景錨點寫了照樣被判播報，白觸發一次重寫。
+    _SELF_STATE = ("我在", "我還在", "我剛", "我正", "我現在", "我才", "等我", "我等等", "我晚點")
     _BODY_CUES = (
         "身體", "手", "腳", "腿", "腰", "胸", "奶", "臀", "背", "頸", "肩",
         "舌", "唇", "眼", "皮膚", "熱", "燙", "痠", "軟", "濕", "滑", "抖",
@@ -2339,6 +2342,8 @@ class AccountWorker:
     def _has_self_disclosure(cls, text: str) -> bool:
         """有身體／感官描述，而且主詞是自己（有「我」或沒把對方當主詞）。"""
         t = str(text or "")
+        if any(p in t for p in cls._SELF_STATE):
+            return True
         if not any(b in t for b in cls._BODY_CUES):
             return False
         return any(a in t for a in cls._SELF_CUES) or "你" not in t
@@ -7788,6 +7793,42 @@ class AccountWorker:
         return ""
 
 
+    async def _proactive_echo_rewrite(
+        self,
+        group_id: int,
+        topic: str,
+        context: str,
+        own_texts: list[str],
+        last_human: str,
+    ) -> str:
+        """主動發言落在播報腔時換一版；重寫不成回 ""，呼叫端照原樣發。
+
+        回覆路徑的 echo-retry 在這一群幾乎跑不到（一小時十五則有十四則是主動，
+        回覆只一則、42 次被真人插話取消），所以主動發言要自己有一道。
+        """
+        if self._echo_shape_hits(group_id) < _ECHO_SHAPE_HITS:
+            return ""
+        self.stats["proactive_echo_rewrite"] = (
+            int(self.stats.get("proactive_echo_rewrite", 0)) + 1
+        )
+        print(f"[{self.name}] proactive-echo-rewrite: 整段在播報 {topic[:20]!r}", flush=True)
+        picked = await self._pick_passing_candidate(
+            context,
+            "",
+            "上一版整句都在講別人的事、自己身上一句都沒講，只像場邊播報。"
+            "這版別複述別人的哏、別提人名，先用你自己此刻正在做的一件事開場，"
+            "順手帶到身體感覺。",
+            lambda hint: self._generate_context_topic(group_id, extra_hint=hint),
+            recent_bots=await self._recent_bot_lines(group_id),
+            own_texts=own_texts,
+            last_human=last_human,
+            group_id=group_id,
+            limit=2,
+        )
+        if picked:
+            self._mark_echo_if_any(group_id, picked, last_human)
+        return picked
+
     async def _proactive_loop(self):
         while self.is_running:
             try:
@@ -7979,6 +8020,16 @@ class AccountWorker:
                                 )
                                 print(f"[{self.name}] proactive-gate-hold: 換策略重寫仍不合格，這輪不發", flush=True)
                                 continue
+                            topic = picked
+                    # 播報腔：主動發言是這一群的主體（一小時十五則有十四則是主動，
+                    # 回覆只一則，42 次被真人插話取消），所以回覆路徑那套 echo-retry
+                    # 幾乎跑不到，17:38~18:00 十則有九則只補一句評語照樣發出去。
+                    # 這裡判到就真的換一版；重寫仍不成才照原樣發，不讓冷場更空。
+                    if self._decision_enabled() and self._is_press_box(topic):
+                        picked = await self._proactive_echo_rewrite(
+                            int(group_id), topic, context, own_texts_p, last_human_p
+                        )
+                        if picked:
                             topic = picked
                     # 用字檢查層：跟回覆路徑同一套（對照表＋決策層，命中重寫一次再驗）
                     topic = await self._typo_gate(
