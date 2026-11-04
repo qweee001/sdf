@@ -5687,6 +5687,8 @@ class AccountWorker:
             reply, self._own_echo_recent(group_id)
         ) or self._burst_echo(reply, group_id)
         tic_hit = self._own_tic_hit(reply, group_id)
+        if tic_hit:
+            print(f"[{self.name}] tic: {tic_hit} → {reply[:24]!r}", flush=True)
         too_long = len(reply) > char_cap
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
