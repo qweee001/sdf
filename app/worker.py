@@ -2474,6 +2474,17 @@ class AccountWorker:
             1 for t in recent if (gid, t) in _ECHO_MARKS or self._is_press_box(t)
         )
 
+    def _needs_echo_retry(self, group_id: int, text: str) -> bool:
+        """整段都在播報、這則又只補一句評語 → 還是一次重寫機會。
+
+        提示寫在指令裡不一定照做（16:55 RICH「養貓可以，但你這隻會不會太黏人」
+        就是收到提示仍寫成旁觀），所以判到就真的重生成一版。
+        """
+        return (
+            self._echo_shape_hits(group_id) >= _ECHO_SHAPE_HITS
+            and self._is_press_box(text)
+        )
+
     def _echo_shape_note(self, group_id: int) -> str:
         """整段都在複述別人的哏：這則改成自曝開場，否則四號只是場邊主播。"""
         hits = self._echo_shape_hits(group_id)
@@ -4330,6 +4341,31 @@ class AccountWorker:
                 self._mark_echo_if_any(group_id, picked, echo_humans)
                 return picked
             return ""
+        if self._needs_echo_retry(group_id, text):
+            self.stats["echo_rewrite"] = int(self.stats.get("echo_rewrite", 0)) + 1
+            print(f"[{self.name}] echo-retry: 整段在播報 {text[:20]!r}", flush=True)
+            picked = await self._pick_passing_candidate(
+                context,
+                directive,
+                "上一版整句都在講別人的事、自己身上一句都沒講，只像場邊播報。"
+                "這版別複述別人的哏、別提人名，先用你自己此刻在做的一件事開場，"
+                "順手帶到身體感覺。",
+                lambda hint: self._generate_reply(event, extra_hint=hint),
+                recent_bots=recent_bots,
+                own_texts=own_texts,
+                last_human=last_human,
+                group_id=group_id,
+                limit=_GATE_CANDIDATE_LIMIT,
+                sister_recent=sister_recent,
+                strict=strict,
+            )
+            if picked:
+                self.stats["gate_pass_after_rewrite"] = (
+                    int(self.stats.get("gate_pass_after_rewrite", 0)) + 1
+                )
+                self._burst_register(group_id, picked)
+                self._mark_echo_if_any(group_id, picked, echo_humans)
+                return picked
         review = await self._review_candidate(
             context, text, directive, recent_bots, last_human, sister_recent
         )

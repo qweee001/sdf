@@ -174,6 +174,19 @@ def test_marked_line_counts_even_with_body_cue():
     assert w._echo_shape_hits(-1001) == 1
 
 
+def test_needs_retry_only_when_press_box_pressure():
+    w = _worker()
+    _sent(w, "打成蛋餅是怎樣", "娶人妻這麼刺激", "鈴鐺要休幾天", "體力好腿軟")
+    assert w._needs_echo_retry(-1001, "這邏輯我服")
+    assert not w._needs_echo_retry(-1001, "剛伸懶腰裙子往上縮")
+
+
+def test_no_retry_without_pressure():
+    w = _worker()
+    _sent(w, "剛伸懶腰腰好痠", "床好涼腿夾著", "腳都冰了", "整理睡衣腰好酸")
+    assert not w._needs_echo_retry(-1001, "這邏輯我服")
+
+
 # ---- 併進導演指令 --------------------------------------------------------
 
 def test_directors_note_forces_scene_when_press_box():
