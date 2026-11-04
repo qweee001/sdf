@@ -134,6 +134,15 @@ _PENDING_BURST_SECONDS = 30.0
 # 開頭直接搬真人剛講的幾個字（「想試一下？」抄「你想試一下嗎」、「打腫了」抄
 # 「昨晚被我打腫了」）＝同一個點的第二個人，比照撞點退回。
 _ECHO_HEAD_LEN = 3
+# 播報腔：四號輪流把真人剛講的哏複述一遍再補一句裁判評語（2026-11-04 15:26~16:24
+# 十四則有十一則是這個形狀），全場只聽得到「你們、這群、人家」聽不到自己。單則
+# 複讀擋得住，四號輪著講就擋不住，所以把「這則是引述起頭」的結果記下來，累積
+# 到一定密度就整則改成自曝開場。標記掛在句子本身，群組隔離、時間淘汰。
+_ECHO_MARK_TTL = 40 * 60
+_ECHO_SHAPE_WINDOW = 30 * 60
+_ECHO_SHAPE_LOOKBACK = 4
+_ECHO_SHAPE_HITS = 2
+_ECHO_MARKS: dict[tuple[int, str], float] = {}
 _SISTER_STRICT_FLOOR = 0.8
 _PHRASE_CORE_HISTORY_LIMIT = 64
 _PHRASE_CORE_STOPWORDS = frozenset({
@@ -2112,15 +2121,30 @@ class AccountWorker:
         實際送出紀錄（跨帳號、不受 30 則對話窗裡水軍只佔兩三則的限制），
         數 2 字詞文件頻率：先由字元頻率自動推虛字剔除，剩下的實詞只要跨句重複
         就列進提示，抓前 6 個叫它換講法。
+
+        另外一種撞不是「密集」而是「隔很久又拿出來用」（14:08 Chen 手搖 →
+        15:39 小天後 又是手搖，91 分鐘）。這種詞在窗內只出現過一次，df 永遠是 1，
+        光看頻率抓不到，所以再列一份「用過但已隔 45 分鐘以上」的詞。
         """
-        texts = [
-            str(t) for t in (self._recent_texts_by_group.get(int(group_id)) or [])
-        ][-20:]
+        gid = int(group_id)
+        texts = [str(t) for t in (self._recent_texts_by_group.get(gid) or [])]
+        stamps = self._recent_texts_at.get(gid) or []
+        now = time.time()
+        # 窗改成看時鐘 2 小時（跨號撞詞實測隔 61~91 分鐘照樣發生，20 則在這一群
+        # 只有半小時）。40 則上限保留，避免長窗變成一大坨。
+        if stamps and len(stamps) == len(texts):
+            pairs = [(t, ts) for t, ts in zip(texts, stamps) if now - ts < 120 * 60]
+            texts = [t for t, _ in pairs]
+            stamps = [ts for _, ts in pairs]
+        else:
+            stamps = [now] * len(texts)
+        texts, stamps = texts[-40:], stamps[-40:]
         if len(texts) < 3:
             texts = [
                 str(r.get("content") or "") for r in (history or [])
                 if str(r.get("role")) == "assistant"
             ][-20:]
+            stamps = [now] * len(texts)
         if len(texts) < 3:
             return ""
         char_df: dict = {}
@@ -2134,17 +2158,32 @@ class AccountWorker:
             if len(texts) >= 6 else set()
         )
         df: dict = {}
-        for body in texts:
+        last: dict = {}
+        for body, ts in zip(texts, stamps):
             for g in {body[i:i + 2] for i in range(len(body) - 1)}:
                 if not g.strip() or not all("一" <= ch <= "鿿" for ch in g):
                     continue
                 if any(ch in stop for ch in g):
                     continue
                 df[g] = df.get(g, 0) + 1
+                last[g] = max(last.get(g, 0.0), ts)
         hot = [g for g, n in sorted(df.items(), key=lambda kv: -kv[1]) if n >= 2][:6]
-        if not hot:
+        # cold 用整句不用詞：只出現過一次的詞拆成雙字反而看不出是哪句，
+        # 攤出原句模型才知道要避開哪個講法。
+        stale = sorted(
+            (now - ts, body) for body, ts in zip(texts, stamps) if now - ts > 45 * 60
+        )
+        parts = []
+        if hot:
+            parts.append(f"近期大家講爛的詞：{'、'.join(hot)}")
+        if stale:
+            # 只帶最近一句舊句：長窗下 stale 幾乎永遠存在，一次列兩句會變雜訊
+            age, body = stale[-1]
+            olds = f"{int(age // 60)} 分鐘前「{body[:14]}」"
+            parts.append(f"已隔很久的舊句：{olds}")
+        if not parts:
             return ""
-        return f"（近期大家講爛的詞：{'、'.join(hot)}，這則換個講法別再撞）"
+        return f"（{'；'.join(parts)}，這則換個講法別再撞）"
 
     def _recent_own_scene_note(self, name: str, history, own_texts=None) -> str:
         """把你最近用過的開場直接攤在眼前，比叫模型「記得換場景」有效。"""
@@ -2304,9 +2343,9 @@ class AccountWorker:
             return False
         return any(a in t for a in cls._SELF_CUES) or "你" not in t
 
-    def _recent_bot_pool(self, own_texts, group_id: int = 0, history=None) -> list[str]:
-        """最近的水軍發言（跨號優先，樣本不足用本帳號歷史補），只取最後三則。"""
-        recent = self._cross_recent_texts(int(group_id), 30 * 60) if group_id else []
+    def _recent_bot_pool(self, own_texts, group_id: int = 0, history=None, n: int = 3) -> list[str]:
+        """最近的水軍發言（跨號優先，樣本不足用本帳號歷史補），取最後 n 則。"""
+        recent = self._cross_recent_texts(int(group_id), 45 * 60) if group_id else []
         # 跨號紀錄不足時（剛重啟、單元測試）用本帳號 history 與 own_texts 補，
         # 兩者都是相對時間序，own_texts 是新的在前所以要反轉。
         own_hist = [
@@ -2316,7 +2355,7 @@ class AccountWorker:
         ]
         pool = own_hist + [str(t) for t in reversed(list(own_texts or []))] + recent
         pool = [t.strip() for t in pool if t.strip()]
-        return pool[-3:]
+        return pool[-max(1, int(n)):]
 
     def _sentence_type_note(self, own_texts, group_id: int = 0, history=None) -> str:
         """語氣同質化：整段水軍都在審問男人、沒人講自己，這裡點名換語氣。
@@ -2324,6 +2363,8 @@ class AccountWorker:
         實測 21:35~21:58 四則（Chen×2、RICH、小小）全落在「疑問＋鑑定」同一個
         語域，心境抽到不同選項也壓不住，因為四個心境有三個都寫成挑釁。
         做法看本群最近三則的句型分布，問句 ≥2 或全段零自曝就下硬指令。
+        自曝看六則不是三則：一小時才十幾則水軍，上一則有自曝就等於接下來三則
+        （約十五分鐘）都免檢查，於是十四則只剩一則講到自己。
         """
         recent = self._recent_bot_pool(own_texts, group_id, history)
         if not recent:
@@ -2331,7 +2372,10 @@ class AccountWorker:
         # 最後一則是自己問的，不管樣本夠不夠都硬轉；跨號湊到兩問也算。
         last_q = self._is_question(recent[-1])
         asked = sum(1 for t in recent if self._is_question(t))
-        self_talk = any(self._has_self_disclosure(t) for t in recent)
+        self_talk = any(
+            self._has_self_disclosure(t)
+            for t in self._recent_bot_pool(own_texts, group_id, history, n=6)
+        )
         notes = []
         if last_q or asked >= 2:
             notes.append(
@@ -2340,7 +2384,7 @@ class AccountWorker:
             )
         if not self_talk:
             notes.append(
-                "（最近三則沒人講到自己，你這則要帶一句自己的身體感覺或當下狀態，"
+                "（最近六則沒人講到自己，你這則要帶一句自己的身體感覺或當下狀態，"
                 "別只顧著審問對方）"
             )
         return "".join(notes)
@@ -2383,6 +2427,62 @@ class AccountWorker:
         return (
             f"（這群最近有人用「{'、'.join(hot[:2])}」開頭，"
             f"你這則別跟人家撞同樣的起頭字）"
+        )
+
+    def _mark_echo_if_any(self, group_id: int, text: str, humans: str) -> None:
+        """這則是靠引述真人起頭的就登記下來，供 _echo_shape_note 累積密度。"""
+        t = str(text or "").strip()
+        if not t or not humans:
+            return
+        if not (
+            self._echo_human_opening(t, humans) or self._verbatim_run(t, humans, 4)
+        ):
+            return
+        gid = int(group_id)
+        now = time.time()
+        _ECHO_MARKS[(gid, t)] = now
+        for key, ts in list(_ECHO_MARKS.items()):
+            if now - ts > _ECHO_MARK_TTL:
+                del _ECHO_MARKS[key]
+
+    @classmethod
+    def _is_press_box(cls, text: str) -> bool:
+        """旁觀播報：整句沒有自己的身體／狀態，只有在講外面的事。
+
+        「打成蛋餅是怎樣」「這群哥哥連男人都要搶」「一個想娶一個想撿現成」——
+        引述別人的哏或摘要別人的立場再補一句評語，主詞全是別人。光比對字面抓不全
+        （這群、一個想娶都不是誰的原話），所以用「有沒有自己」當唯一判準：
+        有身體字就當她有講到自己，沒有就是播報。
+        """
+        t = str(text or "")
+        return bool(t) and not cls._has_self_disclosure(t)
+
+    def _echo_shape_hits(self, group_id: int) -> int:
+        """最近幾則水軍有幾則在講別人的事（引述起頭或整句旁觀）。"""
+        gid = int(group_id)
+        bucket = self._recent_texts_by_group.get(gid) or []
+        stamp = self._recent_texts_at.get(gid) or []
+        if not bucket or len(stamp) != len(bucket):
+            return 0
+        now = time.time()
+        recent = [
+            t for t, ts in zip(bucket, stamp) if now - ts < _ECHO_SHAPE_WINDOW
+        ][-_ECHO_SHAPE_LOOKBACK:]
+        if len(recent) < _ECHO_SHAPE_LOOKBACK:
+            return 0
+        return sum(
+            1 for t in recent if (gid, t) in _ECHO_MARKS or self._is_press_box(t)
+        )
+
+    def _echo_shape_note(self, group_id: int) -> str:
+        """整段都在複述別人的哏：這則改成自曝開場，否則四號只是場邊主播。"""
+        hits = self._echo_shape_hits(group_id)
+        if hits < _ECHO_SHAPE_HITS:
+            return ""
+        return (
+            f"（最近 {_ECHO_SHAPE_LOOKBACK} 則水軍有 {hits} 則都在講別人的事、自己身上"
+            "一句都沒講，再這樣就只是場邊播報；這則別複述別人的哏、別提人名，"
+            "用你自己此刻正在做的一件事開場，順手帶到身體感覺）"
         )
 
     @staticmethod
@@ -2653,8 +2753,10 @@ class AccountWorker:
         # 整段水軍都沒人講到自己時，場景一律從純自曝那條挑（不提男人、不用問句）。
         need_solo = not any(
             self._has_self_disclosure(t)
-            for t in self._recent_bot_pool(own_texts, _gid, history)
+            for t in self._recent_bot_pool(own_texts, _gid, history, n=6)
         )
+        # 播報腔：四則裡有兩則在引述別人的哏，這則不再跟著講，直接回到自己的生活場景
+        echo_pressure = self._echo_shape_hits(_gid) >= _ECHO_SHAPE_HITS
         current_scene = self._pick_life_anchor(anchors[name_key], name, history, own_texts)
         own_recent = self._recent_own_scene_note(name, history, own_texts)
 
@@ -2675,9 +2777,13 @@ class AccountWorker:
         pick = random.choice(pool)
         used_moods.append(pick)
         del used_moods[:-3]
-        if pick == 0 and need_solo:
+        if echo_pressure:
+            # 播報腔優先於心境輪替：這一則一定要有場景，否則又只剩一句評語
+            pick = 0
+            used_moods[-1] = 0
+        if pick == 0 and (need_solo or echo_pressure):
             current_scene = self._pick_life_anchor(
-                anchors[name_key], name, history, own_texts, prefer_solo=True
+                anchors[name_key], name, history, own_texts, prefer_solo=need_solo
             )
             mood_options[0] = (
                 f"【心境：隨性放鬆/生活瑣事】：{current_scene}。"
@@ -2702,6 +2808,9 @@ class AccountWorker:
         echo_note = self._echo_note(last_human)
         if echo_note:
             chosen_mood += echo_note
+        shape_note = self._echo_shape_note(int(getattr(event, "chat_id", 0) or 0))
+        if shape_note:
+            chosen_mood += shape_note
         chosen_mood += self._overused_terms_note(
             int(getattr(event, "chat_id", 0) or 0), history
         )
@@ -4183,18 +4292,21 @@ class AccountWorker:
         # 本機硬性自檢先跑（複讀真人原句／連三問／起手詞再撞），過了才花模型裁判
         own_texts: list[str] = []
         last_human = ""
+        echo_humans = ""
         try:
             own_texts = await self.db.recent_replies_by_name(group_id, self.name, 6)
-            rows = await self.db.get_group_messages(group_id, limit=8)
+            rows = await self.db.get_group_messages(group_id, limit=14)
             # 只給最後一句時，撞的是「再往前一句」就抓不到：11:14:15 方sir「你還是先
             # 保護好自己吧」→ 11:15:22 RICH「保護之前先顧好自己吧」，中間隔了一句別人，
             # 裁判手上沒有方sir 那句就放行了。這裡帶最近三句真人，讓裁判真的比對得到。
             humans = [
                 str(r.get("content") or "")
                 for r in rows
-                if str(r.get("role")) != "assistant" and str(r.get("content") or "").strip()
-            ][-3:]
-            last_human = "\n".join(humans)
+                if str(r["role"]) != "assistant" and str(r.get("content") or "").strip()
+            ]
+            # 引述判定看 12 句（兩分鐘前的哏也可能被搬），裁判提示仍只給最後三句
+            echo_humans = "\n".join(humans[-12:])
+            last_human = "\n".join(humans[-3:])
         except Exception:
             pass
         veto = self._local_veto(text, own_texts, last_human, group_id)
@@ -4215,6 +4327,7 @@ class AccountWorker:
                 strict=strict,
             )
             if picked:
+                self._mark_echo_if_any(group_id, picked, echo_humans)
                 return picked
             return ""
         review = await self._review_candidate(
@@ -4227,6 +4340,7 @@ class AccountWorker:
         if self._review_passes(review, strict):
             self.stats["gate_pass"] = int(self.stats.get("gate_pass", 0)) + 1
             self._burst_register(group_id, text)
+            self._mark_echo_if_any(group_id, text, echo_humans)
             return text
         self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
         label = _DECISION_ISSUE_LABEL.get(review["issue"], review["issue"])
@@ -4255,6 +4369,7 @@ class AccountWorker:
                 int(self.stats.get("gate_pass_after_rewrite", 0)) + 1
             )
             self._burst_register(group_id, picked)
+            self._mark_echo_if_any(group_id, picked, echo_humans)
             return picked
         self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
         print(f"[{self.name}] gate-hold: 換策略重寫仍不合格，暫緩", flush=True)
