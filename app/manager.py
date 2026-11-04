@@ -67,6 +67,9 @@ class AccountManager:
         # 起手詞／慣用語／疲勞詞才真的跨得過帳號邊界。
         self.recent_texts_by_group: dict[int, list[str]] = {}
         self.recent_texts_at: dict[int, list[float]] = {}
+        # 已過閘門、還沒送出的候選（群組 → [(account_id, name, text, ts)]）。
+        # 四號共用，補上打字延遲期間彼此讀不到 DB 的併發空窗。
+        self.pending_burst: dict[int, list[tuple[int, str, str, float]]] = {}
         self.reply_claim_signals: dict[tuple[int, int], asyncio.Event] = {}
         self.failed_reply_claimants: dict[tuple[int, int], set[int]] = {}
         self.group_send_locks: dict[int, asyncio.Lock] = {}
@@ -349,6 +352,8 @@ class AccountManager:
             self.recent_texts_by_group = {}
         if getattr(self, "recent_texts_at", None) is None:
             self.recent_texts_at = {}
+        if getattr(self, "pending_burst", None) is None:
+            self.pending_burst = {}
         self.personas = personas
         display_name = str(acc.get("tg_username") or "").strip()
         if persona and display_name and persona.get("name") != display_name:
@@ -399,6 +404,7 @@ class AccountManager:
             phrase_cores_by_group=self.phrase_cores_by_group,
             recent_texts_by_group=self.recent_texts_by_group,
             recent_texts_at=self.recent_texts_at,
+            pending_burst=self.pending_burst,
             voice_library=self._voice_library,
             outbound_gate=(
                 self.live_test.outbound_gate

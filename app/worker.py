@@ -126,6 +126,14 @@ _SILENT_REJOIN_SECONDS = 600.0
 _SILENT_REJOIN_MIN_GAP = 45.0
 # 併發撞點：同一則真人訊息 15 秒內已有姊妹回過，候選要有明顯新角度才准發。
 _SISTER_BURST_SECONDS = 15.0
+# 併發撞點的真正空窗：另一號的句子要等「打字延遲＋送出成功」才寫進 DB，
+# 兩號同時被喚醒時彼此的閘門都讀不到對方（11:54:13／11:54:17 兩則同時用
+# 「結婚＋老婆」、12:04:33／12:04:46 兩則都吃「舔狗排隊」）。所以閘門一放行
+# 就先在共享記憶登記，讀取時再併進來，不等 DB。
+_PENDING_BURST_SECONDS = 30.0
+# 開頭直接搬真人剛講的幾個字（「想試一下？」抄「你想試一下嗎」、「打腫了」抄
+# 「昨晚被我打腫了」）＝同一個點的第二個人，比照撞點退回。
+_ECHO_HEAD_LEN = 3
 _SISTER_STRICT_FLOOR = 0.8
 _PHRASE_CORE_HISTORY_LIMIT = 64
 _PHRASE_CORE_STOPWORDS = frozenset({
@@ -612,6 +620,7 @@ class AccountWorker:
                  phrase_cores_by_group: dict | None = None,
                  recent_texts_by_group: dict | None = None,
                  recent_texts_at: dict | None = None,
+                 pending_burst: dict | None = None,
                  voice_library: Any | None = None,
                  outbound_gate: Any | None = None,
                  reply_enabled: bool = True,
@@ -714,6 +723,11 @@ class AccountWorker:
         # 與上面同一批句子的時間戳（同索引），供時間窗取用
         self._recent_texts_at: dict[int, list[float]] = (
             recent_texts_at if recent_texts_at is not None else {}
+        )
+        # 閘門已放行、還沒送出的候選（群組 → [(account_id, name, text, ts)]）。
+        # 另一號的句子要等打字延遲＋送出成功才進 DB，這段空窗靠這份共享記憶補。
+        self.pending_burst: dict[int, list[tuple[int, str, str, float]]] = (
+            pending_burst if pending_burst is not None else {}
         )
         # 每帳號最近抽過的心境索引（避免整個小時同一種語氣）
         self._mood_history: dict[str, list[int]] = {}
@@ -2526,6 +2540,14 @@ class AccountWorker:
         prev = [self._bare_tail(t) for t in (own_texts or [])[:1]]
         return any(p and p[-1] in self._ASK_TAILS for p in prev)
 
+    def _echo_human_opening(self, candidate: str, humans: str) -> str:
+        """候選開頭幾個字是否直接從真人最近三句照抄。"""
+        body = str(candidate or "").lstrip(self._OPEN_STRIP)
+        if len(body) < _ECHO_HEAD_LEN or not humans:
+            return ""
+        head = body[:_ECHO_HEAD_LEN]
+        return head if head in str(humans) else ""
+
     def _local_veto(self, candidate: str, own_texts, last_human: str, group_id: int = 0) -> str:
         """生成後的硬性自檢（不叫模型，零成本）：複讀真人／連問／起手詞／慣用詞再撞。
 
@@ -2534,6 +2556,9 @@ class AccountWorker:
         seg = self._verbatim_run(candidate, last_human)
         if seg:
             return f"整段照抄真人剛講的「{seg}」，換句話說"
+        echo = self._echo_human_opening(candidate, last_human)
+        if echo:
+            return f"開頭直接搬真人那句的「{echo}」，換個角度起頭"
         if self._ask_tail_repeat(own_texts, candidate):
             return "又是問句收尾，跟上一則一樣，改成斷言或動作收"
         toks = [self._opening_token(t, group_id) for t in (own_texts or [])[:6]]
@@ -3881,7 +3906,40 @@ class AccountWorker:
             body = str(row.get("content") or "").strip()
             if body:
                 out.append(f"[{row.get('sender_name') or '?'}] {body[:70]}")
+        # 已放行但還沒進 DB 的候選：兩號同時被喚醒時，先放行的那句只在這裡看得到。
+        recent = {line.split("] ", 1)[-1] for line in out}
+        for acc_id, name, body, ts in list(self.pending_burst.get(group_id, [])):
+            if int(acc_id) == me:
+                continue
+            if now - float(ts) > _PENDING_BURST_SECONDS:
+                continue
+            body = str(body or "").strip()
+            if body and body not in recent:
+                out.append(f"[{name or '?'}] {body[:70]}")
+                self.stats["burst_pending_seen"] = (
+                    int(self.stats.get("burst_pending_seen", 0)) + 1
+                )
         return "\n".join(out)
+
+    def _burst_register(self, group_id: int, text: str) -> None:
+        """閘門已放行的句子先登記。送出要等打字延遲，這段期間另一號的閘門
+        讀不到 DB，只有這裡看得到，才擋得住同一輪的併發撞點。"""
+        body = str(text or "").strip()
+        if not int(group_id or 0) or not body:
+            return
+        now = time.time()
+        bucket = self.pending_burst.setdefault(int(group_id), [])
+        bucket[:] = [e for e in bucket if now - float(e[3]) <= _PENDING_BURST_SECONDS]
+        bucket.append((int(self.tg_user_id or 0), str(self.name or ""), body, now))
+
+    def _burst_release(self, group_id: int, text: str) -> None:
+        """送完就收回登記，DB 已有這句，留著只會重複占位。"""
+        body = str(text or "").strip()
+        bucket = self.pending_burst.get(int(group_id or 0))
+        if not bucket or not body:
+            return
+        me = int(self.tg_user_id or 0)
+        bucket[:] = [e for e in bucket if not (int(e[0]) == me and e[2] == body)]
 
     async def _recent_bot_lines(self, group_id: int, limit: int = 8) -> str:
         """取出群裡最近的水軍發言原文（跨帳號），供裁判做動態重複感知。"""
@@ -3937,7 +3995,8 @@ class AccountWorker:
             "2. 【文化與語言在地純度（極高權重）】：發言必須 100% 符合台灣在地日常口語習慣。"
             "凡出現大陸網路流行語或對岸習慣說法（例如：白嫖、白漂、口嗨、帶節奏、老鐵、吃瓜、牛逼、小姐姐、小哥哥、打卡、給力、走心、內卷、套路、乳交等對岸或生硬書面詞彙，即使寫成繁體字也不行），"
             "台灣女生在約砲群裡會說：被佔便宜、白吃白喝、被當盤子、當免錢的玩、嘴砲、跟風、正妹、超頂、奶炮等。"
-            "近例：秒男→快槍俠、破防→心態崩了／被講到跳腳、上頭→很上頭也講但別濫用。"
+            "近例：秒男→快槍俠、破防→心態崩了／被講到跳腳、上頭→很上頭也講但別濫用、"
+            "不要面子→不給面子、還沒動筷子→還沒開動、餓鬼→餓死鬼、拆台→吐槽／漏氣。"
             "一旦檢出大陸用語或非在地台灣口吻，issue 必須判定為 \"unnatural\"，sendable 必須為 0.0，並在 reason 中精準指出：『包含大陸用語XXX，台灣女生會說YYY，語氣不符在地真實感』，退回由角色動態重寫！\n"
             "3. 凡口氣生硬、充滿公文客服味、裝矜持假正經拒絕聊色，issue 為 \"unnatural\"，sendable 低於 0.5。\n"
             "4. 【動態重複感知（極高權重）】：把候選發言與【群組上下文】裡最近 8 則水軍發言逐句對照。"
@@ -4148,6 +4207,7 @@ class AccountWorker:
             return ""
         if self._review_passes(review, strict):
             self.stats["gate_pass"] = int(self.stats.get("gate_pass", 0)) + 1
+            self._burst_register(group_id, text)
             return text
         self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
         label = _DECISION_ISSUE_LABEL.get(review["issue"], review["issue"])
@@ -4175,6 +4235,7 @@ class AccountWorker:
             self.stats["gate_pass_after_rewrite"] = (
                 int(self.stats.get("gate_pass_after_rewrite", 0)) + 1
             )
+            self._burst_register(group_id, picked)
             return picked
         self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
         print(f"[{self.name}] gate-hold: 換策略重寫仍不合格，暫緩", flush=True)
@@ -6419,6 +6480,7 @@ class AccountWorker:
                 captured_id=captured,
             )
         if not ok:
+            self._burst_release(chat_id, text)
             return False
         # 群組層「不能寫」解鎖了：成功送出就重置指數退避計數
         self._clear_write_forbidden_backoff()
@@ -6445,6 +6507,8 @@ class AccountWorker:
             text,
             message_id=captured[0] if captured else 0,
         )
+        # 已寫進 DB，可以收回併發登記（不改動成功／失敗的既有回傳語意）
+        self._burst_release(chat_id, text)
         # 話題回合：本群 AI 發言計數＋1（真人開題時歸零）
         if int(chat_id) < 0:
             self.topic_turn_counts[int(chat_id)] = (

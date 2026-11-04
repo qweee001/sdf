@@ -189,3 +189,72 @@ def test_name_opening_quiet_when_not_a_streak():
     w._remember_speaker_name(GROUP, "琪琪")
     own = ["琪琪都想看了小萬還不快掏出來", "剛在店裡燙新進的貼身洋裝"]
     assert w._opening_repeat_note(own, GROUP) == ""
+
+
+# ---------- 併發空窗：閘門放行到 DB 寫入之間（11:54:13／11:54:17） ----------
+
+
+def _pair_workers() -> tuple[AccountWorker, AccountWorker, dict]:
+    """兩號共用同一份 pending_burst，重現 manager 注入的共享狀態。"""
+    shared: dict = {}
+    a = _worker("小天後")
+    b = _worker("Chen")
+    a.tg_user_id, b.tg_user_id = 333, 444
+    a.pending_burst = shared
+    b.pending_burst = shared
+    empty = cast(Any, SimpleNamespace(get_group_messages=_as_await([])))
+    a.db = b.db = empty
+    return a, b, shared
+
+
+def test_pending_candidate_visible_before_it_hits_db():
+    """A 剛放行、還沒送出（DB 空的），B 的閘門就必須看得到 A 那句。"""
+    a, b, _shared = _pair_workers()
+    a._burst_register(GROUP, "結婚了還在這邊喊要吃乾淨，你老婆知道嗎")
+    lines = asyncio.run(b._sister_burst_lines(_event()))
+    assert "你老婆知道嗎" in lines
+    assert b.stats.get("burst_pending_seen") == 1
+
+
+def test_pending_candidate_expires_after_window():
+    a, b, _shared = _pair_workers()
+    a._burst_register(GROUP, "結婚了還在這邊喊要吃乾淨")
+    for entry in _shared[GROUP]:
+        _shared[GROUP][_shared[GROUP].index(entry)] = (
+            entry[0], entry[1], entry[2], time.time() - 31,
+        )
+    assert asyncio.run(b._sister_burst_lines(_event())) == ""
+
+
+def test_own_pending_not_reported_as_sister():
+    a, _b, _shared = _pair_workers()
+    a._burst_register(GROUP, "結婚了還在這邊喊要吃乾淨")
+    assert asyncio.run(a._sister_burst_lines(_event())) == ""
+
+
+def test_burst_release_drops_entry():
+    a, b, _shared = _pair_workers()
+    a._burst_register(GROUP, "結婚了還在這邊喊要吃乾淨")
+    a._burst_release(GROUP, "結婚了還在這邊喊要吃乾淨")
+    assert asyncio.run(b._sister_burst_lines(_event())) == ""
+
+
+# ---------- 開頭照搬真人（12:04:33 抄「你想試一下嗎」、12:29:21 抄「打腫了」） ----------
+
+
+def test_echo_human_opening_vetoes():
+    w = _worker("小小")
+    humans = "你想試一下嗎\n為什麼排在小萬後面\n舔狗還不如小萬"
+    assert "想試一" in w._local_veto("想試一下？先問問後面排隊的舔狗同不同意", [], humans, GROUP)
+
+
+def test_echo_opening_caught_mid_sentence():
+    w = _worker("RICH")
+    humans = "誰把你奶打腫了\n昨晚被我打腫了\n開始意淫了嗎"
+    assert "打腫了" in w._local_veto("打腫了還不冰敷，是想讓它一直腫著嗎", [], humans, GROUP)
+
+
+def test_non_echo_opening_passes():
+    w = _worker("RICH")
+    humans = "誰把你奶打腫了\n昨晚被我打腫了"
+    assert w._local_veto("看不出來萬哥這麼會吹", [], humans, GROUP) == ""
