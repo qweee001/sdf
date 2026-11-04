@@ -753,6 +753,8 @@ class AccountWorker:
         self._recent_texts_at: dict[int, list[float]] = (
             recent_texts_at if recent_texts_at is not None else {}
         )
+        # 最後一次從 DB 回填跨號語料的時間（重啟後共享桶是空的，閘門會全部失效）
+        self._cross_seeded_at: dict[int, float] = {}
         # 閘門已放行、還沒送出的候選（群組 → [(account_id, name, text, ts)]）。
         # 另一號的句子要等打字延遲＋送出成功才進 DB，這段空窗靠這份共享記憶補。
         self.pending_burst: dict[int, list[tuple[int, str, str, float]]] = (
@@ -2495,6 +2497,44 @@ class AccountWorker:
         """
         rate = sum(1 for ts in (human_ts or []) if ts > now - 60.0)
         return min(65.0, 25.0 + 12.0 * max(0, rate - 1))
+
+    async def _seed_cross_texts(self, group_id: int) -> None:
+        """跨號語料回填：桶子裡只有「自己」發過的句子，但四號一小時總共才六七則，
+        單一帳號自桶永遠湊不到 4 則，_echo_shape_hits／跨號起手詞／舊詞統計全部
+        形同沒開（上一輪佈線完線上零觸發就是這個原因）。從 DB 把全群水軍近 90 分鐘
+        的句子補進同一個桶，重啟或部署後也補得到。90 秒節流。
+        """
+        gid = int(group_id)
+        now = time.time()
+        if now - float(self._cross_seeded_at.get(gid, 0.0)) < 90.0:
+            return
+        self._cross_seeded_at[gid] = now
+        try:
+            rows = await self.db.get_group_messages(gid, limit=80)
+        except Exception:
+            return
+        bucket = self._recent_texts_by_group.setdefault(gid, [])
+        stamp = self._recent_texts_at.setdefault(gid, [])
+        if len(bucket) != len(stamp):
+            return
+        seen = set(bucket)
+        pairs = []
+        for r in rows:
+            if str(r.get("role")) != "assistant":
+                continue
+            body = str(r.get("content") or "").replace("\n", " ").strip()
+            if not body or body in seen:
+                continue
+            ts = float(r.get("timestamp") or 0.0) or now
+            if now - ts > _CROSS_TEXT_KEEP_SECONDS:
+                continue
+            seen.add(body)
+            pairs.append((ts, body))
+        for ts, body in sorted(pairs):
+            bucket.append(body)
+            stamp.append(ts)
+        del bucket[:-_PHRASE_HISTORY_LIMIT]
+        del stamp[:-_PHRASE_HISTORY_LIMIT]
 
     def _echo_shape_hits(self, group_id: int) -> int:
         """最近幾則水軍有幾則在講別人的事（引述起頭或整句旁觀）。"""
@@ -5653,6 +5693,8 @@ class AccountWorker:
         self._successful_vision_events.discard(self._generation_key(event))
         self._set_generation_reason(event, "generation_empty")
         group_id = int(event.chat_id or 0)
+        # 跨號語料先補齊，下面組指令時的撞詞／起手詞／播報判定才有跨帳號樣本
+        await self._seed_cross_texts(group_id)
         is_image = isinstance(getattr(event, "media", None), MessageMediaPhoto)
         if is_image:
             self.stats["images_seen"] += 1
@@ -7634,6 +7676,7 @@ class AccountWorker:
         簡體／模型空手）就回 ""，呼叫方這一輪不開口，不塞罐頭句。
         extra_hint＝③ 退回來重寫時帶的問題描述。
         """
+        await self._seed_cross_texts(int(group_id))
         try:
             msgs = await self.db.get_group_messages(group_id, limit=12)
         except Exception:

@@ -78,6 +78,33 @@ def test_unowned_self_scene_opener_is_not_press_box():
     assert AccountWorker._is_press_box("酒都不會喝還想聊穴，先長大再說嘛") is True
 
 
+def test_cross_text_seed_backfills_only_bot_lines_and_throttles():
+    """部署／重啟後共享桶是空的，跨號閘門會全部失效（20:31 重啟、20:33 立刻又
+    寫出純評語）。回填只吃水軍句子，且 90 秒內不重打 DB。"""
+    import time as _time
+
+    async def main():
+        worker = _worker()
+        now = _time.time()
+        rows = [
+            {"role": "assistant", "content": "剛洗完澡頭髮還在滴水", "timestamp": now - 60},
+            {"role": "user", "content": "真人講的話", "timestamp": now - 30},
+            {"role": "assistant", "content": "黑的才性感啊", "timestamp": now - 120},
+            {"role": "assistant", "content": "黑的才性感啊", "timestamp": now - 120},
+            {"role": "assistant", "content": "太久以前講的", "timestamp": now - 99999},
+        ]
+        worker.db = SimpleNamespace(get_group_messages=AsyncMock(return_value=rows))
+        await worker._seed_cross_texts(-100)
+        # 桶子是時序（舊到新），後面的判定才把最後一則當「剛剛」
+        assert worker._recent_texts_by_group[-100] == ["黑的才性感啊", "剛洗完澡頭髮還在滴水"]
+        assert worker._recent_texts_at[-100][0] == now - 120
+        # 90 秒內再呼叫不重打 DB
+        await worker._seed_cross_texts(-100)
+        assert worker.db.get_group_messages.await_count == 1
+
+    asyncio.run(main())
+
+
 def test_recent_opener_note_lists_only_the_opening_action():
     async def main():
         worker = _worker()
