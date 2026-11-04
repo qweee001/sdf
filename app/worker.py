@@ -7240,7 +7240,8 @@ class AccountWorker:
         """同一個短詞或道具在該群反覆出鏡時，動態提示換意象。"""
         over = self._fatigued_phrases(group_id)
         shared = self._live_shared_cores(group_id)
-        if not over and not shared:
+        hot = self._hot_char_core(group_id)
+        if not over and not shared and not hot:
             return ""
         hints = []
         if over:
@@ -7259,7 +7260,45 @@ class AccountWorker:
                 f"同群其他姐妹剛用過「{listed}」等道具/場景，短時間內嚴禁再提相同意象！"
                 "請換全新的日常角度（如：捷運人擠人、宵夜鹹酥雞、加班摸魚、看恐怖片、買新衣服、做指甲、喝酒聊八卦等）"
             )
+        hot = self._hot_char_core(group_id)
+        if hot:
+            hints.append(
+                f"群裡最近幾句一直繞著「{'、'.join(hot)}」這幾個字打轉，同一件事已經被玩到爛了："
+                "這則換部位、換道具或換角度，別再從同一個字寫"
+            )
         return "\n".join(hints)
+
+    def _hot_char_core(self, group_id: int) -> list[str]:
+        """本群近 10 句裡高頻、但又不是虛字的單字核心（「腳」這種主題字）。
+
+        雙字疲勞抓不到同一個部位換講法：腳背／腳趾／腳底／腳香是四個不同雙字，
+        真人看卻是「又是腳」。用字頻本身分層——散佈超過六成的字是虛字
+        （的、是、你），排除後剩下的高頻字就是正在爆的主題。
+        """
+        bucket = (self._recent_texts_by_group.get(int(group_id)) or [])[-20:]
+        if len(bucket) < 8:
+            return []
+        df: dict = {}
+        for body in bucket:
+            for ch in set(str(body)):
+                if "一" <= ch <= "鿿":
+                    df[ch] = df.get(ch, 0) + 1
+        # 虛字（的、是、你、嗎）這一段也密；用整份 100 分鐘語料的字頻排名當基準，
+        # 排在很前面的就是文法字（純排名，不寫死清單），剩下的高頻字才是正在爆的主題。
+        history = self._recent_texts_by_group.get(int(group_id)) or [-1]
+        base: dict = {}
+        for body in history:
+            for ch in set(str(body)):
+                if "一" <= ch <= "鿿":
+                    base[ch] = base.get(ch, 0) + 1
+        banned = {
+            ch for ch, _n in sorted(base.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+        }
+        hot = [
+            (n, ch) for ch, n in df.items() if n >= 4 and ch not in banned
+        ]
+        hot.sort(key=lambda kv: (-kv[0], kv[1]))
+        return [ch for _n, ch in hot[:2]]
 
     def _phrase_fatigue_hit(self, group_id: int, text: str) -> str:
         """候選句仍含已疲勞／冷卻中核心詞時回該詞（供 drop／correction），否則空字串。"""

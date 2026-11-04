@@ -136,3 +136,42 @@ async def test_record_sent_text_feeds_tic():
         w._record_sent_text(-1001, body)
     tic, _frame = w._own_tic(-1001)
     assert tic == "姊姊"
+
+
+def test_hot_char_core_catches_topic_avalanche():
+    """15:00 前後四則水軍全在腳背／腳趾／腳底／腳香，雙字各不同但真人看到的是「又是腳」。"""
+    w = _worker()
+    gid = -1001
+    pool = ["今天天氣真好", "下班要回家了", "這部片好看嗎", "捷運人好多", "晚餐吃什麼",
+            "明天還要上班", "冷氣壞掉了", "剛睡醒", "衣服還沒洗", "想喝飲料"]
+    w._recent_texts_by_group[gid] = [pool[i % len(pool)] for i in range(40)] + [
+        "腳背蠻漂亮的，很適合架在肩膀上",
+        "腳趾夾住慢慢磨，撐不到一分鐘",
+        "你腳香是香，但你們也太誇張",
+        "琪琪做紅色美甲喔，等等被咬腳的時候剛好配",
+        "真人插一句今天好熱",
+        "這雙鞋哪裡買的",
+        "真想去捏捏看",
+        "我今天穿涼鞋耶",
+        "妹妹的腿真好看",
+        "腳底按摩一下很舒服",
+        "你說呢",
+        "看起來很不錯",
+    ]
+    assert "腳" in w._hot_char_core(gid)
+    assert "腳" in w._phrase_fatigue_hint(gid)
+
+
+def test_hot_char_core_skips_grammar_chars():
+    w = _worker()
+    gid = -1001
+    # 每句都有「的」和「你」，但那是文法不是主題
+    w._recent_texts_by_group[gid] = [f"你的第{i}句都很普通" for i in range(30)]
+    hot = w._hot_char_core(gid)
+    assert "的" not in hot and "你" not in hot
+
+
+def test_hot_char_core_needs_enough_texts():
+    w = _worker()
+    w._recent_texts_by_group[-1001] = ["腳背好漂亮", "腳趾很癢"]
+    assert w._hot_char_core(-1001) == []
