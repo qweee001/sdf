@@ -6468,6 +6468,10 @@ class AccountWorker:
         live_test_kind: str | None = None,
     ) -> bool:
         captured: list[int] = []
+        # 送出前再登記一次：managed followup 是「先產好、45~90 秒後才送」，產生時
+        # 錨點還沒出現，閘門登記的時間戳早就過期；只有真正要送的這一刻登記，
+        # 另一號的閘門才看得到（12:52:13／12:52:20 就是走這條路漏掉的）。
+        self._burst_register(chat_id, text)
         async with self._send_slot():
             ok = await self._send_message_unlocked(
                 chat_id,
