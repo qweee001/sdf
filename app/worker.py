@@ -2438,7 +2438,9 @@ class AccountWorker:
         都算同一個慣用語換皮，退回重寫。
         """
         own = [str(t) for t in (own_texts or [])[:3] if str(t).strip()]
-        cross = [str(t) for t in (cross_texts or [])[-20:] if str(t).strip()]
+        # [-20:] 在這一群只等於 20 分鐘，90 分鐘窗等於白設（實測 12:49→13:50
+        # 跨號同一個「出一張嘴」差 61 分鐘，早就被切掉）。
+        cross = [str(t) for t in (cross_texts or [])[-120:] if str(t).strip()]
         corpus = own + cross
         grams, _stop = self._content_bigrams(corpus)
         cand = set(grams(candidate))
@@ -2464,6 +2466,19 @@ class AccountWorker:
             """整段重疊之外還要有一個冷字，否則「我跟你」這種通用三段也會誤殺。"""
             return any(any(char_df.get(ch, 0) <= 2 for ch in g) for g in hits)
 
+        # 三段在語料裡出現幾則：同一個慣用語只會出現在「吵架那一對」的兩則，
+        # 通用三段（「你覺得」「有沒有」）卻會散在十幾則。字冷熱擋得住冷僻詞，
+        # 擋不住「出一張嘴」這種夾常見字的慣用語（「嘴」天天有人講）。
+        tri_df: dict = {}
+        for prev in corpus:
+            for g in tri_of(prev):
+                tri_df[g] = tri_df.get(g, 0) + 1
+
+        def idiom(hits) -> bool:
+            if cold(hits):
+                return True
+            return any(tri_df.get(g, 0) <= 2 for g in hits)
+
         tri = set()
         for prev in corpus:
             tri |= tri_of(prev)
@@ -2488,14 +2503,14 @@ class AccountWorker:
             tri_hit = cand_tri & tri_of(own[0])
             if hit and strong(hit):
                 return f"又跟上一則共用「{top(hit)}」，同一個詞換句話說"
-            if cold(tri_hit):
+            if idiom(tri_hit):
                 return f"「{sorted(tri_hit)[0]}」跟上一則同一個慣用語，換句話說"
             for prev in own[1:]:
                 hit = cand & set(grams(prev))
                 tri_hit = cand_tri & tri_of(prev)
                 if len(hit) >= 2 and strong(hit):
                     return f"跟前兩則撞了「{top(hit)}」，換個講法"
-                if tri_hit and cold(tri_hit):
+                if tri_hit and idiom(tri_hit):
                     return f"跟前兩則撞了「{sorted(tri_hit)[0]}」，換個講法"
         for prev in cross:
             hit = cand & set(grams(prev))
@@ -2504,7 +2519,7 @@ class AccountWorker:
                 return f"別人也剛用過「{top(hit)}」，別跟著講"
             # 複合慣用語（「出一張嘴」）的雙字會被虛字濾掉剩一個，靠整段三字直接退，
             # 不再要求先湊滿兩個雙字——實測這條是唯一能擋住它一天講四次的路。
-            if tri_hit and cold(tri_hit):
+            if tri_hit and idiom(tri_hit):
                 return f"別人也剛用過「{sorted(tri_hit)[0]}」，別跟著講"
         return ""
 

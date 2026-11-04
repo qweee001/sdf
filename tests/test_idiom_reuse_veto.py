@@ -185,3 +185,29 @@ def test_burst_echo_allows_new_point_within_8s():
     w._recent_texts_by_group[gid] = list(REAL_1954_2010)
     w._own_echo_by_group[gid] = [("鮑魚配晚餐，哥哥挺懂吃的嘛", time.time() - 3)]
     assert not w._burst_echo("黑鮑要夠深才吸得住，就怕你們沒那個長度", gid)
+
+
+def test_cross_idiom_survives_common_char_and_long_distance():
+    """12:49 小天後「哪像有些人只會出一張嘴」→ 13:50 小小 61 分鐘後同一句。
+
+    「嘴」在群裡天天出現，char_df 永遠不冷，舊的 cold() 擋不住；而交叉語料
+    只取最後 20 則，這一群 20 則只有 20 分鐘，90 分鐘窗等於白設。
+    """
+    w = _worker("小小")
+    gid = -1001
+    filler = [f"第{i}則閒聊嘴砲內容" for i in range(30)]
+    w._recent_texts_by_group[gid] = (
+        ["琪琪眼光不錯啊，約過的帥哥品質有保證，哪像有些人只會出一張嘴"] + filler
+    )
+    v = w._idiom_reuse(
+        "在群裡只會出一張嘴當舔狗，鈴鐺怎麼可能看上你", [], w._recent_texts_by_group[gid]
+    )
+    assert "一張嘴" in v or "出一張" in v
+
+
+def test_common_trigram_scattered_does_not_veto():
+    """「你覺得」散在十幾則裡＝通用三段，不該當成同一個慣用語。"""
+    w = _worker()
+    gid = -1001
+    cross = [f"你覺得第{i}個怎麼樣" for i in range(15)]
+    assert w._idiom_reuse("你覺得這樣好嗎", [], cross) == ""
