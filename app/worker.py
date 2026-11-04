@@ -210,6 +210,9 @@ _OWN_ECHO_WINDOW_SECONDS = 600.0
 _OWN_ECHO_HISTORY_LIMIT = 12
 # 同號秒連發：8 秒內兩則還在講同一個詞＝同一點講兩次（實測 19:54 三則 8 秒全在「被踩」）。
 _BURST_ECHO_SECONDS = 8.0
+# 同號語體慣性：8 分鐘內自己連用同一種自稱或同一組場景詞（實測 14:03→14:08 兩則
+# 都是「姊姊店裡＋要吃的」，中間夾 12 則真人，群層疲勞窗早被洗掉）。
+_OWN_TIC_SECONDS = 480.0
 # 這個時間窗內有真人講話，才算是「有人可以接話」的場合
 _HUMAN_CONTEXT_WINDOW_SECONDS = 1800.0
 # 意圖識別：先讀懂對方這句話在做什麼，後面的方式與尺度才有依據
@@ -5594,6 +5597,9 @@ class AccountWorker:
         phrase_hint = self._phrase_fatigue_hint(group_id)
         if phrase_hint:
             user_message += f"\n{phrase_hint}"
+        tic_hint = self._own_tic_note(group_id)
+        if tic_hint:
+            user_message += f"\n{tic_hint}"
         # 遲到偵測（最後才判，用的是此刻的群狀態）
         moved_hint = await self._topic_moved_hint(event, reply_message)
         if moved_hint:
@@ -5680,6 +5686,7 @@ class AccountWorker:
         own_echo = self._is_own_echo(
             reply, self._own_echo_recent(group_id)
         ) or self._burst_echo(reply, group_id)
+        tic_hit = self._own_tic_hit(reply, group_id)
         too_long = len(reply) > char_cap
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
@@ -5692,7 +5699,7 @@ class AccountWorker:
         group_meta = await self._candidate_mentions_current_group_meta(reply)
         fact_bad = time_mismatch or gender_term or simplified or group_meta
 
-        if not format_leak and not refusal and not own_echo and not too_long and not fact_bad:
+        if not format_leak and not refusal and not own_echo and not too_long and not fact_bad and not tic_hit:
             if image:
                 self.stats["images_understood"] += 1
             self._set_generation_reason(event, "ok")
@@ -5721,6 +5728,8 @@ class AccountWorker:
                 if group_meta
                 else "own_echo"
                 if own_echo
+                else "tic"
+                if tic_hit
                 else "too_long"
             )
             self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
@@ -5753,6 +5762,11 @@ class AccountWorker:
             )
         if own_echo:
             correction += "上一版與你剛講過的話太相似，請換一個完全不同的角度或切入點。"
+        if tic_hit:
+            correction += (
+                f"上一版{tic_hit}，跟你前幾則同一個模子。自稱換掉（老娘／本小姐／直接講我），"
+                "場景也換一組，別再從店裡、食物這種同一個生活錨點進場。"
+            )
 
         retry_message = (
             f"{user_message}\n"
@@ -5779,6 +5793,7 @@ class AccountWorker:
         retry_own_echo = self._is_own_echo(
             retry, self._own_echo_recent(group_id)
         ) or self._burst_echo(retry, group_id)
+        retry_tic = self._own_tic_hit(retry, group_id)
         retry_time_mismatch = self._has_time_mismatch(retry, greetings_only=True)
         retry_gender_term = bool(self._gender_term_violation(retry))
         retry_simplified = self._has_simplified_chars(retry)
@@ -5789,6 +5804,7 @@ class AccountWorker:
             or retry_format_leak
             or retry_refusal
             or retry_own_echo
+            or retry_tic
             or retry_time_mismatch
             or retry_gender_term
             or retry_simplified
@@ -5809,6 +5825,8 @@ class AccountWorker:
                 if retry_group_meta
                 else "own_echo"
                 if retry_own_echo
+                else "tic"
+                if retry_tic
                 else "too_long"
             )
             self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
@@ -7070,6 +7088,89 @@ class AccountWorker:
             print(f"[{self.name}] burst-echo: 「{g}」8 秒內重講 {str(candidate)[:18]!r}", flush=True)
             return True
         return False
+
+    # 自稱講法（文法第一人稱候選，不是封殺清單）：只用來數哪一種被用爛了
+    _SELF_REF_TOKENS = ("姊姊", "老娘", "本小姐", "人家", "小妹")
+    _FRAME_STOP = set("我你他她它的是在了也就都還很有一套個這那有會要不能把被給跟和")
+
+    def _own_tic(self, group_id: int, window: float = _OWN_TIC_SECONDS) -> tuple[str, list[str]]:
+        """本號自己的語體慣性：回 (用到爛的自稱, 上一則的場景實詞)。
+
+        群層疲勞（_fatigued_phrases）與 _idiom_reuse 都以「群」為窗，真人一插話
+        就把自己帳號的慣性稀釋掉：實測 14:03「姊姊店裡忙完下午茶」到 14:08
+        「請姊姊喝杯…在店裡摸魚」中間夾了 12 則真人，14:03 早被洗出 8 句窗，
+        14:08 照樣把同一組自稱＋場景再寫一次。這裡只看本號自己。
+        """
+        now = time.time()
+        own = [
+            (str(body), ts)
+            for body, ts in (self._own_echo_by_group.get(int(group_id)) or [])
+            if now - ts < window
+        ]
+        if not own:
+            return "", []
+        recent = [b for b, _ in own[-5:]]
+        tic = ""
+        if len(recent) >= 2:
+            df = {t: sum(1 for b in recent if t in b) for t in self._SELF_REF_TOKENS}
+            top, n = max(df.items(), key=lambda kv: (kv[1], -self._SELF_REF_TOKENS.index(kv[0])))
+            # 連兩則以上、且最近一則也在用，才算慣性（偶爾用一次不算）
+            if n >= 2 and n * 2 >= len(recent) and top in recent[-1]:
+                tic = top
+        prev = recent[-1]
+        for t in self._SELF_REF_TOKENS:
+            prev = prev.replace(t, "|")
+        # 候選＝所有雙字（保留位置），先按語料字頻挑最冷門的，再依序挑不重疊的，
+        # 這樣「微冰手搖」不會被切成「冰手」、也不會因為切詞對齊錯過「店裡」。
+        df: dict = {}
+        for body in (self._recent_texts_by_group.get(int(group_id)) or [])[-40:]:
+            for ch in set(str(body)):
+                df[ch] = df.get(ch, 0) + 1
+        cands = []
+        for i in range(len(prev) - 1):
+            g = prev[i:i + 2]
+            if "|" in g or not all("一" <= ch <= "鿿" for ch in g):
+                continue
+            if g[0] in self._FRAME_STOP or g[1] in self._FRAME_STOP:
+                continue
+            cands.append((df.get(g[0], 0) + df.get(g[1], 0), i, g))
+        cands.sort()
+        frame: list[str] = []
+        taken: set[int] = set()
+        for _score, i, g in cands:
+            if i in taken or (i + 1) in taken:
+                continue
+            taken.update((i, i + 1))
+            if g not in frame:
+                frame.append(g)
+            if len(frame) >= 3:
+                break
+        return tic, frame[:3]
+
+    def _own_tic_note(self, group_id: int) -> str:
+        """把本號自己的慣性攤給模型看；沒有慣性就回空字串。"""
+        tic, frame = self._own_tic(group_id)
+        if not tic and not frame:
+            return ""
+        parts = []
+        if tic:
+            parts.append(f"你最近幾則一直自稱「{tic}」，這則換個講法（老娘／本小姐／直接講我）")
+        if frame:
+            parts.append(f"上一則剛用過「{'、'.join(frame)}」，這則別再從同一組場景詞進場")
+        return "（" + "；".join(parts) + "）"
+
+    def _own_tic_hit(self, candidate: str, group_id: int) -> str:
+        """送出前硬檢：自稱慣性或上一則場景詞還在就回理由，供重寫一次。"""
+        tic, frame = self._own_tic(group_id)
+        body = str(candidate or "")
+        if not body:
+            return ""
+        if tic and tic in body:
+            return f"又自稱「{tic}」"
+        for g in frame:
+            if g in body:
+                return f"又是上一則的「{g}」"
+        return ""
 
     def _live_shared_cores(self, group_id: int) -> list[str]:
         """同群冷卻窗內還有效的跨號核心詞（過期的當場清掉）。"""
