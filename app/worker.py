@@ -3974,7 +3974,7 @@ class AccountWorker:
             f"【群組上下文】\n{context[-1500:] if context else '（無歷史上下文）'}\n"
             f"【近期水軍發言（用來判斷重複與撞句，逐句對照）】\n{recent_bots or '（無）'}\n"
             f"【同則訊息姊妹已回過（同一個點不准再取）】\n{sister_recent or '（無）'}\n"
-            f"【真人最後一句（候選若照抄這句就是複讀）】{last_human[:80] or '（無）'}\n"
+            f"【最近三則真人（候選若只是換句話重講其中一句就是複讀）】{last_human[:220] or '（無）'}\\n"
             f"【前置意圖】{directive if directive else '（無）'}\n"
             f"【候選發言】：「{str(text).strip()}」"
         )
@@ -4107,15 +4107,16 @@ class AccountWorker:
         last_human = ""
         try:
             own_texts = await self.db.recent_replies_by_name(group_id, self.name, 6)
-            rows = await self.db.get_group_messages(group_id, limit=6)
-            last_human = next(
-                (
-                    str(r.get("content") or "")
-                    for r in reversed(rows)
-                    if str(r.get("role")) != "assistant"
-                ),
-                "",
-            )
+            rows = await self.db.get_group_messages(group_id, limit=8)
+            # 只給最後一句時，撞的是「再往前一句」就抓不到：11:14:15 方sir「你還是先
+            # 保護好自己吧」→ 11:15:22 RICH「保護之前先顧好自己吧」，中間隔了一句別人，
+            # 裁判手上沒有方sir 那句就放行了。這裡帶最近三句真人，讓裁判真的比對得到。
+            humans = [
+                str(r.get("content") or "")
+                for r in rows
+                if str(r.get("role")) != "assistant" and str(r.get("content") or "").strip()
+            ][-3:]
+            last_human = "\n".join(humans)
         except Exception:
             pass
         veto = self._local_veto(text, own_texts, last_human, group_id)
