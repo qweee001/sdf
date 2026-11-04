@@ -562,6 +562,23 @@ class AccountWorker:
         return text_guard.split_human_burst(text)
 
     @staticmethod
+    def _trim_to_cap(text: str, cap: int) -> str:
+        """超長就地收在逗號，不再整則丟掉。
+
+        這一群一小時 209 則真人，重寫一次要十幾秒、還會被插話取消；字數超過上限
+        時先自己剪到最後一個逗號（保留 55% 以上才剪），剪得成就直接發。
+        """
+        t = str(text or "").strip()
+        if len(t) <= cap:
+            return ""
+        head = t[:cap]
+        cut = max(head.rfind("，"), head.rfind("、"), head.rfind("。"))
+        if cut < 10:
+            return ""
+        out = t[:cut].rstrip("，、。 ")
+        return out if len(out) >= 10 else ""
+
+    @staticmethod
     def _strip_emoji(text):
         return text_guard.strip_emoji(text)
 
@@ -1151,6 +1168,9 @@ class AccountWorker:
                 # 嚴禁因「群裡有人發了別的 reply」或「積壓 >= 2」就誤殺正在進行的色誘/回覆任務！
                 cancelled = 0
                 now_t = time.time()
+                # 熱場自適應取消預算：同一位群友自己又補話仍立即取消（那才是會對不上話），
+                # 路人閒聊只按群速放大秒數，不整條誤殺。
+                budget = self._interrupt_budget(human_ts, now_t)
                 group_tasks = [
                     t for t in list(self._reply_tasks)
                     if getattr(t, "_sdf_group_id", None) == group_id
@@ -1164,7 +1184,7 @@ class AccountWorker:
                         same_sender = (
                             int(getattr(task, "_sdf_target_sender", 0) or 0) == sender_id
                         )
-                        over_budget = age > 25.0
+                        over_budget = age > budget
                         if same_sender or over_budget:
                             task.cancel()
                             cancelled += 1
@@ -2318,6 +2338,9 @@ class AccountWorker:
     # 自己在幹嘛的狀態句：有場景但沒身體字（「趁我還在辦公室摸魚」）也是自曝，
     # 否則場景錨點寫了照樣被判播報，白觸發一次重寫。
     _SELF_STATE = ("我在", "我還在", "我剛", "我正", "我現在", "我才", "等我", "我等等", "我晚點")
+    # 沒主詞的「剛＋動作」也是自己正在做的事（「剛敷完面膜躺下」），
+    # 純靠 BODY_CUES 會把它判成播報、白觸發一次重寫。
+    _SELF_SCENE = re.compile(r"剛[^\s，,。！？]{0,4}(完|好|飽|澡|床|班|家|回來|出門)")
     _BODY_CUES = (
         "身體", "手", "腳", "腿", "腰", "胸", "奶", "臀", "背", "頸", "肩",
         "舌", "唇", "眼", "皮膚", "熱", "燙", "痠", "軟", "濕", "滑", "抖",
@@ -2342,7 +2365,7 @@ class AccountWorker:
     def _has_self_disclosure(cls, text: str) -> bool:
         """有身體／感官描述，而且主詞是自己（有「我」或沒把對方當主詞）。"""
         t = str(text or "")
-        if any(p in t for p in cls._SELF_STATE):
+        if any(p in t for p in cls._SELF_STATE) or cls._SELF_SCENE.search(t):
             return True
         if not any(b in t for b in cls._BODY_CUES):
             return False
@@ -2461,6 +2484,17 @@ class AccountWorker:
         """
         t = str(text or "")
         return bool(t) and not cls._has_self_disclosure(t)
+
+    @staticmethod
+    def _interrupt_budget(human_ts, now: float) -> float:
+        """真人插話可等的秒數：依近一分鐘真人速率放大，25~65 秒。
+
+        這一群一分鐘三四則真人，固定 25 秒等於每一條生成都被「下一個路人的閒聊」
+        誤殺（20:00 前一小時取消 48 次、只發出 24 則，水軍佔比掉到 3.1%）。
+        冷場維持 25 秒，一則／分 25、三則／分 49、四則以上封頂 65。
+        """
+        rate = sum(1 for ts in (human_ts or []) if ts > now - 60.0)
+        return min(65.0, 25.0 + 12.0 * max(0, rate - 1))
 
     def _echo_shape_hits(self, group_id: int) -> int:
         """最近幾則水軍有幾則在講別人的事（引述起頭或整句旁觀）。"""
@@ -5850,7 +5884,7 @@ class AccountWorker:
         # 回覆長度上限放寬：
         # 為滿足主人「深入勾引、露骨誘惑、情節拉扯、激發肉體衝動」，
         # 允許上限放寬至 65 字元，絕不因稍微寫長或五感描寫豐富就判定 too_long 丟棄！
-        char_cap = max(char_cap, 65)
+        char_cap = max(char_cap, 90)
         reply, _ = text_guard.instant_word_fix(reply)
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)
@@ -5861,6 +5895,11 @@ class AccountWorker:
         if tic_hit:
             print(f"[{self.name}] tic: {tic_hit} → {reply[:24]!r}", flush=True)
         too_long = len(reply) > char_cap
+        if too_long:
+            trimmed = self._trim_to_cap(reply, char_cap)
+            if trimmed:
+                reply = trimmed
+                too_long = False
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
@@ -5961,6 +6000,11 @@ class AccountWorker:
 
         retry, _ = text_guard.instant_word_fix(retry)
         retry_too_long = len(retry) > char_cap
+        if retry_too_long:
+            trimmed = self._trim_to_cap(retry, char_cap)
+            if trimmed:
+                retry = trimmed
+                retry_too_long = False
         retry_format_leak = self._has_format_leak(retry)
         retry_refusal = self._is_refusal(retry)
         retry_own_echo = self._is_own_echo(
@@ -7793,6 +7837,23 @@ class AccountWorker:
         return ""
 
 
+    async def _recent_opener_note(self, group_id: int) -> str:
+        """最近幾則水軍的開場動作。18:40~19:55 的兩則自曝都落在同一類居家梳洗
+        （剛洗完澡／剛敷完面膜躺下），提示只說「講你自己此刻正在做的事」，模型就
+        一直抽同一格，所以把剛用過的動作直接列給它換。
+        """
+        try:
+            lines = await self._recent_bot_lines(int(group_id), limit=4)
+        except Exception:
+            return ""
+        heads = []
+        for line in str(lines or "").splitlines():
+            body = line.split("] ", 1)[-1].strip()
+            head = re.split(r"[，,。！？…~]", body, maxsplit=1)[0].strip()
+            if head:
+                heads.append(head[:14])
+        return "、".join(heads)
+
     async def _proactive_echo_rewrite(
         self,
         group_id: int,
@@ -7812,18 +7873,24 @@ class AccountWorker:
             int(self.stats.get("proactive_echo_rewrite", 0)) + 1
         )
         print(f"[{self.name}] proactive-echo-rewrite: 整段在播報 {topic[:20]!r}", flush=True)
+        openers = await self._recent_opener_note(int(group_id))
+        hint = (
+            "上一版整句都在講別人的事、自己身上一句都沒講，只像場邊播報。"
+            "這版別複述別人的哏、別提人名，先用你自己此刻正在做的一件事開場，"
+            "順手帶到身體感覺。"
+        )
+        if openers:
+            hint += f"（最近幾則的開場動作：{openers}，別再抽同一類，換一個不一樣的當下場景）"
         picked = await self._pick_passing_candidate(
             context,
             "",
-            "上一版整句都在講別人的事、自己身上一句都沒講，只像場邊播報。"
-            "這版別複述別人的哏、別提人名，先用你自己此刻正在做的一件事開場，"
-            "順手帶到身體感覺。",
-            lambda hint: self._generate_context_topic(group_id, extra_hint=hint),
+            hint,
+            lambda hint2: self._generate_context_topic(group_id, extra_hint=hint2),
             recent_bots=await self._recent_bot_lines(group_id),
             own_texts=own_texts,
             last_human=last_human,
             group_id=group_id,
-            limit=2,
+            limit=1,
         )
         if picked:
             self._mark_echo_if_any(group_id, picked, last_human)
