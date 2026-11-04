@@ -574,7 +574,13 @@ class AccountWorker:
         head = t[:cap]
         cut = max(head.rfind("，"), head.rfind("、"), head.rfind("。"))
         if cut < 10:
-            return ""
+            # 整句沒標點（老司機裁判改寫後很常見）→ 硬剪在上限內，
+            # 只修掉尾端殘字，別再送回模型重寫（重寫 10 秒還會被插話取消）。
+            out = head.rstrip("，、。！？ 　")
+            for tail in ("的", "是", "在", "就", "也", "跟", "和"):
+                if out.endswith(tail) and len(out) > 12:
+                    out = out[: -len(tail)]
+            return out if len(out) >= 10 else ""
         out = t[:cut].rstrip("，、。 ")
         return out if len(out) >= 10 else ""
 
@@ -1187,7 +1193,9 @@ class AccountWorker:
                             int(getattr(task, "_sdf_target_sender", 0) or 0) == sender_id
                         )
                         over_budget = age > budget
-                        if same_sender or over_budget:
+                        # 同一人補話仍要取消（否則會答到上一句），但 15 秒內先讓生成跑完：
+                        # 這群同一個人常連丟三句，秒殺等於永遠交不出東西。
+                        if (same_sender and age >= 15.0) or over_budget:
                             task.cancel()
                             cancelled += 1
                     except Exception:
@@ -2347,6 +2355,14 @@ class AccountWorker:
         "身體", "手", "腳", "腿", "腰", "胸", "奶", "臀", "背", "頸", "肩",
         "舌", "唇", "眼", "皮膚", "熱", "燙", "痠", "軟", "濕", "滑", "抖",
         "喘", "心跳", "冷氣", "洗完澡", "床", "沙發", "醉", "香水", "睡",
+        "餓", "渴", "累", "睏",
+    )
+    # 第三人稱標記：有身體字但講的是別人（"24歲沒交過女友，連手都沒牽過"、
+    # "不洗澡那種真的不行，連手搖都不想跟他同排"）。只看「沒有你」會把
+    # 鑑定路人的句子全當成自曝，於是連續播報永遠檢查不到。
+    _THIRD_PERSON = (
+        "他", "她", "那種", "這種", "該不會", "朋友", "道友", "舔狗",
+        "老公", "老婆", "人家", "弟弟", "哥",
     )
 
     def _is_question(self, text: str) -> bool:
@@ -2369,6 +2385,11 @@ class AccountWorker:
         t = str(text or "")
         if any(p in t for p in cls._SELF_STATE) or cls._SELF_SCENE.search(t):
             return True
+        # 順序有意義：先認明確的自曝（我剛／我在／剛洗完澡），再排除在講別人，
+        # 最後才用身體字＋沒有第二人稱當保險。單獨一個「我」不夠
+        # （「萬哥這麼聽話，對我也沒這麼乖過」講的還是萬哥）。
+        if any(tp in t for tp in cls._THIRD_PERSON):
+            return False
         if not any(b in t for b in cls._BODY_CUES):
             return False
         return any(a in t for a in cls._SELF_CUES) or "你" not in t
@@ -2406,6 +2427,15 @@ class AccountWorker:
             self._has_self_disclosure(t)
             for t in self._recent_bot_pool(own_texts, group_id, history, n=6)
         )
+        # 用「則數」看會放水：一小時才十幾則，六則等於半小時前，
+        # 於是 RICH 20:33-20:42 連四則純評語（麻藥沒退／被當白痴／沒交過女友／不洗澡不行）
+        # 都免檢查。改成看連續則數＋時鐘：連兩則播報、或超過 20 分鐘沒人講自己，
+        # 就算零自曝。門檻放 20 分鐘是為了別讓每則都變成「我剛…」開場。
+        self_gap = self._seconds_since_self_talk(group_id)
+        if (self_gap is not None and self_gap > 1200) or (
+            self._consecutive_press_box(group_id) >= 2
+        ):
+            self_talk = False
         notes = []
         if last_q or asked >= 2:
             notes.append(
@@ -2418,6 +2448,38 @@ class AccountWorker:
                 "別只顧著審問對方）"
             )
         return "".join(notes)
+
+    def _seconds_since_self_talk(self, group_id: int) -> float | None:
+        """距離上一次水軍講到自己（身體／當下狀態）幾秒；查不到回 None。"""
+        gid = int(group_id)
+        bucket = self._recent_texts_by_group.get(gid) or []
+        stamp = self._recent_texts_at.get(gid) or []
+        if not bucket or len(stamp) != len(bucket):
+            return None
+        now = time.time()
+        for text, ts in zip(reversed(bucket), reversed(stamp)):
+            if now - ts > 2700:
+                break
+            if self._has_self_disclosure(text):
+                return now - ts
+        return 2700.0
+
+    def _consecutive_press_box(self, group_id: int) -> int:
+        """最近連續幾則水軍都是純播報（由新到舊數，遇到有自曝就停）。"""
+        gid = int(group_id)
+        bucket = self._recent_texts_by_group.get(gid) or []
+        stamp = self._recent_texts_at.get(gid) or []
+        if not bucket or len(stamp) != len(bucket):
+            return 0
+        now = time.time()
+        n = 0
+        for text, ts in zip(reversed(bucket), reversed(stamp)):
+            if now - ts > 2700:
+                break
+            if not (self._is_press_box(text) or (gid, text) in _ECHO_MARKS):
+                break
+            n += 1
+        return n
 
     def _cross_recent_texts(self, group_id: int, seconds: float) -> list[str]:
         """該群在時間窗內的水軍發言（跨帳號）。
@@ -2441,12 +2503,13 @@ class AccountWorker:
 
         「剛洗完澡」這種全群共用的樣板，只看自己那幾則抓不到；這裡吃本群
         實際送出紀錄，前 2 字重複 ≥2 次就禁用，樣本不足自然不觸發。
-        窗走 45 分鐘（見 _cross_recent_texts），避免稀疏發言讓撞車逃掉。
+        窗走 3 小時：這一群一小時只有十來則水軍，「剛洗完澡」19:53 撞 20:58
+        就是隔了 65 分鐘、落在 45 分鐘窗外，舊窗完全抓不到。
         """
-        texts = self._cross_recent_texts(int(group_id), 45 * 60)
+        texts = self._cross_recent_texts(int(group_id), 3 * 3600)
         toks = [self._opening_token(t, group_id) for t in texts]
         toks = [t for t in toks if t]
-        if len(toks) < 4:
+        if len(toks) < 6:
             return ""
         df: dict = {}
         for t in toks:
@@ -4325,6 +4388,7 @@ class AccountWorker:
         limit: int = 3,
         sister_recent: str = "",
         strict: bool = False,
+        require_self: bool = False,
     ) -> str:
         """③ 不過時：改用不同策略各生一條候選，逐條審核，挑可發分最高的那條。
 
@@ -4343,6 +4407,13 @@ class AccountWorker:
             if not candidate:
                 continue
             if self._local_veto(candidate, own_texts or [], last_human, group_id):
+                continue
+            # 這一輪就是要她講自己：換策略還是端出純評語就再換一條，
+            # 別把同樣的播報句子當成「重寫成功」發出去。
+            if require_self and self._is_press_box(candidate):
+                self.stats["echo_press_box_rejected"] = (
+                    int(self.stats.get("echo_press_box_rejected", 0)) + 1
+                )
                 continue
             self.stats["gate_candidates"] = int(self.stats.get("gate_candidates", 0)) + 1
             review = await self._review_candidate(
@@ -4437,6 +4508,7 @@ class AccountWorker:
                 limit=_GATE_CANDIDATE_LIMIT,
                 sister_recent=sister_recent,
                 strict=strict,
+                require_self=True,
             )
             if picked:
                 self.stats["gate_pass_after_rewrite"] = (

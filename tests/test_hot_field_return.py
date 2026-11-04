@@ -16,10 +16,10 @@ from app.persona import get_system_prompt
 
 def test_hot_budget_scales_with_density():
     assert hot_budget(0) == 2
-    assert hot_budget(14) == 2
-    assert hot_budget(20) == 3
-    assert hot_budget(45) == 4
-    assert hot_budget(200) == 5
+    assert hot_budget(14) == 3
+    assert hot_budget(20) == 4
+    assert hot_budget(45) == 6
+    assert hot_budget(200) == 8
 
 
 def test_hot_claim_window_shrinks_when_very_hot():
@@ -109,8 +109,37 @@ def test_return_to_field_after_long_silence_overrides_budget(tmp_path):
 
 
 def test_short_silence_still_respects_budget(tmp_path):
-    # 只潛水 2 分鐘，額度滿了就繼續讓路，不准搶麥
-    assert asyncio.run(_scenario(tmp_path / "c.db", pressure_claims=5, last_sent_age=120)) is False
+    # 只潛水 2 分鐘，額度（45 則真人 → 6）滿了就繼續讓路，不准搶麥
+    assert asyncio.run(_scenario(tmp_path / "c.db", pressure_claims=6, last_sent_age=120)) is False
+
+
+async def _dead_claim(db, group_id, message_id, age):
+    """佔位被插話取消／超長丟棄＝額度要立刻讓回來。"""
+    await _claim_aged(db, group_id, message_id, age)
+    await db._c.execute(
+        "INSERT INTO reply_events (group_id, message_id, account_id, stage, reason, at) "
+        "VALUES (?, ?, 'a0', 'cancel', 'human_interrupt', ?)",
+        (group_id, message_id, time.time() - age + 1),
+    )
+    await db._c.commit()
+
+
+async def _dead_scenario(path):
+    db = Database(str(path))
+    await db.connect()
+    await _seed(db, 777, 45)
+    for index in range(8):
+        await _dead_claim(db, 777, 6000 + index, 90 + index)
+    admitted = await db.admit_ordinary_reply(777, 9001, "a1")
+    await db.close()
+    return admitted
+
+
+def test_dead_claims_give_the_budget_back(tmp_path):
+    """實測 21:02-21:59：97 次佔位只有 23 則送出，死掉的 74 次照樣佔額度，
+    10 分鐘內就自己把自己鎖死（21:34-21:59 全群 25 分鐘零發言）。"""
+    # 8 筆佔位全被取消 → 10 分鐘上限與 5 分鐘額度都吃完也不該擋
+    assert asyncio.run(_dead_scenario(tmp_path / "e.db")) is True
 
 
 def test_ten_minute_claim_cap_still_applies(tmp_path):

@@ -275,7 +275,12 @@ def test_directors_note_clean_group_has_no_press_box_hint():
 
 # ---- 自曝窗 3→6 ---------------------------------------------------------
 
-def test_one_self_disclosure_no_longer_covers_six_lines():
+def test_one_self_disclosure_no_longer_covers_five_press_boxes():
+    """一則自曝後面又連五則播報 → 照樣要講自己。
+
+    舊版只要六則內有任何一則自曝就整段免檢查（一則擋六則，
+    實測就是這樣養出 RICH 連四則純評語）。
+    """
     w = _worker()
     _sent(
         w,
@@ -286,7 +291,7 @@ def test_one_self_disclosure_no_longer_covers_six_lines():
         "鈴鐺是要休幾天",
         "多出一百塊連買店內衣都不夠",
     )
-    assert "沒人講到自己" not in w._sentence_type_note([], -1001, [])
+    assert "沒人講到自己" in w._sentence_type_note([], -1001, [])
 
 
 def test_six_lines_without_self_disclosure_fires():

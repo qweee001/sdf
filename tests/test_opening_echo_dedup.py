@@ -7,6 +7,7 @@
 修法都是動態：起手詞由本人 DB 發言現算，複讀由字串比對，不寫死詞表。
 """
 
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -149,7 +150,22 @@ def test_cross_opening_note_flags_shared_group_cliche():
         "剛洗完澡擦完身體乳",
         "夜市滷味想到你們",
         "紅燒肉配白飯超下飯",
+        "怕就別約我又不吃人",
+        "保險套留著自己用啦",
     ]
+    assert "剛洗" in w._cross_opening_note(-1001)
+
+
+def test_opening_cliche_survives_an_hour_of_gap():
+    """19:53 與 20:58 兩次「剛洗完澡」隔了 65 分鐘，45 分鐘窗完全抓不到。"""
+    w = _worker()
+    now = time.time()
+    texts = ["剛洗完澡頭髮還在滴水"] + ["紅燒肉配白飯超下飯"] * 3 + [
+        "剛洗完澡躺著聞沐浴乳香"
+    ] + ["怕就別約我又不吃人"] * 2
+    ages = [65 * 60, 40 * 60, 30 * 60, 20 * 60, 10 * 60, 5 * 60, 60]
+    w._recent_texts_by_group[-1001] = texts
+    w._recent_texts_at[-1001] = [now - a for a in ages]
     assert "剛洗" in w._cross_opening_note(-1001)
 
 

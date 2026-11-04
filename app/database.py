@@ -34,13 +34,31 @@ _FIXED_LIVE_TEST_SCHEDULE_SIZE = 30
 
 
 def hot_budget(human_5m: int) -> int:
-    """熱場 5 分鐘發言額度：真人越兇放越寬（2→5），避免越熱越隱形。"""
-    return 2 + min(3, max(0, int(human_5m)) // 20)
+    """熱場 5 分鐘發言額度：真人越兇放越寬（2→8），避免越熱越隱形。
+
+    3 則／分的群 5 分鐘就有 15 則真人，舊式 2 則額度等於水軍只佔 13%、
+    四號輪流排還常常整段隱形；改成每 10 則真人多給 1 則。
+    """
+    return 2 + min(6, max(0, int(human_5m)) // 10)
 
 
 def hot_claim_window(human_5m: int) -> int:
     """熱場群級鎖秒數：極熱（≥30 則/5 分）縮到 12 秒，讓不同帳號輪流露臉。"""
     return 12 if int(human_5m) >= 30 else 20
+
+
+# 「還活著的佔位」。熱場群裡七成佔位死於插話取消或超長丟棄，
+# 舊式按 raw 佔位計額度＝自己把自己鎖死 10 分鐘（實測 25 分鐘零發言）。
+# 佔位一旦被取消／被政策丟掉／已送出，立刻把額度讓回來。
+_LIVE_CLAIM_SQL = (
+    "SELECT c.group_id AS group_id, c.message_id AS message_id, c.stage AS stage, "
+    "c.reason AS reason, c.at AS at, "
+    "CASE WHEN EXISTS ("
+    "SELECT 1 FROM reply_events t WHERE t.group_id = c.group_id "
+    "AND t.message_id = c.message_id AND t.stage IN ('cancel', 'policy', 'send')"
+    ") THEN 0 ELSE 1 END AS live "
+    "FROM reply_events c WHERE c.at >= strftime('%s', 'now') - 86400"
+)
 
 
 class Database:
@@ -1607,17 +1625,16 @@ class Database:
         cursor = await self._c.execute(
             "SELECT "
             "SUM(CASE WHEN stage = 'sent' AND reason = 'human' AND at >= ? THEN 1 ELSE 0 END) AS human_sent_5m, "
-            "SUM(CASE WHEN stage = 'claimed' AND reason = 'human' AND at >= ? THEN 1 ELSE 0 END) AS ordinary_claimed_5m, "
-            "SUM(CASE WHEN stage = 'claimed' AND reason = 'human' AND at >= ? THEN 1 ELSE 0 END) AS ordinary_claimed_20s, "
-            "SUM(CASE WHEN stage = 'claimed' AND reason = 'human' AND at >= ? THEN 1 ELSE 0 END) AS ordinary_claimed_10m, "
+            "SUM(CASE WHEN stage = 'claimed' AND reason = 'human' AND at >= ? AND live THEN 1 ELSE 0 END) AS ordinary_claimed_5m, "
+            "SUM(CASE WHEN stage = 'claimed' AND reason = 'human' AND at >= ? AND live THEN 1 ELSE 0 END) AS ordinary_claimed_20s, "
+            "SUM(CASE WHEN stage = 'claimed' AND reason = 'human' AND live THEN 1 ELSE 0 END) AS ordinary_claimed_10m, "
             "SUM(CASE WHEN stage = 'sent' AND at >= ? THEN 1 ELSE 0 END) AS sent_20s, "
             "SUM(CASE WHEN stage = 'sent' AND at >= ? THEN 1 ELSE 0 END) AS sent_10m "
-            "FROM reply_events WHERE group_id = ? AND at >= ?",
+            f"FROM ({_LIVE_CLAIM_SQL}) WHERE group_id = ? AND at >= ?",
             (
                 current - 300,
                 current - 300,
                 current - 20,
-                current - 600,
                 current - 20,
                 current - 600,
                 int(group_id),
@@ -1656,11 +1673,11 @@ class Database:
                     human_5m = int((human_row["n"] if human_row else 0) or 0)
                     claim_cursor = await event_db.execute(
                         "SELECT "
-                        "SUM(CASE WHEN at >= ? THEN 1 ELSE 0 END) AS n20, "
-                        "SUM(CASE WHEN at >= ? THEN 1 ELSE 0 END) AS n5, "
-                        "COUNT(*) AS n10 "
-                        "FROM reply_events WHERE group_id = ? "
-                        "AND stage = 'claimed' AND reason = 'human' AND at >= ?",
+                        "SUM(CASE WHEN at >= ? AND live THEN 1 ELSE 0 END) AS n20, "
+                        "SUM(CASE WHEN at >= ? AND live THEN 1 ELSE 0 END) AS n5, "
+                        "SUM(CASE WHEN live THEN 1 ELSE 0 END) AS n10 "
+                        f"FROM ({_LIVE_CLAIM_SQL}) "
+                        "WHERE group_id = ? AND stage = 'claimed' AND reason = 'human' AND at >= ?",
                         (now - hot_claim_window(human_5m), now - 300, int(group_id), now - 600),
                     )
                     claim_row = await claim_cursor.fetchone()

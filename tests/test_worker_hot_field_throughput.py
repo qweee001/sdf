@@ -57,12 +57,16 @@ def test_trim_to_cap_cuts_at_comma_instead_of_dropping():
     # 收在 20 字以內的最後一個逗號，能留多少留多少
     assert out == "剛洗完澡頭髮還在滴水，多人運動真的母湯"
     assert len(out) <= 20
-    # 沒有好逗點可收就交回重寫
-    assert AccountWorker._trim_to_cap("字" * 40, 20) == ""
+    # 沒有好逗點可收 → 硬剪在上限內（老司機改寫常整句沒標點，
+    # 交回重寫要多十幾秒、還會被插話取消，Chen 因此整晚 0 則）
+    hard = AccountWorker._trim_to_cap("字" * 40, 20)
+    assert len(hard) == 20
+    # 尾端殘字要修掉，不留半個詞
+    assert AccountWorker._trim_to_cap("字" * 18 + "的" + "字" * 30, 20).endswith("字")
     # 本來就沒超長
     assert AccountWorker._trim_to_cap("短短的", 20) == ""
-    # 剪完太短也不採用
-    assert AccountWorker._trim_to_cap("短，後面超長" + "字" * 40, 10) == ""
+    # 只有第一個逗點、剪不到一半也不再丟 → 直接取上限內的頭段
+    assert AccountWorker._trim_to_cap("短，後面超長" + "字" * 40, 10) == "短，後面超長字字字字"
 
 
 def test_unowned_self_scene_opener_is_not_press_box():
