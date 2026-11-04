@@ -1513,6 +1513,22 @@ class Database:
         )
         return [str(row["content"]) for row in await cursor.fetchall()]
 
+    async def last_bot_ts_by_group(self, group_id: int) -> float:
+        """同群最後一則水軍發言的時間；拿不到回 0。
+
+        只用來決定「要不要為了避免搶話而錯開」，不看整天有沒有發言過。
+        """
+        cursor = await self._c.execute(
+            "SELECT MAX(timestamp) AS ts FROM messages "
+            "WHERE group_id = ? AND role = 'assistant'",
+            (int(group_id),),
+        )
+        row = await cursor.fetchone()
+        try:
+            return float((row["ts"] if row else 0) or 0)
+        except Exception:
+            return 0.0
+
     # ---------- 去重流量與持久回覆診斷 ----------
 
     async def record_group_event(

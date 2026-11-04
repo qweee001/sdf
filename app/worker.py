@@ -112,6 +112,13 @@ _PHRASE_HISTORY_LIMIT = 200
 _CROSS_TEXT_KEEP_SECONDS = 100 * 60
 # 跨號意象冷卻：任一號用過的核心詞，同群其他號 90 分鐘內避開。
 _PHRASE_CORE_COOLDOWN_SECONDS = 90 * 60
+# 回覆遲到偵測：目標訊息已超過 N 秒、群裡又冒出 M 則真人發言 → 話題早就翻頁
+_TOPIC_MOVED_SECONDS = 45.0
+_TOPIC_MOVED_MIN_NEWER = 3
+# 水軍搶話錯開只針對真的撞在一起（最近一則水軍在 12 秒內）；
+# 以前只要 48 小時內有過水軍發言就無條件睡 5-10 秒，等於每則都白白遲到。
+_BOT_STAGGER_WINDOW_SECONDS = 12.0
+_BOT_STAGGER_SECONDS = (2.5, 6.0)
 _PHRASE_CORE_HISTORY_LIMIT = 64
 _PHRASE_CORE_STOPWORDS = frozenset({
     "今天", "真的", "可以", "什麼", "一個", "這個", "那個",
@@ -2768,6 +2775,57 @@ class AccountWorker:
             )
         return ""
 
+    async def _topic_moved_hint(self, event, reply_message=None) -> str:
+        """回覆已經遲到、群裡早翻頁時的修正指令。
+
+        實測（2026-11-03 21:35:38 / 21:41:06）：Chen 晚 66 秒才回，回的是早就被
+        三則新話淹掉的舊訊息，而且只是再問一次別人已經問過的問題。真人會直接跟上
+        現在大家在講的，不會補答上一頁。
+
+        定向判定直接吃生成端已經拿到的 reply_message，不再重撈一次父訊息。
+        """
+        group_id = int(getattr(event, "chat_id", 0) or 0)
+        if not group_id:
+            return ""
+        if int(getattr(event, "sender_id", 0) or 0) in self.managed_ids:
+            return ""  # 姊妹互撩本來就慢，話題軸線還是同一條
+        if getattr(event, "mentioned", False):
+            return ""  # 被點名就乖乖回那則
+        if reply_message is not None and int(
+            getattr(reply_message, "sender_id", 0) or 0
+        ) == int(self.tg_user_id or 0):
+            return ""  # 回覆我自己 → 一定得接
+        sent_at = _event_sent_at(event) or float(
+            getattr(event, "_sdf_seen_at", 0) or 0
+        )
+        if sent_at <= 0:
+            return ""
+        gap = time.time() - sent_at
+        if gap < _TOPIC_MOVED_SECONDS:
+            return ""
+        try:
+            recent = await self.db.get_group_messages(group_id, limit=10)
+        except Exception:
+            return ""
+        newer = [
+            row for row in recent
+            if str(row.get("role")) == "user"
+            and float(row.get("timestamp") or 0) > sent_at + 1.0
+            and str(row.get("content") or "").strip()
+        ]
+        if len(newer) < _TOPIC_MOVED_MIN_NEWER:
+            return ""
+        tail = "／".join(
+            str(row.get("content") or "").strip()[:22] for row in newer[-4:]
+        )
+        return (
+            f"\n【話題已翻頁】你正要回的那則已經 {int(gap)} 秒前，後面早被洗過去了，"
+            f"群裡現在講的是：{tail}\n"
+            "直接跟上現在這幾句、講你自己的看法或身體反應，用斷言收掉；"
+            "不要再回頭補答舊那則，也不要重問群裡已經有人問過、或已經有人答過的同一件事"
+            "（幾公分、有沒有、多久、哪裡），更別複述別人原話。"
+        )
+
     def _social_dynamics_hint(self, history: list[dict]) -> str:
         """真人社交動力學：偶爾無視、偶爾吐槽拆台，不是每句都捧場。
 
@@ -3777,6 +3835,9 @@ class AccountWorker:
             "(e) 慣用語或評語換皮重講：同一角色前後兩則共用同一個口頭禪（連著兩則都「嘴硬」）、"
             "或跟別人四則內撞同一組評語（前面才有人說「嘴巴說不要身體倒是很誠實」，下一則又寫「身體早就誠實了」），"
             "只換主詞沒換說法，issue 判 repeat，reason 寫出撞的是哪個詞。"
+            "(f) 資訊冗餘：候選只是把群裡已經有人問過、或已經有人答過的同一件事再問一次"
+            "（別人已報「18 公分」、已有人問「多長」，候選又問「到底多長」），沒帶新角度，"
+            "即使字面沒撞也算 repeat，sendable 壓到 0.2 以下。\n"
             "5. 【人設聲音對照】：依【待發言角色】的年齡、職業、性格與風格，判斷這句話像不像「這個人本人」會說的話。"
             "若語氣跑到別的角色身上（例如文靜內斂的設計師突然變成毒舌嗆辣、輕熟女突然用年輕妹子的口吻），issue 判定為 \"unnatural\"，sendable 低於 0.4，"
             "並在 reason 說明「這句更像誰、她本人應該怎麼說」。\n"
@@ -4066,11 +4127,11 @@ class AccountWorker:
                         return
                 except Exception:
                     pass
-            # 防撞防同秒搶話：檢查群內最近一則是否為同群其他水軍剛發送（10秒內），是則錯開 6~12 秒
+            # 防撞防同秒搶話：只有水軍真的剛在 12 秒內講過才錯開。
             try:
-                recent_water = await self.db.recent_bot_texts_by_group(int(event.chat_id or 0))
-                if recent_water:
-                    await asyncio.sleep(random.uniform(5.0, 10.0))
+                last_bot_ts = await self.db.last_bot_ts_by_group(int(event.chat_id or 0))
+                if last_bot_ts and time.time() - last_bot_ts <= _BOT_STAGGER_WINDOW_SECONDS:
+                    await asyncio.sleep(random.uniform(*_BOT_STAGGER_SECONDS))
             except Exception:
                 pass
             media_kind = (
@@ -5342,6 +5403,10 @@ class AccountWorker:
         phrase_hint = self._phrase_fatigue_hint(group_id)
         if phrase_hint:
             user_message += f"\n{phrase_hint}"
+        # 遲到偵測（最後才判，用的是此刻的群狀態）
+        moved_hint = await self._topic_moved_hint(event, reply_message)
+        if moved_hint:
+            user_message += moved_hint
 
         # 依主人指示：酒館級 Author's Note / In-Chat @ Depth 末端動態注入
         # 將最高權重的導演演出指令放在整個 Context 的最後一刻，直接引領模型演繹
@@ -5441,6 +5506,13 @@ class AccountWorker:
                 self.stats["images_understood"] += 1
             self._set_generation_reason(event, "ok")
             return reply
+
+        # 近義複讀／8 秒同一點：直接 drop，不再花一次模型重寫。
+        # 重寫多半還是繞回同一個點，卻多拖 10 秒；主人要的是複讀當場閉嘴。
+        if own_echo and not refusal and not format_leak:
+            self._set_generation_reason(event, "own_echo")
+            self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
+            return ""
 
         if retry_used:
             reason = (
