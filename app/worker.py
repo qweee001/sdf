@@ -119,6 +119,14 @@ _TOPIC_MOVED_MIN_NEWER = 3
 # 以前只要 48 小時內有過水軍發言就無條件睡 5-10 秒，等於每則都白白遲到。
 _BOT_STAGGER_WINDOW_SECONDS = 12.0
 _BOT_STAGGER_SECONDS = (2.5, 6.0)
+# 餓死帳號回場：某號在本群久未發言（600 秒）就允許繞過「90 秒內有水軍講過就讓位」。
+# 沒有這條時，手上沒有 owner（真人認領）的帳號會被熱場 burst 永久擋在門外——
+# 實測小小 12h43m 無發言、整場 decision_calls 只有 1（其他號 8~12）。
+_SILENT_REJOIN_SECONDS = 600.0
+_SILENT_REJOIN_MIN_GAP = 45.0
+# 併發撞點：同一則真人訊息 15 秒內已有姊妹回過，候選要有明顯新角度才准發。
+_SISTER_BURST_SECONDS = 15.0
+_SISTER_STRICT_FLOOR = 0.8
 _PHRASE_CORE_HISTORY_LIMIT = 64
 _PHRASE_CORE_STOPWORDS = frozenset({
     "今天", "真的", "可以", "什麼", "一個", "這個", "那個",
@@ -635,6 +643,9 @@ class AccountWorker:
         self.recent_proactive_owners = (
             recent_proactive_owners if recent_proactive_owners is not None else {}
         )
+        # 群內發言者名稱快取：起手詞去重要先剝掉人名，否則「琪琪…／後天…／小萬…」
+        # 每則開頭都不同，字面永遠不撞，實際上卻是同一個「點名＋催」的句型。
+        self._speaker_names_by_group: dict[int, list[str]] = {}
         self.last_human_activity = (
             last_human_activity if last_human_activity is not None else {}
         )
@@ -1089,6 +1100,8 @@ class AccountWorker:
                 display_now = get_display_name(sender_obj) or ""
             except Exception:
                 display_now = ""
+            if display_now:
+                self._remember_speaker_name(group_id, display_now)
             is_admin = (
                 bool(getattr(event, "is_bot", False))
                 or bool(getattr(sender_obj, "bot", False) if sender_obj else False)
@@ -1718,9 +1731,21 @@ class AccountWorker:
             try:
                 spoke = await self.db.group_bot_last_spoke(group_id)
                 if spoke:
+                    now = time.time()
                     last_any_bot = max(float(t or 0.0) for t in spoke.values())
-                    if time.time() - last_any_bot < 90.0:
+                    # 自己手上沒有 owner 時，本來就只剩這條路；若自己又久未發言，
+                    # 90 秒讓位規則會把整個人鎖死在門外（實測 12h43m 零發言）。
+                    mine = float(spoke.get(int(self.tg_user_id or 0), 0.0) or 0.0)
+                    starved = (
+                        (not mine or now - mine >= _SILENT_REJOIN_SECONDS)
+                        and now - last_any_bot >= _SILENT_REJOIN_MIN_GAP
+                    )
+                    if now - last_any_bot < 90.0 and not starved:
                         return False
+                    if starved and now - last_any_bot < 90.0:
+                        self.stats["starved_rejoin"] = (
+                            int(self.stats.get("starved_rejoin", 0)) + 1
+                        )
             except Exception:
                 pass
 
@@ -2118,19 +2143,60 @@ class AccountWorker:
 
     _OPEN_STRIP = "「」『』（(【[ 　~～!！.。…"
 
-    def _opening_token(self, text: str) -> str:
-        """取一句話的起手詞（前 2 個實字）。中文兩字就是一個口頭禪的長度。"""
+    def _remember_speaker_name(self, group_id: int, name: str) -> None:
+        """記住群裡出現過的發言者名稱（含姊妹自己的暱稱），供起手詞剝名用。"""
+        name = str(name or "").strip()
+        if not (2 <= len(name) <= 6):
+            return
+        names = self._speaker_names_by_group.setdefault(int(group_id), [])
+        if name in names:
+            return
+        names.append(name)
+        if len(names) > 40:
+            del names[0]
+
+    def _speaker_names(self, group_id: int) -> list[str]:
+        """長名優先：避免「小萬」被「小萬英尺」截斷成錯的名字。"""
+        names = list(self._speaker_names_by_group.get(int(group_id or 0), []))
+        for persona in (self.personas or {}).values():
+            p_name = str((persona or {}).get("name") or "").strip()
+            if p_name and p_name not in names:
+                names.append(p_name)
+        return sorted(names, key=len, reverse=True)
+
+    def _opening_token(self, text: str, group_id: int = 0) -> str:
+        """取一句話的起手詞（前 2 個實字）。中文兩字就是一個口頭禪的長度。
+
+        先剝掉開頭的群友名：真人被點名開場時，撞的是後面那個動詞而不是名字。
+        """
         body = str(text or "").lstrip(self._OPEN_STRIP)
+        for name in self._speaker_names(group_id):
+            if body.startswith(name):
+                body = body[len(name):].lstrip(self._OPEN_STRIP)
+                break
         body = body.lstrip("".join(ch for ch in body[:2] if not ("一" <= ch <= "鿿")))
         return body[:2] if len(body) >= 2 else ""
 
-    def _opening_repeat_note(self, own_texts) -> str:
+    def _name_opening_streak(self, own_texts, group_id: int = 0) -> bool:
+        """自己最近兩則都用人名開頭 → 這則也不該再點名開場。"""
+        names = self._speaker_names(group_id)
+        if not names:
+            return False
+        hits = 0
+        for text in list(own_texts or [])[:2]:
+            body = str(text or "").lstrip(self._OPEN_STRIP)
+            if any(body.startswith(name) for name in names):
+                hits += 1
+        return hits >= 2
+
+
+    def _opening_repeat_note(self, own_texts, group_id: int = 0) -> str:
         """動態統計自己近期起手詞：撞過的直接點名禁用，不寫死「笑死」「剛下班」清單。
 
         只認本人發言（DB 取回），跨帳號的熱詞歸 _overused_terms_note 管；
         門檻是同一詞在自己近 6 則出現 ≥2 次，或與上一則開頭相同。
         """
-        toks = [self._opening_token(t) for t in (own_texts or [])[:6]]
+        toks = [self._opening_token(t, group_id) for t in (own_texts or [])[:6]]
         toks = [t for t in toks if t]
         if len(toks) < 2:
             return ""
@@ -2141,6 +2207,8 @@ class AccountWorker:
         if not hot and toks[0] and toks[0] == toks[1]:
             hot = [toks[0]]
         if not hot:
+            if self._name_opening_streak(own_texts, group_id):
+                return "（你最近兩則都是先喊人名才講話，這則別再點名開場，直接講事）"
             return ""
         return (
             f"（你自己最近 {len(toks)} 則裡「{'、'.join(hot[:2])}」開頭已經用過，"
@@ -2285,7 +2353,7 @@ class AccountWorker:
         窗走 45 分鐘（見 _cross_recent_texts），避免稀疏發言讓撞車逃掉。
         """
         texts = self._cross_recent_texts(int(group_id), 45 * 60)
-        toks = [self._opening_token(t) for t in texts]
+        toks = [self._opening_token(t, group_id) for t in texts]
         toks = [t for t in toks if t]
         if len(toks) < 4:
             return ""
@@ -2468,11 +2536,16 @@ class AccountWorker:
             return f"整段照抄真人剛講的「{seg}」，換句話說"
         if self._ask_tail_repeat(own_texts, candidate):
             return "又是問句收尾，跟上一則一樣，改成斷言或動作收"
-        toks = [self._opening_token(t) for t in (own_texts or [])[:6]]
+        toks = [self._opening_token(t, group_id) for t in (own_texts or [])[:6]]
         toks = [t for t in toks if t]
-        head = self._opening_token(candidate)
+        head = self._opening_token(candidate, group_id)
         if head and toks.count(head) >= 2:
             return f"起手詞「{head}」自己已經用過 {toks.count(head)} 次"
+        if group_id and self._name_opening_streak(own_texts, group_id):
+            names = self._speaker_names(group_id)
+            body = str(candidate or "").lstrip(self._OPEN_STRIP)
+            if any(body.startswith(n) for n in names):
+                return "連兩則先喊人名才講話，這則改成不點名的寫法"
         if group_id:
             own_set = {str(t) for t in (own_texts or [])}
             cross = [
@@ -2570,7 +2643,9 @@ class AccountWorker:
         chosen_mood = mood_options[pick]
         if own_recent:
             chosen_mood += own_recent
-        opening_note = self._opening_repeat_note(own_texts)
+        opening_note = self._opening_repeat_note(
+            own_texts, int(getattr(event, "chat_id", 0) or 0)
+        )
         if opening_note:
             chosen_mood += opening_note
         cross_note = self._cross_opening_note(int(getattr(event, "chat_id", 0) or 0))
@@ -3715,7 +3790,7 @@ class AccountWorker:
 
     async def _review_candidate(
         self, context: str, text: str, directive: str = "", recent_bots: str = "",
-        last_human: str = "",
+        last_human: str = "", sister_recent: str = "",
     ):
         """③ 審核候選回覆：上下文＋前置決策＋生成文字一起送審。
 
@@ -3724,7 +3799,12 @@ class AccountWorker:
         支援雙軌：優先 Jev/Laya 專用端點；未配置或超時自動切換至網關神經網絡老司機旁路審查。
         """
         decision_block = f"前置決策（這次原本要怎麼回）：\n{directive}\n" if directive else ""
-        state = f"{context}\n{decision_block}你要發出的回覆：「{str(text).strip()}」"
+        sister_block = (
+            f"（同一則訊息剛剛已經有姊妹回過，候選不得再取同一個點）\n{sister_recent}\n"
+            if sister_recent
+            else ""
+        )
+        state = f"{context}\n{sister_block}{decision_block}你要發出的回覆：「{str(text).strip()}」"
         if getattr(self.config, "decision_api_key", "").strip():
             try:
                 answers = await self._decision_call(
@@ -3767,8 +3847,41 @@ class AccountWorker:
 
         # 網關神經網絡動態審核層（最優解：老司機旁路裁判）
         return await self._review_candidate_gateway(
-            context, text, directive, recent_bots, last_human
+            context, text, directive, recent_bots, last_human, sister_recent
         )
+
+    async def _sister_burst_lines(self, event, window: float | None = None) -> str:
+        """姊妹在「同一則真人訊息」上剛剛搶先回過的句子。
+
+        兩人同時被喚醒時，彼此的候選互相看不到，結果兩句取同一個點
+        （實測 10:30:29 小天後「香腸也能拿來比」→ 4 秒後 RICH「我看是香腸贏了吧」）。
+        生成後、送出前再讀一次，把姊妹那句塞進裁判，撞點就重寫。
+        """
+        group_id = int(getattr(event, "chat_id", 0) or 0)
+        if not group_id:
+            return ""
+        span = _SISTER_BURST_SECONDS if window is None else float(window)
+        me = int(self.tg_user_id or 0)
+        try:
+            rows = await self.db.get_group_messages(group_id, limit=4)
+        except Exception:
+            return ""
+        now = time.time()
+        out = []
+        for row in reversed(rows):
+            if str(row.get("role")) != "assistant":
+                continue
+            if int(row.get("sender_id") or 0) == me:
+                continue
+            try:
+                if now - float(row.get("timestamp") or 0) > span:
+                    break
+            except (TypeError, ValueError):
+                continue
+            body = str(row.get("content") or "").strip()
+            if body:
+                out.append(f"[{row.get('sender_name') or '?'}] {body[:70]}")
+        return "\n".join(out)
 
     async def _recent_bot_lines(self, group_id: int, limit: int = 8) -> str:
         """取出群裡最近的水軍發言原文（跨帳號），供裁判做動態重複感知。"""
@@ -3788,7 +3901,7 @@ class AccountWorker:
 
     async def _review_candidate_gateway(
         self, context: str, text: str, directive: str = "", recent_bots: str = "",
-        last_human: str = "",
+        last_human: str = "", sister_recent: str = "",
     ) -> dict | None:
         """網關神經網絡動態審核層：以台灣老司機視角進行旁路打分與審查。"""
         if not self.ai_client:
@@ -3835,9 +3948,12 @@ class AccountWorker:
             "(e) 慣用語或評語換皮重講：同一角色前後兩則共用同一個口頭禪（連著兩則都「嘴硬」）、"
             "或跟別人四則內撞同一組評語（前面才有人說「嘴巴說不要身體倒是很誠實」，下一則又寫「身體早就誠實了」），"
             "只換主詞沒換說法，issue 判 repeat，reason 寫出撞的是哪個詞。"
-            "(f) 資訊冗餘：候選只是把群裡已經有人問過、或已經有人答過的同一件事再問一次"
+            "（f) 資訊冗餘：候選只是把群裡已經有人問過、或已經有人答過的同一件事再問一次"
             "（別人已報「18 公分」、已有人問「多長」，候選又問「到底多長」），沒帶新角度，"
-            "即使字面沒撞也算 repeat，sendable 壓到 0.2 以下。\n"
+            "即使字面沒撞也算 repeat，sendable 壓到 0.2 以下。"
+            "若【同則訊息姊妹已回過】區塊非空，代表另一位姊妹搶在同一個節拍已把那個點取走了，"
+            "候選只要還是同一個資訊點（同一件事、同一個吐槽角度、同一種比較）一律判 repeat，"
+            "sendable 壓到 0.2 以下，reason 要寫出「姊妹已回過哪個點」。\n"
             "5. 【人設聲音對照】：依【待發言角色】的年齡、職業、性格與風格，判斷這句話像不像「這個人本人」會說的話。"
             "若語氣跑到別的角色身上（例如文靜內斂的設計師突然變成毒舌嗆辣、輕熟女突然用年輕妹子的口吻），issue 判定為 \"unnatural\"，sendable 低於 0.4，"
             "並在 reason 說明「這句更像誰、她本人應該怎麼說」。\n"
@@ -3856,6 +3972,7 @@ class AccountWorker:
             f"聊天風格：{self.persona.get('chat_style') or '?'}）\n"
             f"【群組上下文】\n{context[-1500:] if context else '（無歷史上下文）'}\n"
             f"【近期水軍發言（用來判斷重複與撞句，逐句對照）】\n{recent_bots or '（無）'}\n"
+            f"【同則訊息姊妹已回過（同一個點不准再取）】\n{sister_recent or '（無）'}\n"
             f"【真人最後一句（候選若照抄這句就是複讀）】{last_human[:80] or '（無）'}\n"
             f"【前置意圖】{directive if directive else '（無）'}\n"
             f"【候選發言】：「{str(text).strip()}」"
@@ -3910,8 +4027,10 @@ class AccountWorker:
             print(f"[{self.name}] gateway reviewer error: {exc}", flush=True)
             return {"sendable": 0.8, "issue": "none", "reason": ""}
 
-    def _review_passes(self, review: dict) -> bool:
+    def _review_passes(self, review: dict, strict: bool = False) -> bool:
         threshold = float(getattr(self.config, "decision_gate_threshold", 0.5))
+        if strict:
+            threshold = max(threshold, _SISTER_STRICT_FLOOR)
         return review["issue"] == "none" and review["sendable"] >= threshold
 
     async def _pick_passing_candidate(
@@ -3926,6 +4045,8 @@ class AccountWorker:
         last_human: str = "",
         group_id: int = 0,
         limit: int = 3,
+        sister_recent: str = "",
+        strict: bool = False,
     ) -> str:
         """③ 不過時：改用不同策略各生一條候選，逐條審核，挑可發分最高的那條。
 
@@ -3947,9 +4068,9 @@ class AccountWorker:
                 continue
             self.stats["gate_candidates"] = int(self.stats.get("gate_candidates", 0)) + 1
             review = await self._review_candidate(
-                context, candidate, directive, recent_bots, last_human
+                context, candidate, directive, recent_bots, last_human, sister_recent
             )
-            if review is None or not self._review_passes(review):
+            if review is None or not self._review_passes(review, strict):
                 continue
             score = float(review.get("sendable") or 0.0)
             if score > best_score:
@@ -3978,6 +4099,8 @@ class AccountWorker:
         directive = self._decision_directive(decision) if isinstance(decision, dict) else ""
         group_id = int(getattr(event, "chat_id", 0) or 0)
         recent_bots = await self._recent_bot_lines(group_id)
+        sister_recent = await self._sister_burst_lines(event)
+        strict = bool(sister_recent)
         # 本機硬性自檢先跑（複讀真人原句／連三問／起手詞再撞），過了才花模型裁判
         own_texts: list[str] = []
         last_human = ""
@@ -4008,18 +4131,20 @@ class AccountWorker:
                 last_human=last_human,
                 group_id=group_id,
                 limit=_GATE_CANDIDATE_LIMIT,
+                sister_recent=sister_recent,
+                strict=strict,
             )
             if picked:
                 return picked
             return ""
         review = await self._review_candidate(
-            context, text, directive, recent_bots, last_human
+            context, text, directive, recent_bots, last_human, sister_recent
         )
         if review is None:
             self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
             print(f"[{self.name}] gate-hold: 決策層超時/失敗，暫緩 {text[:20]!r}", flush=True)
             return ""
-        if self._review_passes(review):
+        if self._review_passes(review, strict):
             self.stats["gate_pass"] = int(self.stats.get("gate_pass", 0)) + 1
             return text
         self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
@@ -4041,6 +4166,8 @@ class AccountWorker:
             last_human=last_human,
             group_id=group_id,
             limit=_GATE_CANDIDATE_LIMIT,
+            sister_recent=sister_recent,
+            strict=strict,
         )
         if picked:
             self.stats["gate_pass_after_rewrite"] = (
