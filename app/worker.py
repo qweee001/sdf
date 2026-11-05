@@ -147,7 +147,20 @@ _GESTURE_WORDS = (
     "懶腰", "鐵門", "高跟鞋", "絲襪", "解扣", "扣子", "口紅", "防曬", "面膜",
     "洗完澡", "沖完澡", "癱在", "窩在", "縮在", "蹲在", "站到", "趴著",
     "躺床", "吸管", "摸魚", "揉腳", "揉小腿", "冷氣", "雞皮疙瘩",
+    # 嘴上的動作最容易兩則連著做（15:41 Chen「發情想亂咬…想咬姊姊哪裡」→
+    # 15:44 小天後「還想咬，弟弟你斷奶了沒」），身體部位清單抓不到。
+    "咬", "舔", "扭腰",
+    # 狀態軸：一整個下午三則都在講累（15:32 腳痠、15:50 躺著廢、16:01 伸懶腰勒緊）
+    "累", "痠",
 )
+# 場景軸的壽命不是固定 30 分鐘：單獨一個動作／道具一小時內算撞，但一則句子
+# 同時借用兩軸以上、或整句是從三則舊句拼起來的（16:01 小小「下午摸魚伸個懶腰
+# 內衣勒得好緊，出一張嘴」＝14:06 RICH「吹著冷氣伸懶腰內衣勒得有點悶」＋14:10
+# 小天後「咬著手搖吸管摸魚」＋14:20 Chen「只會出一張嘴」），每個字單獨看都已經
+# 超過半小時，逐字窗永遠放行，群友看到的卻是同一格重播。軸的壽命依共用軸數放大。
+_SCENE_FADE_SHORT = 60 * 60
+_SCENE_FADE_LONG = 150 * 60
+_SCENE_MOSAIC_SOURCES = 3
 # 群務說明句：入會／找助理這種本來就該講外面的事，不套自曝要求。
 _INFO_WORDS = ("助理", "入會", "會員", "排隊", "私訊")
 _ECHO_MARKS: dict[tuple[int, str], float] = {}
@@ -2506,6 +2519,23 @@ class AccountWorker:
         now = time.time()
         return [str(t) for t, ts in zip(bucket, stamp) if now - ts < seconds]
 
+    def _cross_recent_items(self, group_id: int, seconds: float) -> list[tuple[str, float]]:
+        """跟 `_cross_recent_texts` 一樣的窗，但回 (句子, 幾秒前)。
+
+        場景軸要依「多久以前」決定壽命，只給字串不夠用。
+        """
+        gid = int(group_id)
+        bucket = self._recent_texts_by_group.get(gid) or []
+        stamp = self._recent_texts_at.get(gid) or []
+        if not bucket:
+            return []
+        if len(stamp) != len(bucket):
+            return [(str(t), 0.0) for t in bucket]
+        now = time.time()
+        return [
+            (str(t), now - ts) for t, ts in zip(bucket, stamp) if now - ts < seconds
+        ]
+
     def _hot_opening_tokens(self, group_id: int) -> tuple[list[str], list[str]]:
         """本群近期被用爛的起頭詞與起頭字（純頻率，不寫死任何字）。
 
@@ -2920,19 +2950,31 @@ class AccountWorker:
                 if near and head[0] in str(near[-1])[:24]:
                     return f"上一則水軍前半句才用過「{head[0]}」，這則換一個字起頭"
         # 同一個身體動作短時間內被兩個號做過（小小 13:40 伸懶腰→RICH 14:06 伸懶腰），
-        # 場景字串不同但群友看到的是同一個動作，這條只看實際有人做過的動作。
+        # 場景字串不同但群友看到的是同一個動作。改成看「這則借了幾軸、跟幾則舊句借」：
+        # 一軸 → 一小時內算撞；兩軸以上或分散在三則舊句（拼裝）→ 兩個半小時都算撞。
         if group_id:
-            g_hits = [g for g in _GESTURE_WORDS if g in str(candidate)]
-            if g_hits:
-                used = {
-                    g
-                    for g in _GESTURE_WORDS
-                    for t in self._cross_recent_texts(int(group_id), 30 * 60)
-                    if g in str(t)
-                }
-                dup = [g for g in g_hits if g in used]
-                if dup:
-                    return f"「{'、'.join(dup)}」這動作最近才有人做過，換一個身體動作"
+            cand_items = {
+                g for g in _GESTURE_WORDS + _LIFESTYLE_MOTIFS if g in str(candidate)
+            }
+            if cand_items:
+                shared_any: set = set()
+                short_dup: set = set()
+                sources = 0
+                for t, age in self._cross_recent_items(int(group_id), _SCENE_FADE_LONG):
+                    shared = {g for g in cand_items if g in t}
+                    if not shared:
+                        continue
+                    sources += 1
+                    shared_any |= shared
+                    if age <= _SCENE_FADE_SHORT:
+                        short_dup |= shared
+                if len(shared_any) >= 2 or sources >= _SCENE_MOSAIC_SOURCES:
+                    return (
+                        f"「{'、'.join(sorted(shared_any))}」這幾個點最近已經被拼過"
+                        f"（{sources} 則舊句），整句換一組場景，別再拿同樣幾個東西重組"
+                    )
+                if short_dup:
+                    return f"「{'、'.join(sorted(short_dup))}」這動作最近才有人做過，換一個身體動作"
         if group_id:
             own_set = {str(t) for t in (own_texts or [])}
             cross = [
@@ -2961,7 +3003,9 @@ class AccountWorker:
             and not any(w in str(candidate) for w in _INFO_WORDS)
         ):
             recent = self._cross_recent_texts(int(group_id), 30 * 60)[-6:]
-            if len(recent) >= 4:
+            # 三則就判：15:37 小小、15:41 Chen 都是純評語，15:44 小天後 又是評語，
+            # 門檻卡在 4 則、樣本只有 3 就永遠不觸發，一整個下午都在播報。
+            if len(recent) >= 3:
                 press = sum(
                     1
                     for t in recent
