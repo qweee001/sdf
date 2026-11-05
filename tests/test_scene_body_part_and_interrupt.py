@@ -124,3 +124,35 @@ def test_latency_samples_are_group_isolated():
     for sec in (10, 10, 10):
         w._note_reply_latency(GID, sec)
     assert w._adaptive_interrupt_budget([], now, -2002) == 25.0
+
+
+def test_veto_code_classifies_reason():
+    assert AccountWorker._veto_code("「胸口」這個部位十分鐘內才有人寫過") == "body_part"
+    assert AccountWorker._veto_code("「懶腰」自己四小時內做過了") == "own_scene"
+    assert AccountWorker._veto_code("「懶腰」這動作最近才有人做過") == "scene_dup"
+    assert AccountWorker._veto_code("起手詞「剛」自己已經用過 2 次") == "opening"
+    assert AccountWorker._veto_code("亂七八糟") == "other"
+
+
+def test_seconds_since_any_bot_without_history_is_large():
+    import asyncio
+
+    w = _worker()
+
+    async def _spoke(_gid):
+        return {}
+
+    w.db = SimpleNamespace(group_bot_last_spoke=_spoke)
+    assert asyncio.run(w._seconds_since_any_bot(GID)) > 600
+
+
+def test_seconds_since_any_bot_reads_latest_speaker():
+    import asyncio
+
+    w = _worker()
+
+    async def _spoke(_gid):
+        return {1: time.time() - 30, 2: time.time() - 120}
+
+    w.db = SimpleNamespace(group_bot_last_spoke=_spoke)
+    assert 25 < asyncio.run(w._seconds_since_any_bot(GID)) < 35

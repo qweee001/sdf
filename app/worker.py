@@ -2762,6 +2762,36 @@ class AccountWorker:
         bucket.append(float(seconds))
         del bucket[:-12]
 
+    async def _seconds_since_any_bot(self, group_id: int) -> float:
+        """群裡上一次水軍（任何一號）出聲到現在幾秒；沒有紀錄回一個大數。"""
+        try:
+            spoke = await self.db.group_bot_last_spoke(int(group_id))
+        except Exception:
+            return 10**6
+        if not spoke:
+            return 10**6
+        last = max(float(t or 0.0) for t in spoke.values())
+        return time.time() - last if last else 10**6
+
+    @staticmethod
+    def _veto_code(reason: str) -> str:
+        """退回理由分類，給統計用（沒有 log 可翻時至少看得出是哪一軸在攔）。"""
+        table = (
+            ("部位", "body_part"),
+            ("拼過", "mosaic"),
+            ("自己四小時", "own_scene"),
+            ("動作最近", "scene_dup"),
+            ("痠累", "state"),
+            ("起手", "opening"),
+            ("問句", "ask_tail"),
+            ("照抄", "verbatim"),
+            ("複讀", "echo"),
+        )
+        for key, code in table:
+            if key in str(reason):
+                return code
+        return "other"
+
     def _adaptive_interrupt_budget(self, human_ts, now: float, group_id: int) -> float:
         """速率當下限、實測生成時間當主體：模型慢的場自然等得久，快的場不拖延。"""
         base = self._interrupt_budget(human_ts, now)
@@ -4833,6 +4863,8 @@ class AccountWorker:
         veto = self._local_veto(text, own_texts, last_human, group_id)
         if veto:
             self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
+            _code = "veto_" + self._veto_code(veto)
+            self.stats[_code] = int(self.stats.get(_code, 0)) + 1
             print(f"[{self.name}] local-veto: {veto} {text[:20]!r}", flush=True)
             picked = await self._pick_passing_candidate(
                 context,
@@ -8566,6 +8598,8 @@ class AccountWorker:
                             topic, own_texts_p, last_human_p, int(group_id)
                         )
                         if veto_p:
+                            _code = "veto_" + self._veto_code(veto_p)
+                            self.stats[_code] = int(self.stats.get(_code, 0)) + 1
                             review = {"sendable": 0.2, "issue": "repeat", "reason": veto_p}
                         else:
                             review = await self._review_candidate(
@@ -8621,9 +8655,14 @@ class AccountWorker:
                         )
                         if picked:
                             topic = picked
-                        elif self._consecutive_press_box(int(group_id)) >= 3:
+                        elif (
+                            self._consecutive_press_box(int(group_id)) >= 3
+                            and self._seconds_since_any_bot(int(group_id)) < 600
+                        ):
                             # 已經連三則純評語，重寫又生不出有場景的版本：這輪先不發，
-                            # 別把第四句場邊主播也推出去。名額留給下一輪（loop 30~90 秒後）。
+                            # 別把第四句場邊主播也推出去。但如果群裡已經十分鐘沒有水軍
+                            # 出聲，hold 就變成靜音（部署後九個候選全被 hold、八分鐘零則），
+                            # 這時候寧可發一句評語也不要空場。
                             self.stats["proactive_echo_hold"] = (
                                 int(self.stats.get("proactive_echo_hold", 0)) + 1
                             )
