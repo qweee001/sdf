@@ -100,9 +100,12 @@ def test_half_function_bigram_alone_does_not_veto():
     w = _worker()
     gid = -1001
     w._recent_texts_by_group[gid] = list(REAL_1954_2010)
-    assert w._local_veto(
+    # 這則是真的跟前一則同一個字開頭（吃），退的是起頭字那條，不是慣用語那條。
+    veto = w._local_veto(
         "吃飯哪有吃人香，深情哥是想請琪琪吃晚餐還是吃別的", [], "", gid
-    ) == ""
+    )
+    assert "慣用" not in veto or veto == ""
+    assert veto == "" or "開頭" in veto
 
 
 def test_vetoes_idiom_that_contains_function_chars():

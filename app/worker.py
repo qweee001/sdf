@@ -142,6 +142,14 @@ _ECHO_MARK_TTL = 40 * 60
 _ECHO_SHAPE_WINDOW = 30 * 60
 _ECHO_SHAPE_LOOKBACK = 4
 _ECHO_SHAPE_HITS = 2
+# 身體動作詞：只用來「偵測最近有沒有人做過」，不是禁用詞表，命中與否看實際語料。
+_GESTURE_WORDS = (
+    "懶腰", "鐵門", "高跟鞋", "絲襪", "解扣", "扣子", "口紅", "防曬", "面膜",
+    "洗完澡", "沖完澡", "癱在", "窩在", "縮在", "蹲在", "站到", "趴著",
+    "躺床", "吸管", "摸魚", "揉腳", "揉小腿", "冷氣", "雞皮疙瘩",
+)
+# 群務說明句：入會／找助理這種本來就該講外面的事，不套自曝要求。
+_INFO_WORDS = ("助理", "入會", "會員", "排隊", "私訊")
 _ECHO_MARKS: dict[tuple[int, str], float] = {}
 _SISTER_STRICT_FLOOR = 0.8
 _PHRASE_CORE_HISTORY_LIMIT = 64
@@ -2895,11 +2903,36 @@ class AccountWorker:
         head = self._opening_token(candidate, group_id)
         if head and toks.count(head) >= 2:
             return f"起手詞「{head}」自己已經用過 {toks.count(head)} 次"
-        if group_id and self._name_opening_streak(own_texts, group_id):
-            names = self._speaker_names(group_id)
-            body = str(candidate or "").lstrip(self._OPEN_STRIP)
-            if any(body.startswith(n) for n in names):
-                return "連兩則先喊人名才講話，這則改成不點名的寫法"
+        # 相鄰兩則同一格：13:40 小小「剛在位子伸個懶腰」→ 13:41 小天後「剛補完防曬」，
+        # 字面不同、頻率也還沒累積到兩次，只看頻率的門檻永遠慢一步，這裡直接比上一則。
+        if group_id and head:
+            near = self._cross_recent_texts(int(group_id), 12 * 60)
+            near_heads = [
+                t2[0] for t2 in (self._opening_token(x, group_id) for x in near) if t2
+            ]
+            if near_heads:
+                if head[0] == near_heads[-1]:
+                    return f"上一則水軍也從「{head[0]}」開頭，連著兩則同一格，換一個字起頭"
+                if near_heads.count(head[0]) >= 2:
+                    return f"「{head[0]}」開頭最近已經兩則，換一個字起頭"
+                # 對方不是從那個字開頭，但同一個字就在上一則的前半句（13:40「…害我
+                # 剛在位子伸個懶腰」→ 13:41「剛補完防曬」），群友讀到的還是同一個起手。
+                if near and head[0] in str(near[-1])[:24]:
+                    return f"上一則水軍前半句才用過「{head[0]}」，這則換一個字起頭"
+        # 同一個身體動作短時間內被兩個號做過（小小 13:40 伸懶腰→RICH 14:06 伸懶腰），
+        # 場景字串不同但群友看到的是同一個動作，這條只看實際有人做過的動作。
+        if group_id:
+            g_hits = [g for g in _GESTURE_WORDS if g in str(candidate)]
+            if g_hits:
+                used = {
+                    g
+                    for g in _GESTURE_WORDS
+                    for t in self._cross_recent_texts(int(group_id), 30 * 60)
+                    if g in str(t)
+                }
+                dup = [g for g in g_hits if g in used]
+                if dup:
+                    return f"「{'、'.join(dup)}」這動作最近才有人做過，換一個身體動作"
         if group_id:
             own_set = {str(t) for t in (own_texts or [])}
             cross = [
@@ -2909,7 +2942,37 @@ class AccountWorker:
             ]
         else:
             cross = []
-        return self._idiom_reuse(candidate, own_texts, cross)
+        if group_id and self._name_opening_streak(own_texts, group_id):
+            names = self._speaker_names(group_id)
+            body = str(candidate or "").lstrip(self._OPEN_STRIP)
+            if any(body.startswith(n) for n in names):
+                return "連兩則先喊人名才講話，這則改成不點名的寫法"
+        # 慣用詞的判定最細，先跑：命中就回它，別被下面比較粗的密度規則蓋掉理由。
+        idiom = self._idiom_reuse(candidate, own_texts, cross)
+        if idiom:
+            return idiom
+        # 播報密度：連兩則才攔會漏掉「你一則我一則」輪流播報（13:15~13:52 十一則
+        # 有五則純評語，沒有一則是連著的），改看最近六則裡佔比過三分之二。
+        # 佔一半太鬆（真實 13 則回放會多殺 5 則），三分之二是「這群已經在播報了」。
+        # 帶人入會／找助理這種群務說明本來就該講外面的事，不逼她講自己。
+        if (
+            group_id
+            and self._is_press_box(candidate)
+            and not any(w in str(candidate) for w in _INFO_WORDS)
+        ):
+            recent = self._cross_recent_texts(int(group_id), 30 * 60)[-6:]
+            if len(recent) >= 4:
+                press = sum(
+                    1
+                    for t in recent
+                    if self._is_press_box(t) or (int(group_id), t) in _ECHO_MARKS
+                )
+                if press * 3 >= len(recent) * 2:
+                    return (
+                        f"最近 {len(recent)} 則水軍有 {press} 則在講別人的事，"
+                        "這則要有自己的身體感覺或此刻動作"
+                    )
+        return ""
 
     def _build_directors_note(
         self, event, history: list[dict], own_texts=None, last_human: str = ""
