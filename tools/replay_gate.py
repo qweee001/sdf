@@ -7,6 +7,7 @@ import datetime
 import json
 import os
 import sys
+import time
 import zoneinfo
 from types import SimpleNamespace
 from typing import Any, cast
@@ -46,8 +47,10 @@ for t, r in rows:
         continue
     name = r["sender_name"]
     own = [s for (st, sn, s) in reversed(sent) if sn == name][:6]
-    ts = t.timestamp()
-    w._recent_texts_at[gid] = [ts - (t - st).total_seconds() for (st, _sn, _s) in sent]
+    # 時間軸錨在「候選當下」：整份語料的年齡用現在回推，重播過多久都不會失真
+    # （直接用資料的絕對時間戳，重播晚一小時 14:06 就會變成三小時前而被放行）。
+    now = time.time()
+    w._recent_texts_at[gid] = [now - (t - st).total_seconds() for (st, _sn, _s) in sent]
     v = w._local_veto(txt, own, "", gid)
     if v:
         vetoed += 1
