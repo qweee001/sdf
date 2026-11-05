@@ -170,3 +170,64 @@ def test_life_anchor_avoids_scene_another_account_just_used():
     ]
     picks = {w._pick_life_anchor(anchors, "小小", [], [], group_id=GID) for _ in range(20)}
     assert picks == {anchors[1][1]}
+
+def test_same_account_repeating_the_gesture_after_the_short_window_is_vetoed():
+    """17:32 小小又伸懶腰，16:01 才伸過（91 分鐘）：同一個號重做比別號撞更明顯。"""
+    w = _worker("小小")
+    old = "下午摸魚伸個懶腰內衣勒得好緊，出一張嘴就想上喔"
+    _seed(w, [(91 * 60, old), (300, "真假")])
+    w._own_scene_by_group[GID] = [(old, time.time() - 91 * 60)]
+    veto = _veto(w, "在位子上伸懶腰胸口勒得好緊，想跑去陪妹子吃鍋就承認嘛")
+    assert veto
+    assert "懶腰" in veto
+
+
+def test_same_gesture_from_another_account_keeps_the_short_window():
+    """別的號 91 分鐘前伸過同一個懶腰，單軸照樣放行，不因為改寫變永久封鎖。"""
+    w = _worker("小小")
+    _seed(w, [(91 * 60, "下午摸魚伸個懶腰內衣勒得好緊"), (300, "真假")])
+    assert _veto(w, "在位子上扭腰，椅子都坐不住了") == ""
+
+
+def test_traditional_acid_variant_hits_the_state_axis():
+    """17:16 腰「酸」背痛 → 18:01 腰「酸」死了，只收『痠』的偵測整條失效。"""
+    w = _worker("Chen")
+    _seed(w, [(45 * 60, "誰跟你在收錢，我站櫃整天腰酸背痛，只想找個硬的"), (60, "真假")])
+    veto = _veto(w, "剛理完店裡的衣服腰酸死了，吃大餐不帶妹")
+    assert veto
+    assert "痠" in veto
+
+
+def test_state_saturation_forces_a_non_body_scene():
+    """兩小時三則都在講痠累，第四則換一個新字（喘）一樣算同一個心境。"""
+    w = _worker("RICH")
+    _seed(
+        w,
+        [
+            (50 * 60, "站櫃站了一整天，腰酸背痛只想找個硬的"),
+            (25 * 60, "摸魚按著發酸的肩膀，鱷魚當然剝皮做小廢包"),
+            (12 * 60, "腳底板熱到發燙，脫了鞋就著地板散熱"),
+        ],
+    )
+    veto = _veto(w, "提著兩袋東西爬上樓，進門靠著牆喘")
+    assert veto
+    assert "身體痠累" in veto
+
+
+def test_anchor_picker_avoids_fatigue_anchor_when_the_group_is_saturated():
+    """飽和時挑錨點就把疲勞場景排到後面，不要生成完才被退。"""
+    w = _worker("小小")
+    _seed(
+        w,
+        [
+            (50 * 60, "站櫃站了一整天，腰酸背痛只想找個硬的"),
+            (25 * 60, "摸魚按著發酸的肩膀，鱷魚當然剝皮做小廢包"),
+            (12 * 60, "腳底板熱到發燙，脫了鞋就著地板散熱"),
+        ],
+    )
+    anchors = [
+        ("站櫃", "站櫃站了一整天，腳底板和小腿超痠，好想有個耐操的男人"),
+        ("自｜夜市", "逛完夜市手提著鹹酥雞，紙袋油到透出來，涼拖鞋啪嗒啪嗒走回騎樓"),
+    ]
+    picks = {w._pick_life_anchor(anchors, "小天後", [], [], group_id=GID) for _ in range(20)}
+    assert picks == {anchors[1][1]}

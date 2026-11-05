@@ -160,6 +160,15 @@ _GESTURE_WORDS = (
 # 超過半小時，逐字窗永遠放行，群友看到的卻是同一格重播。軸的壽命依共用軸數放大。
 _SCENE_FADE_SHORT = 60 * 60
 _SCENE_FADE_LONG = 150 * 60
+# 同一個號重做同一個動作比別的號撞更明顯（17:32 小小又伸懶腰，16:01 才伸過，91 分鐘，
+# 逐字看已經超過一小時）。自己的場景另外記一份、窗拉到四小時。
+_SCENE_FADE_SELF = 4 * 60 * 60
+# 身體狀態字：不是禁用詞，是拿來數「這一小時有幾則在講痠累」。換字不代表換心境
+# （17:16 腰酸背痛 → 17:37 肩膀發酸 → 18:01 腰酸死了，三個號都在同一個疲勞格）。
+_STATE_WORDS = ("痠", "累", "喘", "麻", "燙")
+_STATE_FADE = 120 * 60
+# 異體字只影響比對，不動輸出：偵測漏「酸」等於整條狀態軸失效。
+_AXIS_VARIANTS = str.maketrans({"酸": "痠", "溼": "濕", "檯": "台"})
 _SCENE_MOSAIC_SOURCES = 3
 # 群務說明句：入會／找助理這種本來就該講外面的事，不套自曝要求。
 _INFO_WORDS = ("助理", "入會", "會員", "排隊", "私訊")
@@ -788,6 +797,8 @@ class AccountWorker:
         self._recent_texts_at: dict[int, list[float]] = (
             recent_texts_at if recent_texts_at is not None else {}
         )
+        # 本帳號自己做過的身體動作（群組 → [(句子, 時間]），窗比跨號長四倍
+        self._own_scene_by_group: dict[int, list[tuple[str, float]]] = {}
         # 最後一次從 DB 回填跨號語料的時間（重啟後共享桶是空的，閘門會全部失效）
         self._cross_seeded_at: dict[int, float] = {}
         # 閘門已放行、還沒送出的候選（群組 → [(account_id, name, text, ts)]）。
@@ -2173,11 +2184,15 @@ class AccountWorker:
         if not recent:
             return random.choice([sc for _, sc in anchors])
         scored = []
+        # 狀態軸飽和時把「以身體痠累為主」的錨點往後排，否則改寫十次還是挑同一種疲勞場景
+        saturated = bool(group_id) and self._state_hits(int(group_id), _STATE_FADE) >= 3
         for tag, scene in anchors:
             sh = self._scene_shingles(scene)
             overlap = (sum(1 for s in sh if s in recent) / len(sh)) if sh else 0.0
             if tag and tag in recent:
                 overlap += 2.0
+            if saturated and any(w in str(scene).translate(_AXIS_VARIANTS) for w in _STATE_WORDS):
+                overlap += 1.5
             scored.append((overlap, scene))
         low = min(s for s, _ in scored)
         pool = [sc for s, sc in scored if s <= low + 1e-9]
@@ -2554,6 +2569,26 @@ class AccountWorker:
             (str(t), now - ts) for t, ts in zip(bucket, stamp) if now - ts < seconds
         ]
 
+    def _own_scene_items(self, group_id: int, seconds: float) -> set[str]:
+        """本帳號在窗內做過哪些身體動作（給自檢比對用）。"""
+        rows = self._own_scene_by_group.get(int(group_id)) or []
+        now = time.time()
+        found: set[str] = set()
+        for text, ts in rows:
+            if now - ts >= seconds:
+                continue
+            body = str(text).translate(_AXIS_VARIANTS)
+            found |= {g for g in _GESTURE_WORDS + _LIFESTYLE_MOTIFS if g in body}
+        return found
+
+    def _state_hits(self, group_id: int, seconds: float) -> int:
+        """窗內有幾則水軍在講自己的身體狀態（痠累喘麻燙）。"""
+        return sum(
+            1
+            for text, _age in self._cross_recent_items(int(group_id), seconds)
+            if any(w in str(text).translate(_AXIS_VARIANTS) for w in _STATE_WORDS)
+        )
+
     def _hot_opening_tokens(self, group_id: int) -> tuple[list[str], list[str]]:
         """本群近期被用爛的起頭詞與起頭字（純頻率，不寫死任何字）。
 
@@ -2710,14 +2745,21 @@ class AccountWorker:
             return
         seen = set(bucket)
         pairs = []
+        own_pairs = []
+        own_seen = {str(b) for b, _ in (self._own_scene_by_group.get(gid) or [])}
         for r in rows:
             if str(r.get("role")) != "assistant":
                 continue
             body = str(r.get("content") or "").replace("\n", " ").strip()
-            if not body or body in seen:
+            if not body:
                 continue
             ts = float(r.get("timestamp") or 0.0) or now
             if now - ts > _CROSS_TEXT_KEEP_SECONDS:
+                continue
+            if str(r.get("sender_id")) == str(self.tg_user_id) and body not in own_seen:
+                own_seen.add(body)
+                own_pairs.append((ts, body))
+            if body in seen:
                 continue
             seen.add(body)
             pairs.append((ts, body))
@@ -2726,6 +2768,9 @@ class AccountWorker:
             stamp.append(ts)
         del bucket[:-_PHRASE_HISTORY_LIMIT]
         del stamp[:-_PHRASE_HISTORY_LIMIT]
+        own = self._own_scene_by_group.setdefault(gid, [])
+        own.extend((body, ts) for ts, body in sorted(own_pairs))
+        own[:] = [(b, ts) for b, ts in own if now - ts < _SCENE_FADE_SELF]
 
     def _echo_shape_hits(self, group_id: int) -> int:
         """最近幾則水軍有幾則在講別人的事（引述起頭或整句旁觀）。"""
@@ -2989,20 +3034,27 @@ class AccountWorker:
         # 一軸 → 一小時內算撞；兩軸以上或分散在三則舊句（拼裝）→ 兩個半小時都算撞。
         if group_id:
             cand_items = {
-                g for g in _GESTURE_WORDS + _LIFESTYLE_MOTIFS if g in str(candidate)
+                g
+                for g in _GESTURE_WORDS + _LIFESTYLE_MOTIFS
+                if g in str(candidate).translate(_AXIS_VARIANTS)
             }
             if cand_items:
                 shared_any: set = set()
                 short_dup: set = set()
                 sources = 0
                 for t, age in self._cross_recent_items(int(group_id), _SCENE_FADE_LONG):
-                    shared = {g for g in cand_items if g in t}
+                    shared = {g for g in cand_items if g in str(t).translate(_AXIS_VARIANTS)}
                     if not shared:
                         continue
                     sources += 1
                     shared_any |= shared
                     if age <= _SCENE_FADE_SHORT:
                         short_dup |= shared
+                # 自己重做同一個動作（同一個號 91 分鐘內伸兩次懶腰）：群友認的是這個人
+                # 又來一次，不是兩個不同的人剛好都伸懶腰，所以窗比跨號長四倍。
+                own_hit = cand_items & self._own_scene_items(int(group_id), _SCENE_FADE_SELF)
+                if own_hit and len(shared_any) < 2 and sources < _SCENE_MOSAIC_SOURCES:
+                    return f"「{'、'.join(sorted(own_hit))}」自己四小時內做過了，這一則換一個身體動作"
                 if len(shared_any) >= 2 or sources >= _SCENE_MOSAIC_SOURCES:
                     return (
                         f"「{'、'.join(sorted(shared_any))}」這幾個點最近已經被拼過"
@@ -3010,6 +3062,14 @@ class AccountWorker:
                     )
                 if short_dup:
                     return f"「{'、'.join(sorted(short_dup))}」這動作最近才有人做過，換一個身體動作"
+            # 狀態軸飽和：兩小時內已經三則在講痠累，換字也是同一個心境
+            # （17:16 腰酸背痛→17:37 肩膀發酸→18:01 腰酸死了），這則要有別的場景。
+            elif (
+                not any(w in str(candidate) for w in _INFO_WORDS)
+                and self._state_hits(int(group_id), _STATE_FADE) >= 3
+                and any(w in str(candidate).translate(_AXIS_VARIANTS) for w in _STATE_WORDS)
+            ):
+                return "兩小時內已經三則在講身體痠累，這則換一個不是身體狀態的場景"
         if group_id:
             own_set = {str(t) for t in (own_texts or [])}
             cross = [
@@ -3075,6 +3135,8 @@ class AccountWorker:
                 ("酒吧", "「週末好想去酒吧喝一杯，小妹子喝了酒最不設防，哪個哥哥要帶我走」"),
                 # 純自曝：整句不提男人、不用問句，用來壓「每則都在找男人」的單一形狀
                 ("自｜追劇", "「關燈窩在棉被裡追劇追到出神，冷氣太強腳都冰了，只好自己把腿縮起來夾著」"),
+                # 晚上不必都在喊累：夜市這種場景沒有半個疲勞字，狀態軸飽和時拿來換氣
+                ("自｜夜市", "「逛完夜市手提著鹹酥雞，紙袋油到透出來，涼拖鞋啪嗒啪嗒走回騎樓」"),
             ],
             "小天後": [
                 # 30歲慵懶傲嬌櫃姐：三重夜貓、專治吹牛、嘴賤挑釁、求被伺候
@@ -3084,6 +3146,7 @@ class AccountWorker:
                 ("更衣室", "「現在休息時間躲在更衣室摸魚，真絲內衣被汗弄得貼在胸口，微喘著只想找男人私聊」"),
                 ("打嘴砲", "「整天看群裡男人打嘴砲，真上場能把我弄到求饒抓破床單的到底有沒有半個」"),
                 ("自｜收攤", "「鐵門拉下來整個人癱在椅子上不想動，腳底板熱到發燙，脫了鞋就著地板散熱」"),
+                ("自｜等紅燈", "「下班騎車停在路口等紅燈，安全帽壓出一圈印，瀏海被風吹到眼睛裡」"),
             ],
             "RICH": [
                 # 28歲中壢文靜設計師：台大悶騷、文青微醺、反問勾人、想被霸氣征服
@@ -3092,6 +3155,7 @@ class AccountWorker:
                 ("畫圖", "「剛畫完人體線條圖，滿腦子都是被按在牆上親吻撫摸的畫面，誰今晚有種來把我餵飽」"),
                 ("香水", "「今天噴了超撩人的木質調香水，自己聞著都心跳好快，只給今晚敢帶我走的男人聞」"),
                 ("自｜收工", "「存檔關機，螢幕一暗房間就只剩檯燈，安靜到連自己吞口水的聲音都聽得到」"),
+                ("自｜泡澡", "「放了一缸熱水泡到皮膚發紅，起身鏡子全是霧，擦乾才想到睡衣還晾在外面」"),
             ],
             "Chen": [
                 # 38歲大安熟女服飾店闆娘：家庭冷淡出軌、極致飢渴少婦、專吃年下小狼狗
@@ -3101,6 +3165,7 @@ class AccountWorker:
                 ("看店", "「整理進口蕾絲睡衣，看著鏡子裡的腰身線條，小女生哪懂怎麼讓男人舒服到不想下床」"),
                 ("床", "「空蕩蕩的雙人床好涼，姊姊現在慾火正旺，哪個體能強悍的小狼狗敢進來交作業」"),
                 ("自｜打烊", "「算完今天的帳把計算機推開，指節痠，靠著椅背仰頭發呆，脖子後面一片涼」"),
+                ("自｜收衣服", "「把曬乾的衣服一件件收進來，棉被有太陽的味道，抱著直接往臉上蹭」"),
                 ("自｜開店", "「拉開鐵門前先在騎樓蹲著擦玻璃，抹布擰到手掌發紅，手肘撐在膝蓋上喘」"),
             ],
         }
@@ -7577,6 +7642,9 @@ class AccountWorker:
         stamp = self._recent_texts_at.setdefault(gid, [])
         bucket.append(t)
         stamp.append(now)
+        own_scene = self._own_scene_by_group.setdefault(gid, [])
+        own_scene.append((t, now))
+        own_scene[:] = [(b, ts) for b, ts in own_scene if now - ts < _SCENE_FADE_SELF]
         # 時間優先淘汰：水軍密度低時若只按則數截斷，90 分鐘窗會被吃掉一半
         keep = [
             i for i, ts in enumerate(stamp) if now - ts < _CROSS_TEXT_KEEP_SECONDS
