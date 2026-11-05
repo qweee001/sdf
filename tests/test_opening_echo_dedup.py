@@ -169,6 +169,53 @@ def test_opening_cliche_survives_an_hour_of_gap():
     assert "剛洗" in w._cross_opening_note(-1001)
 
 
+def test_cross_opening_note_flags_same_head_char_across_accounts():
+    """「剛站櫃」「剛開店」「剛擦完身體乳」前兩字互不相同，仍是同一格起手。
+
+    10:00~10:23 三號輪流用「剛＋當下動作」開場，字面比對一句都攔不到。
+    """
+    w = _worker()
+    w._recent_texts_by_group[-1001] = [
+        "剛站櫃就想摸魚喝冰美式",
+        "剛開店冷氣都還沒涼",
+        "剛擦完身體乳滑溜溜",
+        "萬英尺你也太壞了吧",
+        "好啦別吵了跟自卑的人計較什麼",
+        "保險套留著自己用啦",
+    ]
+    assert "剛" in w._cross_opening_note(-1001)
+
+
+def test_cross_opening_note_head_char_needs_three():
+    """同一字只出現兩次還不算撞，避免把「我／你」這種常見起頭一律封掉。"""
+    w = _worker()
+    w._recent_texts_by_group[-1001] = [
+        "剛站櫃就想摸魚喝冰美式",
+        "剛開店冷氣都還沒涼",
+        "夜市滷味想到你們",
+        "紅燒肉配白飯超下飯",
+        "怕就別約我又不吃人",
+        "保險套留著自己用啦",
+    ]
+    assert w._cross_opening_note(-1001) == ""
+
+
+def test_cross_opening_note_does_not_repeat_head_already_flagged():
+    w = _worker()
+    w._recent_texts_by_group[-1001] = [
+        "剛洗完澡頭髮還在滴水",
+        "剛洗完澡擦完身體乳",
+        "剛站櫃就想摸魚喝冰美式",
+        "夜市滷味想到你們",
+        "怕就別約我又不吃人",
+        "保險套留著自己用啦",
+    ]
+    note = w._cross_opening_note(-1001)
+    assert "剛洗" in note
+    # 2 字詞已點名過，不該再重複列一次同樣的起頭字
+    assert "；「剛」" not in note
+
+
 def test_cross_opening_note_quiet_without_shared_start():
     w = _worker()
     w._recent_texts_by_group[-1001] = [

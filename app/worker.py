@@ -2515,12 +2515,33 @@ class AccountWorker:
         for t in toks:
             df[t] = df.get(t, 0) + 1
         hot = [t for t, n in sorted(df.items(), key=lambda kv: -kv[1]) if n >= 2]
-        if not hot:
-            return ""
-        return (
-            f"（這群最近有人用「{'、'.join(hot[:2])}」開頭，"
-            f"你這則別跟人家撞同樣的起頭字）"
-        )
+        # 同一「起頭字」只是換了第二個字，字面比對整批放過，但群友看到的就是同一格：
+        # 今天 10:00/10:02/10:23 三號輪流「剛站櫃」「剛開店」「剛擦完身體乳」，
+        # 前 2 字互不相同，這條卻一句都攔不到。改用實際樣本算起頭字頻率，不寫死「剛」。
+        head_df: dict = {}
+        for t in toks:
+            head_df[t[0]] = head_df.get(t[0], 0) + 1
+        hot_heads = [
+            h
+            for h, n in sorted(head_df.items(), key=lambda kv: -kv[1])
+            if n >= 3 and not any(t.startswith(h) for t in hot)
+        ]
+        if hot:
+            note = (
+                f"（這群最近有人用「{'、'.join(hot[:2])}」開頭，"
+                f"你這則別跟人家撞同樣的起頭字）"
+            )
+            if hot_heads:
+                note = note[:-1] + (
+                    f"；「{'、'.join(hot_heads[:2])}」這個起頭字也已經好幾個人用過）"
+                )
+            return note
+        if hot_heads:
+            return (
+                f"（這群最近連續有人用「{'、'.join(hot_heads[:2])}」當開頭，"
+                f"就算後面接的字不一樣，看到也是同一格，你這則換個起頭）"
+            )
+        return ""
 
     def _mark_echo_if_any(self, group_id: int, text: str, humans: str) -> None:
         """這則是靠引述真人起頭的就登記下來，供 _echo_shape_note 累積密度。"""
@@ -7852,6 +7873,11 @@ class AccountWorker:
             phrase_hint = self._phrase_fatigue_hint(group_id)
             if phrase_hint:
                 body += f"\n{phrase_hint}"
+            # 主動路徑原本只有慣用語疲勞，沒有起手詞去重：10:00 小天後「剛站櫃」、
+            # 10:02 Chen「剛開店」連著兩則同一個起手式，提示層完全沒擋。
+            cross_hint = self._cross_opening_note(int(group_id))
+            if cross_hint:
+                body += f"\n{cross_hint}"
             return body + self._time_hint()
 
         # 生成不出可用的一句就重試（最多 3 次）：重試時把「已經講過的」餵回去，
