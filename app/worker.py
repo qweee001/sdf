@@ -167,12 +167,22 @@ _SCENE_FADE_SELF = 4 * 60 * 60
 # （17:16 腰酸背痛 → 17:37 肩膀發酸 → 18:01 腰酸死了，三個號都在同一個疲勞格）。
 _STATE_WORDS = ("痠", "累", "喘", "麻", "燙")
 _STATE_FADE = 120 * 60
+# 身體部位：動作詞抓不到「胸口」這種只換部位不換動作的寫法
+# （19:00 小天後「內衣濕貼在胸口」→19:06 RICH「緊身裙胸口被勒出紅印」，六分鐘同一個部位）。
+# 部位換得快，窗只有十分鐘：同一部位十分鐘內被寫過就換一個。
+_BODY_PART_WORDS = (
+    "胸口", "腰", "腿", "鎖骨", "脖子", "肩膀", "臀", "小腹", "腳踝", "手腕", "大腿", "背",
+)
+_BODY_PART_FADE = 10 * 60
 # 異體字只影響比對，不動輸出：偵測漏「酸」等於整條狀態軸失效。
 _AXIS_VARIANTS = str.maketrans({"酸": "痠", "溼": "濕", "檯": "台"})
 _SCENE_MOSAIC_SOURCES = 3
 # 群務說明句：入會／找助理這種本來就該講外面的事，不套自曝要求。
 _INFO_WORDS = ("助理", "入會", "會員", "排隊", "私訊")
-_OWN_ACTOR_WORDS = ("我", "老娘", "自己", "姊")
+_OWN_ACTOR_WORDS = ("我", "老娘", "姊")
+# 「自己」不算主詞：19:32 小小「下春藥是怕自己硬不起來嗎」的「自己」是那個男人，
+# 不是她的身體，卻讓整句被判成自曝放行，連著三則純評語都沒被攔。
+_OWN_REFLEXIVE_WORDS = ("自己",)
 _SELF_STATE_WORDS = (
     "冰", "涼", "熱", "燙", "痠", "酸", "累", "癢", "悶", "緊", "濕", "溼", "軟",
     "脹", "抖", "麻", "餓",
@@ -843,6 +853,10 @@ class AccountWorker:
         self._pending_live_video_evidence: dict[str, VideoContextEvidence] = {}
 
         self._recent_errors: list[str] = []
+        # 回覆實際花多久（生成到送出）：插話取消的容忍時間要依這群的實測速度決定，
+        # 而不是寫死秒數。一小時 183 則真人的場，49 秒預算等於每一條都還在生成就被
+        # 下一句路人殺掉（19:06–19:34 回覆送出 0 則、取消卻一直在跳）。
+        self._reply_latencies: dict[int, list[float]] = {}
         self.stats = {
             "replies_sent": 0,
             "errors": 0,
@@ -1218,7 +1232,7 @@ class AccountWorker:
                 now_t = time.time()
                 # 熱場自適應取消預算：同一位群友自己又補話仍立即取消（那才是會對不上話），
                 # 路人閒聊只按群速放大秒數，不整條誤殺。
-                budget = self._interrupt_budget(human_ts, now_t)
+                budget = self._adaptive_interrupt_budget(human_ts, now_t, group_id)
                 group_tasks = [
                     t for t in list(self._reply_tasks)
                     if getattr(t, "_sdf_group_id", None) == group_id
@@ -1233,9 +1247,18 @@ class AccountWorker:
                             int(getattr(task, "_sdf_target_sender", 0) or 0) == sender_id
                         )
                         over_budget = age > budget
-                        # 同一人補話仍要取消（否則會答到上一句），但 15 秒內先讓生成跑完：
-                        # 這群同一個人常連丟三句，秒殺等於永遠交不出東西。
-                        if (same_sender and age >= 15.0) or over_budget:
+                        # 句子已經生成好了（只剩用字檢查與發送）就不要再被路人閒聊砍掉：
+                        # 正確性由發送前的 _context_still_fresh 把關，砍掉只是白花一次生成。
+                        # 19:06–19:34 一小時十三次認領全部取消、送出零則，就是這樣死的。
+                        text_ready = bool(getattr(task, "_sdf_text_ready", False))
+                        if age > 180.0:
+                            task.cancel()
+                            cancelled += 1
+                        # 同一人補話仍要取消（否則會答到上一句），但門檻跟著實測速度走
+                        elif same_sender and age >= max(15.0, budget * 0.5):
+                            task.cancel()
+                            cancelled += 1
+                        elif over_budget and not text_ready:
                             task.cancel()
                             cancelled += 1
                     except Exception:
@@ -2705,6 +2728,13 @@ class AccountWorker:
         head = t[:12]
         if any(a in head for a in _OWN_ACTOR_WORDS):
             return False
+        # 「自己」只在後面接她自己的動作時才算主詞（自己脫到剩內衣 ⭕／怕自己硬不起來 ✕）
+        for word in _OWN_REFLEXIVE_WORDS:
+            idx = t.find(word)
+            if 0 <= idx <= 10:
+                tail = t[idx + len(word):]
+                if tail and _OWN_ACTION_START_RE.match(tail):
+                    return False
         if _OWN_ACTION_START_RE.match(t):
             return False
         # 沒有主詞的純狀態（冷氣太強腳都冰了、幹到腿軟）是自己身上的感覺，
@@ -2724,6 +2754,24 @@ class AccountWorker:
         rate = sum(1 for ts in (human_ts or []) if ts > now - 60.0)
         return min(65.0, 25.0 + 12.0 * max(0, rate - 1))
 
+    def _note_reply_latency(self, group_id: int, seconds: float) -> None:
+        """記下這條回覆真的花了幾秒（只留最近 12 筆，群組隔離）。"""
+        if seconds <= 0:
+            return
+        bucket = self._reply_latencies.setdefault(int(group_id), [])
+        bucket.append(float(seconds))
+        del bucket[:-12]
+
+    def _adaptive_interrupt_budget(self, human_ts, now: float, group_id: int) -> float:
+        """速率當下限、實測生成時間當主體：模型慢的場自然等得久，快的場不拖延。"""
+        base = self._interrupt_budget(human_ts, now)
+        lat = sorted(self._reply_latencies.get(int(group_id)) or [])
+        if len(lat) >= 3:
+            p75 = lat[max(0, int(round(len(lat) * 0.75)) - 1)]
+            # 一點餘裕（×1.4）但不無上限放大，超過兩分鐘的回覆本來就該重來
+            base = max(base, min(120.0, p75 * 1.4 + 5.0))
+        return base
+
     async def _seed_cross_texts(self, group_id: int) -> None:
         """跨號語料回填：桶子裡只有「自己」發過的句子，但四號一小時總共才六七則，
         單一帳號自桶永遠湊不到 4 則，_echo_shape_hits／跨號起手詞／舊詞統計全部
@@ -2736,7 +2784,10 @@ class AccountWorker:
             return
         self._cross_seeded_at[gid] = now
         try:
-            rows = await self.db.get_group_messages(gid, limit=80)
+            # 80 筆在這種流速（一分鐘三則真人）只回溯 28 分鐘，但下面的窗是
+            # 90 分鐘／150 分鐘／4 小時：等於所有長窗都被悄悄截成半小時，
+            # 17:32 伸過懶腰、18:45 又伸一次就是這樣過關的。改成按時間留、按筆數保底。
+            rows = await self.db.get_group_messages(gid, limit=800)
         except Exception:
             return
         bucket = self._recent_texts_by_group.setdefault(gid, [])
@@ -3029,6 +3080,23 @@ class AccountWorker:
                 # 剛在位子伸個懶腰」→ 13:41「剛補完防曬」），群友讀到的還是同一個起手。
                 if near and head[0] in str(near[-1])[:24]:
                     return f"上一則水軍前半句才用過「{head[0]}」，這則換一個字起頭"
+        # 同一個身體部位十分鐘內被別的號寫過（19:00 內衣濕貼胸口 → 19:06 胸口勒出紅印）：
+        # 部位換得比動作快，用短窗，同一部位就換一個地方寫。
+        if group_id:
+            body = str(candidate).translate(_AXIS_VARIANTS)
+            cand_parts = {p for p in _BODY_PART_WORDS if p in body}
+            if cand_parts:
+                hot_parts: set = set()
+                for t, age in self._cross_recent_items(int(group_id), _BODY_PART_FADE):
+                    if any(p in str(t).translate(_AXIS_VARIANTS) for p in cand_parts):
+                        hot_parts |= {
+                            p for p in cand_parts if p in str(t).translate(_AXIS_VARIANTS)
+                        }
+                if hot_parts:
+                    return (
+                        f"「{'、'.join(sorted(hot_parts))}」這個部位十分鐘內才有人寫過，"
+                        "換一個身體部位或直接換場景"
+                    )
         # 同一個身體動作短時間內被兩個號做過（小小 13:40 伸懶腰→RICH 14:06 伸懶腰），
         # 場景字串不同但群友看到的是同一個動作。改成看「這則借了幾軸、跟幾則舊句借」：
         # 一軸 → 一小時內算撞；兩軸以上或分散在三則舊句（拼裝）→ 兩個半小時都算撞。
@@ -5131,6 +5199,13 @@ class AccountWorker:
                     self._record_reply_drop("gate_held")
                     await self._audit_reply(event, "policy", "gate_held")
                     return
+                # 到這裡句子已經定稿，插話取消只會白花一次生成 → 標記讓取消邏輯放行
+                try:
+                    _task = asyncio.current_task()
+                    if _task is not None:
+                        _task._sdf_text_ready = True  # type: ignore[attr-defined]
+                except Exception:
+                    pass
                 # 用字檢查層：全面動態審核，不再於熱場跳過！
                 # 即使群內節奏快，也必須保障動態用字與常識語意，杜絕同音別字漏放。
                 text = await self._typo_gate(
@@ -5185,6 +5260,13 @@ class AccountWorker:
                 self.stats["human_sent"] += 1
                 human_counted = True
             if sent:
+                try:
+                    _t = asyncio.current_task()
+                    _sched = float(getattr(_t, "_sdf_sched_at", 0.0) or 0.0)
+                    if _sched:
+                        self._note_reply_latency(int(event.chat_id), time.time() - _sched)
+                except Exception:
+                    pass
                 await self._audit_reply(
                     event,
                     "sent",
@@ -8447,6 +8529,9 @@ class AccountWorker:
                     # 生不出來（空手／重複／時段穿幫）就這一輪不開口。
                     topic = await self._generate_context_topic(group_id)
                     if not topic:
+                        self.stats["proactive_empty_topic"] = (
+                            int(self.stats.get("proactive_empty_topic", 0)) + 1
+                        )
                         print(f"[{self.name}] proactive-skip: no fresh context topic", flush=True)
                         continue
                     # 錯別字層也要用 context，先預設空；決策層啟用時才取
