@@ -199,7 +199,9 @@ def test_marked_line_counts_even_with_body_cue():
     line = "腿軟是什麼感覺"
     w._mark_echo_if_any(-1001, line, "腿軟是什麼感覺啊")
     _sent(w, line, "冷氣太強腳都冰了", "床好涼", "整理蕾絲睡衣")
-    assert w._echo_shape_hits(-1001) == 1
+    # 「整理蕾絲睡衣」只有動作沒有狀態字，現在跟「床好涼」一樣算講別人的事，
+    # 所以是指定那則＋它自己；標記的那則仍然算數。
+    assert w._echo_shape_hits(-1001) == 2
 
 
 def test_needs_retry_only_when_press_box_pressure():

@@ -111,7 +111,9 @@ def test_normal_anchor_when_someone_already_talked_about_herself():
     finally:
         restore()
     assert "追劇" not in note
-    assert "先把自己的狀態講出來" not in note
+    # 「先把自己的狀態講出來」這句話現在也會由播報密度（連三則評語）帶出來，
+    # 所以改驗純自曝那條的專屬說法：這一段有人講到自己，不該走 need_solo。
+    assert "最近六則沒人講到自己" not in note
 
 
 def test_every_account_has_a_solo_anchor():

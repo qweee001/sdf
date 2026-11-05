@@ -163,6 +163,14 @@ _SCENE_FADE_LONG = 150 * 60
 _SCENE_MOSAIC_SOURCES = 3
 # 群務說明句：入會／找助理這種本來就該講外面的事，不套自曝要求。
 _INFO_WORDS = ("助理", "入會", "會員", "排隊", "私訊")
+_OWN_ACTOR_WORDS = ("我", "老娘", "自己", "姊")
+_SELF_STATE_WORDS = (
+    "冰", "涼", "熱", "燙", "痠", "酸", "累", "癢", "悶", "緊", "濕", "溼", "軟",
+    "脹", "抖", "麻", "餓",
+)
+_OWN_ACTION_START_RE = re.compile(
+    r"^(剛|剛剛|下午|下班|現在|脫|穿|咬|吸|站|坐|躺|摸|揉|吹|洗|蹲|趴|縮|癱|窩|爬|推|拉)"
+)
 _ECHO_MARKS: dict[tuple[int, str], float] = {}
 _SISTER_STRICT_FLOOR = 0.8
 _PHRASE_CORE_HISTORY_LIMIT = 64
@@ -2651,7 +2659,24 @@ class AccountWorker:
         有身體字就當她有講到自己，沒有就是播報。
         """
         t = str(text or "")
-        return bool(t) and not cls._has_self_disclosure(t)
+        if not t:
+            return False
+        if not cls._has_self_disclosure(t):
+            return True
+        # 「有身體字」不等於「講自己」：男人的身體部位也算自曝，16:39 Chen「幾歲了
+        # 還要嘴餵，手斷了不會自己吃喔」、16:44 小小「哥哥嘴上說不舔…把舌頭伸出來」
+        # 都被判成自曝放行，三則連著全是評語。所以要有一個「自己在做」的主詞或句首
+        # 動作才算數，光有身體名詞不算。
+        head = t[:12]
+        if any(a in head for a in _OWN_ACTOR_WORDS):
+            return False
+        if _OWN_ACTION_START_RE.match(t):
+            return False
+        # 沒有主詞的純狀態（冷氣太強腳都冰了、幹到腿軟）是自己身上的感覺，
+        # 不能因為沒寫「我」就判播報；「手斷了」「舌頭伸出來」那種他人身體才判。
+        if any(w in t for w in _SELF_STATE_WORDS):
+            return False
+        return True
 
     @staticmethod
     def _interrupt_budget(human_ts, now: float) -> float:
