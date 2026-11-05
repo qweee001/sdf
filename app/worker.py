@@ -109,7 +109,7 @@ _PHRASE_FATIGUE_MIN_REPEAT = 2
 # 讓 90 分鐘窗真的走得完，則數只當保險絲。
 _PHRASE_HISTORY_LIMIT = 200
 # 跨號歷史保留窗：等於（略大於）核心詞冷卻窗，句子留著才抓得到整段慣用語。
-_CROSS_TEXT_KEEP_SECONDS = 100 * 60
+_CROSS_TEXT_KEEP_SECONDS = 180 * 60
 # 跨號意象冷卻：任一號用過的核心詞，同群其他號 90 分鐘內避開。
 _PHRASE_CORE_COOLDOWN_SECONDS = 90 * 60
 # 回覆遲到偵測：目標訊息已超過 N 秒、群裡又冒出 M 則真人發言 → 話題早就翻頁
@@ -2133,7 +2133,8 @@ class AccountWorker:
         ][-n:]
 
     def _pick_life_anchor(
-        self, anchors: list, name: str, history, own_texts=None, prefer_solo: bool = False
+        self, anchors: list, name: str, history, own_texts=None,
+        prefer_solo: bool = False, group_id: int = 0,
     ) -> str:
         """動態場景去重：同一個帳號不連兩則用同一個生活場景（不靠黑名單）。
 
@@ -2142,6 +2143,9 @@ class AccountWorker:
         取最低分的一組再隨機——剛講過的場景自動排到後面，加新場景只要多寫一條。
         own_texts 是 DB 取回的本人近期發言（新到舊）；沒有才退回對話窗。
         prefer_solo＝只從「自｜」開頭（純自曝、不提男人）的場景挑，整段沒人講自己時用。
+        group_id：連別人的句子一起算。16:25 小小挑到「跑業務」那條（絲襪＋體力好的
+        哥哥），可是 15:25 同一個號才剛講「還有體力把我抓著雙手幹到求饒」、16:22 小天後
+        講腳底燙，錨點先把撞掉的場景排到後面，才不會生成完又被自檢退掉重寫。
         """
         if prefer_solo:
             solo = [a for a in anchors if str(a[0]).startswith("自｜")]
@@ -2152,6 +2156,12 @@ class AccountWorker:
         else:
             rows = self._own_recent_rows(name, history)
             recent = " ".join(str(r.get("content") or "") for r in rows).strip()
+        if group_id:
+            recent = (
+                recent
+                + " "
+                + " ".join(t for t, _ in self._cross_recent_items(int(group_id), _SCENE_FADE_LONG))
+            ).strip()
         if not recent:
             return random.choice([sc for _, sc in anchors])
         scored = []
@@ -3078,7 +3088,9 @@ class AccountWorker:
         )
         # 播報腔：四則裡有兩則在引述別人的哏，這則不再跟著講，直接回到自己的生活場景
         echo_pressure = self._echo_shape_hits(_gid) >= _ECHO_SHAPE_HITS
-        current_scene = self._pick_life_anchor(anchors[name_key], name, history, own_texts)
+        current_scene = self._pick_life_anchor(
+            anchors[name_key], name, history, own_texts, group_id=_gid
+        )
         own_recent = self._recent_own_scene_note(name, history, own_texts)
 
         mood_options = [
@@ -3104,7 +3116,8 @@ class AccountWorker:
             used_moods[-1] = 0
         if pick == 0 and (need_solo or echo_pressure):
             current_scene = self._pick_life_anchor(
-                anchors[name_key], name, history, own_texts, prefer_solo=need_solo
+                anchors[name_key], name, history, own_texts,
+                prefer_solo=need_solo, group_id=_gid,
             )
             current_scene = self._strip_hot_head(current_scene, _gid)
             mood_options[0] = (

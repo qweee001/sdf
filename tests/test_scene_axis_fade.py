@@ -148,3 +148,25 @@ def test_tired_state_repeated_within_the_hour_is_vetoed():
     veto = _veto(w, "下班累到不想講話，飯都懶得吃")
     assert veto
     assert "累" in veto
+
+
+def test_life_anchor_avoids_scene_another_account_just_used():
+    """挑錨點就把別人的句子算進去，不要生成完才被自檢退掉。
+
+    16:25 小小挑到「跑業務」（絲襪＋體力好的哥哥），但 15:25 才剛講過「還有體力把我
+    抓著雙手幹到求饒」、16:22 小天後講腳底燙，等於選了一個注定要重寫的場景。
+    """
+    w = _worker()
+    _seed(
+        w,
+        [
+            (60 * 60, "力氣都耗在貨上了，晚上還有體力把我抓著雙手幹到求饒嗎"),
+            (6 * 60, "脫了鞋腳底好燙，真有本事就去聯絡助理排我"),
+        ],
+    )
+    anchors = [
+        ("跑業務", "剛跑完業務回到家累死，脫掉高跟鞋和絲襪，只想找個體力好的哥哥來按摩"),
+        ("酒吧", "週末好想去酒吧喝一杯，小妹子喝了酒最不設防"),
+    ]
+    picks = {w._pick_life_anchor(anchors, "小小", [], [], group_id=GID) for _ in range(20)}
+    assert picks == {anchors[1][1]}

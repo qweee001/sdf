@@ -114,11 +114,20 @@ def test_history_is_kept_by_time_not_by_count():
 
 
 def test_stale_history_is_pruned():
+    # 保留窗跟著最長的消費窗（場景軸 150 分鐘）放到 3 小時，超過才淘汰。
+    w = _worker()
+    w._record_sent_text(GID, "三小時前講的")
+    w._recent_texts_at[GID][-1] = NOW - 200 * 60
+    w._record_sent_text(GID, "剛講的")
+    assert w._recent_texts_by_group[GID] == ["剛講的"]
+
+
+def test_two_hour_old_history_is_kept_for_scene_axes():
     w = _worker()
     w._record_sent_text(GID, "兩小時前講的")
     w._recent_texts_at[GID][-1] = NOW - 120 * 60
     w._record_sent_text(GID, "剛講的")
-    assert w._recent_texts_by_group[GID] == ["剛講的"]
+    assert w._recent_texts_by_group[GID] == ["兩小時前講的", "剛講的"]
 
 
 def test_cross_window_falls_back_without_timestamps():
