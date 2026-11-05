@@ -4918,6 +4918,18 @@ class AccountWorker:
                 self._burst_register(group_id, picked)
                 self._mark_echo_if_any(group_id, picked, echo_humans)
                 return picked
+            # 連換幾條都是播報、群裡又已經十分鐘沒有水軍出聲：這則不要丟，
+            # 照原樣發。19:34 之後全場在圍剿同一個男人，模型只能下評語，
+            # 五條候選全被判播報 → 一句都發不出去，比發一句評語更糟。
+            if self._needs_echo_retry(group_id, text) and (
+                await self._seconds_since_any_bot(group_id) >= 600
+            ):
+                self.stats["echo_press_box_forced"] = (
+                    int(self.stats.get("echo_press_box_forced", 0)) + 1
+                )
+                print(f"[{self.name}] echo-forced: 全場播報但已十分鐘沒水軍，照發 {text[:20]!r}", flush=True)
+                self._burst_register(group_id, text)
+                return text
         review = await self._review_candidate(
             context, text, directive, recent_bots, last_human, sister_recent
         )
