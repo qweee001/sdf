@@ -2498,6 +2498,49 @@ class AccountWorker:
         now = time.time()
         return [str(t) for t, ts in zip(bucket, stamp) if now - ts < seconds]
 
+    def _hot_opening_tokens(self, group_id: int) -> tuple[list[str], list[str]]:
+        """本群近期被用爛的起頭詞與起頭字（純頻率，不寫死任何字）。
+
+        回 (hot, hot_heads)：hot 是前 2 字整組重複、hot_heads 是同一個字開頭
+        重複。樣本不足 6 則就回空，寧可不判。
+        """
+        texts = self._cross_recent_texts(int(group_id), 3 * 3600)
+        toks = [self._opening_token(t, group_id) for t in texts]
+        toks = [t for t in toks if t]
+        if len(toks) < 6:
+            return [], []
+        df: dict = {}
+        for t in toks:
+            df[t] = df.get(t, 0) + 1
+        hot = [t for t, n in sorted(df.items(), key=lambda kv: -kv[1]) if n >= 2]
+        head_df: dict = {}
+        for t in toks:
+            head_df[t[0]] = head_df.get(t[0], 0) + 1
+        hot_heads = [
+            h
+            for h, n in sorted(head_df.items(), key=lambda kv: -kv[1])
+            if n >= 2 and not any(t.startswith(h) for t in hot)
+        ]
+        return hot, hot_heads
+
+    def _strip_hot_head(self, scene: str, group_id: int) -> str:
+        """錨點字串本身就從被用爛的起頭字開頭時，先把那個字拿掉。
+
+        提示寫了「別撞同一個起頭字」，但場景錨點五條有三條是「剛拉下鐵門」
+        「剛洗完澡」「剛跑完業務」，模型照抄字串就照樣撞（11:24 Chen 剛熨完、
+        11:39 小小 剛在茶水間）。這裡直接改字串，不靠模型自律。
+        """
+        s = str(scene or "")
+        prefix = "「" if s.startswith("「") else ""
+        body = s[len(prefix):]
+        if not body:
+            return scene
+        hot, hot_heads = self._hot_opening_tokens(int(group_id))
+        heads = set(hot_heads) | {t[0] for t in hot if t}
+        if body[0] not in heads:
+            return scene
+        return prefix + body[1:]
+
     def _cross_opening_note(self, group_id: int) -> str:
         """跨帳號起手詞撞車：本群近期水軍都拿同一組字開頭就點名換掉。
 
@@ -2511,21 +2554,12 @@ class AccountWorker:
         toks = [t for t in toks if t]
         if len(toks) < 6:
             return ""
-        df: dict = {}
-        for t in toks:
-            df[t] = df.get(t, 0) + 1
-        hot = [t for t, n in sorted(df.items(), key=lambda kv: -kv[1]) if n >= 2]
         # 同一「起頭字」只是換了第二個字，字面比對整批放過，但群友看到的就是同一格：
         # 今天 10:00/10:02/10:23 三號輪流「剛站櫃」「剛開店」「剛擦完身體乳」，
         # 前 2 字互不相同，這條卻一句都攔不到。改用實際樣本算起頭字頻率，不寫死「剛」。
-        head_df: dict = {}
-        for t in toks:
-            head_df[t[0]] = head_df.get(t[0], 0) + 1
-        hot_heads = [
-            h
-            for h, n in sorted(head_df.items(), key=lambda kv: -kv[1])
-            if n >= 3 and not any(t.startswith(h) for t in hot)
-        ]
+        # 門檻從 3 降到 2：一小時才七則水軍，同一個字兩次（11:46 小小、11:56 Chen
+        # 都「笑死」）群友就已經看到了，等第三次才點名太慢。
+        hot, hot_heads = self._hot_opening_tokens(group_id)
         if hot:
             note = (
                 f"（這群最近有人用「{'、'.join(hot[:2])}」開頭，"
@@ -2631,7 +2665,10 @@ class AccountWorker:
         recent = [
             t for t, ts in zip(bucket, stamp) if now - ts < _ECHO_SHAPE_WINDOW
         ][-_ECHO_SHAPE_LOOKBACK:]
-        if len(recent) < _ECHO_SHAPE_LOOKBACK:
+        # 這裡原本要求湊滿 4 則才算，但這一群一小時才七則水軍，30 分鐘窗
+        # 常常只有 2~3 則，於是永遠湊不到 4、整條播報偵測形同沒開
+        # （12:00／12:06 連續兩則純評語就是這樣漏掉的）。改成 2 則就開始算。
+        if len(recent) < 2:
             return 0
         return sum(
             1 for t in recent if (gid, t) in _ECHO_MARKS or self._is_press_box(t)
@@ -2962,6 +2999,7 @@ class AccountWorker:
             current_scene = self._pick_life_anchor(
                 anchors[name_key], name, history, own_texts, prefer_solo=need_solo
             )
+            current_scene = self._strip_hot_head(current_scene, _gid)
             mood_options[0] = (
                 f"【心境：隨性放鬆/生活瑣事】：{current_scene}。"
                 "現在用這件事當開場，先把自己的狀態講出來，別急著反問對方。"
@@ -4119,7 +4157,7 @@ class AccountWorker:
 
     async def _review_candidate(
         self, context: str, text: str, directive: str = "", recent_bots: str = "",
-        last_human: str = "", sister_recent: str = "",
+        last_human: str = "", sister_recent: str = "", require_self: bool = False,
     ):
         """③ 審核候選回覆：上下文＋前置決策＋生成文字一起送審。
 
@@ -4133,7 +4171,17 @@ class AccountWorker:
             if sister_recent
             else ""
         )
-        state = f"{context}\n{sister_block}{decision_block}你要發出的回覆：「{str(text).strip()}」"
+        require_block = (
+            "【這則的硬要求】這一輪全場都在播報、沒人講到自己，候選必須帶一句"
+            "自己的身體感覺或此刻正在做的事。整句還只在講別人（沒有自己的身體、"
+            "自己的當下狀態）就算不合格。\n"
+            if require_self
+            else ""
+        )
+        state = (
+            f"{context}\n{sister_block}{decision_block}{require_block}"
+            f"你要發出的回覆：「{str(text).strip()}」"
+        )
         if getattr(self.config, "decision_api_key", "").strip():
             try:
                 answers = await self._decision_call(
@@ -4176,7 +4224,8 @@ class AccountWorker:
 
         # 網關神經網絡動態審核層（最優解：老司機旁路裁判）
         return await self._review_candidate_gateway(
-            context, text, directive, recent_bots, last_human, sister_recent
+            context, text, directive, recent_bots, last_human, sister_recent,
+            require_self=require_self,
         )
 
     async def _sister_burst_lines(self, event, window: float | None = None) -> str:
@@ -4263,7 +4312,7 @@ class AccountWorker:
 
     async def _review_candidate_gateway(
         self, context: str, text: str, directive: str = "", recent_bots: str = "",
-        last_human: str = "", sister_recent: str = "",
+        last_human: str = "", sister_recent: str = "", require_self: bool = False,
     ) -> dict | None:
         """網關神經網絡動態審核層：以台灣老司機視角進行旁路打分與審查。"""
         if not self.ai_client:
@@ -4340,7 +4389,15 @@ class AccountWorker:
             f"【同則訊息姊妹已回過（同一個點不准再取）】\n{sister_recent or '（無）'}\n"
             f"【最近三則真人（候選若只是換句話重講其中一句就是複讀）】{last_human[:220] or '（無）'}\\n"
             f"【前置意圖】{directive if directive else '（無）'}\n"
-            f"【候選發言】：「{str(text).strip()}」"
+            + (
+                "【這則的硬要求】這一輪全場都在播報、沒人講到自己：候選必須帶一句自己"
+                "的身體感覺或此刻正在做的事（場景開場、生活碎念都算，不必硬拗回上一句）。"
+                "整句還只在講別人、自己身上一句都沒有，issue 判 repeat，sendable 壓到 0.25 以下，"
+                "reason 寫「還是一句場邊評語，沒講到自己」。"
+                if require_self
+                else ""
+            )
+            + f"【候選發言】：「{str(text).strip()}」"
         )
 
         started = time.monotonic()
@@ -4441,7 +4498,8 @@ class AccountWorker:
                 continue
             self.stats["gate_candidates"] = int(self.stats.get("gate_candidates", 0)) + 1
             review = await self._review_candidate(
-                context, candidate, directive, recent_bots, last_human, sister_recent
+                context, candidate, directive, recent_bots, last_human, sister_recent,
+                require_self=require_self,
             )
             if review is None or not self._review_passes(review, strict):
                 continue
@@ -7694,6 +7752,26 @@ class AccountWorker:
                 return True
         return False
 
+    async def _proactive_starved(self, group_id: int) -> bool:
+        """自己久沒在該群出聲、別人卻一直在講＝這輪不准被機率閘門刷掉。
+
+        RICH 11:27 之後 40 分鐘只發 1 則，decision_calls 只有別人的四分之一，
+        表示它連生成都輪不到：熱場 75% 讓路、人類活躍 70% 讓路兩道隨機閘門疊起來，
+        久沒講話的號照樣每次都被刷掉，前面的輪替等於白做。
+        """
+        try:
+            spoke = await self.db.group_bot_last_spoke(int(group_id))
+        except Exception:
+            return False
+        me = int(self.tg_user_id or 0)
+        if not spoke or not me:
+            return False
+        mine = float(spoke.get(me, 0.0) or 0.0)
+        if not mine or time.time() - mine < _SILENT_REJOIN_SECONDS:
+            return False
+        others = [float(t or 0.0) for s, t in spoke.items() if int(s) != me and t]
+        return bool(others) and max(others) > mine
+
     async def _proactive_rotation_ok(self, group_id: int, latest: dict | None) -> bool:
         """水軍輪替＋純水軍自演剎車。
 
@@ -8034,7 +8112,8 @@ class AccountWorker:
             own_texts=own_texts,
             last_human=last_human,
             group_id=group_id,
-            limit=1,
+            limit=2,
+            require_self=True,
         )
         if picked:
             self._mark_echo_if_any(group_id, picked, last_human)
@@ -8092,11 +8171,13 @@ class AccountWorker:
                     latest_row = None
                 if not await self._proactive_rotation_ok(group_id, latest_row):
                     continue
+                starved_turn = await self._proactive_starved(group_id)
                 hot_join = False
                 if self._hot_field(group_id):
                     # 熱場不再 100% 讓路：真人越兇、水軍越隱形是反的。
                     # 保留小概率插話（其餘交給 reply 路徑），其後不再疊加 10 分鐘抑制。
-                    if random.random() >= 0.25:
+                    # 久沒講話的號不吃這道機率，否則熱場一整個下午都輪不到它。
+                    if random.random() >= 0.25 and not starved_turn:
                         print(
                             f"[{self.name}] proactive-skip: group {group_id} 熱場（1 分鐘內真人≥{_HOT_FIELD_HUMAN_MIN}），留給 reply",
                             flush=True,
@@ -8106,7 +8187,7 @@ class AccountWorker:
                     print(f"[{self.name}] proactive-join: group {group_id} 熱場中插話（25%）", flush=True)
                 if not hot_join and self._should_suppress_proactive(group_id):
                     # 人類近 10 分鐘有活動：以 70% 讓路、30% 像正常人一樣偶爾插話
-                    if random.random() < 0.7:
+                    if random.random() < 0.7 and not starved_turn:
                         print(f"[{self.name}] proactive-skip: group {group_id} suppressed (recent human activity)", flush=True)
                         continue
                     print(f"[{self.name}] proactive-join: group {group_id} 人類熱聊中，水軍選擇接話（30%）", flush=True)
@@ -8242,6 +8323,17 @@ class AccountWorker:
                         )
                         if picked:
                             topic = picked
+                        elif self._consecutive_press_box(int(group_id)) >= 3:
+                            # 已經連三則純評語，重寫又生不出有場景的版本：這輪先不發，
+                            # 別把第四句場邊主播也推出去。名額留給下一輪（loop 30~90 秒後）。
+                            self.stats["proactive_echo_hold"] = (
+                                int(self.stats.get("proactive_echo_hold", 0)) + 1
+                            )
+                            print(
+                                f"[{self.name}] proactive-echo-hold: 連三則播報且重寫不成，這輪不發",
+                                flush=True,
+                            )
+                            continue
                     # 用字檢查層：跟回覆路徑同一套（對照表＋決策層，命中重寫一次再驗）
                     topic = await self._typo_gate(
                         None,

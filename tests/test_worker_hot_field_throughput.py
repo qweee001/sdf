@@ -135,6 +135,7 @@ def test_press_box_rewrite_feeds_used_openers_and_stays_cheap():
         async def fake_pick(context, directive, base_hint, generate, **kwargs):
             captured["hint"] = base_hint
             captured["limit"] = kwargs.get("limit")
+            captured["require_self"] = kwargs.get("require_self")
             return "在等外送的時候一直聞到隔壁的鹹酥雞味，餓到肚子在叫"
 
         worker._pick_passing_candidate = fake_pick
@@ -143,8 +144,10 @@ def test_press_box_rewrite_feeds_used_openers_and_stays_cheap():
         assert out.startswith("在等外送")
         assert "剛洗完澡頭髮還在滴水" in captured["hint"]
         assert "換一個不一樣的當下場景" in captured["hint"]
-        # 熱場一次生成就要有結果，不再跑兩條策略各審一遍
-        assert captured["limit"] == 1
+        # 重寫這一版必須真的帶到自己的生活，交給裁判一起判，所以兩條策略＋
+        # require_self；生不出有場景的版本就寧可這輪不發（呼叫端另有攔截）。
+        assert captured["limit"] == 2
+        assert captured["require_self"] is True
 
     asyncio.run(main())
 

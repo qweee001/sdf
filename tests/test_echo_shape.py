@@ -167,17 +167,29 @@ def test_old_lines_fall_out_of_window():
     assert w._echo_shape_hits(-1001) == 0
 
 
-def test_needs_full_lookback_sample():
+def test_two_lines_are_enough_for_press_box_pressure():
+    """這一群一小時才七則水軍，30 分鐘窗常常湊不到四則，舊版要求 4 則＝整條沒開。
+
+    12:00／12:06 兩則連著純評語就是這樣漏掉的。
+    """
     w = _worker()
     _sent(w, "打成蛋餅是怎樣", "娶人妻這麼刺激")
-    assert w._echo_shape_hits(-1001) == 0
+    assert w._echo_shape_hits(-1001) == 2
+    assert w._echo_shape_note(-1001) != ""
+
+
+def test_one_self_line_among_two_is_not_enough():
+    w = _worker()
+    _sent(w, "剛伸懶腰腰好痠", "打成蛋餅是怎樣")
+    assert w._echo_shape_hits(-1001) == 1
+    assert w._echo_shape_note(-1001) == ""
 
 
 def test_groups_are_isolated():
     w = _worker()
     _sent(w, "打成蛋餅是怎樣", "娶人妻這麼刺激", gid=-2002)
     _sent(w, "打成蛋餅是怎樣", "娶人妻這麼刺激", "鈴鐺要休幾天", "體力好腿軟", gid=-1001)
-    assert w._echo_shape_hits(-2002) == 0
+    assert w._echo_shape_hits(-2002) == 2
     assert w._echo_shape_hits(-1001) == 3
 
 
@@ -328,3 +340,103 @@ def test_fresh_lines_are_not_stale():
     _sent(w, "剛拉下鐵門腳底板超痠", "練完瑜珈筋都軟了", "床好涼腿夾著")
     note = w._overused_terms_note(-1001, [])
     assert "分鐘前" not in note
+
+
+# ---- 起頭字（同一格換第二個字照樣撞） -----------------------------------
+
+def test_repeated_head_char_is_named_after_two():
+    """11:46 小小、11:56 Chen 都「笑死」開頭，群友十分鐘內看到同一格。
+
+    舊門檻要同一個字三次才點名，這一群一小時才七則水軍，等不到第三次。
+    """
+    w = _worker()
+    _sent(
+        w,
+        "笑死，昨天還在舔別人今天就裝深情",
+        "笑死，一群人圍攻一個",
+        "打成蛋餅是怎樣",
+        "娶人妻這麼刺激",
+        "鈴鐺是要休幾天",
+        "床好涼腿夾著",
+    )
+    assert "笑" in w._cross_opening_note(-1001)
+
+
+def test_anchor_starting_with_hot_head_loses_the_char():
+    """錨點字串自己就從被用爛的字開頭，提示寫了模型照抄，直接改字串。"""
+    w = _worker()
+    _sent(
+        w,
+        "剛熨完一批新貨熱得要命",
+        "剛在茶水間沖咖啡",
+        "打成蛋餅是怎樣",
+        "娶人妻這麼刺激",
+        "鈴鐺是要休幾天",
+        "床好涼腿夾著",
+    )
+    assert w._strip_hot_head("「剛洗完澡擦完身體乳」", -1001) == "「洗完澡擦完身體乳」"
+    assert w._strip_hot_head("「週末好想去酒吧喝一杯」", -1001) == "「週末好想去酒吧喝一杯」"
+
+
+# ---- 裁判：這一輪要她講自己 ---------------------------------------------
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        msg = SimpleNamespace(content='{"sendable":0.9,"issue":"none","reason":""}')
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+
+def test_judge_is_told_to_require_self_disclosure():
+    """提示寫在生成指令裡模型會照樣寫評語，所以要讓裁判也拿著這條判。"""
+    import asyncio
+
+    w = _worker()
+    client = _FakeClient()
+    w.ai_client = cast(Any, client)
+    asyncio.run(
+        w._review_candidate_gateway("ctx", "這邏輯我服", require_self=True)
+    )
+    assert "硬要求" in client.calls[0]["messages"][1]["content"]
+
+
+def test_judge_has_no_extra_requirement_by_default():
+    import asyncio
+
+    w = _worker()
+    client = _FakeClient()
+    w.ai_client = cast(Any, client)
+    asyncio.run(w._review_candidate_gateway("ctx", "這邏輯我服"))
+    assert "硬要求" not in client.calls[0]["messages"][1]["content"]
+
+
+# ---- 久沒講話的號不准被機率閘門刷掉 -------------------------------------
+
+def _spoke_db(mine_ago: float, other_ago: float):
+    async def group_bot_last_spoke(_gid):
+        now = time.time()
+        return {555: now - mine_ago, 666: now - other_ago}
+
+    return cast(Any, SimpleNamespace(group_bot_last_spoke=group_bot_last_spoke))
+
+
+def test_starved_when_i_am_longest_silent():
+    import asyncio
+
+    w = _worker()
+    w.tg_user_id = 555
+    w.db = _spoke_db(40 * 60, 60)
+    assert asyncio.run(w._proactive_starved(-1001))
+
+
+def test_not_starved_right_after_speaking():
+    import asyncio
+
+    w = _worker()
+    w.tg_user_id = 555
+    w.db = _spoke_db(120, 60)
+    assert not asyncio.run(w._proactive_starved(-1001))

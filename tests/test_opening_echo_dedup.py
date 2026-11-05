@@ -186,8 +186,12 @@ def test_cross_opening_note_flags_same_head_char_across_accounts():
     assert "剛" in w._cross_opening_note(-1001)
 
 
-def test_cross_opening_note_head_char_needs_three():
-    """同一字只出現兩次還不算撞，避免把「我／你」這種常見起頭一律封掉。"""
+def test_cross_opening_note_head_char_needs_two():
+    """同一個字兩次就點名。
+
+    這一群一小時才七則水軍，等第三次才攔太慢（11:46 小小、11:56 Chen 都「笑死」，
+    十分鐘內群友就看到同一格）。樣本不足 6 則仍不判，避免把「我／你」一律封掉。
+    """
     w = _worker()
     w._recent_texts_by_group[-1001] = [
         "剛站櫃就想摸魚喝冰美式",
@@ -197,7 +201,7 @@ def test_cross_opening_note_head_char_needs_three():
         "怕就別約我又不吃人",
         "保險套留著自己用啦",
     ]
-    assert w._cross_opening_note(-1001) == ""
+    assert "剛" in w._cross_opening_note(-1001)
 
 
 def test_cross_opening_note_does_not_repeat_head_already_flagged():
