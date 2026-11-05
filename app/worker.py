@@ -3150,9 +3150,18 @@ class AccountWorker:
                         short_dup |= shared
                 # 自己重做同一個動作（同一個號 91 分鐘內伸兩次懶腰）：群友認的是這個人
                 # 又來一次，不是兩個不同的人剛好都伸懶腰，所以窗比跨號長四倍。
-                own_hit = cand_items & self._own_scene_items(int(group_id), _SCENE_FADE_SELF)
-                if own_hit and len(shared_any) < 2 and sources < _SCENE_MOSAIC_SOURCES:
-                    return f"「{'、'.join(sorted(own_hit))}」自己四小時內做過了，這一則換一個身體動作"
+                # 但四小時對只有幾組錨點的人是全域封鎖（RICH 19:06 之後每一則都被
+                # 自己的「胸口／面膜」擋掉，七分鐘發不出東西）。所以分兩段：出現在
+                # 開頭十四字的動作算四小時，只落在後半句的算九十分鐘。
+                own_items = self._own_scene_items(int(group_id), _SCENE_FADE_SELF)
+                own_hit = cand_items & own_items
+                head_body = str(candidate).translate(_AXIS_VARIANTS)[:14]
+                head_own = {g for g in own_hit if g in head_body}
+                if head_own and len(shared_any) < 2 and sources < _SCENE_MOSAIC_SOURCES:
+                    return f"「{'、'.join(sorted(head_own))}」自己四小時內在開頭做過了，這一則換一個身體動作"
+                own_mid = cand_items & self._own_scene_items(int(group_id), 90 * 60)
+                if own_mid and len(shared_any) < 2 and sources < _SCENE_MOSAIC_SOURCES:
+                    return f"「{'、'.join(sorted(own_mid))}」自己九十分鐘內做過了，這一則換一個身體動作"
                 if len(shared_any) >= 2 or sources >= _SCENE_MOSAIC_SOURCES:
                     return (
                         f"「{'、'.join(sorted(shared_any))}」這幾個點最近已經被拼過"

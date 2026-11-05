@@ -126,6 +126,30 @@ def test_latency_samples_are_group_isolated():
     assert w._adaptive_interrupt_budget([], now, -2002) == 25.0
 
 
+def test_own_scene_repeat_alone_is_still_vetoed():
+    w = _worker()
+    now = time.time()
+    w._own_scene_by_group[GID] = [("在位子上伸懶腰胸口勒得好緊", now - 78 * 60)]
+    veto = w._local_veto("剛躺沙發伸懶腰肚子超餓", [], "", GID)
+    assert "自己四小時" in veto
+
+
+def test_own_scene_repeat_in_tail_uses_shorter_window():
+    # 動作只落在後半句、且是兩小時前做的 → 九十分鐘窗已過，放行
+    w = _worker()
+    now = time.time()
+    w._own_scene_by_group[GID] = [("在店裡整理衣服，順手把面膜丟進垃圾桶", now - 120 * 60)]
+    assert w._local_veto("剛洗完澡擦完乳液，整個人滑到不行", [], "", GID) == ""
+
+
+def test_own_scene_repeat_in_tail_within_ninety_minutes_still_vetoed():
+    w = _worker()
+    now = time.time()
+    w._own_scene_by_group[GID] = [("在店裡整理衣服，順手把面膜丟進垃圾桶", now - 50 * 60)]
+    veto = w._local_veto("剛洗完澡擦完乳液整個人滑到不行，面膜還敷在臉上沒撕", [], "", GID)
+    assert "九十分鐘" in veto
+
+
 def test_veto_code_classifies_reason():
     assert AccountWorker._veto_code("「胸口」這個部位十分鐘內才有人寫過") == "body_part"
     assert AccountWorker._veto_code("「懶腰」自己四小時內做過了") == "own_scene"
