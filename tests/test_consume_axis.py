@@ -104,6 +104,13 @@ def test_single_old_drink_does_not_block():
     assert "喝" not in w._local_veto(line, [], "", GID)
 
 
+def test_two_food_lines_in_the_same_minute_are_blocked():
+    """12:39 小小連兩則吃食（中午買的便當 → 我正啃雞排），秒差、同一個人、同一個群。"""
+    w = _worker("小小")
+    _seed(w, [(12 * 60, "後天嘴巴這麼挑，中午買的便當我也才吃兩口就不想吃了")])
+    assert "喝" in w._local_veto("我正啃雞排嘴脣超油，你留著自己啃", [], "", GID)
+
+
 def test_different_group_does_not_block():
     """上一則是喝咖啡，這則吃鹹酥雞，不同群放行。"""
     w = _worker()
