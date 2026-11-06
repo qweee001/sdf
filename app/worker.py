@@ -198,6 +198,8 @@ _CONSUME_DENSITY_HITS = 2
 _AXIS_VARIANTS = str.maketrans({"酸": "痠", "溼": "濕", "檯": "台"})
 # 複讀比對前先剝掉的襯字（只剝不承載語意的，不碰名詞動詞）。
 _FILLER_STRIP = str.maketrans("", "", "一了啦喔欸嘛啊呀耶哦囉")
+# 句子不可能停在這些字上（停住就是模型被切斷）：14:18 RICH「變態才」三個字就送出去。
+_TAIL_DANGLE = set("才就都又也還卻而但跟和與讓把被從比在")
 _SCENE_MOSAIC_SOURCES = 3
 # 群務說明句：入會／找助理這種本來就該講外面的事，不套自曝要求。
 _INFO_WORDS = ("助理", "入會", "會員", "排隊", "私訊")
@@ -2929,6 +2931,7 @@ class AccountWorker:
             ("問句", "ask_tail"),
             ("照抄", "verbatim"),
             ("複讀", "echo"),
+            ("斷在", "dangle"),
         )
         for key, code in table:
             if key in str(reason):
@@ -3037,6 +3040,12 @@ class AccountWorker:
             "一句都沒講，再這樣就只是場邊播報；這則別複述別人的哏、別提人名，"
             "用你自己此刻正在做的一件事開場，順手帶到身體感覺）"
         )
+
+    @staticmethod
+    def _is_dangling(text: str) -> bool:
+        """句尾停在連接詞／虛字上＝被切斷（「變態才」「我剛在」）。"""
+        t = str(text or "").strip().rstrip("，,、 ")
+        return bool(t) and t[-1] in _TAIL_DANGLE and len(t) <= 30
 
     @staticmethod
     def _strip_fillers(text: str) -> str:
@@ -3241,6 +3250,8 @@ class AccountWorker:
         seg = self._verbatim_run(candidate, last_human)
         if seg:
             return f"整段照抄真人剛講的「{seg}」，換句話說"
+        if self._is_dangling(candidate):
+            return f"整句斷在「{str(candidate).strip()[-1]}」就沒了，補完一句再送"
         echo = self._echo_human_opening(candidate, last_human)
         if echo:
             return f"開頭直接搬真人那句的「{echo}」，換個角度起頭"
