@@ -9222,8 +9222,10 @@ class AccountWorker:
                     except Exception:
                         own_texts_p = []
                     last_human_p = ""
+                    duel_p: tuple = ()
                     try:
-                        recent_rows = await self.db.get_group_messages(int(group_id), limit=6)
+                        recent_rows = await self.db.get_group_messages(int(group_id), limit=14)
+                        duel_p = _duel_pair(recent_rows)
                         last_human_p = next(
                             (
                                 str(r.get("content") or "")
@@ -9241,7 +9243,8 @@ class AccountWorker:
                         except Exception:
                             context = ""
                         veto_p = self._local_veto(
-                            topic, own_texts_p, last_human_p, int(group_id)
+                            topic, own_texts_p, last_human_p, int(group_id),
+                            duel_names=duel_p,
                         )
                         if veto_p:
                             _code = "veto_" + self._veto_code(veto_p)
