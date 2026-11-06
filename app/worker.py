@@ -211,6 +211,8 @@ _DUEL_WINDOW = 8 * 60
 _DUEL_MIN_PAIR = 6
 _DUEL_MIN_SHARE = 0.35
 _DUEL_SHORT_LEN = 22
+# 群裡多久沒水軍出聲就不再讓路人閒聊砍掉手上的回覆（六分鐘）
+_SPARE_SILENCE_SECONDS = 360.0
 
 
 def _duel_pair(rows, seconds: float = _DUEL_WINDOW) -> tuple:
@@ -1355,6 +1357,9 @@ class AccountWorker:
                 # 熱場自適應取消預算：同一位群友自己又補話仍立即取消（那才是會對不上話），
                 # 路人閒聊只按群速放大秒數，不整條誤殺。
                 budget = self._adaptive_interrupt_budget(human_ts, now_t, group_id)
+                # 群裡很久沒水軍出聲：手上這條是「插話」不是「答話」，
+                # 路人閒聊不該把它砍掉（互嗆場兩男的短句每十五秒一句，改不完也等不到）。
+                starved = await self._seconds_since_any_bot(group_id)
                 group_tasks = [
                     t for t in list(self._reply_tasks)
                     if getattr(t, "_sdf_group_id", None) == group_id
@@ -1368,19 +1373,13 @@ class AccountWorker:
                         same_sender = (
                             int(getattr(task, "_sdf_target_sender", 0) or 0) == sender_id
                         )
-                        over_budget = age > budget
                         # 句子已經生成好了（只剩用字檢查與發送）就不要再被路人閒聊砍掉：
                         # 正確性由發送前的 _context_still_fresh 把關，砍掉只是白花一次生成。
                         # 19:06–19:34 一小時十三次認領全部取消、送出零則，就是這樣死的。
                         text_ready = bool(getattr(task, "_sdf_text_ready", False))
-                        if age > 180.0:
-                            task.cancel()
-                            cancelled += 1
-                        # 同一人補話仍要取消（否則會答到上一句），但門檻跟著實測速度走
-                        elif same_sender and age >= max(15.0, budget * 0.5):
-                            task.cancel()
-                            cancelled += 1
-                        elif over_budget and not text_ready:
+                        if self._interrupt_action(
+                            age, budget, same_sender, text_ready, starved
+                        ) == "cancel":
                             task.cancel()
                             cancelled += 1
                     except Exception:
@@ -3063,6 +3062,29 @@ class AccountWorker:
             if key in str(reason):
                 return code
         return "other"
+
+    @staticmethod
+    def _interrupt_action(
+        age: float,
+        budget: float,
+        same_sender: bool,
+        text_ready: bool,
+        starved: float,
+    ) -> str:
+        """真人插話時這條待辦要「cancel」還是留著（hold）。
+
+        同一個人自己又補話一律砍——留下來就會答到上一句。
+        路人插話只在超時又還沒生成好時砍；但群裡已經六分鐘沒水軍出聲時不砍：
+        那時這條是插話不是答話，砍了就是整場消失（19:41–19:52 二十分鐘四號零輸出，
+        期間真人講了六十幾句）。硬上限一百八十秒仍在，避免無限拖著。
+        """
+        if age > 180.0:
+            return "cancel"
+        if same_sender and age >= max(15.0, budget * 0.5):
+            return "cancel"
+        if age > budget and not text_ready:
+            return "cancel" if starved < _SPARE_SILENCE_SECONDS else "hold"
+        return "hold"
 
     def _adaptive_interrupt_budget(self, human_ts, now: float, group_id: int) -> float:
         """速率當下限、實測生成時間當主體：模型慢的場自然等得久，快的場不拖延。"""
