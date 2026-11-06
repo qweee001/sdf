@@ -3121,6 +3121,16 @@ class AccountWorker:
 
         return grams, stop
 
+    _ADDRESS_WORDS = ("哥哥", "姊姊", "姐姐", "弟弟", "妹妹", "大哥", "大姐")
+
+    @staticmethod
+    def _strip_address(text: str) -> str:
+        """剝掉稱謂：對象軸指名之後名字後面一定接「哥哥」，那不算慣用詞換皮。"""
+        body = str(text or "")
+        for word in AccountWorker._ADDRESS_WORDS:
+            body = body.replace(word, "")
+        return body
+
     def _idiom_reuse(self, candidate: str, own_texts, cross_texts) -> str:
         """慣用詞重用：同一句實詞又拿出來講，換句話說（動態，非詞表）。
 
@@ -3132,9 +3142,15 @@ class AccountWorker:
         # [-20:] 在這一群只等於 20 分鐘，90 分鐘窗等於白設（實測 12:49→13:50
         # 跨號同一個「出一張嘴」差 61 分鐘，早就被切掉）。
         cross = [str(t) for t in (cross_texts or [])[-120:] if str(t).strip()]
+        # 稱謂不算慣用詞：對象軸要求指名之後，「戰豆哥哥」「後天哥哥」一定帶著哥哥，
+        # 16:05→16:15 就退在「共用哥哥、姊姊」，改到第三版還是會帶回來——
+        # 兩軸互相打架，重寫永遠不會過。比對前先把稱謂剝掉。
+        own = [self._strip_address(t) for t in own]
+        cross = [self._strip_address(t) for t in cross]
+        core = self._strip_address(candidate)
         corpus = own + cross
         grams, _stop = self._content_bigrams(corpus)
-        cand = set(grams(candidate))
+        cand = set(grams(core))
         if not cand:
             return ""
         # 越冷門的字越能代表同一個慣用語，回報時挑最冷門的兩個（不挑「的時」這種虛組合）
@@ -3173,7 +3189,7 @@ class AccountWorker:
         tri = set()
         for prev in corpus:
             tri |= tri_of(prev)
-        cand_tri = tri_of(candidate)
+        cand_tri = tri_of(core)
 
         def strong(hit) -> bool:
             if any(char_df.get(g[0], 0) <= 1 and char_df.get(g[1], 0) <= 1 for g in hit):

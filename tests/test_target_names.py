@@ -139,6 +139,31 @@ def test_soft_tail_shows_up_in_the_local_veto_after_the_idiom_axis():
     assert "同一個腔" in w._local_veto("這一杯喝下去大概整晚都不用睡了嘛", own, "")
 
 
+# ---- 稱謂不算慣用詞（兩軸打架） -----------------------------------------
+
+_1615 = "整理貨架順便看戲，戰豆哥哥在群裡嘴硬不當舔狗，那到床上會乖乖低頭把姊姊舔濕嗎"
+_1605 = "後天哥哥的未來都在後庭，姊姊的小穴濕熱又緊，下班買鹹酥雞帶去飯店看誰先投降"
+
+
+def test_address_words_are_not_an_idiom_collision():
+    """對象軸指名 → 名字後面一定接哥哥；再用慣用詞軸退它，重寫永遠不會過。"""
+    w = _worker()
+    assert w._idiom_reuse(_1605, [_1615], []) == ""
+    assert w._idiom_reuse(_1615, [_1605], []) == ""
+
+
+def test_real_idiom_still_collides_after_stripping_address():
+    w = _worker()
+    assert "嘴硬" in w._idiom_reuse(
+        "嘴硬成這樣，被踩的時候倒是挺享受的", ["沒舔過還敢嘴硬，弟弟你是怕一舔就回不去嗎"], []
+    )
+
+
+def test_strip_address_removes_only_titles():
+    assert AccountWorker._strip_address("戰豆哥哥你姊姊的") == "戰豆你的"
+    assert AccountWorker._strip_address("剛下班") == "剛下班"
+
+
 # ---- 主動路徑：名字進提示，換不到要記回退 -------------------------------
 
 
