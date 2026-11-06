@@ -186,6 +186,24 @@ _PLACE_WORDS = (
 _PLACE_FADE = 90 * 60
 _PLACE_NEAR = 20 * 60
 _PLACE_HITS = 2
+# 無對象開場軸：一整條水軍語流都是「自己身上的場景動作，逗號，才撩」。
+# 20:16~21:15 十一則全這個模子（吹乾頭髮／沙發上擦乳液／泡完熱水澡／邊看恐怖片邊塗乳液／
+# 吃完飯糰手指油油的／剛脫絲襪揉小腿），起手字、部位、場所、吃喝每一軸都只看自己那一格，
+# 十一則全部放行，群友看到的還是同一台機器。這裡量的是「第一個逗號前有沒有人」：
+# 沒有人名、沒有你／妳、不是問句，就算一則無對象開場；密度到就要求這則對著一個人講。
+_NAMELESS_OPEN_WINDOW = 40 * 60
+_NAMELESS_OPEN_MIN_SAMPLE = 5
+_NAMELESS_OPEN_HITS = 4
+# 改不出具名版又不講會整場消失：十二分鐘沒有水軍出聲就照發。
+_NAMELESS_FORCED_SECONDS = 12 * 60
+# 這一號自己已經二十五分鐘沒出聲時，軟軸不再攔（Chen 一整小時 claimed 3 sent 0）。
+_NAMELESS_STARVED_SECONDS = 25 * 60
+# 同一題連發：九十秒內上一則水軍已經在講同一個題目（共用的實字 2-gram），換角度。
+_SAME_TOPIC_NEAR = 90
+_SAME_TOPIC_SKIP_GRAMS = {
+    "你們", "我們", "他們", "你的", "我的", "他的", "這個", "那個", "這樣", "那樣",
+    "不是", "什麼", "可以", "已經", "還是", "就是", "然後", "所以", "真的",
+}
 # 場所不固定在開頭（17:10 那句的「坐在辦公椅上」在第三個逗號後面），所以不比字數，
 # 比「在某地」這個句型：場所詞前面四個字內要有在／坐／靠／趴／蹲／站／躺這種介系詞。
 # 「等下拿去茶水間」是被拿去的位置，不算她又報一次自己在哪。
@@ -2959,6 +2977,78 @@ class AccountWorker:
             return False
         return True
 
+    def _open_head_of(self, text: str, group_id: int = 0) -> str:
+        """第一個逗號前的開場段：先剝掉開頭喊的人名，再看這一段有沒有人。"""
+        body = str(text or "").lstrip(self._OPEN_STRIP)
+        for name in self._speaker_names(group_id):
+            if body.startswith(name):
+                body = body[len(name):].lstrip(self._OPEN_STRIP)
+                break
+        return re.split(r"[，,]", body)[0].strip()
+
+    def _is_nameless_open(self, text: str, group_id: int = 0) -> bool:
+        """開場段只講自己身上的場景，沒有對象（沒人名、沒你、不是問句）。
+
+        「後天覺得他語言豐富」一開口就喊人名，不算；「泡完熱水澡忘記拿睡衣」算；
+        「排隊排到狗後面也太慘」這種對事不對人的評語也一起算——群友要的是
+        「這句在對誰講」，不是場景有沒有寫出來。
+        """
+        body = str(text or "").lstrip(self._OPEN_STRIP)
+        names = self._speaker_names(group_id)
+        if any(body.startswith(n) for n in names):
+            return False
+        head = re.split(r"[，,]", body)[0].strip()
+        if len(head) < 6:
+            return False
+        bare = head.replace("你們", "").replace("大家", "")
+        if "你" in bare or "妳" in bare:
+            return False
+        if any(n in head for n in names):
+            return False
+        # 「太遜了吧」是斷言不是問句，這裡只認真的問號與疑問詞，
+        # 不能直接套 _is_question（它把「吧」當問句尾）。
+        if "？" in head or "?" in head:
+            return False
+        if any(m in head for m in self._Q_MARKERS):
+            return False
+        return True
+
+    def _nameless_open_flow(self, group_id: int, candidate: str) -> bool:
+        """整條水軍語流都是無對象開場，這則也一樣 → 該逼它對著一個人講。"""
+        if not group_id or not self._is_nameless_open(candidate, int(group_id)):
+            return False
+        recent = self._cross_recent_texts(int(group_id), _NAMELESS_OPEN_WINDOW)[-8:]
+        if len(recent) < _NAMELESS_OPEN_MIN_SAMPLE:
+            return False
+        hits = sum(1 for t in recent if self._is_nameless_open(t, int(group_id)))
+        return hits >= _NAMELESS_OPEN_HITS
+
+    def _same_topic_as_prev(self, group_id: int, candidate: str) -> str:
+        """九十秒內上一則水軍已經在講同一個題目（共用實字 2-gram）就回那個詞。"""
+        near = self._cross_recent_items(int(group_id), _SAME_TOPIC_NEAR)
+        if not near:
+            return ""
+        prev = str(near[-1][0])
+        grams = {
+            prev[i: i + 2]
+            for i in range(max(0, len(prev) - 1))
+            if prev[i: i + 2] not in _SAME_TOPIC_SKIP_GRAMS
+            and "一" <= prev[i] <= "鿿"
+            and "一" <= prev[i + 1] <= "鿿"
+        }
+        cand = str(candidate or "")
+        hit = [g for g in grams if g in cand]
+        return hit[0] if hit else ""
+
+    async def _own_silent_seconds(self, group_id: int) -> float:
+        """自己這一號在這群多久沒出聲了（給軟軸退讓用）。"""
+        try:
+            spoke = await self.db.group_bot_last_spoke(int(group_id))
+        except Exception:
+            return 0.0
+        mine = float(spoke.get(int(self.tg_user_id or 0), 0.0) or 0.0)
+        return time.time() - mine if mine else 10**6
+
     def _broadcast_hits(self, group_id: int, seconds: float = 60 * 60) -> int:
         recent = self._cross_recent_texts(int(group_id), seconds)[-4:]
         return sum(1 for t in recent if self._is_broadcast(t))
@@ -3045,6 +3135,8 @@ class AccountWorker:
             ("動作最近", "scene_dup"),
             ("場地開頭", "place"),
             ("正在互嗆", "duel"),
+            ("才在講", "same_topic"),
+            ("第一個逗號前", "nameless_open"),
             ("喝／吃同一類", "consume"),
             ("搬真人", "opening_echo"),
             ("上一則水軍也從", "opening_same"),
@@ -3437,6 +3529,8 @@ class AccountWorker:
         last_human: str,
         group_id: int = 0,
         duel_names: tuple = (),
+        nameless_flow: bool = False,
+        hot_names: tuple = (),
     ) -> str:
         """生成後的硬性自檢（不叫模型，零成本）：複讀真人／連問／起手詞／慣用詞再撞。
 
@@ -3456,6 +3550,14 @@ class AccountWorker:
             return (
                 f"{who}正在互嗆，這則沒點到名，只像旁邊補一句；"
                 f"挑{duel_names[0]}或{duel_names[-1]}其中一個，把名字放進句子，接他剛講的那句"
+            )
+        # 無對象開場軸：整條水軍語流都是「自己身上的場景，逗號，才撩」，這則也一樣 →
+        # 逼它落到一個人身上。名字要在第一個逗號前，後半才出現「你」的不算。
+        if nameless_flow and self._is_nameless_open(candidate, group_id):
+            who = "、".join([n for n in hot_names if n][:2]) or "剛剛講話最兇那個"
+            return (
+                "最近好幾則水軍都是先講自己身上的小事、對象含糊，接著看像同一個人在自語；"
+                f"這則把名字放進第一個逗號前，直接接{who}剛講的那句"
             )
         if self._ask_tail_repeat(own_texts, candidate) and not (
             group_id and self._assert_run(int(group_id))
@@ -3601,6 +3703,13 @@ class AccountWorker:
         idiom = self._idiom_reuse(candidate, own_texts, cross)
         if idiom:
             return idiom
+        # 九十秒內上一則水軍已經在講同一個題目（20:35 小小「專一還是舔狗分很細欸」→
+        # 20:36 小天後「你也那麼專一嗎」，兩號接力答同一題）：別接著同一個詞再講一次。
+        # 放在慣用詞之後：慣用詞命中的詞更具體，先讓它出。
+        if group_id:
+            dup = self._same_topic_as_prev(int(group_id), candidate)
+            if dup:
+                return f"上一則水軍才在講「{dup}」，這則換個角度開頭，別接著同一個詞再講一次"
         # 語氣詞尾換殼不算換腔（15:02 嗎 → 15:18 啊）。放在慣用詞之後：
         # 撞了慣用詞或起手字的理由更具體，先命中先回。
         if self._soft_tail_repeat(own_texts, candidate) and not (
@@ -5241,6 +5350,8 @@ class AccountWorker:
         require_target: bool = False,
         require_names: tuple = (),
         duel_names: tuple = (),
+        nameless_flow: bool = False,
+        hot_names: tuple = (),
     ) -> str:
         """③ 不過時：改用不同策略各生一條候選，逐條審核，挑可發分最高的那條。
 
@@ -5261,7 +5372,13 @@ class AccountWorker:
             if not candidate:
                 continue
             if self._local_veto(
-                candidate, own_texts or [], last_human, group_id, duel_names=duel_names
+                candidate,
+                own_texts or [],
+                last_human,
+                group_id,
+                duel_names=duel_names,
+                nameless_flow=nameless_flow,
+                hot_names=hot_names,
             ):
                 continue
             # 這一輪就是要她講自己：換策略還是端出純評語就再換一條，
@@ -5364,7 +5481,34 @@ class AccountWorker:
         need_target = self._needs_target_retry(group_id, text)
         # 兩人在互嗆：這則沒點名就退回重寫（互嗆的場，名字比什麼都重要）。
         duel = _duel_pair(rows)
-        veto = self._local_veto(text, own_texts, last_human, group_id, duel_names=duel)
+        # 這一串水軍發言全是「先講自己、對象含糊」的場景自語：逼這則落到人身上。
+        # 互嗆場已經在管名字，這軸不重複；自己這一號久未出聲時軟軸退讓（免得餓死）。
+        hot_names: tuple = ()
+        flow = False
+        if group_id and not duel:
+            cut = time.time() - 8 * 60
+            tally: dict = {}
+            for r in rows:
+                if str(r.get("role")) == "assistant":
+                    continue
+                nm = str(r.get("sender_name") or "").strip()
+                if nm and float(r.get("timestamp") or 0.0) >= cut:
+                    tally[nm] = tally.get(nm, 0) + 1
+            hot_names = tuple(
+                n for n, _c in sorted(tally.items(), key=lambda kv: -kv[1])[:2]
+            )
+            flow = bool(hot_names) and self._nameless_open_flow(group_id, text)
+            if flow and await self._own_silent_seconds(group_id) >= _NAMELESS_STARVED_SECONDS:
+                flow = False
+        veto = self._local_veto(
+            text,
+            own_texts,
+            last_human,
+            group_id,
+            duel_names=duel,
+            nameless_flow=flow,
+            hot_names=hot_names,
+        )
         if veto:
             self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
             _code = "veto_" + self._veto_code(veto)
@@ -5382,19 +5526,22 @@ class AccountWorker:
                 limit=_GATE_CANDIDATE_LIMIT,
                 sister_recent=sister_recent,
                 strict=strict,
-                require_target=need_target or bool(duel),
+                require_target=need_target or bool(duel) or flow,
                 require_names=tuple(duel) if duel else (),
                 duel_names=duel,
+                nameless_flow=flow,
+                hot_names=hot_names,
             )
             if picked:
                 self._mark_echo_if_any(group_id, picked, echo_humans)
                 return picked
             # 互嗆場改不出具名版本、群裡又已經十分鐘沒有水軍出聲：原句照發，
             # 一句旁白也比整場消失好。
-            if duel and await self._seconds_since_any_bot(group_id) >= 600:
+            _forced_at = 600 if duel else _NAMELESS_FORCED_SECONDS
+            if (duel or flow) and await self._seconds_since_any_bot(group_id) >= _forced_at:
                 self.stats["duel_forced"] = int(self.stats.get("duel_forced", 0)) + 1
                 print(
-                    f"[{self.name}] duel-forced: 改不出具名版、十分鐘沒水軍，照發 {text[:20]!r}",
+                    f"[{self.name}] duel-forced: 改不出具名版、群裡太久沒水軍，照發 {text[:20]!r}",
                     flush=True,
                 )
                 self._burst_register(group_id, text)
@@ -8926,15 +9073,19 @@ class AccountWorker:
                 continue
             # 主動發言自己開口，穿幫成本最高：時段不合或混入簡體字就換一句
             if self._has_time_mismatch(topic):
+                self.stats["proactive_drop_time"] = int(self.stats.get("proactive_drop_time", 0)) + 1
                 print(f"[{self.name}] proactive-drop: time mismatch on {topic[:20]!r}", flush=True)
                 continue
             if self._has_simplified_chars(topic):
+                self.stats["proactive_drop_simp"] = int(self.stats.get("proactive_drop_simp", 0)) + 1
                 print(f"[{self.name}] proactive-drop: simplified chars on {topic[:20]!r}", flush=True)
                 continue
             if self._mainland_term_hint(topic):
+                self.stats["proactive_drop_mainland"] = int(self.stats.get("proactive_drop_mainland", 0)) + 1
                 print(f"[{self.name}] proactive-drop: mainland term on {topic[:20]!r}", flush=True)
                 continue
             if self._gender_term_violation(topic):
+                self.stats["proactive_drop_gender"] = int(self.stats.get("proactive_drop_gender", 0)) + 1
                 print(f"[{self.name}] proactive-drop: gender term on {topic[:20]!r}", flush=True)
                 continue
             # 群層級詞語疲勞：同一個詞在群內被不同帳號連用 3+ 次就該換一句
@@ -8950,11 +9101,13 @@ class AccountWorker:
                 )
                 continue
             if self._starts_with_gan(topic):
+                self.stats["proactive_drop_gan"] = int(self.stats.get("proactive_drop_gan", 0)) + 1
                 print(f"[{self.name}] proactive-drop: gan opener on {topic[:20]!r}", flush=True)
                 already.append(topic[:40])
                 continue
             fatigued = self._phrase_fatigue_hit(group_id, topic)
             if fatigued:
+                self.stats["proactive_drop_fatigue"] = int(self.stats.get("proactive_drop_fatigue", 0)) + 1
                 print(
                     f"[{self.name}] proactive-drop: phrase fatigue {fatigued!r} on {topic[:20]!r}",
                     flush=True,
@@ -8963,6 +9116,7 @@ class AccountWorker:
                 continue
             illogical = self._illogical_sentence_violation(topic)
             if illogical:
+                self.stats["proactive_drop_illogic"] = int(self.stats.get("proactive_drop_illogic", 0)) + 1
                 print(f"[{self.name}] proactive-drop: illogical sentence {illogical!r} on {topic[:20]!r}", flush=True)
                 already.append(topic[:40])
                 continue
@@ -8970,6 +9124,7 @@ class AccountWorker:
                 topic, expected=self._expected_place_names(context, notes_block)
             )
             if place_typo:
+                self.stats["proactive_drop_place"] = int(self.stats.get("proactive_drop_place", 0)) + 1
                 print(f"[{self.name}] proactive-drop: place typo {place_typo} on {topic[:20]!r}", flush=True)
                 already.append(topic[:40])
                 continue
@@ -8977,6 +9132,7 @@ class AccountWorker:
             if not normalized:
                 continue
             if normalized in self._recent_proactive_topics or normalized in remote_texts:
+                self.stats["proactive_drop_repeat"] = int(self.stats.get("proactive_drop_repeat", 0)) + 1
                 print(f"[{self.name}] proactive-drop: repeated topic {topic[:20]!r}", flush=True)
                 already.append(topic[:40])
                 continue
@@ -9019,7 +9175,13 @@ class AccountWorker:
         # 對象軸的主場在主動發言（這一群一小時十幾則，十四則是主動）：
         # 全場都在當裁判時，主動那句也必須落到一個人身上，不能只在回覆路徑管。
         need_target = self._broadcast_hits(int(group_id)) >= 2 and self._is_broadcast(topic)
-        if not press_box and not need_target:
+        # 整條水軍語流都是場景自語：主動那句也一樣要落到人身上，不能只在回覆路徑管。
+        flow = self._nameless_open_flow(int(group_id), topic)
+        if flow and await self._own_silent_seconds(int(group_id)) >= _NAMELESS_STARVED_SECONDS:
+            flow = False
+        if flow:
+            self.stats["proactive_nameless"] = int(self.stats.get("proactive_nameless", 0)) + 1
+        if not press_box and not need_target and not flow:
             return ""
         self.stats["proactive_echo_rewrite"] = (
             int(self.stats.get("proactive_echo_rewrite", 0)) + 1
@@ -9029,7 +9191,7 @@ class AccountWorker:
         # 15:02／15:18 兩則都退在這：提示寫了「挑一個具體的男人」，模型手上卻沒有人名，
         # 五條候選全端回「你們」，最後回 "" 讓呼叫端照發原句。人名要自己餵進去。
         names: list = []
-        if need_target:
+        if need_target or flow:
             try:
                 names = self._target_names(await self.db.get_group_messages(group_id, limit=14))
             except Exception:
@@ -9048,6 +9210,11 @@ class AccountWorker:
             )
             if names:
                 hint += f"就從這幾個人裡挑一個：{'、'.join(names)}，他的名字要出現在句子裡。"
+        if flow:
+            hint += (
+                "最近幾則水軍全是先講自己身上的小事、對象含糊，接著看像同一個人在自語。"
+                "這版名字放第一個逗號前，直接從他剛講的那句接著講，別再從自己身上開場。"
+            )
         if openers:
             hint += f"（最近幾則的開場動作：{openers}，別再抽同一類，換一個不一樣的當下場景）"
         picked = await self._pick_passing_candidate(
@@ -9061,10 +9228,12 @@ class AccountWorker:
             group_id=group_id,
             limit=2,
             require_self=press_box,
-            require_target=need_target,
+            require_target=need_target or flow,
             require_names=tuple(names),
+            nameless_flow=flow,
+            hot_names=tuple(names),
         )
-        if not picked and need_target and names:
+        if not picked and names and (need_target or flow):
             # 兩條都還是全場 → 第二輪只准叫名字開頭，整句不准出現「你們」。
             self.stats["target_retry_second"] = (
                 int(self.stats.get("target_retry_second", 0)) + 1
