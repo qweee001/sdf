@@ -186,6 +186,9 @@ _CONSUME_GROUPS = {
         "鹹酥雞", "宵夜", "泡麵", "早餐", "午餐", "下午茶", "蛋餅", "飯糰", "壽司", "火鍋",
         "便當", "雞排", "水餃", "鍋貼", "炒飯", "滷肉飯", "麵線", "三明治", "漢堡", "豆漿",
         "甜點", "蛋糕",
+        # 泛稱也要算同一群，否則「簡單吃一點」這種沒品項的句子在軸上等於空白：
+        # 13:05 Chen「簡單吃一點」就在 12:39 小小便當＋雞排的兩小時窗內，照樣放行。
+        "吃", "餓",
     ),
 }
 _CONSUME_FADE = 20 * 60
@@ -193,6 +196,8 @@ _CONSUME_DENSITY_FADE = 120 * 60
 _CONSUME_DENSITY_HITS = 2
 # 異體字只影響比對，不動輸出：偵測漏「酸」等於整條狀態軸失效。
 _AXIS_VARIANTS = str.maketrans({"酸": "痠", "溼": "濕", "檯": "台"})
+# 複讀比對前先剝掉的襯字（只剝不承載語意的，不碰名詞動詞）。
+_FILLER_STRIP = str.maketrans("", "", "一了啦喔欸嘛啊呀耶哦囉")
 _SCENE_MOSAIC_SOURCES = 3
 # 群務說明句：入會／找助理這種本來就該講外面的事，不套自曝要求。
 _INFO_WORDS = ("助理", "入會", "會員", "排隊", "私訊")
@@ -2859,6 +2864,18 @@ class AccountWorker:
         recent = self._cross_recent_texts(int(group_id), seconds)[-4:]
         return sum(1 for t in recent if self._is_broadcast(t))
 
+    def _needs_target_retry(self, group_id: int, text: str) -> bool:
+        """全場都在當裁判、這則又只補一句評語 → 真的重寫一版，不只寫提示。
+
+        12:49:39「被嗆100公斤急著找台階下的人比較像破防吧」／13:22「舔狗被弄哭也是
+        很可憐欸，誰去安慰一下」／13:37「把褲子脫下來看看雞雞跟腹肌像不像彭于晏比較實際」，
+        三則橫跨一小時，提示（_sentence_type_note）早就寫了「挑一個人講」，
+        模型照樣端回裁判腔——提示不落地就等於沒有。
+        """
+        return bool(group_id) and (
+            self._broadcast_hits(int(group_id)) >= 2 and self._is_broadcast(text)
+        )
+
     @staticmethod
     def _consume_groups(text: str) -> set:
         """這句在喝／吃哪一類東西（coffee/drink/booze/food）。
@@ -3022,9 +3039,18 @@ class AccountWorker:
         )
 
     @staticmethod
-    def _verbatim_run(a: str, b: str, min_len: int = 6) -> str:
-        """a 有沒有整段照抄 b 的連續 ≥min_len 字（複讀真人原句用）。回最長那段。"""
-        a, b = str(a or ""), str(b or "")
+    def _strip_fillers(text: str) -> str:
+        """拿掉不承載語意的襯字，讓「簡單吃一點」與「簡單吃點啦」算同一句。"""
+        return str(text or "").translate(_FILLER_STRIP)
+
+    @classmethod
+    def _verbatim_run(cls, a: str, b: str, min_len: int = 6) -> str:
+        """a 有沒有整段照抄 b 的連續 ≥min_len 字（複讀真人原句用）。回最長那段。
+
+        襯字先剝掉再比：13:04:35 真人「簡單吃點啦」→ 13:05:18 Chen「簡單吃一點」，
+        中間只插了一個「一」，四字窗就差一格放行，群友看到的是同一句。
+        """
+        a, b = cls._strip_fillers(a), cls._strip_fillers(b)
         if len(a) < min_len or len(b) < min_len:
             return ""
         best = ""
@@ -4647,6 +4673,7 @@ class AccountWorker:
     async def _review_candidate(
         self, context: str, text: str, directive: str = "", recent_bots: str = "",
         last_human: str = "", sister_recent: str = "", require_self: bool = False,
+        require_target: bool = False,
     ):
         """③ 審核候選回覆：上下文＋前置決策＋生成文字一起送審。
 
@@ -4667,8 +4694,15 @@ class AccountWorker:
             if require_self
             else ""
         )
+        target_block = (
+            "【這則的硬要求】這一小時的水軍都在對全場下判決（「你們」「這群」「只會…」），"
+            "候選必須落在一個具體的男人身上：把他的名字或單數的「你」放進句子，"
+            "只在句尾對全場補一句評語就算不合格。\n"
+            if require_target
+            else ""
+        )
         state = (
-            f"{context}\n{sister_block}{decision_block}{require_block}"
+            f"{context}\n{sister_block}{decision_block}{require_block}{target_block}"
             f"你要發出的回覆：「{str(text).strip()}」"
         )
         if getattr(self.config, "decision_api_key", "").strip():
@@ -4714,7 +4748,7 @@ class AccountWorker:
         # 網關神經網絡動態審核層（最優解：老司機旁路裁判）
         return await self._review_candidate_gateway(
             context, text, directive, recent_bots, last_human, sister_recent,
-            require_self=require_self,
+            require_self=require_self, require_target=require_target,
         )
 
     async def _sister_burst_lines(self, event, window: float | None = None) -> str:
@@ -4802,6 +4836,7 @@ class AccountWorker:
     async def _review_candidate_gateway(
         self, context: str, text: str, directive: str = "", recent_bots: str = "",
         last_human: str = "", sister_recent: str = "", require_self: bool = False,
+        require_target: bool = False,
     ) -> dict | None:
         """網關神經網絡動態審核層：以台灣老司機視角進行旁路打分與審查。"""
         if not self.ai_client:
@@ -4886,6 +4921,14 @@ class AccountWorker:
                 if require_self
                 else ""
             )
+            + (
+                "【這則的硬要求】這一小時水軍全是場邊裁判：候選必須落在一個具體男人身上，"
+                "把他的名字或單數的「你」放進句子（「誰去安慰一下」「比較像破防吧」這種"
+                "對全場的判決不行）。只在句尾補一句評語就算不合格，issue 判 repeat，"
+                "sendable 壓到 0.25 以下，reason 寫「還是對全場下判決，沒落到一個人身上」。"
+                if require_target
+                else ""
+            )
             + f"【候選發言】：「{str(text).strip()}」"
         )
 
@@ -4959,6 +5002,7 @@ class AccountWorker:
         sister_recent: str = "",
         strict: bool = False,
         require_self: bool = False,
+        require_target: bool = False,
     ) -> str:
         """③ 不過時：改用不同策略各生一條候選，逐條審核，挑可發分最高的那條。
 
@@ -4985,10 +5029,16 @@ class AccountWorker:
                     int(self.stats.get("echo_press_box_rejected", 0)) + 1
                 )
                 continue
+            # 這一輪就是要她對一個人講：換策略還端回對全場的判決就再換一條。
+            if require_target and self._is_broadcast(candidate):
+                self.stats["broadcast_rewrite_rejected"] = (
+                    int(self.stats.get("broadcast_rewrite_rejected", 0)) + 1
+                )
+                continue
             self.stats["gate_candidates"] = int(self.stats.get("gate_candidates", 0)) + 1
             review = await self._review_candidate(
                 context, candidate, directive, recent_bots, last_human, sister_recent,
-                require_self=require_self,
+                require_self=require_self, require_target=require_target,
             )
             if review is None or not self._review_passes(review, strict):
                 continue
@@ -5041,6 +5091,8 @@ class AccountWorker:
             last_human = "\n".join(humans[-3:])
         except Exception:
             pass
+        # 這一小時全場都在當裁判、這版又只補一句評語：不論走哪條路都要落到一個人身上。
+        need_target = self._needs_target_retry(group_id, text)
         veto = self._local_veto(text, own_texts, last_human, group_id)
         if veto:
             self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
@@ -5059,6 +5111,7 @@ class AccountWorker:
                 limit=_GATE_CANDIDATE_LIMIT,
                 sister_recent=sister_recent,
                 strict=strict,
+                require_target=need_target,
             )
             if picked:
                 self._mark_echo_if_any(group_id, picked, echo_humans)
@@ -5072,7 +5125,13 @@ class AccountWorker:
                 directive,
                 "上一版整句都在講別人的事、自己身上一句都沒講，只像場邊播報。"
                 "這版別複述別人的哏、別提人名，先用你自己此刻在做的一件事開場，"
-                "順手帶到身體感覺。",
+                "順手帶到身體感覺。"
+                + (
+                    "還有，挑一個具體的男人對他說，把「你」放進句子，"
+                    "別再對他以外的全場下判決。"
+                    if need_target
+                    else ""
+                ),
                 lambda hint: self._generate_reply(event, extra_hint=hint),
                 recent_bots=recent_bots,
                 own_texts=own_texts,
@@ -5082,6 +5141,7 @@ class AccountWorker:
                 sister_recent=sister_recent,
                 strict=strict,
                 require_self=True,
+                require_target=need_target,
             )
             if picked:
                 self.stats["gate_pass_after_rewrite"] = (
@@ -5102,6 +5162,35 @@ class AccountWorker:
                 print(f"[{self.name}] echo-forced: 全場播報但已十分鐘沒水軍，照發 {text[:20]!r}", flush=True)
                 self._burst_register(group_id, text)
                 return text
+        # 有自曝但整則還是對全場下判決（13:30 RICH「請客就想白幹嗎…誰買單吧」）：
+        # 換一條點名一個人的版本，換不到就發原本那句——它已經過得了自檢。
+        if need_target:
+            self.stats["target_rewrite"] = int(self.stats.get("target_rewrite", 0)) + 1
+            print(f"[{self.name}] target-retry: 又對全場下判決 {text[:20]!r}", flush=True)
+            picked = await self._pick_passing_candidate(
+                context,
+                directive,
+                "這一小時全場都在當裁判，上一版還是只對全場下判決。這版挑一個具體的"
+                "男人對他說，把「你」或他的名字放進句子，講你對他這句的反應，"
+                "別再對「你們」發言。",
+                lambda hint: self._generate_reply(event, extra_hint=hint),
+                recent_bots=recent_bots,
+                own_texts=own_texts,
+                last_human=last_human,
+                group_id=group_id,
+                limit=_GATE_CANDIDATE_LIMIT,
+                sister_recent=sister_recent,
+                strict=strict,
+                require_target=True,
+            )
+            if picked:
+                self.stats["gate_pass_after_rewrite"] = (
+                    int(self.stats.get("gate_pass_after_rewrite", 0)) + 1
+                )
+                self._burst_register(group_id, picked)
+                self._mark_echo_if_any(group_id, picked, echo_humans)
+                return picked
+            return text
         review = await self._review_candidate(
             context, text, directive, recent_bots, last_human, sister_recent
         )
@@ -8609,18 +8698,29 @@ class AccountWorker:
         回覆路徑的 echo-retry 在這一群幾乎跑不到（一小時十五則有十四則是主動，
         回覆只一則、42 次被真人插話取消），所以主動發言要自己有一道。
         """
-        if self._echo_shape_hits(group_id) < _ECHO_SHAPE_HITS:
+        press_box = self._echo_shape_hits(group_id) >= _ECHO_SHAPE_HITS
+        # 對象軸的主場在主動發言（這一群一小時十幾則，十四則是主動）：
+        # 全場都在當裁判時，主動那句也必須落到一個人身上，不能只在回覆路徑管。
+        need_target = self._broadcast_hits(int(group_id)) >= 2 and self._is_broadcast(topic)
+        if not press_box and not need_target:
             return ""
         self.stats["proactive_echo_rewrite"] = (
             int(self.stats.get("proactive_echo_rewrite", 0)) + 1
         )
         print(f"[{self.name}] proactive-echo-rewrite: 整段在播報 {topic[:20]!r}", flush=True)
         openers = await self._recent_opener_note(int(group_id))
-        hint = (
-            "上一版整句都在講別人的事、自己身上一句都沒講，只像場邊播報。"
-            "這版別複述別人的哏、別提人名，先用你自己此刻正在做的一件事開場，"
-            "順手帶到身體感覺。"
-        )
+        hint = ""
+        if press_box:
+            hint = (
+                "上一版整句都在講別人的事、自己身上一句都沒講，只像場邊播報。"
+                "這版別複述別人的哏、別提人名，先用你自己此刻正在做的一件事開場，"
+                "順手帶到身體感覺。"
+            )
+        if need_target:
+            hint += (
+                "這一小時全場都在當裁判，這版挑一個具體的男人對他說，把「你」或他的名字"
+                "放進句子，講你對他這句的反應，別再對「你們」發言。"
+            )
         if openers:
             hint += f"（最近幾則的開場動作：{openers}，別再抽同一類，換一個不一樣的當下場景）"
         picked = await self._pick_passing_candidate(
@@ -8633,7 +8733,8 @@ class AccountWorker:
             last_human=last_human,
             group_id=group_id,
             limit=2,
-            require_self=True,
+            require_self=press_box,
+            require_target=need_target,
         )
         if picked:
             self._mark_echo_if_any(group_id, picked, last_human)

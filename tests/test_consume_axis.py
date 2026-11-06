@@ -123,3 +123,18 @@ def test_line_without_consumable_is_untouched():
     w = _worker()
     _seed(w, [(60, _COFFEE), (120, _COFFEE2)])
     assert "喝" not in w._local_veto("你們連貓咪的位子都要搶，這麼想被抱在懷裡摸嗎", [], "", GID)
+
+
+def test_generic_eating_shares_the_food_group():
+    """「簡單吃一點」沒有品項，軸上不能變空白。"""
+    w = _worker()
+    assert w._consume_groups("簡單吃一點") == {"food"}
+
+
+def test_generic_eating_in_the_food_window_is_blocked():
+    """12:39 小小便當／雞排 → 13:05 Chen「剛在店裡整理新衣服，簡單吃一點就被嫌很一般」。"""
+    w = _worker("Chen")
+    _seed(w, [(26 * 60, "後天嘴巴這麼挑，中午買的便當我也才吃兩口就不想吃了"),
+              (26 * 60 + 5, "我正啃雞排嘴脣超油，你留著自己啃")])
+    line = "剛在店裡整理新進的衣服，簡單吃一點就被嫌很一般，弟弟們要求都這麼嚴格嗎"
+    assert "喝" in w._local_veto(line, [], "", GID)

@@ -107,3 +107,137 @@ def test_broadcast_window_expires():
     w = _worker()
     _seed(w, [(80 * 60, _BROADCASTS[0]), (70 * 60, _BROADCASTS[1])])
     assert w._broadcast_hits(GID) == 0
+
+
+# ---- 13:22~13:37 第二輪實測：提示不落地 --------------------------------
+
+_BREAK_LINE = "臉不像沒關係，把褲子脫下來看看雞雞跟腹肌像不像彭于晏比較實際"
+
+
+def test_ruling_on_a_third_man_is_still_broadcast():
+    """13:37 小小「把褲子脫下來看看…比較實際」：在講華發吹牛，但整句沒有「你」。"""
+    w = _worker("小小")
+    assert w._is_broadcast(_BREAK_LINE)
+    assert w._is_broadcast("舔狗被弄哭也是很可憐欸，誰去安慰一下🤣")
+
+
+def test_two_broadcasts_force_a_target_retry():
+    w = _worker("小小")
+    _seed(w, [(47 * 60, _BROADCASTS[1]), (14 * 60, "舔狗被弄哭也是很可憐欸，誰去安慰一下🤣")])
+    assert w._needs_target_retry(GID, _BREAK_LINE)
+    assert not w._needs_target_retry(GID, _TO_ONE)
+
+
+def test_target_retry_needs_pressure():
+    w = _worker()
+    _seed(w, [(600, _ANCHOR)])
+    assert not w._needs_target_retry(GID, _BREAK_LINE)
+
+
+# ---- 重寫鏈：換策略還端回判決就再換一條 ---------------------------------
+
+def test_broadcast_candidate_is_dropped_when_a_target_is_required():
+    import asyncio
+
+    w = _worker("小小")
+    bodies = iter([_BREAK_LINE, "你這句講得我腿都軟了，剛坐著寫東西腰超痠"])
+    seen: list[str] = []
+
+    async def generate(_hint: str) -> str:
+        body = next(bodies)
+        seen.append(body)
+        return body
+
+    async def review(_ctx, cand, *_a, **_k):
+        return {"sendable": 0.9, "issue": "none"}
+
+    w._review_candidate = review  # type: ignore[assignment]
+    out = asyncio.run(
+        w._pick_passing_candidate(
+            "ctx", "", "hint", generate, group_id=GID, limit=2, require_target=True
+        )
+    )
+    assert out == "你這句講得我腿都軟了，剛坐著寫東西腰超痠"
+    assert w.stats["broadcast_rewrite_rejected"] == 1
+    assert len(seen) == 2
+
+
+# ---- 裁判帶著這條判 -----------------------------------------------------
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        msg = SimpleNamespace(content='{"sendable":0.9,"issue":"none","reason":""}')
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+
+def test_judge_is_told_to_demand_a_single_target():
+    import asyncio
+
+    w = _worker()
+    client = _FakeClient()
+    w.ai_client = cast(Any, client)
+    asyncio.run(w._review_candidate_gateway("ctx", _BREAK_LINE, require_target=True))
+    body = client.calls[0]["messages"][1]["content"]
+    assert "硬要求" in body and "單數的「你」" in body
+
+
+def test_judge_has_no_target_requirement_by_default():
+    import asyncio
+
+    w = _worker()
+    client = _FakeClient()
+    w.ai_client = cast(Any, client)
+    asyncio.run(w._review_candidate_gateway("ctx", _BREAK_LINE))
+    assert "單數的「你」" not in client.calls[0]["messages"][1]["content"]
+
+
+# ---- 複讀比對不吃襯字 ---------------------------------------------------
+
+def test_verbatim_run_ignores_filler_chars():
+    """13:04:35 真人「簡單吃點啦」→ 13:05:18 Chen「簡單吃一點」，只差一個「一」。"""
+    assert AccountWorker._verbatim_run("剛在店裡整理新衣服，簡單吃一點就被嫌很一般", "簡單吃點啦", 4)
+
+
+# ---- 主動發言路徑（這一群幾乎全靠主動） ---------------------------------
+
+def _stub_pick(w: AccountWorker, result: str, calls: list[Any]) -> None:
+    async def fake(*_a, **_k):
+        calls.append(1)
+        return result
+
+    w._pick_passing_candidate = fake  # type: ignore[assignment]
+
+
+def test_proactive_broadcast_is_rewritten_even_with_self_disclosure():
+    """13:30 RICH「請客就想白幹嗎，體力能讓我腿軟再說誰買單吧」：有自曝、但沒有對象。"""
+    import asyncio
+
+    w = _worker("RICH")
+    _seed(w, [
+        (27 * 60, "剛坐在櫃檯腳背點到麻了，你們這幾個是要吵到什麼時候"),
+        (3 * 60, "請客就想白幹嗎，體力能讓我腿軟再說誰買單吧"),
+    ])
+    calls: list[Any] = []
+    _stub_pick(w, "你這句講得我腿都軟了", calls)
+    out = asyncio.run(w._proactive_echo_rewrite(GID, _BREAK_LINE, "", [], ""))
+    assert out == "你這句講得我腿都軟了"
+    assert calls
+
+
+def test_proactive_targeted_line_is_not_rewritten():
+    import asyncio
+
+    w = _worker("RICH")
+    _seed(w, [
+        (27 * 60, "剛坐在櫃檯腳背點到麻了，你們這幾個是要吵到什麼時候"),
+        (3 * 60, "請客就想白幹嗎，體力能讓我腿軟再說誰買單吧"),
+    ])
+    calls: list[Any] = []
+    _stub_pick(w, "不該被用到", calls)
+    assert asyncio.run(w._proactive_echo_rewrite(GID, _TO_ONE, "", [], "")) == ""
+    assert not calls
