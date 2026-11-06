@@ -174,6 +174,34 @@ _BODY_PART_WORDS = (
     "胸口", "腰", "腿", "鎖骨", "脖子", "肩膀", "臀", "小腹", "腳踝", "手腕", "大腿", "背",
 )
 _BODY_PART_FADE = 10 * 60
+# 場地軸：三則連著都用「我在某個地方＋手上的小事」開場，場所三個字串全都不同
+# （17:10 小小「坐在辦公椅…等下班」→17:21 Chen「靠著店裡櫃檯放空揉太陽穴」→
+# 17:26 小小「剛在茶水間泡咖啡差點嗆到」），逐字軸、動作軸、吃喝軸一個都中不到。
+# 場所本身不是禁用（小天後本來就是店員），撞的是「我在哪裡＋手上的小事」這個格子：
+# 只算「在某地」句型，場所落在後半句當背景的不算。
+_PLACE_WORDS = (
+    "櫃檯", "櫃台", "櫃上", "鐵門", "店裡", "店面", "辦公椅", "辦公桌", "辦公室",
+    "位子", "座位", "茶水間", "廚房", "陽台", "浴室", "車上", "電梯", "樓梯間", "會議室",
+)
+_PLACE_FADE = 90 * 60
+_PLACE_NEAR = 20 * 60
+_PLACE_HITS = 2
+# 場所不固定在開頭（17:10 那句的「坐在辦公椅上」在第三個逗號後面），所以不比字數，
+# 比「在某地」這個句型：場所詞前面四個字內要有在／坐／靠／趴／蹲／站／躺這種介系詞。
+# 「等下拿去茶水間」是被拿去的位置，不算她又報一次自己在哪。
+_PLACE_LEAD_RE = re.compile(r"(在|坐|靠|趴|蹲|站|躺|回到|走到|溜進|躲進)[^，,、]{0,4}$")
+_PLACE_RE = re.compile("|".join(_PLACE_WORDS))
+
+
+def _place_opening(text: str) -> str:
+    """回句子裡「在某個地方」的場地詞（沒有就回空字串）。"""
+    s = str(text or "")
+    for m in _PLACE_RE.finditer(s):
+        if _PLACE_LEAD_RE.search(s[: m.start()]):
+            return m.group(0)
+    return ""
+
+
 # 飲品／吃食軸：同一件事只換品項。10:00 Chen「先喝杯熱拿鐵」→10:03 RICH「先點手搖飲」
 # →10:12 小天後「在櫃上喝完黑咖啡」→11:25 RICH「剛喝完冰美式」，八十五分鐘四則全在喝，
 # 逐字比對一個字都不重（拿鐵／手搖／黑咖啡／冰美式是四個字串），起手詞軸也全放行，
@@ -271,6 +299,12 @@ _GATE_REWRITE_STRATEGIES = (
 )
 # 難例最多試幾種策略（成本＝每次多一個生成＋一次 ③ 審核）
 _GATE_CANDIDATE_LIMIT = 3
+# 全部候選都差一點時的最後放行線：發一句被扣分的，勝過整條不發。
+# 17:42–18:42 實測 claimed 94／sent 7，其中 gate_held 34 是候選耗盡後整條丟掉 ——
+# 比真人搶話取消的 26 還多。ai_leak／contradict 是硬傷（群友一看就破），其餘
+# 只是分數沒過門檻，取最高分那條照發。
+_GATE_NEAR_MISS_FLOOR = 0.35
+_GATE_NEAR_MISS_FATAL = ("ai_leak", "contradict")
 # 候選可發分到這個就夠穩，不必再試下一種
 _GATE_CANDIDATE_GOOD_ENOUGH = 0.85
 # 水軍輪替：上一則是自己人時，只在「輪到我」且隔了這麼久才接（避免三隻疊字）
@@ -2944,7 +2978,11 @@ class AccountWorker:
             ("部位", "body_part"),
             ("拼過", "mosaic"),
             ("自己四小時", "own_scene"),
+            ("九十分鐘內做過", "own_scene_mid"),
             ("動作最近", "scene_dup"),
+            ("場地開頭", "place"),
+            ("喝／吃同一類", "consume"),
+            ("搬真人", "opening_echo"),
             ("痠累", "state"),
             ("起手", "opening"),
             ("引述", "quote_assert"),
@@ -3373,6 +3411,23 @@ class AccountWorker:
                     return (
                         "最近幾則才有人在喝／吃同一類東西（換品項也一樣：拿鐵、美式、"
                         "黑咖啡是同一件事），這則換一類或改用手上正在做的事開頭"
+                    )
+        # 場地軸：連著兩三則都「我在櫃檯／辦公椅／茶水間」開場，場所字串全不同。
+        # 只比開頭十四字，場所落在後半句不算；撞到就改成從身體感覺或對方那句話起頭。
+        if group_id:
+            cand_place = _place_opening(candidate)
+            if cand_place:
+                place_hits = [
+                    age
+                    for t, age in self._cross_recent_items(int(group_id), _PLACE_FADE)
+                    if _place_opening(t)
+                ]
+                if len(place_hits) >= _PLACE_HITS or (
+                    place_hits and min(place_hits) <= _PLACE_NEAR
+                ):
+                    return (
+                        f"最近幾則水軍都從場地開頭（這則是「{cand_place}」），"
+                        "整句換成從身體感覺或對方剛講的那句起頭，別再報自己在哪"
                     )
         # 同一個身體動作短時間內被兩個號做過（小小 13:40 伸懶腰→RICH 14:06 伸懶腰），
         # 場景字串不同但群友看到的是同一個動作。改成看「這則借了幾軸、跟幾則舊句借」：
@@ -5091,6 +5146,8 @@ class AccountWorker:
         """
         best_text = ""
         best_score = -1.0
+        soft_text = ""
+        soft_score = -1.0
         for strategy in _GATE_REWRITE_STRATEGIES[: max(1, int(limit))]:
             try:
                 candidate = await generate(f"{base_hint}\n這次的寫法：{strategy}")
@@ -5126,15 +5183,33 @@ class AccountWorker:
                 context, candidate, directive, recent_bots, last_human, sister_recent,
                 require_self=require_self, require_target=require_target,
             )
-            if review is None or not self._review_passes(review, strict):
+            if review is None:
                 continue
             score = float(review.get("sendable") or 0.0)
+            if not self._review_passes(review, strict):
+                # 差一點的留起來當最後一條路：不是硬傷、分數也還有基本盤就記著。
+                if (
+                    str(review.get("issue") or "none") not in _GATE_NEAR_MISS_FATAL
+                    and score >= _GATE_NEAR_MISS_FLOOR
+                    and score > soft_score
+                ):
+                    soft_score = score
+                    soft_text = candidate
+                continue
             if score > best_score:
                 best_score = score
                 best_text = candidate
             # 已經很穩就不用再試下一種策略（省一次生成）
             if score >= _GATE_CANDIDATE_GOOD_ENOUGH:
                 break
+        if not best_text and soft_text:
+            self.stats["gate_near_miss"] = int(self.stats.get("gate_near_miss", 0)) + 1
+            print(
+                f"[{self.name}] gate-near-miss: 候選全差一點，取最高分 {soft_score:.2f} 照發 "
+                f"{soft_text[:20]!r}",
+                flush=True,
+            )
+            return soft_text
         return best_text
 
     async def _gate_reply(self, event, text: str) -> str:
