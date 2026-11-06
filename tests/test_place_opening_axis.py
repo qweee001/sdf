@@ -130,3 +130,6 @@ def test_veto_reason_gets_its_own_code():
     assert AccountWorker._veto_code("開頭直接搬真人那句的「剛下班」，換個角度起頭") == "opening_echo"
     assert AccountWorker._veto_code("「揉腳」自己九十分鐘內做過了，這一則換一個身體動作") == "own_scene_mid"
     assert AccountWorker._veto_code("最近幾則才有人在喝／吃同一類東西") == "consume"
+    assert AccountWorker._veto_code("上一則水軍也從「剛」開頭，連著兩則同一格") == "opening_same"
+    assert AccountWorker._veto_code("上一則水軍前半句才用過「我」，這則換一個字起頭") == "opening_mid"
+    assert AccountWorker._veto_code("「我」開頭最近已經兩則，換一個字起頭") == "opening_dense"
