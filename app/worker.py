@@ -208,16 +208,17 @@ def _place_opening(text: str) -> str:
 # 19:01:55「敢不敢與我一戰」）。名字在句子裡才是真的插進戰局，沒有名字就只是旁白。
 # 判的是「這兩個人在對打」（兩人合計夠多、比例夠高、句子短），不是誰的名字。
 _DUEL_WINDOW = 8 * 60
-_DUEL_MIN_PAIR = 8
+_DUEL_MIN_PAIR = 6
 _DUEL_MIN_SHARE = 0.35
 _DUEL_SHORT_LEN = 22
+
+
 def _duel_pair(rows, seconds: float = _DUEL_WINDOW) -> tuple:
     """窗內是不是兩個人在互嗆 → 回那兩個人名（不是就空 tuple）。
 
-    rows 是最新在前的群組訊息。條件全部看「行為」：兩人合計至少八則、
-    佔窗內真人一半不到就不算（熱場很多人插花時仍可能成立，所以比例門檻
-    取 0.35 而不是多數），而且他們自己的句子要短、不帶問號——互嗆是短打，
-    長篇發問是另一種場。
+    rows 是最新在前的群組訊息。條件全部看「行為」：兩人合計至少六則、
+    佔窗內真人 0.35 以上（熱場很多人插花時仍可能成立，所以不是多數決），
+    而且他們自己的句子要短、不帶問號——互嗆是短打，長篇發問是另一種場。
     """
     now = time.time()
     recent: list[tuple[str, str]] = []
@@ -237,9 +238,12 @@ def _duel_pair(rows, seconds: float = _DUEL_WINDOW) -> tuple:
     if len(recent) < _DUEL_MIN_PAIR:
         return ()
     counts: dict = {}
-    for name, _body in recent:
+    last_seen: dict = {}
+    for idx, (name, _body) in enumerate(recent):
         counts[name] = counts.get(name, 0) + 1
-    top = sorted(counts, key=lambda n: -counts[n])[:2]
+        last_seen[name] = idx  # rows 最新在前：idx 越小越新
+    # 同則數時取最近還在講的那個（19:42 鈴鐺與你說會喜歡我各兩則，正在回話的是後者）
+    top = sorted(counts, key=lambda n: (-counts[n], last_seen[n]))[:2]
     if len(top) < 2:
         return ()
     pair = [n for n in top if counts[n] >= 2]

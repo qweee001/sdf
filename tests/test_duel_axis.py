@@ -135,3 +135,42 @@ def test_no_duel_means_no_name_requirement():
 
 def test_duel_veto_gets_its_own_code():
     assert AccountWorker._veto_code("萬英尺、和進出口正在互嗆，這則沒點到名") == "duel"
+
+
+# ---- 真實回放：19:35–19:42 ------------------------------------------------
+
+
+_SPARSE = [
+    _row("和進出口", "你想吃水餃還是炒麵", 420),
+    _row("Eric Chiu", "誰胸部比較豐滿?", 412),
+    _row("鈴鐺", "我吃過晚餐了", 390),
+    _row("華發", "一個人吃三份便當，你肯定是豬", 389),
+    _row("戰豆", "拒絕有點委婉", 379),
+    _row("和進出口", "可以再吃一份嗎", 366),
+    _row("規范", "鈴鐺又不是豬", 323),
+    _row("和進出口", "這是我對鈴鐺的愛", 302),
+    _row("你說會喜歡我", "鈴鐺會撐爆", 298),
+    _row("地暖鋪著", "這個畫面蠻噁心", 230),
+    _row("華發", "讓流浪狗再吃回去", 173),
+    _row("和進出口", "誰他媽是流浪狗", 150),
+    _row("你說會喜歡我", "沒猜錯應該是說你", 141),
+    _row("鈴鐺", "現在說什麼都是錯的", 138),
+    _row("和進出口", "為什麼又被攻擊了", 125),
+    _row("地暖鋪著", "鈴鐺我沒有說話", 100),
+]
+
+
+def test_sparse_crowd_with_one_fighter_still_counts():
+    """19:42 RICH 那句在十六則裡只有兩個人各兩則在互嗆，主攻的仍是和進出口。"""
+    pair = _duel_pair(_SPARSE)
+    assert "和進出口" in pair
+    assert len(pair) == 2
+
+
+def test_rich_line_at_1942_without_a_name_is_vetoed():
+    line = "每天都被當箭靶也太委屈了，看你這麼可憐借個肩膀給你靠一下嘛"
+    veto = _worker("RICH")._local_veto(
+        line, [], "", GID, duel_names=_duel_pair(_SPARSE)
+    )
+    assert "互嗆" in veto
+
