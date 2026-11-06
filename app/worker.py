@@ -2866,6 +2866,26 @@ class AccountWorker:
         recent = self._cross_recent_texts(int(group_id), seconds)[-4:]
         return sum(1 for t in recent if self._is_broadcast(t))
 
+    @staticmethod
+    def _target_names(rows, limit: int = 3) -> list:
+        """最近講話的幾個真人名字，越新越前；給對象軸指名用。
+
+        14:48「光看你們誇口我都快睡著了」／15:02「連年輕姊姊都搞不定」／15:18
+        「喝完咖啡哪夠」三則都退成全場判決。提示只寫「挑一個具體的男人」時
+        模型挑不出人，換三種策略照樣端回「你們」——它手上沒有人名。
+        """
+        names: list = []
+        for row in reversed(list(rows or [])):
+            if str(row.get("role")) == "assistant":
+                continue
+            name = str(row.get("sender_name") or "").strip()
+            if not name or name == "管理員" or name in names:
+                continue
+            names.append(name)
+            if len(names) >= limit:
+                break
+        return names
+
     def _needs_target_retry(self, group_id: int, text: str) -> bool:
         """全場都在當裁判、這則又只補一句評語 → 真的重寫一版，不只寫提示。
 
@@ -3205,6 +3225,10 @@ class AccountWorker:
         )
 
     _ASK_TAILS = ("嗎", "吧", "呢", "麼", "？", "?")
+    # 語氣詞尾：不是問句，但跟問句同一個「在審問男人」的語域。15:18
+    # 「喝完咖啡哪夠…才過癮啊」接在 15:02「…還想越級打怪嗎🤣」後面，
+    # 換個「啊」收尾就閃過連問偵測，小天後 34 分鐘三則全在同一個語域。
+    _SOFT_TAILS = ("啊", "喔", "欸", "耶", "嘛", "呀")
     _TAIL_DECO = " \t「」『』（）()【】~～!！.。,，、…"
 
     def _bare_tail(self, text: str) -> str:
@@ -3228,6 +3252,26 @@ class AccountWorker:
             return False
         prev = [self._bare_tail(t) for t in (own_texts or [])[:1]]
         return any(p and p[-1] in self._ASK_TAILS for p in prev)
+
+    def _soft_tail_repeat(self, own_texts, candidate: str) -> bool:
+        """換個語氣詞收尾不算換語域。
+
+        15:02「…還想越級打怪嗎🤣」→ 15:18「…才過癮啊」，把「嗎」換成「啊」就
+        閃過連問偵測，小天後 34 分鐘三則全在同一個「審問男人」的腔。
+        只看上一則（是不是問句）與上上一則（連兩個軟尾），斷言結尾（了／掉）照放。
+        """
+        body = self._bare_tail(candidate)
+        if not body or body[-1] not in self._SOFT_TAILS:
+            return False
+        prev = [self._bare_tail(t) for t in (own_texts or [])[:2]]
+        if prev and prev[0] and (
+            prev[0][-1] in self._ASK_TAILS or self._is_question(prev[0])
+        ):
+            return True
+        return bool(
+            len(prev) > 1 and prev[1] and prev[1][-1] in self._SOFT_TAILS
+            and self._is_question(prev[1])
+        )
 
     def _echo_human_opening(self, candidate: str, humans: str) -> str:
         """候選開頭幾個字是否直接從真人最近三句照抄。"""
@@ -3382,6 +3426,12 @@ class AccountWorker:
         idiom = self._idiom_reuse(candidate, own_texts, cross)
         if idiom:
             return idiom
+        # 語氣詞尾換殼不算換腔（15:02 嗎 → 15:18 啊）。放在慣用詞之後：
+        # 撞了慣用詞或起手字的理由更具體，先命中先回。
+        if self._soft_tail_repeat(own_texts, candidate) and not (
+            group_id and self._assert_run(int(group_id))
+        ):
+            return "上一則是問句、這則換個語氣詞收尾，還是同一個腔，改成斷言或動作收"
         # 播報密度：連兩則才攔會漏掉「你一則我一則」輪流播報（13:15~13:52 十一則
         # 有五則純評語，沒有一則是連著的），改看最近六則裡佔比過三分之二。
         # 佔一半太鬆（真實 13 則回放會多殺 5 則），三分之二是「這群已經在播報了」。
@@ -5014,6 +5064,7 @@ class AccountWorker:
         strict: bool = False,
         require_self: bool = False,
         require_target: bool = False,
+        require_names: tuple = (),
     ) -> str:
         """③ 不過時：改用不同策略各生一條候選，逐條審核，挑可發分最高的那條。
 
@@ -5044,6 +5095,12 @@ class AccountWorker:
             if require_target and self._is_broadcast(candidate):
                 self.stats["broadcast_rewrite_rejected"] = (
                     int(self.stats.get("broadcast_rewrite_rejected", 0)) + 1
+                )
+                continue
+            # 指定了人名就真的要比對：三個策略都改寫成「你們」的，等於沒指名。
+            if require_names and not any(n in candidate for n in require_names):
+                self.stats["target_name_rejected"] = (
+                    int(self.stats.get("target_name_rejected", 0)) + 1
                 )
                 continue
             self.stats["gate_candidates"] = int(self.stats.get("gate_candidates", 0)) + 1
@@ -5086,6 +5143,7 @@ class AccountWorker:
         own_texts: list[str] = []
         last_human = ""
         echo_humans = ""
+        rows: list = []
         try:
             own_texts = await self.db.recent_replies_by_name(group_id, self.name, 6)
             rows = await self.db.get_group_messages(group_id, limit=14)
@@ -5178,12 +5236,17 @@ class AccountWorker:
         if need_target:
             self.stats["target_rewrite"] = int(self.stats.get("target_rewrite", 0)) + 1
             print(f"[{self.name}] target-retry: 又對全場下判決 {text[:20]!r}", flush=True)
+            names = self._target_names(rows)
+            name_note = (
+                f"就從這幾個人裡挑一個：{'、'.join(names)}，他的名字要出現在句子裡。"
+                if names else ""
+            )
             picked = await self._pick_passing_candidate(
                 context,
                 directive,
                 "這一小時全場都在當裁判，上一版還是只對全場下判決。這版挑一個具體的"
                 "男人對他說，把「你」或他的名字放進句子，講你對他這句的反應，"
-                "別再對「你們」發言。",
+                "別再對「你們」發言。" + name_note,
                 lambda hint: self._generate_reply(event, extra_hint=hint),
                 recent_bots=recent_bots,
                 own_texts=own_texts,
@@ -5193,7 +5256,30 @@ class AccountWorker:
                 sister_recent=sister_recent,
                 strict=strict,
                 require_target=True,
+                require_names=tuple(names),
             )
+            # 三個策略都還端回全場 → 再一輪，這次只准用名字開頭叫他，不寫「你們」。
+            if not picked and names:
+                self.stats["target_retry_second"] = (
+                    int(self.stats.get("target_retry_second", 0)) + 1
+                )
+                picked = await self._pick_passing_candidate(
+                    context,
+                    directive,
+                    f"上一版還是對全場講。這次句子開頭直接叫「{names[0]}」，"
+                    "第一句就講他剛才那句哪裡讓你受不了或想接，"
+                    "整句不要出現「你們」。",
+                    lambda hint: self._generate_reply(event, extra_hint=hint),
+                    recent_bots=recent_bots,
+                    own_texts=own_texts,
+                    last_human=last_human,
+                    group_id=group_id,
+                    limit=2,
+                    sister_recent=sister_recent,
+                    strict=strict,
+                    require_target=True,
+                    require_names=tuple(names),
+                )
             if picked:
                 self.stats["gate_pass_after_rewrite"] = (
                     int(self.stats.get("gate_pass_after_rewrite", 0)) + 1
@@ -5201,6 +5287,12 @@ class AccountWorker:
                 self._burst_register(group_id, picked)
                 self._mark_echo_if_any(group_id, picked, echo_humans)
                 return picked
+            # 換不到就發原本那句，但要把回退記下來：上一輪三則全退成全場判決，
+            # 統計裡卻看不到半次回退，等於對象軸有沒有作用沒人知道。
+            self.stats["target_fallback"] = (
+                int(self.stats.get("target_fallback", 0)) + 1
+            )
+            print(f"[{self.name}] target-fallback: 換不到具名版本，照發全場判決", flush=True)
             return text
         review = await self._review_candidate(
             context, text, directive, recent_bots, last_human, sister_recent
@@ -8720,6 +8812,14 @@ class AccountWorker:
         )
         print(f"[{self.name}] proactive-echo-rewrite: 整段在播報 {topic[:20]!r}", flush=True)
         openers = await self._recent_opener_note(int(group_id))
+        # 15:02／15:18 兩則都退在這：提示寫了「挑一個具體的男人」，模型手上卻沒有人名，
+        # 五條候選全端回「你們」，最後回 "" 讓呼叫端照發原句。人名要自己餵進去。
+        names: list = []
+        if need_target:
+            try:
+                names = self._target_names(await self.db.get_group_messages(group_id, limit=14))
+            except Exception:
+                names = []
         hint = ""
         if press_box:
             hint = (
@@ -8732,6 +8832,8 @@ class AccountWorker:
                 "這一小時全場都在當裁判，這版挑一個具體的男人對他說，把「你」或他的名字"
                 "放進句子，講你對他這句的反應，別再對「你們」發言。"
             )
+            if names:
+                hint += f"就從這幾個人裡挑一個：{'、'.join(names)}，他的名字要出現在句子裡。"
         if openers:
             hint += f"（最近幾則的開場動作：{openers}，別再抽同一類，換一個不一樣的當下場景）"
         picked = await self._pick_passing_candidate(
@@ -8746,7 +8848,32 @@ class AccountWorker:
             limit=2,
             require_self=press_box,
             require_target=need_target,
+            require_names=tuple(names),
         )
+        if not picked and need_target and names:
+            # 兩條都還是全場 → 第二輪只准叫名字開頭，整句不准出現「你們」。
+            self.stats["target_retry_second"] = (
+                int(self.stats.get("target_retry_second", 0)) + 1
+            )
+            picked = await self._pick_passing_candidate(
+                context,
+                "",
+                f"上一版還是對全場講。這次句子開頭直接叫「{names[0]}」，"
+                "第一句就講他剛才那句哪裡讓你受不了或想接，整句不要出現「你們」。",
+                lambda hint2: self._generate_context_topic(group_id, extra_hint=hint2),
+                recent_bots=await self._recent_bot_lines(group_id),
+                own_texts=own_texts,
+                last_human=last_human,
+                group_id=group_id,
+                limit=2,
+                require_target=True,
+                require_names=tuple(names),
+            )
+        if not picked and need_target:
+            self.stats["target_fallback"] = (
+                int(self.stats.get("target_fallback", 0)) + 1
+            )
+            print(f"[{self.name}] target-fallback: 主動發言換不到具名版本，照發全場判決", flush=True)
         if picked:
             self._mark_echo_if_any(group_id, picked, last_human)
         return picked
