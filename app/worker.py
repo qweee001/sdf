@@ -5108,13 +5108,15 @@ class AccountWorker:
                 )
                 continue
             # 這一輪就是要她對一個人講：換策略還端回對全場的判決就再換一條。
-            if require_target and self._is_broadcast(candidate):
+            # 帶到名字的句子沒有「你」也是對人講，`_is_broadcast` 看不出來，先放行。
+            named = bool(require_names) and any(n in candidate for n in require_names)
+            if require_target and not named and self._is_broadcast(candidate):
                 self.stats["broadcast_rewrite_rejected"] = (
                     int(self.stats.get("broadcast_rewrite_rejected", 0)) + 1
                 )
                 continue
             # 指定了人名就真的要比對：三個策略都改寫成「你們」的，等於沒指名。
-            if require_names and not any(n in candidate for n in require_names):
+            if require_target and require_names and not named:
                 self.stats["target_name_rejected"] = (
                     int(self.stats.get("target_name_rejected", 0)) + 1
                 )

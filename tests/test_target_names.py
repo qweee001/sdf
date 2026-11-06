@@ -110,6 +110,29 @@ def test_candidate_without_the_name_is_rejected_even_with_a_single_you():
     assert w.stats["target_name_rejected"] == 1
 
 
+def test_named_candidate_without_you_passes_the_target_gate():
+    """「戰豆在群裡嘴硬」沒有你，也是對他講——`_is_broadcast` 只會看成全場。"""
+    w = _worker()
+    bodies = iter([
+        "整理貨架順便看戲，戰豆在群裡嘴硬不當舔狗，那到床上會乖乖低頭把姊姊舔濕嗎",
+    ])
+
+    async def generate(_hint: str) -> str:
+        return next(bodies)
+
+    async def review(_ctx, cand, *_a, **_k):
+        return {"sendable": 0.9, "issue": "none"}
+
+    w._review_candidate = review  # type: ignore[assignment]
+    out = asyncio.run(
+        w._pick_passing_candidate(
+            "ctx", "", "hint", generate, group_id=GID, limit=1,
+            require_target=True, require_names=("戰豆",),
+        )
+    )
+    assert out.startswith("整理貨架")
+
+
 # ---- 語氣詞尾不再閃過連問 ----------------------------------------------
 
 
