@@ -202,6 +202,66 @@ def _place_opening(text: str) -> str:
     return ""
 
 
+# 兩人互嗆軸：全場只剩特定兩個男人互相開火，帳號只補一句自己的狀態。
+# 19:02:13 小小「喝點小酒臉超燙，他只會嘴你生什麼氣嗎」——「他」「你」都在指人，
+# 卻一個名字都沒有；前後是 和進出口 與 萬英尺 的短句互罵（19:01「你攻擊力有點差」／
+# 19:01:55「敢不敢與我一戰」）。名字在句子裡才是真的插進戰局，沒有名字就只是旁白。
+# 判的是「這兩個人在對打」（兩人合計夠多、比例夠高、句子短），不是誰的名字。
+_DUEL_WINDOW = 8 * 60
+_DUEL_MIN_PAIR = 8
+_DUEL_MIN_SHARE = 0.35
+_DUEL_SHORT_LEN = 22
+def _duel_pair(rows, seconds: float = _DUEL_WINDOW) -> tuple:
+    """窗內是不是兩個人在互嗆 → 回那兩個人名（不是就空 tuple）。
+
+    rows 是最新在前的群組訊息。條件全部看「行為」：兩人合計至少八則、
+    佔窗內真人一半不到就不算（熱場很多人插花時仍可能成立，所以比例門檻
+    取 0.35 而不是多數），而且他們自己的句子要短、不帶問號——互嗆是短打，
+    長篇發問是另一種場。
+    """
+    now = time.time()
+    recent: list[tuple[str, str]] = []
+    for row in rows or []:
+        if str(row.get("role")) == "assistant":
+            continue
+        name = str(row.get("sender_name") or "").strip()
+        if not name or name == "管理員":
+            continue
+        try:
+            ts = float(row.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            continue
+        if now - ts > seconds:
+            continue
+        recent.append((name, str(row.get("content") or "")))
+    if len(recent) < _DUEL_MIN_PAIR:
+        return ()
+    counts: dict = {}
+    for name, _body in recent:
+        counts[name] = counts.get(name, 0) + 1
+    top = sorted(counts, key=lambda n: -counts[n])[:2]
+    if len(top) < 2:
+        return ()
+    pair = [n for n in top if counts[n] >= 2]
+    if len(pair) < 2:
+        return ()
+    if sum(counts[n] for n in pair) < _DUEL_MIN_PAIR:
+        return ()
+    if sum(counts[n] for n in pair) / len(recent) < _DUEL_MIN_SHARE:
+        return ()
+    jabs = [
+        body
+        for name, body in recent
+        if name in pair
+    ]
+    short = sum(
+        1 for b in jabs if len(b) <= _DUEL_SHORT_LEN and "？" not in b and "?" not in b
+    )
+    if not jabs or short / len(jabs) < 0.6:
+        return ()
+    return tuple(pair)
+
+
 # 飲品／吃食軸：同一件事只換品項。10:00 Chen「先喝杯熱拿鐵」→10:03 RICH「先點手搖飲」
 # →10:12 小天後「在櫃上喝完黑咖啡」→11:25 RICH「剛喝完冰美式」，八十五分鐘四則全在喝，
 # 逐字比對一個字都不重（拿鐵／手搖／黑咖啡／冰美式是四個字串），起手詞軸也全放行，
@@ -2981,6 +3041,7 @@ class AccountWorker:
             ("九十分鐘內做過", "own_scene_mid"),
             ("動作最近", "scene_dup"),
             ("場地開頭", "place"),
+            ("正在互嗆", "duel"),
             ("喝／吃同一類", "consume"),
             ("搬真人", "opening_echo"),
             ("上一則水軍也從", "opening_same"),
@@ -3343,7 +3404,14 @@ class AccountWorker:
         recent = self._cross_recent_texts(int(group_id), 30 * 60)[-max(1, n):]
         return len(recent) >= n and not any(self._is_question(t) for t in recent)
 
-    def _local_veto(self, candidate: str, own_texts, last_human: str, group_id: int = 0) -> str:
+    def _local_veto(
+        self,
+        candidate: str,
+        own_texts,
+        last_human: str,
+        group_id: int = 0,
+        duel_names: tuple = (),
+    ) -> str:
         """生成後的硬性自檢（不叫模型，零成本）：複讀真人／連問／起手詞／慣用詞再撞。
 
         回空字串＝放行；回字串＝退回理由，直接餵給重寫。
@@ -3356,6 +3424,13 @@ class AccountWorker:
         echo = self._echo_human_opening(candidate, last_human)
         if echo:
             return f"開頭直接搬真人那句的「{echo}」，換個角度起頭"
+        # 兩個人在互嗆、這則卻一個人名都沒有 → 退回，逼它挑一個叫名字。
+        if duel_names and not any(n in str(candidate) for n in duel_names):
+            who = "、".join(duel_names)
+            return (
+                f"{who}正在互嗆，這則沒點到名，只像旁邊補一句；"
+                f"挑{duel_names[0]}或{duel_names[-1]}其中一個，把名字放進句子，接他剛講的那句"
+            )
         if self._ask_tail_repeat(own_texts, candidate) and not (
             group_id and self._assert_run(int(group_id))
         ):
@@ -5139,6 +5214,7 @@ class AccountWorker:
         require_self: bool = False,
         require_target: bool = False,
         require_names: tuple = (),
+        duel_names: tuple = (),
     ) -> str:
         """③ 不過時：改用不同策略各生一條候選，逐條審核，挑可發分最高的那條。
 
@@ -5158,7 +5234,9 @@ class AccountWorker:
                 continue
             if not candidate:
                 continue
-            if self._local_veto(candidate, own_texts or [], last_human, group_id):
+            if self._local_veto(
+                candidate, own_texts or [], last_human, group_id, duel_names=duel_names
+            ):
                 continue
             # 這一輪就是要她講自己：換策略還是端出純評語就再換一條，
             # 別把同樣的播報句子當成「重寫成功」發出去。
@@ -5258,7 +5336,9 @@ class AccountWorker:
             pass
         # 這一小時全場都在當裁判、這版又只補一句評語：不論走哪條路都要落到一個人身上。
         need_target = self._needs_target_retry(group_id, text)
-        veto = self._local_veto(text, own_texts, last_human, group_id)
+        # 兩人在互嗆：這則沒點名就退回重寫（互嗆的場，名字比什麼都重要）。
+        duel = _duel_pair(rows)
+        veto = self._local_veto(text, own_texts, last_human, group_id, duel_names=duel)
         if veto:
             self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
             _code = "veto_" + self._veto_code(veto)
@@ -5276,11 +5356,23 @@ class AccountWorker:
                 limit=_GATE_CANDIDATE_LIMIT,
                 sister_recent=sister_recent,
                 strict=strict,
-                require_target=need_target,
+                require_target=need_target or bool(duel),
+                require_names=tuple(duel) if duel else (),
+                duel_names=duel,
             )
             if picked:
                 self._mark_echo_if_any(group_id, picked, echo_humans)
                 return picked
+            # 互嗆場改不出具名版本、群裡又已經十分鐘沒有水軍出聲：原句照發，
+            # 一句旁白也比整場消失好。
+            if duel and await self._seconds_since_any_bot(group_id) >= 600:
+                self.stats["duel_forced"] = int(self.stats.get("duel_forced", 0)) + 1
+                print(
+                    f"[{self.name}] duel-forced: 改不出具名版、十分鐘沒水軍，照發 {text[:20]!r}",
+                    flush=True,
+                )
+                self._burst_register(group_id, text)
+                return text
             return ""
         if self._needs_echo_retry(group_id, text):
             self.stats["echo_rewrite"] = int(self.stats.get("echo_rewrite", 0)) + 1
