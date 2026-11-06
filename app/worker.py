@@ -174,6 +174,19 @@ _BODY_PART_WORDS = (
     "胸口", "腰", "腿", "鎖骨", "脖子", "肩膀", "臀", "小腹", "腳踝", "手腕", "大腿", "背",
 )
 _BODY_PART_FADE = 10 * 60
+# 飲品／吃食軸：同一件事只換品項。10:00 Chen「先喝杯熱拿鐵」→10:03 RICH「先點手搖飲」
+# →10:12 小天後「在櫃上喝完黑咖啡」→11:25 RICH「剛喝完冰美式」，八十五分鐘四則全在喝，
+# 逐字比對一個字都不重（拿鐵／手搖／黑咖啡／冰美式是四個字串），起手詞軸也全放行，
+# 群友看到的是「這群女人上班都在喝飲料」。所以分群比對：同群不同品項算同一件事。
+_CONSUME_GROUPS = {
+    "coffee": ("咖啡", "拿鐵", "美式", "卡布", "單品", "濃縮", "手沖", "冰滴", "摩卡"),
+    "drink": ("手搖", "飲料", "奶茶", "珍奶", "果汁", "紅茶", "綠茶", "烏龍", "氣泡水"),
+    "booze": ("紅酒", "啤酒", "威士忌", "調酒", "喝一杯", "微醺", "小米酒"),
+    "food": ("鹹酥雞", "宵夜", "泡麵", "早餐", "午餐", "蛋餅", "飯糰", "壽司", "火鍋"),
+}
+_CONSUME_FADE = 20 * 60
+_CONSUME_DENSITY_FADE = 120 * 60
+_CONSUME_DENSITY_HITS = 2
 # 異體字只影響比對，不動輸出：偵測漏「酸」等於整條狀態軸失效。
 _AXIS_VARIANTS = str.maketrans({"酸": "痠", "溼": "濕", "檯": "台"})
 _SCENE_MOSAIC_SOURCES = 3
@@ -2441,6 +2454,11 @@ class AccountWorker:
         "他", "她", "那種", "這種", "該不會", "朋友", "道友", "舔狗",
         "老公", "老婆", "人家", "弟弟", "哥",
     )
+    # 子句裡出現這些就代表「這一句講的不是我」。拿去擋狀態字誤判自曝。
+    _OTHER_PERSON = (
+        "你", "他", "她", "那種", "這種", "朋友", "道友", "舔狗",
+        "老公", "老婆", "弟弟", "哥", "萬哥",
+    )
 
     def _is_question(self, text: str) -> bool:
         """問句判定走結構不吃詞表：問號與疑問助詞直接算，語氣詞要有疑問詞撐。"""
@@ -2457,10 +2475,36 @@ class AccountWorker:
         return len(t) <= 12 and any(m in t for m in self._Q_MARKERS)
 
     @classmethod
+    def _state_owner(cls, text: str) -> str:
+        """狀態字講的是誰："self" / "other" / ""（沒有狀態字）。
+
+        21:32 RICH「…鈴鐺指尖輕輕碰一下就直接**硬到發燙**」的「燙」是那個男人在燙，
+        舊版把狀態字一律算自曝，於是同一則既被判成播報、又被判成有自曝，兩道閘門
+        互相抵銷：連續播報數歸零、自曝免責成立，接下來六則都免檢查。
+        """
+        t = str(text or "")
+        for index, clause in enumerate(re.split(r"[，,、。！？!?\s]", t)):
+            if not clause or not any(w in clause for w in _SELF_STATE_WORDS):
+                continue
+            if any(m in clause for m in cls._OTHER_PERSON):
+                return "other"
+            # 「X 輕輕碰一下就直接硬到發燙」：狀態字接在「就」後面、前面還有子句、
+            # 整句沒有「我」→ 講的是別人身上的反應，不是她的。
+            if index and "就" in clause and "我" not in t:
+                return "other"
+            return "self"
+        return ""
+
+    @classmethod
     def _has_self_disclosure(cls, text: str) -> bool:
         """有身體／感官描述，而且主詞是自己（有「我」或沒把對方當主詞）。"""
         t = str(text or "")
         if any(p in t for p in cls._SELF_STATE) or cls._SELF_SCENE.search(t):
+            return True
+        owner = cls._state_owner(t)
+        if owner == "other":
+            return False
+        if owner == "self":
             return True
         # 順序有意義：先認明確的自曝（我剛／我在／剛洗完澡），再排除在講別人，
         # 最後才用身體字＋沒有第二人稱當保險。單獨一個「我」不夠
@@ -2500,9 +2544,16 @@ class AccountWorker:
         # 最後一則是自己問的，不管樣本夠不夠都硬轉；跨號湊到兩問也算。
         last_q = self._is_question(recent[-1])
         asked = sum(1 for t in recent if self._is_question(t))
+        # 反向也一樣會壞：禁問禁到一小時七則只剩一則問句（21:03 之後五則全斷言），
+        # 群友回的每一句都只能被「裁決」。連兩則斷言之後就該輪到問句。
+        assert_streak = 0
+        for t in reversed(recent):
+            if self._is_question(t):
+                break
+            assert_streak += 1
         self_talk = any(
-            self._has_self_disclosure(t)
-            for t in self._recent_bot_pool(own_texts, group_id, history, n=6)
+            self._has_self_disclosure(t) and not self._is_press_box(t)
+            for t in self._recent_bot_pool(own_texts, group_id, history, n=3)
         )
         # 用「則數」看會放水：一小時才十幾則，六則等於半小時前，
         # 於是 RICH 20:33-20:42 連四則純評語（麻藥沒退／被當白痴／沒交過女友／不洗澡不行）
@@ -2519,10 +2570,29 @@ class AccountWorker:
                 f"（最近三則水軍有 {asked} 則在問句收尾，你這則不准問，"
                 "直接下斷言或講動作，句尾別落在「嗎」「啊」）"
             )
+        elif assert_streak >= 3:
+            notes.append(
+                f"（最近 {assert_streak} 則水軍全是斷言收尾，群友只被裁決、沒人回話，"
+                "你這則改成問句收尾，問他一個具體的）"
+            )
+        # 形狀軸：整場都是同一個骨架（引述某人再補一句葷斷言），換字換不掉。
+        if group_id and self._quote_assert_hits(int(group_id)) >= 2:
+            notes.append(
+                "（最近的水軍都在引述別人再補一句評語，你這則別引述、別提名字，"
+                "用自己的當下狀態或直接對他下一個動作開頭）"
+            )
         if not self_talk:
             notes.append(
                 "（最近六則沒人講到自己，你這則要帶一句自己的身體感覺或當下狀態，"
                 "別只顧著審問對方）"
+            )
+        # 對象軸：有自曝不等於有對象。四則全是「我剛…＋對全場下判決」時，
+        # 群友看到的是主播，不是來赴約的女人。
+        if group_id and self._broadcast_hits(int(group_id)) >= 2:
+            notes.append(
+                "（最近的水軍都在對全場下判決（「你們」「這群」「只會…」），"
+                "沒有一則落在單一男人身上，你這則挑一個人講——"
+                "把他的名字或「你」放進句子，自曝留著但別再接第二段評語）"
             )
         return "".join(notes)
 
@@ -2743,6 +2813,57 @@ class AccountWorker:
             return False
         return True
 
+    def _is_quote_assert(self, text: str) -> bool:
+        """「引述某人（或某人的動作），再補一句葷斷言」的骨架。
+
+        21:27~21:42 RICH 五則＋20:56 小天後一則，六則同一個模子：
+        嘴上說怕，…翹最高的就是你／沒痔瘡講這麼順，…等著被頂嗎／
+        專挑這時候表白裝深情，…直接硬到發燙／連想被弄都能秒懂，…睡嘛／
+        森森到底行不行，…三秒就軟掉。開頭字全不同，起手詞那一軸全部放行，
+        群友看到的還是同一台機器。
+        """
+        t = str(text or "").strip()
+        if not t or "我" in t or self._is_question(t):
+            return False
+        clauses = [c for c in re.split(r"[，,]", t) if c.strip()]
+        if len(clauses) < 2:
+            return False
+        return True
+
+    def _quote_assert_hits(self, group_id: int, seconds: float = 30 * 60) -> int:
+        recent = self._cross_recent_texts(int(group_id), seconds)[-4:]
+        return sum(1 for t in recent if self._is_quote_assert(t))
+
+    @classmethod
+    def _is_broadcast(cls, text: str) -> bool:
+        """整則在對全場下判決，不是挑一個男人講。
+
+        群裡十三個男人正在互相開火，四號如果只當裁判（10:36「妹妹不理你們這幾個弟弟」／
+        10:57「你們連貓咪的位子都要搶」／11:04「只會在群裡亂舔有什麼用」），
+        一小時四則全是旁白，沒有一則落在單一個人身上。窗給到一小時：這個流速
+        四則就是八十五分鐘，三十分鐘的窗只抓得到最近一則。
+        """
+        t = str(text or "").strip()
+        if len(t) < 10:
+            return False
+        # 有一個單數的「你」就是對著某個人講，即使句首是「你們」也不算對群。
+        if "你" in t.replace("你們", "") or "妳" in t:
+            return False
+        return True
+
+    def _broadcast_hits(self, group_id: int, seconds: float = 60 * 60) -> int:
+        recent = self._cross_recent_texts(int(group_id), seconds)[-4:]
+        return sum(1 for t in recent if self._is_broadcast(t))
+
+    @staticmethod
+    def _consume_groups(text: str) -> set:
+        """這句在喝／吃哪一類東西（coffee/drink/booze/food）。
+
+        分群而不是列字：拿鐵、美式、黑咖啡是三個字串但同一件事，逐字比對永遠放行。
+        """
+        t = str(text or "")
+        return {g for g, words in _CONSUME_GROUPS.items() if any(w in t for w in words)}
+
     @staticmethod
     def _interrupt_budget(human_ts, now: float) -> float:
         """真人插話可等的秒數：依近一分鐘真人速率放大，25~65 秒。
@@ -2783,6 +2904,7 @@ class AccountWorker:
             ("動作最近", "scene_dup"),
             ("痠累", "state"),
             ("起手", "opening"),
+            ("引述", "quote_assert"),
             ("問句", "ask_tail"),
             ("照抄", "verbatim"),
             ("複讀", "echo"),
@@ -3076,6 +3198,11 @@ class AccountWorker:
         head = body[:_ECHO_HEAD_LEN]
         return head if head in str(humans) else ""
 
+    def _assert_run(self, group_id: int, n: int = 2) -> bool:
+        """最近 n 則水軍是不是全用斷言收尾（問句就該輪回來了）。"""
+        recent = self._cross_recent_texts(int(group_id), 30 * 60)[-max(1, n):]
+        return len(recent) >= n and not any(self._is_question(t) for t in recent)
+
     def _local_veto(self, candidate: str, own_texts, last_human: str, group_id: int = 0) -> str:
         """生成後的硬性自檢（不叫模型，零成本）：複讀真人／連問／起手詞／慣用詞再撞。
 
@@ -3087,7 +3214,9 @@ class AccountWorker:
         echo = self._echo_human_opening(candidate, last_human)
         if echo:
             return f"開頭直接搬真人那句的「{echo}」，換個角度起頭"
-        if self._ask_tail_repeat(own_texts, candidate):
+        if self._ask_tail_repeat(own_texts, candidate) and not (
+            group_id and self._assert_run(int(group_id))
+        ):
             return "又是問句收尾，跟上一則一樣，改成斷言或動作收"
         toks = [self._opening_token(t, group_id) for t in (own_texts or [])[:6]]
         toks = [t for t in toks if t]
@@ -3110,6 +3239,9 @@ class AccountWorker:
                 # 剛在位子伸個懶腰」→ 13:41「剛補完防曬」），群友讀到的還是同一個起手。
                 if near and head[0] in str(near[-1])[:24]:
                     return f"上一則水軍前半句才用過「{head[0]}」，這則換一個字起頭"
+        # 形狀軸：開頭字全不同，骨架卻是同一個「引述＋逗號＋斷言」。
+        # 起手詞那一軸看到的是六個不同的字，群友看到的是同一台機器，所以另外量骨架。
+        # 判定放在函式尾端（慣用詞與播報密度的理由更具體，先命中先回）。
         # 同一個身體部位十分鐘內被別的號寫過（19:00 內衣濕貼胸口 → 19:06 胸口勒出紅印）：
         # 部位換得比動作快，用短窗，同一部位就換一個地方寫。
         if group_id:
@@ -3126,6 +3258,20 @@ class AccountWorker:
                     return (
                         f"「{'、'.join(sorted(hot_parts))}」這個部位十分鐘內才有人寫過，"
                         "換一個身體部位或直接換場景"
+                    )
+        # 喝的吃的：同群物件換品項不算換，兩小時內第二則、或二十分鐘內貼身撞就換一類。
+        if group_id:
+            cand_groups = self._consume_groups(candidate)
+            if cand_groups:
+                ages = [
+                    age
+                    for t, age in self._cross_recent_items(int(group_id), _CONSUME_DENSITY_FADE)
+                    if self._consume_groups(t) & cand_groups
+                ]
+                if ages and (min(ages) < _CONSUME_FADE or len(ages) >= _CONSUME_DENSITY_HITS):
+                    return (
+                        "最近幾則才有人在喝／吃同一類東西（換品項也一樣：拿鐵、美式、"
+                        "黑咖啡是同一件事），這則換一類或改用手上正在做的事開頭"
                     )
         # 同一個身體動作短時間內被兩個號做過（小小 13:40 伸懶腰→RICH 14:06 伸懶腰），
         # 場景字串不同但群友看到的是同一個動作。改成看「這則借了幾軸、跟幾則舊句借」：
@@ -3218,6 +3364,13 @@ class AccountWorker:
                         f"最近 {len(recent)} 則水軍有 {press} 則在講別人的事，"
                         "這則要有自己的身體感覺或此刻動作"
                     )
+        # 形狀軸：開頭字全不同，骨架卻是同一個「引述＋逗號＋斷言」。
+        # 起手詞那一軸看到的是六個不同的字，群友看到的是同一台機器，所以另外量骨架。
+        # 放在慣用詞與播報密度之後：那兩條的理由更具體，先命中先回。
+        if group_id and self._is_quote_assert(candidate):
+            hits = self._quote_assert_hits(int(group_id))
+            if hits >= 3:
+                return "又是引述別人再補一句斷言，連幾則同一個骨架，改用自己的動作或狀態開頭"
         return ""
 
     def _build_directors_note(
@@ -3354,8 +3507,8 @@ class AccountWorker:
         if type_note:
             chosen_mood += type_note
 
-        # 動態句式引導：整段都在問就硬轉斷言，其餘照機率平衡陳述與問句
-        if "不准問" in type_note or random.random() < 0.65:
+        # 動態句式引導：整段都在問就硬轉斷言，剛好相反時把問句要回來
+        if "不准問" in type_note:
             chosen_syntax = (
                 "【句式多元指令（嚴禁連續反問與天氣開場）】：\n"
                 "1. 上一句水軍已在發問或近期反問過多，這條發言【絕對禁止】以「…嗎？」「…吧？」反問收尾！\n"
@@ -3363,13 +3516,28 @@ class AccountWorker:
                 "3. 必須直接針對當前群組最熱門的上一句話題、群友外號或貼圖圖片進行自然吐槽、下斷言或分享當下動作，乾脆俐落收尾。"
                 "\n4. 上一句水軍就是問句，這則【結尾一定要落在斷言或動作】，不准再用「嗎」「吧」「呢」或問號收尾。"
             )
-        else:
+        elif "問句收尾" in type_note:
+            chosen_syntax = (
+                "【句式指令・把問句要回來】：\n"
+                "1. 最近幾則水軍全在幫人下判斷，群友只能被裁決、接不到話，這則【結尾一定是一個真問題】。\n"
+                "2. 問句要具體（問他一個動作、一個時間、一個身體反應），不准問「對不對」「好不好」這種填充問句。\n"
+                "3. 【絕對禁止】以「外面太陽大」「天氣熱」開頭，也不要開頭就引述別人再補評語。"
+            )
+        elif random.random() < 0.65:
             chosen_syntax = (
                 "【句式要求・簡短自然】：\n"
                 "1. 開頭禁止使用「光會」「笑死」「只會」「連…都」「去什麼」等固定套路詞！\n"
                 "2. 【絕對禁止】以「外面太陽大」「天氣熱」等天氣氣候作為開頭！\n"
                 "3. 用自然第一人稱或直觀動作開場（如「我剛剛…」「等等」「好啦」「其實…」），俐落隨性。"
                 "\n4. 這則可以自然帶問句，但別跟上一句同一個問法。"
+            )
+        else:
+            # 三條分支都落空（沒 notes 又抽到 0.65 以上）時要有底：不然 chosen_syntax
+            # 沒綁定，下面 f-string 直接 UnboundLocalError，整則回覆炸掉。
+            chosen_syntax = (
+                "【句式要求・自然口語】：\n"
+                "1. 直接用第一人稱當下動作或一句直球開場，不要引述別人、不要天氣開場。\n"
+                "2. 句子短，收在斷言或動作，問句最多一個。"
             )
 
         # 定向對象優先於抽到的情緒：女性同伴不能被當作男客套用性挑逗。

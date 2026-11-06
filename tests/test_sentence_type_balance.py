@@ -109,14 +109,17 @@ def test_director_note_forces_assertive_syntax_when_breaching():
     assert "不准問" in note
 
 
-def test_no_note_when_window_is_assertive():
+def test_no_question_ban_when_window_is_assertive():
+    """整窗都是斷言 → 不會被禁問；連三則斷言改由「把問句要回來」這條接手。"""
     w = _worker()
     w._recent_texts_by_group[GID] = [
         "店裡鐵門剛拉下來，腿還痠著",
         "紅酒倒好了，只穿睡袍在等",
         "腰有點軟，今晚不想自己睡",
     ]
-    assert w._sentence_type_note([], GID) == ""
+    note = w._sentence_type_note([], GID)
+    assert "不准問" not in note
+    assert "問句收尾" in note
 
 
 def test_self_disclosure_suppresses_second_note_only():
