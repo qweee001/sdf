@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import secrets
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 
@@ -767,6 +768,8 @@ class AccountManager:
                 if callable(getattr(self.db, "diagnostics", None))
                 else {}
             ),
+            # 今天各帳號被哪一關卡住（DB 持久化，重啟不掉）：四號集體隱形時先看這裡
+            "proactive_skip": await self._proactive_skip_counters(),
             "media_spend_usd": round(await self.db.media_spend_total(), 6),
             "media_budget_usd": self.config.media_daily_budget_usd,
             "features": self.feature_status(),
@@ -777,6 +780,32 @@ class AccountManager:
                 self.config.proactive_loop_max_seconds,
             ],
         }
+
+    async def _proactive_skip_counters(self) -> dict[str, dict]:
+        """今天各帳號主動路徑被哪一關擋下的次數（worker._pcount 落 DB 的那份）。
+
+        沒有 Railway log 可看，這是唯一能查「為什麼四號全體不出聲」的地方；
+        只留今天，避免 runtime_settings 無限長。
+        """
+        try:
+            settings = await self.db.get_runtime_settings()
+        except Exception:
+            return {}
+        today = int((time.time() + 8 * 3600) // 86400)
+        out: dict[str, dict] = {}
+        for key, value in settings.items():
+            if not key.startswith("pskip:"):
+                continue
+            day_str, _, account_id = key.partition("pskip:")[2].partition(":")
+            try:
+                if int(day_str) != today:
+                    continue
+                payload = json.loads(value)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict):
+                out[account_id] = payload
+        return out
 
     async def start_live_test(self, request: dict) -> dict:
         return await self.live_test.start(request)

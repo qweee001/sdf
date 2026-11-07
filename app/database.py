@@ -2451,6 +2451,25 @@ class Database:
         rows = await cursor.fetchall()
         return {int(r[0]): str(r[1]) for r in rows}
 
+    async def group_last_human_ts(self, group_id: int) -> float:
+        """群內最後一則真人訊息的時間（重啟後回填 last_human_activity 用）。
+
+        重啟會把 last_human_activity 清空 → 每群都被判成「從沒真人」（tier=paused），
+        加上當日額度已從 DB 回填，重啟後四號會一路 pskip_ratelimit 到下一句真人
+        訊息進來為止；21:36–21:43 群裡剛好沒人講話，就成了整組 8 分鐘真空。
+        """
+        try:
+            gid = int(group_id)
+        except (TypeError, ValueError):
+            return 0.0
+        cursor = await self._c.execute(
+            "SELECT MAX(timestamp) AS at FROM messages "
+            "WHERE group_id = ? AND role != 'assistant'",
+            (gid,),
+        )
+        row = await cursor.fetchone()
+        return float(row["at"] or 0.0) if row else 0.0
+
     async def group_bot_last_spoke(self, group_id: int) -> dict[int, float]:
         """群內每個水軍帳號最近一次發言的時間（輪替用：誰最久沒講話誰優先）。
 

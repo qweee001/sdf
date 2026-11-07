@@ -901,6 +901,21 @@ class AccountWorker:
         return out if len(out) >= 10 else ""
 
     @staticmethod
+    def _strip_lead_to_tail(text: str, cap: int) -> str:
+        """短碎模式專用：砍掉前情、只留最後那一記，砍不動回空字串。
+
+        模型每一則都會自己補前情（「剛點好香氛蠟燭大腿還微酸，…」），光靠提示詞
+        「不要交代前情」壓不下來；8~16 字的帶因此長年出 23~26 字。
+        """
+        parts = re.split(r"[，,、；;]", str(text or "").rstrip("。！？!? "))
+        if len(parts) < 2:
+            return ""
+        tail = parts[-1].strip()
+        if 6 <= len(tail) <= cap:
+            return tail
+        return ""
+
+    @staticmethod
     def _strip_emoji(text):
         return text_guard.strip_emoji(text)
 
@@ -1131,6 +1146,10 @@ class AccountWorker:
         # 而不是寫死秒數。一小時 183 則真人的場，49 秒預算等於每一條都還在生成就被
         # 下一句路人殺掉（19:06–19:34 回覆送出 0 則、取消卻一直在跳）。
         self._reply_latencies: dict[int, list[float]] = {}
+        # 閘門計數的跨重啟落盤暫存（見 _pcount）：部署重啟會把 stats 清空，
+        # 21:36–21:59 四號全隱形時卡在哪一關就查不到。
+        self._pcount_pending: dict[str, int] = {}
+        self._pcount_flushed_at = 0.0
         self.stats = {
             "replies_sent": 0,
             "errors": 0,
@@ -1230,6 +1249,11 @@ class AccountWorker:
             self._recent_proactive_topics.clear()
             # 重啟不要把當日主動額度歸零（監控/部署期間重啟很頻繁）
             await self._restore_proactive_quota()
+            # 額度回填了，真人活動時間也必須一起回填，否則 tier 被判成 paused 一路閉嘴
+            try:
+                await asyncio.wait_for(self._restore_last_human_activity(), timeout=10)
+            except Exception as exc:
+                print(f"[{self.name}] last-human reload error: {exc}", flush=True)
             # 反重复 P0-2：启动即从 DB 回填全群 48h 已发文案（跨账号），
             # 重启清零后不再复读旧话题。回填失败只降级为无回填，不阻塞启动。
             try:
@@ -8758,13 +8782,47 @@ class AccountWorker:
     # 20:14–20:23 九分鐘全體沒出聲就是這樣。真正會撞話的是前 2 分鐘，之後接一句很正常。
     _PROACTIVE_HUMAN_QUIET_SECONDS = 120.0
 
+    _PCOUNT_FLUSH_SECONDS = 15.0
+
     def _pcount(self, key: str) -> None:
         """主動路徑的各個前置閘計數。
 
         沒有 Railway log 可看時，stat 是唯一能看到「卡在哪一關」的地方；
         這一輪 18 分鐘四號零則，全靠猜。名字進 stats，dashboard 直接讀得到。
+        但 stats 只活在這條連線裡，部署／重啟一到就全部歸零（21:36–21:59 四號
+        全隱形那一輪，四次重啟把證據全抹掉）——所以同時抄一份進 DB，跨重啟還在。
         """
         self.stats[key] = int(self.stats.get(key, 0)) + 1
+        self._pcount_pending[key] = int(self._pcount_pending.get(key, 0)) + 1
+        now = time.time()
+        if now - self._pcount_flushed_at >= self._PCOUNT_FLUSH_SECONDS:
+            self._pcount_flushed_at = now
+            try:
+                asyncio.create_task(self._flush_pcounts())
+            except RuntimeError:
+                pass
+
+    async def _flush_pcounts(self) -> None:
+        pending, self._pcount_pending = dict(self._pcount_pending), {}
+        if not pending:
+            return
+        key = f"pskip:{self._today_index()}:{self.account_id}"
+        current: dict[str, int] = {}
+        try:
+            raw = await self.db.get_runtime_setting(key) or ""
+            parsed = json.loads(raw) if raw.strip().startswith("{") else {}
+            if isinstance(parsed, dict):
+                current = {str(k): int(v) for k, v in parsed.items()}
+        except Exception:
+            current = {}
+        for name, value in pending.items():
+            current[name] = int(current.get(name, 0)) + int(value)
+        try:
+            await self.db.set_runtime_settings(
+                {key: json.dumps(current, ensure_ascii=False)}
+            )
+        except Exception as exc:
+            print(f"[{self.name}] pcount persist error: {exc}", flush=True)
 
     def _should_suppress_proactive(self, group_id: int) -> bool:
         last_human = float(self.last_human_activity.get(int(group_id), 0) or 0)
@@ -8905,6 +8963,24 @@ class AccountWorker:
             return
         self._proactive_day = today
         self._proactive_today = max(0, stored_count)
+
+    async def _restore_last_human_activity(self) -> None:
+        """重啟後從 DB 回填「最後一則真人訊息」時間。
+
+        少了這一步，重啟後每群都被當成從沒真人（tier=paused），而當日主動額度
+        又已經從 DB 回填（>=4 就 pskip_ratelimit），四號會一直閉嘴到下一句真人
+        進來為止；群裡剛好沒人講話時就是整組真空。
+        """
+        for group_id in self.selected_groups:
+            try:
+                at = await self.db.group_last_human_ts(int(group_id))
+            except Exception as exc:
+                print(f"[{self.name}] last-human backfill error: {exc}", flush=True)
+                continue
+            if at > 0:
+                current = float(self.last_human_activity.get(int(group_id), 0) or 0)
+                if at > current:
+                    self.last_human_activity[int(group_id)] = at
 
     async def _persist_proactive_quota(self) -> None:
         key = f"proactive_today:{self.account_id}"
@@ -9580,12 +9656,19 @@ class AccountWorker:
                 )
                 continue
 
-            # 動態字數帶修整：僅在中文長度顯著超出時於自然標點處就地收尾
-            _p_cap = _p_hi + (20 if _p_mode == "scene" else 10 if _p_mode == "short" else 15)
+            # 字數帶是硬上限，不是提示：short 原本給 +10 寬容，實際每一則都出 23~26 字，
+            # 「8~16 字短碎」等於沒作用（21:00–21:59 平均 23.0 字、≤8 字 0 則）。
+            # 短碎模式先砍掉前情、只留最後那一記（模型永遠會自己補前情），砍不動才標點裁切。
+            _p_cap = _p_hi + (20 if _p_mode == "scene" else 2 if _p_mode == "short" else 6)
             if len(topic) > _p_cap:
-                trimmed = self._trim_to_cap(topic, _p_cap)
-                if trimmed:
-                    topic = trimmed
+                if _p_mode == "short":
+                    clipped = self._strip_lead_to_tail(topic, _p_cap)
+                    if clipped:
+                        topic = clipped
+                if len(topic) > _p_cap:
+                    trimmed = self._trim_to_cap(topic, _p_cap)
+                    if trimmed:
+                        topic = trimmed
             _note_seen(topic)
 
             # 最高優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型
