@@ -241,6 +241,10 @@ _STRUCT_BANDS: dict[str, tuple[int, int]] = {
     "scene": (15, 30),
 }
 
+# 現場熱度門檻（近兩分鐘真人訊息數）：洗屏時短碎優先，不排生活場景。
+_HOT_BURST_HUMANS = 10
+_WARM_BURST_HUMANS = 4
+
 # 每個模式對應的內容指令。長度另外由 _STRUCT_BANDS 帶，兩者一起才有差別。
 _STRUCT_SYNTAX: dict[str, str] = {
     "short": "【動態情境・短碎口語】：順著上一句情緒隨性丟一句大白話，短小俐落，不硬扯生活前情，像真人群聊自然起鬨或開嗆。",
@@ -576,6 +580,7 @@ _DECISION_ISSUE_LABEL = {
     "time": "時段穿幫（例如白天講早安、下午說早餐）",
     "simplified": "混入簡體字",
     "typo": "用字錯誤（錯別字或地名寫錯）",
+    "meta_speak": "元話：在解釋自己被交代的角色或工作，不是在講話",
 }
 
 
@@ -852,6 +857,10 @@ class AccountWorker:
     @staticmethod
     def _is_refusal(text):
         return text_guard.is_refusal(text)
+
+    @staticmethod
+    def _is_meta_speak(text):
+        return text_guard.is_meta_speak(text)
 
     @staticmethod
     def _normalized_reply(text):
@@ -4016,6 +4025,24 @@ class AccountWorker:
                 return "又是引述別人再補一句斷言，連幾則同一個骨架，改用自己的動作或狀態開頭"
         return ""
 
+    @staticmethod
+    def _burst_heat(history: list[dict], window: float = 120.0) -> int:
+        """近兩分鐘真人訊息數＝現場熱度。
+
+        這一群尖峰時一分鐘 8 句、每句 4~11 字；水軍照 20~30 字的作文節奏進場，
+        句子還沒送出話題就翻頁了。熱度只用來決定「講多短、要不要省掉裁判」，
+        閾值不是人名也不是固定詞。
+        """
+        rows = [r for r in (history or []) if str(r.get("role")) != "assistant"]
+        if len(rows) < 2:
+            return 0
+        newest = max(float(r.get("timestamp") or 0) for r in rows)
+        if not newest:
+            return 0
+        return sum(
+            1 for r in rows if newest - float(r.get("timestamp") or 0) <= window
+        )
+
     def _build_directors_note(
         self, event, history: list[dict], own_texts=None, last_human: str = ""
     ) -> str:
@@ -4123,13 +4150,23 @@ class AccountWorker:
         # 徹底打破「[人名] + [我剛在做某事] + [你敢不敢/看你有沒有本事]」的四合一長句固定模子
         # 模式可以外部指定（_struct_mode_force），測試與重寫才吃得到同一組字數。
         forced_mode = getattr(self, "_struct_mode_force", "")
+        heat = self._burst_heat(history)
         if forced_mode in _STRUCT_BANDS:
             self._struct_mode = forced_mode
         else:
             struct_roll = random.random()
-            self._struct_mode = (
-                "short" if struct_roll < 0.35 else "dirty" if struct_roll < 0.70 else "scene"
-            )
+            # 現場正在洗屏：短碎比重拉到 70%，生活場景整段不排（它一定要交代前情，
+            # 一交代就是 25 字，在 8 句/分的場子裡等於遲到）。
+            if heat >= _HOT_BURST_HUMANS:
+                self._struct_mode = "short" if struct_roll < 0.7 else "dirty"
+            elif heat >= _WARM_BURST_HUMANS:
+                self._struct_mode = (
+                    "short" if struct_roll < 0.5 else "dirty" if struct_roll < 0.8 else "scene"
+                )
+            else:
+                self._struct_mode = (
+                    "short" if struct_roll < 0.35 else "dirty" if struct_roll < 0.70 else "scene"
+                )
         chosen_syntax = _STRUCT_SYNTAX[self._struct_mode]
         if self._struct_mode != "scene":
             # 心境輪替常抽到「生活瑣事」，它會逼你交代場景開場，把短碎又拉回長句。
@@ -4137,6 +4174,11 @@ class AccountWorker:
             chosen_syntax += (
                 "\n【長度優先於心境】：上面心境若叫你用某件事開場，這則仍以本模式字數為準；"
                 "字數滿了就把生活前情砍掉，只留最後那記吐槽或撩撥。"
+            )
+        if heat >= _HOT_BURST_HUMANS:
+            chosen_syntax += (
+                "\n【現場正在洗屏】：大家現在是一句 5~10 字在接話，節奏很快。"
+                "這則不要交代前情、不要開新場景，直接接現在這一句在講的事，一句話講完。"
             )
 
         if "不准問" in type_note:
@@ -5319,6 +5361,7 @@ class AccountWorker:
                                 "tone": "語氣明顯不像本人設或明顯不符合場合（只是不夠熱情、不夠露骨都算沒有問題）",
                                 "time": "時段穿幫（如白天說早安、下午說早餐）",
                                 "simplified": "混入簡體字",
+                                "meta_speak": "元話：整則在解釋自己被交代的角色或工作（如「你的要求是讓我在群聊中扮演特定角色」），不是在跟群裡講話",
                                 "typo": "用字錯誤：錯別字或地名寫錯（例如中壢寫成中坢、士林寫成士休）",
                             },
                         },
@@ -5452,12 +5495,15 @@ class AccountWorker:
             "請直接輸出純 JSON，格式如下：\n"
             "{\n"
             '  "sendable": 0.0到1.0的浮點數,\n'
-            '  "issue": "none" | "ai_leak" | "unnatural" | "offtopic" | "contradict" | "repeat",\n'
+            '  "issue": "none" | "ai_leak" | "meta_speak" | "unnatural" | "offtopic" | "contradict" | "repeat",\n'
             '  "reason": "簡短一句話說明原因"\n'
             "}\n"
             "審核準則：\n"
             "1. 凡出現「task ready」、「task_ready」、「system prompt」、「as an AI」等英文任務狀態詞、"
             "系統指令或代碼標記，issue 必須判定為 \"ai_leak\"，sendable 必須為 0.0。\n"
+            "1b. 【元話穿幫】：整則在講「自己被交代了什麼」（例：你的要求是讓我在群聊情境中扮演特定角色、"
+            "任務是扮演一個…、以女朋友的身分回應你），不是在跟群裡講自己的生活或撩人，"
+            "issue 判定為 \"meta_speak\"，sendable 壓到 0.25 以下。\n"
             "2. 【文化與語言在地純度（極高權重）】：發言必須 100% 符合台灣在地日常口語習慣。"
             "凡出現大陸網路流行語或對岸習慣說法（例如：白嫖、白漂、口嗨、帶節奏、老鐵、吃瓜、牛逼、小姐姐、小哥哥、打卡、給力、走心、內卷、套路、乳交等對岸或生硬書面詞彙，即使寫成繁體字也不行），"
             "台灣女生在約砲群裡會說：被佔便宜、白吃白喝、被當盤子、當免錢的玩、嘴砲、跟風、正妹、超頂、奶炮等。"
@@ -5746,6 +5792,16 @@ class AccountWorker:
             last_human = "\n".join(humans[-3:])
         except Exception:
             pass
+        # 洗屏時每個分支（裁判、具名重寫）都是額外 2~4 秒延遲：本機自檢（複讀／連三問／
+        # 起手詞／對象軸）已經跑完，這裡直接放行比讓句子過期好。姊妹句同時在跑才續留裁判。
+        if not strict and self._burst_heat(rows) >= _HOT_BURST_HUMANS:
+            self.stats["gate_hot_skip"] = int(self.stats.get("gate_hot_skip", 0)) + 1
+            print(
+                f"[{self.name}] gate-hot: 現場洗屏，略過裁判直接發 {text[:20]!r}",
+                flush=True,
+            )
+            self._burst_register(group_id, text)
+            return text
         # 這一小時全場都在當裁判、這版又只補一句評語：不論走哪條路都要落到一個人身上。
         need_target = self._needs_target_retry(group_id, text)
         # 兩人在互嗆：這則沒點名就退回重寫（互嗆的場，名字比什麼都重要）。
@@ -5940,9 +5996,22 @@ class AccountWorker:
             )
             print(f"[{self.name}] target-fallback: 換不到具名版本，照發全場判決", flush=True)
             return text
-        review = await self._review_candidate(
-            context, text, directive, recent_bots, last_human, sister_recent
-        )
+        review = None
+        if self._is_meta_speak(text):
+            # 元話不用花裁判：句型抓得到就退，直接把問題文字交給重寫。
+            self.stats["meta_speak_rewrite"] = (
+                int(self.stats.get("meta_speak_rewrite", 0)) + 1
+            )
+            review = {
+                "issue": "meta_speak",
+                "reason": "整則在解釋自己被交代的角色與工作，不是在講話",
+                "sendable": 0.2,
+            }
+            print(f"[{self.name}] meta-speak → 重寫 {text[:24]!r}", flush=True)
+        if review is None:
+            review = await self._review_candidate(
+                context, text, directive, recent_bots, last_human, sister_recent
+            )
         if review is None:
             self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
             print(f"[{self.name}] gate-hold: 決策層超時/失敗，暫緩 {text[:20]!r}", flush=True)
@@ -7483,9 +7552,12 @@ class AccountWorker:
         reply, _ = text_guard.instant_word_fix(reply)
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)
+        meta_speak = self._is_meta_speak(reply)
         # 語言硬底線：台灣約砲群發言必須包含中文漢字。全英文或無中文直接視為模型報錯/拒答丟棄！
         cjk_count = len(re.findall(r"[\u4e00-\u9fff]", reply))
-        if cjk_count < 2 or refusal:
+        # 全英文碎片（Google 的 The prompt could not…）一定沒漢字，直接丟；
+        # 中文拒答（中文漢字有兩個以上）留給下面重寫一次，別讓它白燒。
+        if cjk_count < 2:
             self._set_generation_reason(event, "refusal" if refusal else "no_chinese")
             self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
             return ""
@@ -7510,7 +7582,7 @@ class AccountWorker:
         # 群務語意閘：女號不得替群組發言（群規、管理員、收費、保證約到）。
         # 這是語意分類器判定，不是關鍵詞黑名單；先過高召回預篩，可疑才打模型。
         group_meta = await self._candidate_mentions_current_group_meta(reply)
-        fact_bad = time_mismatch or gender_term or simplified or group_meta
+        fact_bad = time_mismatch or gender_term or simplified or group_meta or meta_speak
 
         if not format_leak and not refusal and not own_echo and not too_long and not fact_bad and not tic_hit:
             if image:
@@ -7537,6 +7609,8 @@ class AccountWorker:
                 if gender_term
                 else "simplified_chars"
                 if simplified
+                else "meta_speak"
+                if meta_speak
                 else "group_meta"
                 if group_meta
                 else "own_echo"
@@ -7561,6 +7635,11 @@ class AccountWorker:
             )
         if format_leak:
             correction += "嚴禁輸出任何 XML 標籤或 markdown 標記，只輸出純對話文字。"
+        if meta_speak:
+            correction += (
+                "上一版在講你被交代了什麼（像在自我介紹工作內容），不是在講話。"
+                "用角色本人的第一人稱直接打一句給群裡看，不要提「要求」「角色」「扮演」「設定」。"
+            )
         if time_mismatch:
             correction += f"上一版問候語的時段不對（現在是{self._time_hint().strip() or '此刻'}），請依當前時段講話。"
         if gender_term:
@@ -7608,6 +7687,7 @@ class AccountWorker:
                 retry_too_long = False
         retry_format_leak = self._has_format_leak(retry)
         retry_refusal = self._is_refusal(retry)
+        retry_meta = self._is_meta_speak(retry)
         retry_own_echo = self._is_own_echo(
             retry, self._own_echo_recent(group_id)
         ) or self._burst_echo(retry, group_id)
@@ -7621,6 +7701,7 @@ class AccountWorker:
             retry_too_long
             or retry_format_leak
             or retry_refusal
+            or retry_meta
             or retry_own_echo
             or retry_tic
             or retry_time_mismatch
@@ -7639,6 +7720,8 @@ class AccountWorker:
                 if retry_gender_term
                 else "simplified_chars"
                 if retry_simplified
+                else "meta_speak"
+                if retry_meta
                 else "group_meta"
                 if retry_group_meta
                 else "own_echo"

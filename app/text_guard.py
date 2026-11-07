@@ -185,6 +185,30 @@ _REFUSAL_PATTERNS = (
     re.compile(r"the prompt could not", re.IGNORECASE),
 )
 
+# 元話（meta-speak）句型：角色在講「自己被交代了什麼」，不是自己的日常。
+# 一律用句型收，不用單詞：單詞擋「角色」「設定」會誤殺真人閒聊。
+_META_SPEAK_PATTERNS = (
+    # 「你的要求是…」「任務就是…」（後接扮演／設定／群聊這類工作語彙才算）
+    re.compile(
+        r"(?:你的|您的|這)?(?:要求|需求|任務|指令|指示|目標)"
+        r"(?:就)?(?:是|為)[^。！？!?]{0,14}"
+        r"(?:扮演|設定|角色|情境|群聊|群組|回應|回覆|互動|語氣)"
+    ),
+    # 「在（這個）群組／群聊／情境中扮演…」
+    re.compile(
+        r"(?:在|於)(?:這個|本|該|此)?(?:群組|群聊|群|情境|設定|場合)"
+        r"[^。！？!?]{0,6}(?:扮演|詮釋|飾演|當作|身分|身份)"
+    ),
+    # 「扮演（一個）…角色」
+    re.compile(r"(?:扮演|詮釋|飾演)[^。！？!?]{0,8}(?:角色|人物|設定|身分|身份)"),
+    re.compile(r"角色扮演|人設(?:是|設定|為)"),
+    # 「以女朋友的身分回應你」
+    re.compile(
+        r"(?:以|用)[^。！？!?]{0,8}(?:的身分|的身份|角色|人設)"
+        r"[^。！？!?]{0,6}(?:回應|回覆|說話|講話|互動)"
+    ),
+)
+
 _SEMANTIC_GROUP_META_SYSTEM_PROMPT = """
 You are a binary safety classifier for a short Traditional-Chinese chat candidate.
 Decide whether the candidate promotes, explains, endorses, guarantees, defends,
@@ -531,6 +555,20 @@ def has_format_leak(text: str) -> bool:
             text,
         )
     )
+
+def is_meta_speak(text: str) -> bool:
+    """模型在「描述自己被交代的工作」，不是在講話。
+
+    真實失敗模式：「你的要求是讓我在群聊情境中扮演特定角色」——文法正確、
+    沒有拒答腔、沒有簡體，既有防線全放行，群裡看到的是提示詞在自我介紹。
+    收的是角色扮演才有的句型（要求＋是＋扮演／群組＋扮演／人設是…），
+    不是單詞黑名單，所以「我的人設有點騷」這種真人講法不會被擋。
+    """
+    t = str(text or "").strip()
+    if not t:
+        return False
+    return any(p.search(t) for p in _META_SPEAK_PATTERNS)
+
 
 def mainland_term_hint(text: str) -> str:
     """大陸講法偵測＋指名替代：「方便面」應講「泡麵」這種。
