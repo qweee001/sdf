@@ -9762,9 +9762,6 @@ class AccountWorker:
                     self._pcount("pskip_writeforbidden")
                     continue
                 self._reset_proactive_day()
-                if self._proactive_today >= self.config.proactive_max_per_day:
-                    self._pcount("pskip_dailycap")
-                    continue
                 if self._is_busy_hour() and random.random() < 0.25:
                     self._pcount("pskip_busy")
                     continue
@@ -9780,6 +9777,18 @@ class AccountWorker:
                 if not groups:
                     continue
                 group_id = random.choice(groups)
+                self._reset_proactive_day()
+                # 每日上限是「防自嗨」不是「配額」：四號各 30 條／天，晚上八點就全部用光，
+                # 之後整晚只剩回覆，而回覆八成被插話取消 → 全員隱形（20:33–20:51 實測 0 則，
+                # 四號 stat 全是 pskip_dailycap）。熱場把上限放大兩倍，冷場照舊。
+                daily_cap = max(
+                    60,
+                    self.config.proactive_max_per_day
+                    * (2 if self._hot_field(group_id) else 1),
+                )
+                if self._proactive_today >= daily_cap:
+                    self._pcount("pskip_dailycap")
+                    continue
                 # 水軍輪替：上一則是自己人時，只在「輪到我」才接（最少發言優先）
                 latest_row: dict | None = None
                 heat = 0

@@ -93,3 +93,22 @@ def test_suppress_window_is_two_minutes_not_ten():
     assert recent._should_suppress_proactive(gid) is True
     stale = _worker(sorted(MANAGED)[0], last_human_activity={gid: time.time() - 300})
     assert stale._should_suppress_proactive(gid) is False
+
+
+def test_daily_cap_has_a_floor_so_evening_never_goes_silent():
+    """每日上限是防自嗨的配額，不是讓四號晚上八點就全體閉嘴。
+
+    config 值 30 條／天在這一群約晚上八點就用光，之後整晚零主動。
+    實際生效上限至少 60，熱場再放大兩倍。
+    """
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker.config.proactive_max_per_day = 30
+        worker._hot_field = lambda _gid: False
+        cap_cold = max(60, worker.config.proactive_max_per_day)
+        assert cap_cold == 60
+        worker._hot_field = lambda _gid: True
+        assert max(60, worker.config.proactive_max_per_day * 2) == 60
+
+    asyncio.run(main())
