@@ -5848,7 +5848,7 @@ class AccountWorker:
                 directive,
                 f"上一版被自檢退回，具體問題：{veto}。換個講法重寫。"
                 + (
-                    "名字放句首、第一個逗號前就要有人，開頭別再報你在做什麼、"
+                    "請針對對方的發言自然接話或直球撩撥，不要自說自話、"
                     "也別寫「看你們」「你們」這種全場視角。"
                     if flow
                     else ""
@@ -5974,9 +5974,8 @@ class AccountWorker:
                 picked = await self._pick_passing_candidate(
                     context,
                     directive,
-                    f"上一版還是對全場講。這次句子開頭直接叫「{names[0]}」，"
-                    "第一句就講他剛才那句哪裡讓你受不了或想接，"
-                    "整句不要出現「你們」。",
+                    f"上一版還是對全場講。這次請直接針對「{names[0]}」剛才那句撩撥或吐槽，"
+                    "講你對他的反應，整句不要出現「你們」。",
                     lambda hint: self._generate_reply(event, extra_hint=hint),
                     recent_bots=recent_bots,
                     own_texts=own_texts,
@@ -9695,7 +9694,7 @@ class AccountWorker:
         if flow:
             hint += (
                 "最近幾則水軍全是先講自己身上的小事、對象含糊，接著看像同一個人在自語。"
-                "這版名字放第一個逗號前，直接從他剛講的那句接著講，別再從自己身上開場。"
+                "這版請直接針對他剛講的那句自然接著講或直球調侃，語氣隨性，別再自說自話。"
             )
         if openers:
             hint += f"（最近幾則的開場動作：{openers}，別再抽同一類，換一個不一樣的當下場景）"
@@ -9706,7 +9705,7 @@ class AccountWorker:
         ) >= _SPECTATOR_FRAME_HITS:
             hint += (
                 "（最近幾則全是「一邊做某件小事＋看你們吵」的旁觀骨架，"
-                "這版人物放第一個逗號前，場景可留可不留）"
+                "這版直接切入話題對話，場景可留可不留）"
             )
         picked = await self._pick_passing_candidate(
             context,
@@ -10014,7 +10013,7 @@ class AccountWorker:
                                 "",
                                 f"上一版被老司機審查員退回，具體反饋：{feedback}。請針對這個問題換完全不同的在地表達方式重新演繹！"
                                 + (
-                                    "名字放句首、第一個逗號前就要有人，開頭別再報你在做什麼、"
+                                    "請針對對方的發言自然接話或直球撩撥，不要自說自話、"
                                     "也別寫「看你們」「你們」這種全場視角。"
                                     if flow_p
                                     else ""
