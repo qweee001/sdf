@@ -181,8 +181,8 @@ _REFUSAL_PATTERNS = (
     # 「請你理解／諒解／見諒」是模型收尾的固定句式，真人吵架不會這樣講；
     # 「請你尊重」則真實對話常見，故不收錄。
     re.compile(r"(?:請|建議|希望)(?:你|您)[^。！？!?]{0,4}(?:理解|諒解|見諒)"),
-    # 上游平台/Google Vertex AI 政策拒答字樣（如「The prompt could not be submitted」）
-    re.compile(r"the prompt could not be", re.IGNORECASE),
+    # 上游平台/Google Vertex AI 政策拒答字樣（如「The prompt could not be submitted」或被截斷的「The prompt could not」）
+    re.compile(r"the prompt could not", re.IGNORECASE),
 )
 
 _SEMANTIC_GROUP_META_SYSTEM_PROMPT = """

@@ -7483,6 +7483,11 @@ class AccountWorker:
         reply, _ = text_guard.instant_word_fix(reply)
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)
+        # 英文系統報錯/拒答直接丟棄，絕不能截斷放行
+        if refusal:
+            self._set_generation_reason(event, "refusal")
+            self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
+            return ""
         own_echo = self._is_own_echo(
             reply, self._own_echo_recent(group_id)
         ) or self._burst_echo(reply, group_id)
