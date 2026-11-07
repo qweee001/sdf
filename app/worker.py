@@ -9421,8 +9421,21 @@ class AccountWorker:
 
         # 主動路徑也吃句型模式：這條路沒有導演指令，全靠這裡的字數帶，
         # 否則四號只會不停「剛下班…你敢不敢」同一個長度模子。重試沿用同一模式。
+        # 熱度跟回覆路徑一致：洗屏時短碎優先，生活場景整段不排。
+        # 主動路徑沒有導演指令，這裡是唯一能決定長度的地方（21:00–21:10 六則全 24~31 字）。
+        _p_heat = self._burst_heat(msgs)
         _p_roll = random.random()
-        _p_mode = "short" if _p_roll < 0.3 else "dirty" if _p_roll < 0.65 else "scene"
+        if _p_heat >= _HOT_BURST_HUMANS:
+            _p_mode = "short" if _p_roll < 0.7 else "dirty"
+        elif _p_heat >= _WARM_BURST_HUMANS:
+            _p_mode = "short" if _p_roll < 0.5 else "dirty" if _p_roll < 0.8 else "scene"
+        else:
+            _p_mode = "short" if _p_roll < 0.3 else "dirty" if _p_roll < 0.65 else "scene"
+        self._pcount(f"band_{_p_mode}")
+        self._pcount(
+            "band_heat_" + ("hot" if _p_heat >= _HOT_BURST_HUMANS
+                            else "warm" if _p_heat >= _WARM_BURST_HUMANS else "cold")
+        )
         _p_lo, _p_hi = _STRUCT_BANDS[_p_mode]
         _p_struct = {
             "short": "這則走極短碎念（8~16字）：不交代場景、不點名，像隨口丟一句。",
