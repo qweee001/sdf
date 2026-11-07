@@ -153,10 +153,37 @@ def test_press_box_rewrite_feeds_used_openers_and_stays_cheap():
 
 
 def test_press_box_rewrite_skipped_when_field_is_not_echoing():
+    """語流本身不是旁白（前面幾則都點了名）時，播報軸不該出手。"""
+
     async def main():
         worker = _worker()
         worker._echo_shape_hits = Mock(return_value=0)
         worker._pick_passing_candidate = AsyncMock(return_value="不該被叫到")
+        worker._remember_speaker_name(-100, "和進出口")
+        worker._remember_speaker_name(-100, "萬英尺")
+        now = time.time()
+        worker._recent_texts_by_group[-100] = [
+            "和進出口你嘴這麼硬，先來我這邊",
+            "萬英尺等一下被嗆到破防又要開戰",
+        ]
+        worker._recent_texts_at[-100] = [now - 40, now - 20]
         assert await worker._proactive_echo_rewrite(-100, "黑的才性感啊", "", [], "") == ""
+
+    asyncio.run(main())
+
+
+def test_cold_start_rewrites_the_first_line_of_the_day():
+    """10:01 開群第一則「剛買冰美式進辦公室就開始摸魚」：窗裡零則水軍也要逼具名。"""
+
+    async def main():
+        worker = _worker()
+        worker._echo_shape_hits = Mock(return_value=0)
+        worker._pick_passing_candidate = AsyncMock(return_value="和進出口你昨天嘴這麼硬，今天還敢嗎")
+        worker._recent_texts_by_group[-100] = []
+        worker._recent_texts_at[-100] = []
+        out = await worker._proactive_echo_rewrite(
+            -100, "剛買冰美式進辦公室就開始摸魚，哥哥今天不忙嗎", "", [], ""
+        )
+        assert out == "和進出口你昨天嘴這麼硬，今天還敢嗎"
 
     asyncio.run(main())

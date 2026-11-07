@@ -9429,9 +9429,11 @@ class AccountWorker:
                         own_texts_p = []
                     last_human_p = ""
                     duel_p: tuple = ()
+                    names_p: list = []
                     try:
                         recent_rows = await self.db.get_group_messages(int(group_id), limit=14)
                         duel_p = _duel_pair(recent_rows)
+                        names_p = self._target_names(recent_rows)
                         last_human_p = next(
                             (
                                 str(r.get("content") or "")
@@ -9448,9 +9450,23 @@ class AccountWorker:
                             context = await self._proactive_decision_context(group_id)
                         except Exception:
                             context = ""
+                        # 無對象軸要在這裡也生效：主動發言是這一群的主體，只在
+                        # 播報軸（_proactive_echo_rewrite，還要 topic 是純評語才跑）
+                        # 判等於整段開群熱潮都在自語。
+                        flow_p = (
+                            not duel_p
+                            and bool(names_p)
+                            and await self._nameless_flow_active(int(group_id), topic)
+                        )
+                        if flow_p:
+                            self.stats["proactive_nameless"] = (
+                                int(self.stats.get("proactive_nameless", 0)) + 1
+                            )
                         veto_p = self._local_veto(
                             topic, own_texts_p, last_human_p, int(group_id),
                             duel_names=duel_p,
+                            nameless_flow=flow_p,
+                            hot_names=tuple(names_p[:2]),
                         )
                         if veto_p:
                             _code = "veto_" + self._veto_code(veto_p)
@@ -9492,14 +9508,34 @@ class AccountWorker:
                                 own_texts=own_texts_p,
                                 group_id=int(group_id),
                                 limit=2,
+                                require_target=bool(duel_p) or flow_p,
+                                nameless_flow=flow_p,
+                                hot_names=tuple(names_p[:2]),
                             )
                             if not picked:
-                                self.stats["proactive_gate_hold"] = (
-                                    int(self.stats.get("proactive_gate_hold", 0)) + 1
-                                )
-                                print(f"[{self.name}] proactive-gate-hold: 換策略重寫仍不合格，這輪不發", flush=True)
-                                continue
-                            topic = picked
+                                # 餓到八分鐘就別再 hold：熱場裡別號一直在講，
+                                # 「群裡十分鐘沒水軍」永遠等不到（10:39–10:45 十四則
+                                # 真人、四號全 hold）。原句帶點旁白也比消失好。
+                                if (
+                                    flow_p
+                                    and await self._own_silent_seconds(int(group_id))
+                                    >= _GATE_FORCED_OWN_SILENT
+                                ):
+                                    self.stats["gate_forced_starved"] = (
+                                        int(self.stats.get("gate_forced_starved", 0)) + 1
+                                    )
+                                    print(
+                                        f"[{self.name}] proactive-nameless-forced: 改不出具名版、自己餓，照發 {topic[:20]!r}",
+                                        flush=True,
+                                    )
+                                else:
+                                    self.stats["proactive_gate_hold"] = (
+                                        int(self.stats.get("proactive_gate_hold", 0)) + 1
+                                    )
+                                    print(f"[{self.name}] proactive-gate-hold: 換策略重寫仍不合格，這輪不發", flush=True)
+                                    continue
+                            else:
+                                topic = picked
                     # 播報腔：主動發言是這一群的主體（一小時十五則有十四則是主動，
                     # 回覆只一則，42 次被真人插話取消），所以回覆路徑那套 echo-retry
                     # 幾乎跑不到，17:38~18:00 十則有九則只補一句評語照樣發出去。
