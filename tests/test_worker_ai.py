@@ -55,3 +55,23 @@ def test_call_ai_disables_thinking_when_configured():
         }
 
     asyncio.run(main())
+
+
+def test_clean_ai_content_strips_thinking_and_english_preamble():
+    # 1. 思考標籤去除
+    s1 = "<think>思考過程...</think>今晚想吃什麼"
+    assert AccountWorker._clean_ai_content(s1) == "今晚想吃什麼"
+
+    s2 = "<thought>Some reasoning in English</thought>\n擦著乳液看你們聊"
+    assert AccountWorker._clean_ai_content(s2) == "擦著乳液看你們聊"
+
+    # 2. 模型輸出思考前言（例如 Im thinking through...）自動剝除，保留中文
+    s3 = "Im thinking through how to reply.\n\n擦著乳液看你們聊，手都停不下來"
+    assert AccountWorker._clean_ai_content(s3) == "擦著乳液看你們聊，手都停不下來"
+
+    s4 = "Initial suspicion is that this is dirty talk.\n妹妹他哪裡持久了"
+    assert AccountWorker._clean_ai_content(s4) == "妹妹他哪裡持久了"
+
+    # 3. 普通中文保持不變
+    s5 = "先換 LINE 啊，之後有空約出來見面"
+    assert AccountWorker._clean_ai_content(s5) == "先換 LINE 啊，之後有空約出來見面"

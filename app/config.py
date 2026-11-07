@@ -202,7 +202,7 @@ def load_settings() -> Settings:
         ai_temperature=_float("AI_TEMPERATURE", 0.95),
         ai_max_tokens=_int("AI_MAX_TOKENS", 200),
         ai_timeout=_float("AI_TIMEOUT", 60),
-        ai_disable_thinking=_bool("AI_DISABLE_THINKING", False),
+        ai_disable_thinking=_bool("AI_DISABLE_THINKING", True),
         ai_reasoning_effort=os.getenv("AI_REASONING_EFFORT", "low").strip(),
         vision_model=(
             os.getenv("VISION_MODEL", "").strip()

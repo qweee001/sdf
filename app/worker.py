@@ -8047,6 +8047,28 @@ class AccountWorker:
             )
             print(f"[{self.name}] ai-cost record error: {exc}", flush=True)
 
+    @staticmethod
+    def _clean_ai_content(raw: str) -> str:
+        if not raw:
+            return ""
+        t = str(raw).strip()
+        # 移除 <think>...</think> 或 <thought>...</thought> 思考區塊
+        t = re.sub(r"<(?:think|thought)>.*?</(?:think|thought)>", "", t, flags=re.DOTALL).strip()
+        # 移除 Markdown 程式碼區塊包裹
+        if t.startswith("```") and t.endswith("```"):
+            t = re.sub(r"^```[a-zA-Z]*\n?", "", t)
+            t = re.sub(r"\n?```$", "", t).strip()
+        # 若開頭為英文思考前言（例如 Im thinking through... / Initial suspicion is... 等）
+        # 且後面帶有中文，直接提取從中文開始的正文內容，杜絕思考過程吃掉發言字數
+        first_cjk = re.search(r"[\u4e00-\u9fff]", t)
+        if first_cjk:
+            cjk_idx = first_cjk.start()
+            if cjk_idx > 0:
+                prefix = t[:cjk_idx].strip()
+                if not re.search(r"[\u4e00-\u9fff]", prefix):
+                    t = t[cjk_idx:].strip()
+        return t
+
     async def _call_ai(
         self,
         system_prompt: str,
@@ -8121,7 +8143,8 @@ class AccountWorker:
                 cost_status=cost_status,
             )
             if content:
-                return text_guard.auto_convert_to_tw(content.strip())
+                cleaned = self._clean_ai_content(content)
+                return text_guard.auto_convert_to_tw(cleaned)
             return ""
         except Exception as e:
             # API 層錯誤（如 402 欠費）與「模型回空」分開計數，控制台一眼看得出，
