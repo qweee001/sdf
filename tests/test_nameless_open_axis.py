@@ -13,6 +13,7 @@
 判的是「第一個逗號前有沒有人」，不是場景詞表。
 """
 
+import asyncio
 import time
 from types import SimpleNamespace
 from typing import Any, cast
@@ -103,10 +104,74 @@ def test_short_head_is_left_alone():
     assert not w._is_nameless_open("笑死，你們繼續", GID)
 
 
-def test_flow_needs_a_sample_and_a_density():
+def test_cold_start_forces_a_target_even_with_no_sample():
+    """2026-11-07 10:01 開群第一則 RICH「剛買冰美式進辦公室就開始摸魚，哥哥今天不忙嗎」：
+    窗裡零則水軍，樣本湊不到五則，舊版直接放行，整段開群熱潮全是旁白。"""
     w = _worker()
-    _seed(w, _SCENE[:3])
-    # 樣本 3 則不足，寧可不判
+    w._remember_speaker_name(GID, "後天")
+    w._recent_texts_by_group[GID] = []
+    w._recent_texts_at[GID] = []
+    assert w._nameless_open_flow(GID, "剛買冰美式進辦公室就開始摸魚，哥哥今天不忙嗎")
+    assert not w._nameless_open_flow(GID, _NAMED)
+
+
+def test_partial_sample_ramps_up_the_requirement():
+    w = _worker()
+    _seed(w, _SCENE[:2])
+    assert w._nameless_open_flow(GID, _SCENE[0])
+    _seed(w, [_NAMED, "萬英尺你嘴這麼硬，先來我這邊", _SCENE[1]])
+    assert not w._nameless_open_flow(GID, _SCENE[0])
+
+
+# ---- 餓號退讓：隔夜開群不能退 --------------------------------------------
+
+
+class _SpeakDB:
+    def __init__(self, last: float):
+        self._last = last
+
+    async def group_bot_last_spoke(self, _gid: int) -> dict:
+        return {0: self._last}
+
+
+def test_starved_account_still_forced_on_a_cold_open():
+    """每一號都餓了十二小時，窗裡卻一則水軍都沒有 → 餓不算數。"""
+    w = _worker()
+    w.db = cast(Any, _SpeakDB(0.0))
+    w._recent_texts_by_group[GID] = []
+    w._recent_texts_at[GID] = []
+    assert asyncio.run(w._nameless_flow_active(GID, _FRESH))
+
+
+def test_starved_account_steps_back_once_the_window_is_populated():
+    w = _worker()
+    w.db = cast(Any, _SpeakDB(0.0))
+    _seed(w, _SCENE)
+    assert not asyncio.run(w._nameless_flow_active(GID, _FRESH))
+
+
+def test_fed_account_is_forced_inside_a_nameless_stream():
+    w = _worker()
+    w.db = cast(Any, _SpeakDB(time.time()))
+    _seed(w, _SCENE)
+    assert asyncio.run(w._nameless_flow_active(GID, _FRESH))
+
+
+def test_flow_needs_a_density_once_the_sample_is_full():
+    w = _worker()
+    # 樣本滿了（六則）卻只有一半是旁白 → 不算在自語
+    _seed(
+        w,
+        [
+            _NAMED,
+            "萬英尺你嘴這麼硬，先來我這邊",
+            "鈴鐺說得對，你也只會出一張嘴",
+            _SCENE[0],
+            _SCENE[1],
+            _SCENE[2],
+        ],
+        tail=False,
+    )
     assert not w._nameless_open_flow(GID, _SCENE[0])
     _seed(w, _SCENE)
     assert w._nameless_open_flow(GID, _SCENE[0])

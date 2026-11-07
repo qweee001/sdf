@@ -198,6 +198,9 @@ _NAMELESS_OPEN_HITS = 4
 _NAMELESS_FORCED_SECONDS = 12 * 60
 # 這一號自己已經二十五分鐘沒出聲時，軟軸不再攔（Chen 一整小時 claimed 3 sent 0）。
 _NAMELESS_STARVED_SECONDS = 25 * 60
+# 改寫全失敗時，自己餓到這個秒數就先照發原句——熱場裡「群裡十分鐘沒水軍」
+# 永遠等不到，帳號就這樣一路 not_dispatched 到消失。
+_GATE_FORCED_OWN_SILENT = 8 * 60
 # 同一題連發：九十秒內上一則水軍已經在講同一個題目（共用的實字 2-gram），換角度。
 _SAME_TOPIC_NEAR = 90
 _SAME_TOPIC_SKIP_GRAMS = {
@@ -3018,9 +3021,15 @@ class AccountWorker:
         if not group_id or not self._is_nameless_open(candidate, int(group_id)):
             return False
         recent = self._cross_recent_texts(int(group_id), _NAMELESS_OPEN_WINDOW)[-8:]
-        if len(recent) < _NAMELESS_OPEN_MIN_SAMPLE:
-            return False
+        if not recent:
+            # 隔夜／長休後開群：窗裡一個水軍都沒有，湊不到五則樣本。
+            # 這正是人最多、最容易被看到的開群第一批，不能因為樣本不足就
+            # 全部放行成旁白——冷啟一律要求對著一個人講。
+            return True
         hits = sum(1 for t in recent if self._is_nameless_open(t, int(group_id)))
+        if len(recent) < _NAMELESS_OPEN_MIN_SAMPLE:
+            # 開群後第 2~5 則：樣本還不夠，密度門檻放寬成「幾乎全是旁白」。
+            return hits >= len(recent) - 1
         return hits >= _NAMELESS_OPEN_HITS
 
     def _same_topic_as_prev(self, group_id: int, candidate: str) -> str:
@@ -3039,6 +3048,20 @@ class AccountWorker:
         cand = str(candidate or "")
         hit = [g for g in grams if g in cand]
         return hit[0] if hit else ""
+
+    async def _nameless_flow_active(self, group_id: int, text: str) -> bool:
+        """這個場現在要不要啟用「逼具名」這軸（含餓號退讓）。
+
+        餓號退讓是為了別讓一個餓很久的帳號卡在重寫上，但隔夜開群時每一號都
+        餓了十幾小時，窗裡卻一則水軍都沒有——那時候退讓等於整個開群熱潮
+        （人最多、最該被看到的一段）全部放行成旁白。所以只有窗裡已經有東西
+        可比時，餓才算數。
+        """
+        if not self._nameless_open_flow(int(group_id), text):
+            return False
+        if await self._own_silent_seconds(int(group_id)) < _NAMELESS_STARVED_SECONDS:
+            return True
+        return not self._cross_recent_texts(int(group_id), _NAMELESS_OPEN_WINDOW)
 
     async def _own_silent_seconds(self, group_id: int) -> float:
         """自己這一號在這群多久沒出聲了（給軟軸退讓用）。"""
@@ -5497,9 +5520,7 @@ class AccountWorker:
             hot_names = tuple(
                 n for n, _c in sorted(tally.items(), key=lambda kv: -kv[1])[:2]
             )
-            flow = bool(hot_names) and self._nameless_open_flow(group_id, text)
-            if flow and await self._own_silent_seconds(group_id) >= _NAMELESS_STARVED_SECONDS:
-                flow = False
+            flow = bool(hot_names) and await self._nameless_flow_active(group_id, text)
         veto = self._local_veto(
             text,
             own_texts,
@@ -5537,11 +5558,23 @@ class AccountWorker:
                 return picked
             # 互嗆場改不出具名版本、群裡又已經十分鐘沒有水軍出聲：原句照發，
             # 一句旁白也比整場消失好。
+            # 熱場裡「群裡十分鐘沒水軍」幾乎不會成立（別號一直在講），可是自己
+            # 十分鐘不吭聲一樣是死人：10:00–10:19 有 58 則真人、只出 3 則，
+            # 小天後／RICH 各燒掉一輪改寫後照樣 not_dispatched。所以自己餓了
+            # 就先照發，別等群一起安靜。
             _forced_at = 600 if duel else _NAMELESS_FORCED_SECONDS
-            if (duel or flow) and await self._seconds_since_any_bot(group_id) >= _forced_at:
+            _starved = await self._own_silent_seconds(group_id) >= _GATE_FORCED_OWN_SILENT
+            if (duel or flow) and (
+                _starved or await self._seconds_since_any_bot(group_id) >= _forced_at
+            ):
                 self.stats["duel_forced"] = int(self.stats.get("duel_forced", 0)) + 1
+                if _starved:
+                    self.stats["gate_forced_starved"] = (
+                        int(self.stats.get("gate_forced_starved", 0)) + 1
+                    )
                 print(
-                    f"[{self.name}] duel-forced: 改不出具名版、群裡太久沒水軍，照發 {text[:20]!r}",
+                    f"[{self.name}] duel-forced: 改不出具名版、自己餓"
+                    f"（{'自己太久沒出聲' if _starved else '群裡太久沒水軍'}），照發 {text[:20]!r}",
                     flush=True,
                 )
                 self._burst_register(group_id, text)
@@ -9176,9 +9209,7 @@ class AccountWorker:
         # 全場都在當裁判時，主動那句也必須落到一個人身上，不能只在回覆路徑管。
         need_target = self._broadcast_hits(int(group_id)) >= 2 and self._is_broadcast(topic)
         # 整條水軍語流都是場景自語：主動那句也一樣要落到人身上，不能只在回覆路徑管。
-        flow = self._nameless_open_flow(int(group_id), topic)
-        if flow and await self._own_silent_seconds(int(group_id)) >= _NAMELESS_STARVED_SECONDS:
-            flow = False
+        flow = await self._nameless_flow_active(int(group_id), topic)
         if flow:
             self.stats["proactive_nameless"] = int(self.stats.get("proactive_nameless", 0)) + 1
         if not press_box and not need_target and not flow:
