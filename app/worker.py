@@ -7483,9 +7483,10 @@ class AccountWorker:
         reply, _ = text_guard.instant_word_fix(reply)
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)
-        # 英文系統報錯/拒答直接丟棄，絕不能截斷放行
-        if refusal:
-            self._set_generation_reason(event, "refusal")
+        # 語言硬底線：台灣約砲群發言必須包含中文漢字。全英文或無中文直接視為模型報錯/拒答丟棄！
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", reply))
+        if cjk_count < 2 or refusal:
+            self._set_generation_reason(event, "refusal" if refusal else "no_chinese")
             self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
             return ""
         own_echo = self._is_own_echo(
