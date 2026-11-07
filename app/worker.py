@@ -880,8 +880,11 @@ class AccountWorker:
 
         這一群一小時 209 則真人，重寫一次要十幾秒、還會被插話取消；字數超過上限
         時先自己剪到最後一個逗號（保留 55% 以上才剪），剪得成就直接發。
+        嚴格守門：非中文、純英文、或系統報錯，絕不硬切成殘片放行！
         """
         t = str(text or "").strip()
+        if len(re.findall(r"[\u4e00-\u9fff]", t)) < 2 or text_guard.is_refusal(t) or text_guard.is_meta_speak(t):
+            return ""
         if len(t) <= cap:
             return ""
         head = t[:cap]
@@ -8261,6 +8264,19 @@ class AccountWorker:
         activity_kind: str = "reply",
         captured_id: list | None = None,
     ) -> bool:
+        # 終極底線防線（發送前最後一道守門員）：
+        # 這是所有對話送進 Telegram 的唯一出口（Single Point of Exit）。
+        # 任何純英文碎片、少於 2 個漢字、系統拒答、代碼標記、或元話語，在這一層直接物理攔截丟棄！
+        cjk_count = len(re.findall(r"[\u4e00-\u9fff]", text or ""))
+        if (
+            cjk_count < 2
+            or text_guard.is_refusal(text)
+            or text_guard.is_meta_speak(text)
+            or text_guard.has_format_leak(text)
+        ):
+            print(f"[{self.name}] FATAL LEAK BLOCKED AT TELEGRAM OUTBOUND: {text[:40]!r}", flush=True)
+            return False
+
         if len(text) > _MAX_REPLY_CHARS_HARD:
             return False
         client = self.tg_client
@@ -9550,20 +9566,28 @@ class AccountWorker:
             topic = (raw or "").strip()
             if not topic:
                 continue
-            # 字數帶要硬：主動路徑原本完全沒有長度檢查，短碎模式寫成 30 字長句照樣發。
-            _p_cap = _p_hi + (20 if _p_mode == "scene" else 4 if _p_mode == "short" else 10)
-            if len(topic) > _p_cap:
-                topic = self._trim_to_cap(topic, _p_cap) or topic
-            # 不管最後被哪條規則 drop（或放行）都記：模型下一 cycle 要看到「這些已經出過」
-            _note_seen(topic)
-            # 全英文碎片：21:31/21:35 主動路徑連發「Im thinking through」「Initial suspicion is」，
-            # 是模型把思考前言當答案。回覆路徑早有 cjk<2 這關，主動路徑漏掉。
-            if len(re.findall(r"[\u4e00-\u9fff]", topic)) < 2:
-                print(f"[{self.name}] proactive-drop: 無中文碎片 {topic[:24]!r}", flush=True)
+            # 物理硬底線守門員（在任何長度裁切或處理之前先驗證）：
+            # 必須包含至少 2 個中文漢字，且絕不為系統拒答、元話語或格式標籤
+            if (
+                len(re.findall(r"[\u4e00-\u9fff]", topic)) < 2
+                or self._is_refusal(topic)
+                or self._is_meta_speak(topic)
+                or self._has_format_leak(topic)
+            ):
+                print(f"[{self.name}] proactive-drop: 異常輸出/無中文/拒答 {topic[:24]!r}", flush=True)
                 self.stats["proactive_drop_nochinese"] = (
                     int(self.stats.get("proactive_drop_nochinese", 0)) + 1
                 )
                 continue
+
+            # 動態字數帶修整：僅在中文長度顯著超出時於自然標點處就地收尾
+            _p_cap = _p_hi + (20 if _p_mode == "scene" else 10 if _p_mode == "short" else 15)
+            if len(topic) > _p_cap:
+                trimmed = self._trim_to_cap(topic, _p_cap)
+                if trimmed:
+                    topic = trimmed
+            _note_seen(topic)
+
             # 最高優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型
             # 即使同時命中簡體、時段或性別違規，只要屬於複讀就一律直接放棄當輪發言
             if self._is_own_echo(topic, self._own_echo_recent(group_id)):
@@ -9572,10 +9596,6 @@ class AccountWorker:
                     flush=True,
                 )
                 return ""
-            if self._is_refusal(topic):
-                continue
-            if self._has_format_leak(topic):
-                continue
             # 主動發言自己開口，穿幫成本最高：時段不合或混入簡體字就換一句
             if self._has_time_mismatch(topic):
                 self.stats["proactive_drop_time"] = int(self.stats.get("proactive_drop_time", 0)) + 1
@@ -9600,23 +9620,16 @@ class AccountWorker:
                     f"[{self.name}] proactive-drop: phrase fatigue {fatigued!r} on {topic[:20]!r}",
                     flush=True,
                 )
+                self.stats["proactive_drop_fatigue"] = int(self.stats.get("proactive_drop_fatigue", 0)) + 1
                 hint = (
                     f"不要再用「{fatigued}」這個詞或類似說法，群裡剛才已經提過太多次；"
                     "換一個完全不同的話題角度。"
                 )
+                already.append(topic[:40])
                 continue
             if self._starts_with_gan(topic):
                 self.stats["proactive_drop_gan"] = int(self.stats.get("proactive_drop_gan", 0)) + 1
                 print(f"[{self.name}] proactive-drop: gan opener on {topic[:20]!r}", flush=True)
-                already.append(topic[:40])
-                continue
-            fatigued = self._phrase_fatigue_hit(group_id, topic)
-            if fatigued:
-                self.stats["proactive_drop_fatigue"] = int(self.stats.get("proactive_drop_fatigue", 0)) + 1
-                print(
-                    f"[{self.name}] proactive-drop: phrase fatigue {fatigued!r} on {topic[:20]!r}",
-                    flush=True,
-                )
                 already.append(topic[:40])
                 continue
             illogical = self._illogical_sentence_violation(topic)
