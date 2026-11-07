@@ -394,7 +394,11 @@ _CONSUME_DENSITY_HITS = 2
 # 判前半句有沒有「看你們」型的旁觀子句，近四則有兩則是就換骨架。
 _SPECTATOR_FRAME_FADE = 40 * 60
 _SPECTATOR_FRAME_HITS = 2
-_SPECTATOR_MARKERS = ("看你們", "你們吵", "你們鬥", "看你們這樣", "你們這齣")
+_SPECTATOR_MARKERS = ("看你們", "你們吵", "你們鬥", "看你們這樣", "你們這齣", "聽你們", "你們互嗆")
+# 兩號前後幾秒疊一對時，兩個人都用「一邊做自己的事一邊看你們吵」最刺眼
+# （15:28:27 RICH「邊喝微糖烏龍邊看你們吵」→ 15:28:30 小天後「犯睏聽你們互嗆」）。
+# 這對不看密度，只看上一則水軍有沒有同一個骨架。
+_SPECTATOR_ADJACENT = 120
 # 第三人軸：互嗆那兩個把版面佔滿，旁邊還有真人在講自己的事卻沒人接
 # （11:34~11:51 琪琪在講午餐、膝蓋，九則水軍全黏在男男互咬上）。
 # 這人在近 12 分鐘講滿 3 句、又不在互嗆名單、水軍近 25 分鐘沒點過她 → 這則改挑她。
@@ -3151,6 +3155,13 @@ class AccountWorker:
         head = re.split(r"[，,。！？…]", body)[0]
         return any(m in head for m in _SPECTATOR_MARKERS)
 
+    @staticmethod
+    def _is_spectator_anywhere(text: str) -> bool:
+        """整句版旁觀判定。head 版看不到「規範被嘴到不敢吭聲，這時間犯睏聽你們互嗆」這種
+        名字在前、旁觀子句在逗號後的寫法，疊發成對時要抓得到。"""
+        body = str(text or "")
+        return any(m in body for m in _SPECTATOR_MARKERS)
+
     def _nameless_open_flow(self, group_id: int, candidate: str = "") -> bool:
         """整條水軍語流都是無對象開場 → 這一句也該對著人講。
 
@@ -3770,6 +3781,15 @@ class AccountWorker:
                     "又是「我一邊做某件小事＋看你們吵＋補一句」的旁觀骨架，"
                     "最近幾則都同一個模子；這則名字或動作只留一個，"
                     "人物放前面，別再開場就報你在做什麼"
+                )
+        # 上一則水軍才剛用同一個旁觀骨架（15:28:27／15:28:30 三秒疊一對），
+        # 不看密度，直接換：兩句黏在一起時，同一個模子比十則撞一次更明顯。
+        if group_id and self._is_spectator_anywhere(candidate):
+            prev = self._cross_recent_items(int(group_id), _SPECTATOR_ADJACENT)
+            if any(self._is_spectator_anywhere(t) for t, _a in prev):
+                return (
+                    "上一則水軍也是「一邊做自己的事＋看你們吵」的旁觀句，"
+                    "兩句黏在一起；這則改成只接一個人剛講的那句，不必報自己在做什麼"
                 )
         if self._ask_tail_repeat(own_texts, candidate) and not (
             group_id and self._assert_run(int(group_id))

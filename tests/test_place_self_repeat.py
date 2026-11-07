@@ -130,3 +130,22 @@ def test_carry_hold_skips_the_repeated_place():
     assert "店裡" not in picked
     assert "萬英尺" in picked
 
+
+
+def test_paired_spectator_frames_veto_the_second():
+    """15:28:27 RICH「邊喝微糖烏龍邊看你們吵」→ 15:28:30 小天後「犯睏聽你們互嗆」，
+    三秒疊一對同一個旁觀模子；名稱在逗號前也要抓得到。"""
+    w = _worker("小天後")
+    _seed(w, own=[], others=[(3, "邊喝微糖烏龍邊看你們吵，被罵性無能的晚上敢不敢來我房間證明自己")])
+    veto = w._local_veto(
+        "規範被嘴到不敢吭聲，這時間犯睏聽你們互嗆，看來真的腎虛硬不起來", [], "", GID
+    )
+    assert "旁觀句" in veto
+
+
+def test_spectator_frame_not_vetoed_when_prev_is_plain():
+    """上一則不是旁觀句就照放，別把正常接話一起攔掉。"""
+    w = _worker("小天後")
+    _seed(w, own=[], others=[(60, "戰豆下手真狠，踩爛了群裡少根能用的，我下班要找誰騎嘛")])
+    cand = "規範，這時間犯睏聽你們互嗆，看來真的腎虛"
+    assert w._local_veto(cand, [], "", GID) == ""
