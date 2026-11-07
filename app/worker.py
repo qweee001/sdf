@@ -8714,6 +8714,14 @@ class AccountWorker:
     # 20:14–20:23 九分鐘全體沒出聲就是這樣。真正會撞話的是前 2 分鐘，之後接一句很正常。
     _PROACTIVE_HUMAN_QUIET_SECONDS = 120.0
 
+    def _pcount(self, key: str) -> None:
+        """主動路徑的各個前置閘計數。
+
+        沒有 Railway log 可看時，stat 是唯一能看到「卡在哪一關」的地方；
+        這一輪 18 分鐘四號零則，全靠猜。名字進 stats，dashboard 直接讀得到。
+        """
+        self.stats[key] = int(self.stats.get(key, 0)) + 1
+
     def _should_suppress_proactive(self, group_id: int) -> bool:
         last_human = float(self.last_human_activity.get(int(group_id), 0) or 0)
         return (
@@ -9743,6 +9751,7 @@ class AccountWorker:
                 if not bool(getattr(self.config, "proactive_enabled", True)):
                     continue
                 if self._is_sleeping():
+                    self._pcount("pskip_sleep")
                     continue
                 # 群組層「不能寫」退避中：別再生成一句又撞回去（實測省 2 小時 136 次）
                 if self._write_forbidden_backing_off():
@@ -9750,11 +9759,14 @@ class AccountWorker:
                         f"[{self.name}] proactive-skip: ChatWriteForbidden 退避中，先睡",
                         flush=True,
                     )
+                    self._pcount("pskip_writeforbidden")
                     continue
                 self._reset_proactive_day()
                 if self._proactive_today >= self.config.proactive_max_per_day:
+                    self._pcount("pskip_dailycap")
                     continue
                 if self._is_busy_hour() and random.random() < 0.25:
+                    self._pcount("pskip_busy")
                     continue
                 # 挑一個最近活躍的群組（6 小時內）；都沒有的話用已知群 fallback（群不能死）
                 groups = [
@@ -9778,6 +9790,7 @@ class AccountWorker:
                 except Exception:
                     latest_row = None
                 if not await self._proactive_rotation_ok(group_id, latest_row):
+                    self._pcount("pskip_rotation")
                     continue
                 starved_turn = await self._proactive_starved(group_id)
                 # 已經好久沒有水軍出聲：不管現場多熱都接一句。四號全體照 30% 擲骰，
@@ -9802,6 +9815,7 @@ class AccountWorker:
                             f"[{self.name}] proactive-skip: group {group_id} 熱場（1 分鐘內真人≥{_HOT_FIELD_HUMAN_MIN}），留給 reply",
                             flush=True,
                         )
+                        self._pcount("pskip_hot")
                         continue
                     hot_join = True
                     print(f"[{self.name}] proactive-join: group {group_id} 熱場中插話（25%）", flush=True)
@@ -9809,16 +9823,19 @@ class AccountWorker:
                     # 人類近 10 分鐘有活動：以 70% 讓路、30% 像正常人一樣偶爾插話
                     if random.random() < 0.45 and not force_join and not starved_turn:
                         print(f"[{self.name}] proactive-skip: group {group_id} suppressed (recent human activity)", flush=True)
+                        self._pcount("pskip_suppress")
                         continue
                     print(f"[{self.name}] proactive-join: group {group_id} 人類熱聊中，水軍選擇接話（30%）", flush=True)
                 # 反重复 P1-1：群内长时间无真人 → 降频（每天≤2条）/暂停（每天≤4条）
                 if self._proactive_gate_blocks(group_id):
                     tier = self._proactive_rate_limit_ok(group_id)
                     print(f"[{self.name}] proactive-gate-blocked: group {group_id} tier={tier} today={self._proactive_today}", flush=True)
+                    self._pcount("pskip_ratelimit")
                     continue
                 # 冷場深度休眠：12h 沒真人→整組閉嘴（比降頻更狠，防半夜自嗨被檢舉）
                 if self._proactive_hibernating(group_id):
                     print(f"[{self.name}] proactive-skip: group {group_id} 冷場 >{self._PROACTIVE_HIBERNATION_HOURS:.0f}h 無真人，深度休眠", flush=True)
+                    self._pcount("pskip_hibern")
                     continue
                 # 女號扎堆保護：群內 90 秒內已有任何水軍發言，保持冷卻讓群友聊
                 try:
@@ -9833,6 +9850,7 @@ class AccountWorker:
                         )
                         if time.time() - last_any_bot < bot_gap:
                             print(f"[{self.name}] proactive-skip: 群內 {time.time() - last_any_bot:.0f}s 前已有水軍發言，保持冷卻讓群友聊", flush=True)
+                            self._pcount("pskip_botgap")
                             continue
                 except Exception:
                     pass
@@ -9858,6 +9876,7 @@ class AccountWorker:
                     cooldown,
                 ):
                     print(f"[{self.name}] proactive-skip: slot already claimed by another account", flush=True)
+                    self._pcount("pskip_slot")
                     continue
                 # 這一輪沒發出去就歸還窗口：失敗不該讓整組人在這個窗口全部閉嘴
                 delivered = False
