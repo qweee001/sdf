@@ -145,11 +145,12 @@ def test_starved_account_still_forced_on_a_cold_open():
     assert asyncio.run(w._nameless_flow_active(GID, _FRESH))
 
 
-def test_starved_account_steps_back_once_the_window_is_populated():
+def test_starved_account_is_still_forced_once_the_window_is_populated():
+    """10:56 小天後餓 29 分鐘被舊的餓號退讓放掉，又出一句無對象的話。"""
     w = _worker()
     w.db = cast(Any, _SpeakDB(0.0))
     _seed(w, _SCENE)
-    assert not asyncio.run(w._nameless_flow_active(GID, _FRESH))
+    assert asyncio.run(w._nameless_flow_active(GID, _FRESH))
 
 
 def test_fed_account_is_forced_inside_a_nameless_stream():

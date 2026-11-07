@@ -3056,18 +3056,13 @@ class AccountWorker:
         return hit[0] if hit else ""
 
     async def _nameless_flow_active(self, group_id: int, text: str) -> bool:
-        """這個場現在要不要啟用「逼具名」這軸（含餓號退讓）。
+        """這個場現在要不要啟用「逼具名」這軸。
 
-        餓號退讓是為了別讓一個餓很久的帳號卡在重寫上，但隔夜開群時每一號都
-        餓了十幾小時，窗裡卻一則水軍都沒有——那時候退讓等於整個開群熱潮
-        （人最多、最該被看到的一段）全部放行成旁白。所以只有窗裡已經有東西
-        可比時，餓才算數。
+        不看餓不餓：語流整條都在自語，這一則照樣該具名，餓號有兩道保險——
+        改寫失敗八分鐘就照發原句，不至於餓死。10:56 小天後餓 29 分鐘被舊的
+        餓號退讓放掉，結果又出一句「整天在群裡表白鈴鐺…」。
         """
-        if not self._nameless_open_flow(int(group_id), text):
-            return False
-        if await self._own_silent_seconds(int(group_id)) < _NAMELESS_STARVED_SECONDS:
-            return True
-        return not self._cross_recent_texts(int(group_id), _NAMELESS_OPEN_WINDOW)
+        return self._nameless_open_flow(int(group_id), text)
 
     async def _own_silent_seconds(self, group_id: int) -> float:
         """自己這一號在這群多久沒出聲了（給軟軸退讓用）。"""
