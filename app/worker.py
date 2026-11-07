@@ -9770,20 +9770,34 @@ class AccountWorker:
                 group_id = random.choice(groups)
                 # 水軍輪替：上一則是自己人時，只在「輪到我」才接（最少發言優先）
                 latest_row: dict | None = None
+                heat = 0
                 try:
-                    latest_rows = await self.db.get_group_messages(group_id, limit=1)
+                    latest_rows = await self.db.get_group_messages(group_id, limit=30)
                     latest_row = latest_rows[-1] if latest_rows else None
+                    heat = self._burst_heat(latest_rows)
                 except Exception:
                     latest_row = None
                 if not await self._proactive_rotation_ok(group_id, latest_row):
                     continue
                 starved_turn = await self._proactive_starved(group_id)
+                # 已經好久沒有水軍出聲：不管現場多熱都接一句。四號全體照 30% 擲骰，
+                # 熱場再疊 25% 插話率，期望值會掉到十分鐘一則（20:23→20:33 實測 0 則）。
+                silent_for = 1e9
+                try:
+                    spoke_map = await self.db.group_bot_last_spoke(group_id)
+                    if spoke_map:
+                        silent_for = time.time() - max(
+                            float(t or 0.0) for t in spoke_map.values()
+                        )
+                except Exception:
+                    pass
+                force_join = silent_for > 240.0 and not starved_turn
                 hot_join = False
                 if self._hot_field(group_id):
                     # 熱場不再 100% 讓路：真人越兇、水軍越隱形是反的。
                     # 保留小概率插話（其餘交給 reply 路徑），其後不再疊加 10 分鐘抑制。
                     # 久沒講話的號不吃這道機率，否則熱場一整個下午都輪不到它。
-                    if random.random() >= 0.25 and not starved_turn:
+                    if random.random() >= 0.6 and not force_join and not starved_turn:
                         print(
                             f"[{self.name}] proactive-skip: group {group_id} 熱場（1 分鐘內真人≥{_HOT_FIELD_HUMAN_MIN}），留給 reply",
                             flush=True,
@@ -9793,7 +9807,7 @@ class AccountWorker:
                     print(f"[{self.name}] proactive-join: group {group_id} 熱場中插話（25%）", flush=True)
                 if not hot_join and self._should_suppress_proactive(group_id):
                     # 人類近 10 分鐘有活動：以 70% 讓路、30% 像正常人一樣偶爾插話
-                    if random.random() < 0.7 and not starved_turn:
+                    if random.random() < 0.45 and not force_join and not starved_turn:
                         print(f"[{self.name}] proactive-skip: group {group_id} suppressed (recent human activity)", flush=True)
                         continue
                     print(f"[{self.name}] proactive-join: group {group_id} 人類熱聊中，水軍選擇接話（30%）", flush=True)
@@ -9811,7 +9825,13 @@ class AccountWorker:
                     spoke = await self.db.group_bot_last_spoke(group_id)
                     if spoke:
                         last_any_bot = max(float(t or 0.0) for t in spoke.values())
-                        if time.time() - last_any_bot < 90.0:
+                        # 洗屏時水軍之間的 90 秒冷卻也跟著縮，不然一則之後整組再等一分半。
+                        bot_gap = (
+                            40.0 if heat >= _HOT_BURST_HUMANS
+                            else 65.0 if heat >= _WARM_BURST_HUMANS
+                            else 90.0
+                        )
+                        if time.time() - last_any_bot < bot_gap:
                             print(f"[{self.name}] proactive-skip: 群內 {time.time() - last_any_bot:.0f}s 前已有水軍發言，保持冷卻讓群友聊", flush=True)
                             continue
                 except Exception:
@@ -9825,6 +9845,12 @@ class AccountWorker:
                 # 冷卻時間按「窗口」抖動 0.8~2.4 倍：同一個窗口內所有帳號算出
                 # 同一個值（不會搶發），跨窗口則不規則（長尾間隔）。
                 cooldown = self._proactive_cooldown(group_id, slot, interval)
+                # 熱場把冷卻壓短：真人 2~8 句/分在跑，還照 2 分鐘窗口輪，
+                # 一則要等 5~10 分鐘，等於不在場。
+                if heat >= _HOT_BURST_HUMANS:
+                    cooldown *= 0.45
+                elif heat >= _WARM_BURST_HUMANS:
+                    cooldown *= 0.7
                 if not await self.db.claim_proactive_slot(
                     group_id,
                     slot,
