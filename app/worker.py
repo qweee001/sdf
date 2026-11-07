@@ -309,6 +309,19 @@ _CONSUME_GROUPS = {
 _CONSUME_FADE = 20 * 60
 _CONSUME_DENSITY_FADE = 120 * 60
 _CONSUME_DENSITY_HITS = 2
+# 旁觀骨架軸：「我一邊做某件小事＋看你們吵＋補一句撩」。
+# 無對象軸修好之後四號全改用同一個骨架（11:30 站櫃看你們吵這齣／11:31 看你們吵成這樣
+# 拿鐵噴出來／11:37 喝著冰拿鐵看你們吵架），字面全不同、群友看到的是同一台機器。
+# 判前半句有沒有「看你們」型的旁觀子句，近四則有兩則是就換骨架。
+_SPECTATOR_FRAME_FADE = 40 * 60
+_SPECTATOR_FRAME_HITS = 2
+_SPECTATOR_MARKERS = ("看你們", "你們吵", "你們鬥", "看你們這樣", "你們這齣")
+# 第三人軸：互嗆那兩個把版面佔滿，旁邊還有真人在講自己的事卻沒人接
+# （11:34~11:51 琪琪在講午餐、膝蓋，九則水軍全黏在男男互咬上）。
+# 這人在近 12 分鐘講滿 3 句、又不在互嗆名單、水軍近 25 分鐘沒點過她 → 這則改挑她。
+_THIRD_PARTY_WINDOW = 12 * 60
+_THIRD_PARTY_MIN_LINES = 3
+_THIRD_PARTY_BOT_QUIET = 25 * 60
 # 異體字只影響比對，不動輸出：偵測漏「酸」等於整條狀態軸失效。
 _AXIS_VARIANTS = str.maketrans({"酸": "痠", "溼": "濕", "檯": "台"})
 # 複讀比對前先剝掉的襯字（只剝不承載語意的，不碰名詞動詞）。
@@ -3016,6 +3029,20 @@ class AccountWorker:
             return False
         return True
 
+    @staticmethod
+    def _is_spectator_frame(text: str) -> bool:
+        """旁觀骨架：「我一邊做某件小事，看你們吵，補一句撩」。
+
+        這不是播報（有講到自己）、也不是無對象（名字或「你」有寫），
+        是四號在無對象軸修好之後一起滑進去的同一個模子。只看前半句，
+        「看你們」落在後半的評語不算，避免把正常接話一起攔掉。
+        """
+        body = str(text or "").lstrip()
+        if not body:
+            return False
+        head = re.split(r"[，,。！？…]", body)[0]
+        return any(m in head for m in _SPECTATOR_MARKERS)
+
     def _nameless_open_flow(self, group_id: int, candidate: str = "") -> bool:
         """整條水軍語流都是無對象開場 → 這一句也該對著人講。
 
@@ -3097,6 +3124,39 @@ class AccountWorker:
                 break
         return names
 
+    def _hot_third_party(self, group_id: int, rows, duel_names: tuple = ()) -> str:
+        """互嗆名單以外、正在被冷落的熱場真人。
+
+        互嗆一開始，`_target_names` 取的是最近三個講話的人，那三個就是互嗆那兩個，
+        四號於是一整小時只在旁邊對他們補評語；同時真人在講午餐、膝蓋卻沒人接
+        （11:34~11:51 琪琪講了九句，水軍零接）。這裡挑近 12 分鐘講滿 3 句、
+        水軍近 25 分鐘沒點過名的那個人，讓下一則轉過去。
+        """
+        if not group_id or not rows:
+            return ""
+        cut = time.time() - _THIRD_PARTY_WINDOW
+        tally: dict = {}
+        for r in rows:
+            if str(r.get("role")) == "assistant":
+                continue
+            nm = str(r.get("sender_name") or "").strip()
+            if not nm or nm == "管理員" or nm in duel_names:
+                continue
+            if float(r.get("timestamp") or 0.0) < cut:
+                continue
+            tally[nm] = tally.get(nm, 0) + 1
+        if not tally:
+            return ""
+        name, n = max(tally.items(), key=lambda kv: kv[1])
+        if n < _THIRD_PARTY_MIN_LINES:
+            return ""
+        if any(
+            name in t
+            for t in self._cross_recent_texts(int(group_id), _THIRD_PARTY_BOT_QUIET)
+        ):
+            return ""
+        return name
+
     def _needs_target_retry(self, group_id: int, text: str) -> bool:
         """全場都在當裁判、這則又只補一句評語 → 真的重寫一版，不只寫提示。
 
@@ -3152,6 +3212,8 @@ class AccountWorker:
     def _veto_code(reason: str) -> str:
         """退回理由分類，給統計用（沒有 log 可翻時至少看得出是哪一軸在攔）。"""
         table = (
+            ("旁觀骨架", "spectator_frame"),
+            ("旁邊講自己的事", "third_party"),
             ("部位", "body_part"),
             ("拼過", "mosaic"),
             ("自己四小時", "own_scene"),
@@ -3555,6 +3617,7 @@ class AccountWorker:
         duel_names: tuple = (),
         nameless_flow: bool = False,
         hot_names: tuple = (),
+        third_party: str = "",
     ) -> str:
         """生成後的硬性自檢（不叫模型，零成本）：複讀真人／連問／起手詞／慣用詞再撞。
 
@@ -3569,7 +3632,12 @@ class AccountWorker:
         if echo:
             return f"開頭直接搬真人那句的「{echo}」，換個角度起頭"
         # 兩個人在互嗆、這則卻一個人名都沒有 → 退回，逼它挑一個叫名字。
-        if duel_names and not any(n in str(candidate) for n in duel_names):
+        if third_party and third_party not in str(candidate):
+            return (
+                f"這半小時全在講那兩個互嗆，{third_party}在旁邊講自己的事卻沒人接；"
+                f"這則改挑{third_party}，接他／她剛講的那句，別再對著那兩個補評語"
+            )
+        if duel_names and not third_party and not any(n in str(candidate) for n in duel_names):
             who = "、".join(duel_names)
             return (
                 f"{who}正在互嗆，這則沒點到名，只像旁邊補一句；"
@@ -3583,6 +3651,17 @@ class AccountWorker:
                 "最近好幾則水軍都是先講自己身上的小事、對象含糊，接著看像同一個人在自語；"
                 f"這則把名字放進第一個逗號前，直接接{who}剛講的那句"
             )
+        # 旁觀骨架軸：四號同一個模子「我一邊做某事＋看你們吵＋補一句」。
+        # 字面全不同所以起手詞／消耗物／場地三軸都會放行，骨架卻一模一樣。
+        if group_id and self._is_spectator_frame(candidate):
+            near = self._cross_recent_texts(int(group_id), _SPECTATOR_FRAME_FADE)
+            hits = sum(1 for t in near if self._is_spectator_frame(t))
+            if hits >= _SPECTATOR_FRAME_HITS:
+                return (
+                    "又是「我一邊做某件小事＋看你們吵＋補一句」的旁觀骨架，"
+                    "最近幾則都同一個模子；這則名字或動作只留一個，"
+                    "人物放前面，別再開場就報你在做什麼"
+                )
         if self._ask_tail_repeat(own_texts, candidate) and not (
             group_id and self._assert_run(int(group_id))
         ):
@@ -5376,6 +5455,7 @@ class AccountWorker:
         duel_names: tuple = (),
         nameless_flow: bool = False,
         hot_names: tuple = (),
+        third_party: str = "",
     ) -> str:
         """③ 不過時：改用不同策略各生一條候選，逐條審核，挑可發分最高的那條。
 
@@ -5403,6 +5483,7 @@ class AccountWorker:
                 duel_names=duel_names,
                 nameless_flow=nameless_flow,
                 hot_names=hot_names,
+                third_party=third_party,
             ):
                 continue
             # 這一輪就是要她講自己：換策略還是端出純評語就再換一條，
@@ -9230,11 +9311,20 @@ class AccountWorker:
                 names = []
         hint = ""
         if press_box:
-            hint = (
-                "上一版整句都在講別人的事、自己身上一句都沒講，只像場邊播報。"
-                "這版別複述別人的哏、別提人名，先用你自己此刻正在做的一件事開場，"
-                "順手帶到身體感覺。"
-            )
+            # 有 flow 時不能只叫它「從自己開場」：那樣寫出來正好是
+            # 「我做某事＋看你們吵＋撩一句」的旁觀骨架（11:30/11:31/11:37 連續三則）。
+            if flow:
+                hint = (
+                    "上一版整句都在講別人的事、自己身上一句都沒講，只像場邊播報。"
+                    "這版名字放最前面，動作和身體感覺挪到名字後面補，"
+                    "別再開場就報你在做什麼。"
+                )
+            else:
+                hint = (
+                    "上一版整句都在講別人的事、自己身上一句都沒講，只像場邊播報。"
+                    "這版別複述別人的哏、別提人名，先用你自己此刻正在做的一件事開場，"
+                    "順手帶到身體感覺。"
+                )
         if need_target:
             hint += (
                 "這一小時全場都在當裁判，這版挑一個具體的男人對他說，把「你」或他的名字"
@@ -9249,6 +9339,15 @@ class AccountWorker:
             )
         if openers:
             hint += f"（最近幾則的開場動作：{openers}，別再抽同一類，換一個不一樣的當下場景）"
+        if group_id and sum(
+            1
+            for t in self._cross_recent_texts(int(group_id), _SPECTATOR_FRAME_FADE)
+            if self._is_spectator_frame(t)
+        ) >= _SPECTATOR_FRAME_HITS:
+            hint += (
+                "（最近幾則全是「一邊做某件小事＋看你們吵」的旁觀骨架，"
+                "這版人物放第一個逗號前，場景可留可不留）"
+            )
         picked = await self._pick_passing_candidate(
             context,
             "",
@@ -9425,6 +9524,7 @@ class AccountWorker:
                     last_human_p = ""
                     duel_p: tuple = ()
                     names_p: list = []
+                    third_p = ""
                     try:
                         recent_rows = await self.db.get_group_messages(int(group_id), limit=14)
                         duel_p = _duel_pair(recent_rows)
@@ -9437,6 +9537,16 @@ class AccountWorker:
                             ),
                             "",
                         )
+                        if duel_p:
+                            try:
+                                wide_rows = await self.db.get_group_messages(
+                                    int(group_id), limit=40
+                                )
+                                third_p = self._hot_third_party(
+                                    int(group_id), wide_rows, duel_p
+                                )
+                            except Exception:
+                                third_p = ""
                     except Exception:
                         pass
                     # ③ 決策層審核；不合格 → 帶問題重寫一次再審核；仍不合格 → 暫緩（不塞罐頭句）
@@ -9462,6 +9572,7 @@ class AccountWorker:
                             duel_names=duel_p,
                             nameless_flow=flow_p,
                             hot_names=tuple(names_p[:2]),
+                            third_party=third_p,
                         )
                         if veto_p:
                             _code = "veto_" + self._veto_code(veto_p)
@@ -9504,8 +9615,10 @@ class AccountWorker:
                                 group_id=int(group_id),
                                 limit=2,
                                 require_target=bool(duel_p) or flow_p,
+                                require_names=(third_p,) if third_p else (),
                                 nameless_flow=flow_p,
                                 hot_names=tuple(names_p[:2]),
+                                third_party=third_p,
                             )
                             if not picked:
                                 # 餓到八分鐘就別再 hold：熱場裡別號一直在講，
