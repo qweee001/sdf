@@ -4167,6 +4167,12 @@ class AccountWorker:
                 self._struct_mode = (
                     "short" if struct_roll < 0.35 else "dirty" if struct_roll < 0.70 else "scene"
                 )
+        self.stats[f"band_{self._struct_mode}"] = (
+            int(self.stats.get(f"band_{self._struct_mode}", 0)) + 1
+        )
+        self.stats[f"band_heat_{'hot' if heat >= _HOT_BURST_HUMANS else 'warm' if heat >= _WARM_BURST_HUMANS else 'cold'}"] = (
+            int(self.stats.get(f"band_heat_{'hot' if heat >= _HOT_BURST_HUMANS else 'warm' if heat >= _WARM_BURST_HUMANS else 'cold'}", 0)) + 1
+        )
         chosen_syntax = _STRUCT_SYNTAX[self._struct_mode]
         if self._struct_mode != "scene":
             # 心境輪替常抽到「生活瑣事」，它會逼你交代場景開場，把短碎又拉回長句。
