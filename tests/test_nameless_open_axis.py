@@ -260,3 +260,63 @@ def test_same_topic_veto_message():
     _seed(w, ["專一還是舔狗分很細欸"], age=8.0, tail=False)
     veto = w._local_veto("你也那麼專一嗎", [], "", GID)
     assert "別接著同一個詞" in veto
+
+
+# ---- 全滅時的退路 --------------------------------------------------------
+
+def test_all_candidates_vetoed_still_hands_back_a_rewrite():
+    """08:13–13:43 實測：veto_nameless_open 9 次、gate_forced_starved 15 次，
+    等於每一次退回最後都原句照發——這一軸只在記帳。被自檢退回的候選要留一條
+    退路，全滅時拿改寫版替換原句，至少句子換過了。"""
+    w = _worker()
+    _seed(w, _SCENE)
+    pool = [
+        "剛在客廳擦完乳液，誰要來抱我",
+        "邊剝橘子邊聽你們吵，手都黏了",
+        "泡完澡在吹頭髮，你們吵到哪去了",
+    ]
+
+    async def gen(_hint: str) -> str:
+        return pool.pop(0) if pool else ""
+
+    picked = asyncio.run(
+        w._pick_passing_candidate(
+            "ctx", "dir", "hint", gen, group_id=GID, limit=3,
+            nameless_flow=True, hot_names=("萬英尺",), require_target=True,
+        )
+    )
+    assert picked, "候選全被自檢攔時不能回空字串（呼叫方會改發被否決的原句）"
+    assert w.stats.get("gate_veto_carry") == 1
+
+
+def test_carry_prefers_a_candidate_with_a_name():
+    w = _worker()
+    _seed(w, _SCENE)
+    pool = [
+        "剛在客廳擦完乳液，誰要來抱我",
+        "萬英尺嘴這麼硬，先過來讓我驗一下",
+    ]
+
+    async def gen(_hint: str) -> str:
+        return pool.pop(0) if pool else ""
+
+    picked = asyncio.run(
+        w._pick_passing_candidate(
+            "ctx", "dir", "hint", gen, group_id=GID, limit=2,
+            nameless_flow=True, hot_names=("萬英尺",), require_target=True,
+        )
+    )
+    assert "萬英尺" in picked
+
+
+def test_no_candidate_at_all_still_returns_empty():
+    """生不出東西（模型全 timeout）時照舊回空字串，交給呼叫方決定。"""
+    w = _worker()
+    _seed(w, _SCENE)
+
+    async def gen(_hint: str) -> str:
+        return ""
+
+    assert asyncio.run(
+        w._pick_passing_candidate("ctx", "dir", "hint", gen, group_id=GID, limit=3)
+    ) == ""

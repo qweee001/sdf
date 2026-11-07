@@ -5468,6 +5468,12 @@ class AccountWorker:
         best_score = -1.0
         soft_text = ""
         soft_score = -1.0
+        # 被本機自檢退回的候選本來直接丟掉，於是「三個策略全被同一軸攔」時回空字串，
+        # 呼叫方只能把被否決的原句原封不動發出去（08:13–13:43 veto_nameless_open 9 次、
+        # gate_forced_starved 15 次，等於這一軸只記帳、沒改到輸出）。留一條最像樣的
+        # 退路：有名字的優先，全滅時拿它替換原句。
+        hold_text = ""
+        hold_bonus = -1
         for strategy in _GATE_REWRITE_STRATEGIES[: max(1, int(limit))]:
             try:
                 candidate = await generate(f"{base_hint}\n這次的寫法：{strategy}")
@@ -5485,6 +5491,10 @@ class AccountWorker:
                 hot_names=hot_names,
                 third_party=third_party,
             ):
+                bonus = 2 if any(n and n in candidate for n in hot_names) else 0
+                if bonus > hold_bonus:
+                    hold_bonus = bonus
+                    hold_text = candidate
                 continue
             # 這一輪就是要她講自己：換策略還是端出純評語就再換一條，
             # 別把同樣的播報句子當成「重寫成功」發出去。
@@ -5539,6 +5549,14 @@ class AccountWorker:
                 flush=True,
             )
             return soft_text
+        if not best_text and hold_text:
+            self.stats["gate_veto_carry"] = int(self.stats.get("gate_veto_carry", 0)) + 1
+            print(
+                f"[{self.name}] gate-veto-carry: 候選全被自檢攔，帶回改寫版照發 "
+                f"{hold_text[:20]!r}",
+                flush=True,
+            )
+            return hold_text
         return best_text
 
     async def _gate_reply(self, event, text: str) -> str:
@@ -5620,7 +5638,13 @@ class AccountWorker:
             picked = await self._pick_passing_candidate(
                 context,
                 directive,
-                f"上一版被自檢退回，具體問題：{veto}。換個講法重寫。",
+                f"上一版被自檢退回，具體問題：{veto}。換個講法重寫。"
+                + (
+                    "名字放句首、第一個逗號前就要有人，開頭別再報你在做什麼、"
+                    "也別寫「看你們」「你們」這種全場視角。"
+                    if flow
+                    else ""
+                ),
                 lambda hint: self._generate_reply(event, extra_hint=hint),
                 recent_bots=recent_bots,
                 own_texts=own_texts,
@@ -9606,7 +9630,13 @@ class AccountWorker:
                             picked = await self._pick_passing_candidate(
                                 context,
                                 "",
-                                f"上一版被老司機審查員退回，具體反饋：{feedback}。請針對這個問題換完全不同的在地表達方式重新演繹！",
+                                f"上一版被老司機審查員退回，具體反饋：{feedback}。請針對這個問題換完全不同的在地表達方式重新演繹！"
+                                + (
+                                    "名字放句首、第一個逗號前就要有人，開頭別再報你在做什麼、"
+                                    "也別寫「看你們」「你們」這種全場視角。"
+                                    if flow_p
+                                    else ""
+                                ),
                                 lambda hint: self._generate_context_topic(
                                     group_id, extra_hint=hint
                                 ),
