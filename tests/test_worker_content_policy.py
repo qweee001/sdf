@@ -259,6 +259,9 @@ def test_video_topic_reply_is_regenerated_instead_of_rewritten():
 def test_reply_at_exactly_forty_characters_is_accepted_without_retry():
     async def main():
         worker = _worker()
+        # 句型模式現在會帶自己的字數上限（短碎 26／色誘 34），40 字只有場景模式
+        # 整則收得下；這裡驗的是 40 字政策，所以模式釘死，不讓抽樣決定結果。
+        worker._struct_mode_force = "scene"
         text = "字" * 40
         worker._call_ai = AsyncMock(return_value=text)
 

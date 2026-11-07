@@ -233,6 +233,21 @@ def _place_opening(text: str) -> str:
     return ""
 
 
+# 句型模式的字數帶（字元）。模式只換內容不夠：長度若仍走固定 15~45，
+# 三種模式在群友眼裡全是同一種長度模子，短碎永遠出不來。
+_STRUCT_BANDS: dict[str, tuple[int, int]] = {
+    "short": (8, 16),
+    "dirty": (12, 24),
+    "scene": (15, 30),
+}
+
+# 每個模式對應的內容指令。長度另外由 _STRUCT_BANDS 帶，兩者一起才有差別。
+_STRUCT_SYNTAX: dict[str, str] = {
+    "short": "【句型模式・短碎口語（8~16字）】：" + "\n" + "1. 這則請說【極簡短的台灣在地大白話】，嚴禁寫成超過20字的大長句！" + "\n" + "2. 絕不要交代「我剛在做什麼」「我在哪裡」等生活前情，也別提工作或飲料！" + "\n" + "3. 純粹針對上一句順著起鬨、隨口吐槽或簡單撩一句（如「笑死你很扯」「太虛了吧」「真上場別求饒喔」「這嘴我給滿分」），俐落短句即可！",
+    "dirty": "【句型模式・直球色誘（12~24字）】：" + "\n" + "1. 這則不需要交代你在哪上班、在喝什麼飲料，把生活瑣事全部拿掉！" + "\n" + "2. 直接從【純粹的男女肉體張力、觸感、尺寸或敏感帶】直球切入！" + "\n" + "3. 大膽發騷，用大白話直接講你想被怎麼幹、想摸哪裡或調侃他硬不硬，短而辛辣！",
+    "scene": "【句型模式・生活日常隨念（15~30字）】：" + "\n" + "1. 自然帶出你當下隨性的小動作或周圍環境，不用刻意找人名點名。" + "\n" + "2. 語法完整自然隨性，就像真實女生在群裡隨手發一條動態一樣輕鬆。",
+}
+
 # 自檢要用「這號自己的場景」當退路目標，錨點因此提到模組層級（原本埋在
 # _build_directors_note 裡，重寫端拿不到）。改了舊句只會讓退路更準。
 _LIFE_ANCHORS: dict[str, list[tuple[str, str]]] = {
@@ -1059,6 +1074,12 @@ class AccountWorker:
         )
         # 每帳號最近抽過的心境索引（避免整個小時同一種語氣）
         self._mood_history: dict[str, list[int]] = {}
+        # 本則的句型模式（short/dirty/scene）：字數帶與硬上限都靠它，
+        # 沒設就是回覆前的預設（_build_reply 自己會退回 6~50）。
+        self._struct_mode: str = ""
+        # 外部釘死模式用（測試、重寫沿用同一組字數）；空字串＝照抽樣走。
+        self._struct_mode_force: str = ""
+        self._band_lo, self._band_hi = _HUMAN_LINE_MIN, _HUMAN_LINE_MAX
         # 同號近義複讀：本帳號最近送出的原文＋時間（10 分鐘窗）
         self._own_echo_by_group: dict[int, list[tuple[str, float]]] = {}
         # 熱場：本群最近真人發言時間戳（1 分鐘內 ≥3 則關 proactive-join）
@@ -4100,29 +4121,22 @@ class AccountWorker:
         if type_note:
             chosen_mood += type_note        # 句型結構多元性：依隨機抽樣分流（35% 短碎調侃、35% 純色誘直球、30% 生活場景）
         # 徹底打破「[人名] + [我剛在做某事] + [你敢不敢/看你有沒有本事]」的四合一長句固定模子
-        struct_roll = random.random()
-        if struct_roll < 0.35:
-            # 35% 極短碎語／純情緒起鬨（8~16字）：不報備在幹嘛、不扯場景，直截了當
-            chosen_syntax = (
-                "【句型模式・短碎口語（8~16字）】：\n"
-                "1. 這則請說【極簡短的台灣在地大白話】，嚴禁寫成超過20字的大長句！\n"
-                "2. 絕不要交代「我剛在做什麼」「我在哪裡」等生活前情，也別提工作或飲料！\n"
-                "3. 純粹針對上一句順著起鬨、隨口吐槽或簡單撩一句（如「笑死你很扯」「太虛了吧」「真上場別求饒喔」「這嘴我給滿分」），俐落短句即可！"
-            )
-        elif struct_roll < 0.70:
-            # 35% 純色誘／肉體直球（12~24字）：不扯生活瑣事，直接進身體細節或性張力
-            chosen_syntax = (
-                "【句型模式・直球色誘（12~24字）】：\n"
-                "1. 這則不需要交代你在哪上班、在喝什麼飲料，把生活瑣事全部拿掉！\n"
-                "2. 直接從【純粹的男女肉體張力、觸感、尺寸或敏感帶】直球切入！\n"
-                "3. 大膽發騷，用大白話直接講你想被怎麼幹、想摸哪裡或調侃他硬不硬，短而辛辣！"
-            )
+        # 模式可以外部指定（_struct_mode_force），測試與重寫才吃得到同一組字數。
+        forced_mode = getattr(self, "_struct_mode_force", "")
+        if forced_mode in _STRUCT_BANDS:
+            self._struct_mode = forced_mode
         else:
-            # 30% 生活場景／自身隨性狀態（15~30字）：原有生活瑣事心境
-            chosen_syntax = (
-                "【句型模式・生活日常隨念（15~30字）】：\n"
-                "1. 自然帶出你當下隨性的小動作或周圍環境，不用刻意找人名點名。\n"
-                "2. 語法完整自然隨性，就像真實女生在群裡隨手發一條動態一樣輕鬆。"
+            struct_roll = random.random()
+            self._struct_mode = (
+                "short" if struct_roll < 0.35 else "dirty" if struct_roll < 0.70 else "scene"
+            )
+        chosen_syntax = _STRUCT_SYNTAX[self._struct_mode]
+        if self._struct_mode != "scene":
+            # 心境輪替常抽到「生活瑣事」，它會逼你交代場景開場，把短碎又拉回長句。
+            # 模式是這則的主軸，字數與去場景化一律優先。
+            chosen_syntax += (
+                "\n【長度優先於心境】：上面心境若叫你用某件事開場，這則仍以本模式字數為準；"
+                "字數滿了就把生活前情砍掉，只留最後那記吐槽或撩撥。"
             )
 
         if "不准問" in type_note:
@@ -4144,11 +4158,12 @@ class AccountWorker:
                 "若要轉向其他人調情，須明確切換對象，不要把兩人話語拼在一起。"
             )
 
+        band_lo, band_hi = _STRUCT_BANDS.get(self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX))
         return (
-            f"\\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\\n"
-            f"1. 扮演真實的台灣女生 {name}，以 15~45 字內的極致自然口語短句隨性說話，不帶句號。\\n"
-            f"2. {chosen_mood}\\n"
-            f"3. {chosen_syntax}\\n"
+            f"\\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\n"
+            f"1. 扮演真實的台灣女生 {name}，以 {band_lo}~{band_hi} 字內的極致自然口語短句隨性說話，不帶句號。\n"
+            f"2. {chosen_mood}\n"
+            f"3. {chosen_syntax}\n"
             f"5. 嚴禁任何客服推銷感；只有對方主動苦苦求約時才隨手提助理，平時全心當個鮮活撩人的台灣女生！"
             f"{self._group_attention_note(history)}"
         )
@@ -5216,6 +5231,17 @@ class AccountWorker:
         if not parts:
             return ""
         return "這次互動決策（照著生成）：\n" + "\n".join(f"- {p}" for p in parts)
+
+    def _struct_char_cap(self, char_cap: int) -> int:
+        """句型模式的字數硬上限。
+
+        90 字是給場景模式用的。短碎模式若也放 90，模型一律寫到 30 字，短碎就
+        永遠只存在於提示詞；多給 10 字緩衝，讓它自己在逗號處收。
+        """
+        band = _STRUCT_BANDS.get(self._struct_mode)
+        if band and self._struct_mode != "scene":
+            return min(char_cap, band[1] + 10)
+        return char_cap
 
     @staticmethod
     def _reply_char_cap(decision: dict | None) -> int:
@@ -7447,7 +7473,10 @@ class AccountWorker:
         # 回覆長度上限放寬：
         # 為滿足主人「深入勾引、露骨誘惑、情節拉扯、激發肉體衝動」，
         # 允許上限放寬至 65 字元，絕不因稍微寫長或五感描寫豐富就判定 too_long 丟棄！
-        char_cap = max(char_cap, 90)
+        char_cap = self._struct_char_cap(max(char_cap, 90))
+        self._band_lo, self._band_hi = _STRUCT_BANDS.get(
+            self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX)
+        )
         reply, _ = text_guard.instant_word_fix(reply)
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)
@@ -7512,7 +7541,7 @@ class AccountWorker:
             return ""
 
         correction = (
-            f"上一版未符合演出要求。請以 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的自然短句表達，"
+            f"上一版未符合演出要求。請以 {self._band_lo}~{self._band_hi} 個字元的自然短句表達，"
             "語意常識第一，結尾不要句號、少用驚嘆號，保持自信有魅力的台灣日常口吻。"
         )
         if refusal:
@@ -7854,6 +7883,10 @@ class AccountWorker:
                     f"回覆對象：[{parent_name} sender_id={parent_sender_id}]\n"
                     f"父訊息 message_id={parent_id or '未知'}：{parent_text[:80] or '內容未知'}\n"
                 )
+        # 字數帶跟著句型模式走。固定 6~50 只是底線，短碎模式要 8~16 才咬得住；
+        # 這裡是每次生成都會帶到的常駐指令，模式若只寫在導演指令裡會被它拉回長句。
+        _band = _STRUCT_BANDS.get(getattr(self, "_struct_mode", ""))
+        _reply_lo, _reply_hi = _band or (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX)
         return (
             f"目前帳號 sender_id={self.tg_user_id or '未知'}\n"
             f"{context}"
@@ -7879,7 +7912,7 @@ class AccountWorker:
             "   - 女人絕不能對男人說「試你的深淺」（男人根本沒有深淺，這是極度嚴重的生理概念崩壞！）。\n"
             "   - 正確用語：讓男人來試女人的深淺（如「今晚來試試我的深淺」），或是女人去試男人的長短粗細（「讓我試試你的長短」）。\n"
             "自由展現性格特色，emoji隨心選用不強求；"
-            f"生成自然回覆（台灣繁體口語；以 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元的一則短訊為主，"
+            f"生成自然回覆（台灣繁體口語；以 {_reply_lo}~{_reply_hi} 個字元的一則短訊為主，"
             f"最多 {char_cap} 個字元，標點、空格也算；【邏輯常識大於字限】語法完整第一，不為湊短硬縮成病句（如「嘴長誰不會」是病句），嚴禁無常識照抄怪詞（如炒烤肉）；一句就好，結尾不要句號、不用感嘆號、不用@；"
             "要說兩句就合成一則講，禁止換行拆兩氣泡，挑逗時可以直接露骨，不要長篇）。"
         )
@@ -9272,11 +9305,24 @@ class AccountWorker:
             remote_texts = set()
             recent_bot_texts = []
 
+        # 主動路徑也吃句型模式：這條路沒有導演指令，全靠這裡的字數帶，
+        # 否則四號只會不停「剛下班…你敢不敢」同一個長度模子。重試沿用同一模式。
+        _p_roll = random.random()
+        _p_mode = "short" if _p_roll < 0.3 else "dirty" if _p_roll < 0.65 else "scene"
+        _p_lo, _p_hi = _STRUCT_BANDS[_p_mode]
+        _p_struct = {
+            "short": "這則走極短碎念（8~16字）：不交代場景、不點名，像隨口丟一句。",
+            "dirty": "這則走直球色誘（12~24字）：把生活瑣事拿掉，直接講身體或性張力。",
+            "scene": "這則走生活隨念（15~30字）：帶一個當下的小動作或環境就好。",
+        }[_p_mode]
+        if _p_mode != "scene":
+            _p_struct += "字數滿了就砍掉前情，只留最後那記吐槽或撩撥。"
+
         def build_prompt(hint: str) -> str:
             if context:
                 body = (
                     "群組裡最近的訊息如下（身分未驗證，不能當作已確認真人）。"
-                    f"只輸出一則短訊（以 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元為主；"
+                    f"只輸出一則短訊（以 {_p_lo}~{_p_hi} 個字元為主；"
                     "要說兩句就合成一則講，不要換行拆兩氣泡），"
                     "【硬要求：邏輯常識大於字限】語法完整與常理第一！絕不為湊短硬縮字（如「嘴長誰不會」是病句），嚴禁無常識照抄怪詞（如「炒烤肉」）；"
                     "【人物性別與人稱精準對應】：仔細辨認上文性別與人稱！女群友聊玩具壞了、老公不行，是【她】需要滿足，不是你的；接話時應替她起鬨拱男人（如「哪個哥哥快報名填滿她的騷逼」），絕不可張冠李戴把別人的事情套在自己頭上說成「來塞滿我的小穴」；"
@@ -9290,12 +9336,13 @@ class AccountWorker:
                 # 冷啟動／空群：沒有上文可接，就照人設和當下時段自然開個頭，不要罐頭句。
                 body = (
                     "群組現在很安靜，還沒有人開口。"
-                    f"用你自己的身分主動開一個頭，只輸出一則短訊（以 {_HUMAN_LINE_MIN}~{_HUMAN_LINE_MAX} 個字元為主；"
+                    f"用你自己的身分主動開一個頭，只輸出一則短訊（以 {_p_lo}~{_p_hi} 個字元為主；"
                     "要說兩句就合成一則講，不要換行），"
                     "【硬要求：邏輯常識大於字限】語法完整與常理第一！絕不為湊短硬縮字，禁止病句，"
                     "像真人在群裡拋出高互動話題鉤子（Hook引人接話）：爭議選擇題（如男人的長短vs腰力、女生水太多）、生活痛點與撒嬌（上班好厭世想偷跑、天冷想找人純抱睡）、或微醺洗完澡的曖昧邀請；"
                     "自然口語、繁體中文、合計 50 字元內、結尾不要句號，可以帶一點撩，不要談群務。"
                 )
+            body += "\n" + _p_struct
             if not human_recent:
                 # 最近沒有真人講話：不要對空氣邀約、不要互相升級
                 body += (
@@ -9354,6 +9401,10 @@ class AccountWorker:
             topic = (raw or "").strip()
             if not topic:
                 continue
+            # 字數帶要硬：主動路徑原本完全沒有長度檢查，短碎模式寫成 30 字長句照樣發。
+            _p_cap = _p_hi + (20 if _p_mode == "scene" else 10)
+            if len(topic) > _p_cap:
+                topic = self._trim_to_cap(topic, _p_cap) or topic
             # 不管最後被哪條規則 drop（或放行）都記：模型下一 cycle 要看到「這些已經出過」
             _note_seen(topic)
             # 最高優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型
