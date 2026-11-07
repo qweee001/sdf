@@ -112,7 +112,9 @@ def test_cold_start_forces_a_target_even_with_no_sample():
     w._recent_texts_by_group[GID] = []
     w._recent_texts_at[GID] = []
     assert w._nameless_open_flow(GID, "剛買冰美式進辦公室就開始摸魚，哥哥今天不忙嗎")
-    assert not w._nameless_open_flow(GID, _NAMED)
+    # 這句自己有名字也一樣：軸是看語流，名字由 _local_veto 放行
+    assert w._nameless_open_flow(GID, _NAMED)
+    assert w._local_veto(_NAMED, [], "", GID, nameless_flow=True, hot_names=("後天",)) == ""
 
 
 def test_partial_sample_ramps_up_the_requirement():
@@ -177,10 +179,13 @@ def test_flow_needs_a_density_once_the_sample_is_full():
     assert w._nameless_open_flow(GID, _SCENE[0])
 
 
-def test_flow_off_when_the_candidate_names_someone():
+def test_flow_is_judged_on_the_stream_not_on_this_line():
+    """10:31 Chen：主題有點名，寫出來卻退回自己身上 → 軸要照樣啟動。"""
     w = _worker()
     _seed(w, _SCENE)
-    assert not w._nameless_open_flow(GID, _NAMED)
+    named_line = "剛用蒸氣熨鬥燙好展示架的洋裝，那包子看起來很可以，只問妹妹不打算連姊姊的嘴一起餵飽嗎"
+    assert w._nameless_open_flow(GID, named_line)
+    assert "第一個逗號前" in w._local_veto(named_line, [], "", GID, nameless_flow=True, hot_names=("和進出口",))
 
 
 def test_flow_off_when_the_stream_is_already_objected():

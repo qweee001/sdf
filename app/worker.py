@@ -3016,9 +3016,15 @@ class AccountWorker:
             return False
         return True
 
-    def _nameless_open_flow(self, group_id: int, candidate: str) -> bool:
-        """整條水軍語流都是無對象開場，這則也一樣 → 該逼它對著一個人講。"""
-        if not group_id or not self._is_nameless_open(candidate, int(group_id)):
+    def _nameless_open_flow(self, group_id: int, candidate: str = "") -> bool:
+        """整條水軍語流都是無對象開場 → 這一句也該對著人講。
+
+        判的是「語流」，不是這一句：開群時主題常常有點名，寫出來卻又退回
+        自己身上的小事（10:31 Chen「剛用蒸氣熨鬥燙好展示架的洋裝…只問妹妹」），
+        拿這句當前提要它自己承認無對象，軸就永遠不啟動。這裡只看前面幾則；
+        這句自己已經有名字的，交給 `_local_veto` 放行即可。
+        """
+        if not group_id:
             return False
         recent = self._cross_recent_texts(int(group_id), _NAMELESS_OPEN_WINDOW)[-8:]
         if not recent:
