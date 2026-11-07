@@ -118,7 +118,7 @@ def test_reply_prompt_without_mode_falls_back_to_human_band():
 def test_cap_is_clamped_for_short_mode_only():
     w = _worker()
     w._struct_mode = "short"
-    assert w._struct_char_cap(90) == 26
+    assert w._struct_char_cap(90) == 20
     w._struct_mode = "dirty"
     assert w._struct_char_cap(90) == 34
     w._struct_mode = "scene"
