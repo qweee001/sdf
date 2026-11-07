@@ -320,3 +320,19 @@ def test_no_candidate_at_all_still_returns_empty():
     assert asyncio.run(
         w._pick_passing_candidate("ctx", "dir", "hint", gen, group_id=GID, limit=3)
     ) == ""
+
+
+def test_greeting_plus_own_scene_is_nameless():
+    """13:35 小小「哈囉，擦完身體乳全身滑溜溜的正躺平放空呢」：招呼只有兩個字，
+    短句規則整句放行，實際上名字一個都沒有，只是自己在演。招呼要剝掉再看。"""
+    w = _worker()
+    _seed(w, _SCENE)
+    assert w._is_nameless_open("哈囉，擦完身體乳全身滑溜溜的正躺平放空呢", GID)
+    assert w._is_nameless_open("早安，剛把咖啡機拆下去洗", GID)
+
+
+def test_greeting_plus_a_target_still_passes():
+    w = _worker()
+    _seed(w, _SCENE)
+    assert not w._is_nameless_open("哈囉，你要不要過來幫我擦背", GID)
+    assert not w._is_nameless_open("嗨 萬英尺 昨天那攤你買單嗎", GID)

@@ -2460,6 +2460,9 @@ class AccountWorker:
         return f"（你最近講過：{'／'.join(lines)}，這則換個不一樣的場景或切入）"
 
     _OPEN_STRIP = "「」『』（(【[ 　~～!！.。…"
+    # 只有招呼、沒有對象的開頭（「哈囉，擦完身體乳…」）。招呼本身不算對象，
+    # 要把它剝掉改看接在後面那段，否則短句規則會整句放行。
+    _GREETING_HEAD = ("哈囉", "哈啰", "嗨", "安安", "hello", "Hello", "hi", "早安", "午安", "晚安")
 
     def _remember_speaker_name(self, group_id: int, name: str) -> None:
         """記住群裡出現過的發言者名稱（含姊妹自己的暱稱），供起手詞剝名用。"""
@@ -3014,6 +3017,19 @@ class AccountWorker:
         if any(body.startswith(n) for n in names):
             return False
         head = re.split(r"[，,]", body)[0].strip()
+        # 「哈囉，擦完身體乳全身滑溜溜的正躺平放空呢」13:35 實測：招呼只有兩個字，
+        # 被下面的短句規則當成「有在對人講」整句放行，可整句只有自己在演。
+        # 開頭純招呼（且不含人名）就把招呼剝掉，改看後面那一段。
+        if head and len(head) < 6 and not any(n in head for n in names):
+            for _g in self._GREETING_HEAD:
+                if body.startswith(_g):
+                    rest = body[len(_g):].lstrip(self._OPEN_STRIP + "，,、：:")
+                    if rest:
+                        if any(rest.startswith(n) for n in names):
+                            return False
+                        body = rest
+                        head = re.split(r"[，,]", rest)[0].strip()
+                    break
         if len(head) < 6:
             return False
         bare = head.replace("你們", "").replace("大家", "")
