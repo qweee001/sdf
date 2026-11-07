@@ -8709,9 +8709,17 @@ class AccountWorker:
         self._last_realtime_voice = time.time()
         return bound
 
+    # 真人剛講完就讓路，但窗口不能太長：這一群白天一分鐘 2~3 句、幾乎永遠有人在講話，
+    # 原本的 10 分鐘等於「整天都不准主動」，四號只能靠回覆，而回覆八成被插話取消，
+    # 20:14–20:23 九分鐘全體沒出聲就是這樣。真正會撞話的是前 2 分鐘，之後接一句很正常。
+    _PROACTIVE_HUMAN_QUIET_SECONDS = 120.0
+
     def _should_suppress_proactive(self, group_id: int) -> bool:
         last_human = float(self.last_human_activity.get(int(group_id), 0) or 0)
-        return last_human > 0 and time.time() - last_human < 10 * 60
+        return (
+            last_human > 0
+            and time.time() - last_human < self._PROACTIVE_HUMAN_QUIET_SECONDS
+        )
 
     def _hot_field(self, group_id: int) -> bool:
         """1 分鐘內真人 ≥3 則＝熱場，關掉 proactive-join，名額留給 reply。"""

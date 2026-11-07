@@ -81,3 +81,15 @@ def test_suppress_proactive_uses_backfilled_activity():
     assert worker._should_suppress_proactive(-5428680940) is True
     worker2 = _worker(sorted(MANAGED)[0], last_human_activity={})
     assert worker2._should_suppress_proactive(-5428680940) is False
+
+
+def test_suppress_window_is_two_minutes_not_ten():
+    """白天的群幾乎永遠有人在講話，10 分鐘的讓路窗口等於整天不准主動。
+
+    2 分鐘內：讓路（會撞話）；5 分鐘前：可以接（正常人本來就會隔幾句插回來）。
+    """
+    gid = -5428680940
+    recent = _worker(sorted(MANAGED)[0], last_human_activity={gid: time.time() - 60})
+    assert recent._should_suppress_proactive(gid) is True
+    stale = _worker(sorted(MANAGED)[0], last_human_activity={gid: time.time() - 300})
+    assert stale._should_suppress_proactive(gid) is False
