@@ -4098,40 +4098,37 @@ class AccountWorker:
             own_texts, int(getattr(event, "chat_id", 0) or 0), history
         )
         if type_note:
-            chosen_mood += type_note
-
-        # 動態句式引導：整段都在問就硬轉斷言，剛好相反時把問句要回來
-        if "不准問" in type_note:
+            chosen_mood += type_note        # 句型結構多元性：依隨機抽樣分流（35% 短碎調侃、35% 純色誘直球、30% 生活場景）
+        # 徹底打破「[人名] + [我剛在做某事] + [你敢不敢/看你有沒有本事]」的四合一長句固定模子
+        struct_roll = random.random()
+        if struct_roll < 0.35:
+            # 35% 極短碎語／純情緒起鬨（8~16字）：不報備在幹嘛、不扯場景，直截了當
             chosen_syntax = (
-                "【句式多元指令（嚴禁連續反問與天氣開場）】：\n"
-                "1. 上一句水軍已在發問或近期反問過多，這條發言【絕對禁止】以「…嗎？」「…吧？」反問收尾！\n"
-                "2. 【絕對禁止】以「外面太陽大」「天氣熱」等天氣氣候作為開頭或話題主軸（當前室外熱是背景，不是聊天話題）！\n"
-                "3. 必須直接針對當前群組最熱門的上一句話題、群友外號或貼圖圖片進行自然吐槽、下斷言或分享當下動作，乾脆俐落收尾。"
-                "\n4. 上一句水軍就是問句，這則【結尾一定要落在斷言或動作】，不准再用「嗎」「吧」「呢」或問號收尾。"
+                "【句型模式・短碎口語（8~16字）】：\n"
+                "1. 這則請說【極簡短的台灣在地大白話】，嚴禁寫成超過20字的大長句！\n"
+                "2. 絕不要交代「我剛在做什麼」「我在哪裡」等生活前情，也別提工作或飲料！\n"
+                "3. 純粹針對上一句順著起鬨、隨口吐槽或簡單撩一句（如「笑死你很扯」「太虛了吧」「真上場別求饒喔」「這嘴我給滿分」），俐落短句即可！"
             )
-        elif "問句收尾" in type_note:
+        elif struct_roll < 0.70:
+            # 35% 純色誘／肉體直球（12~24字）：不扯生活瑣事，直接進身體細節或性張力
             chosen_syntax = (
-                "【句式指令・把問句要回來】：\n"
-                "1. 最近幾則水軍全在幫人下判斷，群友只能被裁決、接不到話，這則【結尾一定是一個真問題】。\n"
-                "2. 問句要具體（問他一個動作、一個時間、一個身體反應），不准問「對不對」「好不好」這種填充問句。\n"
-                "3. 【絕對禁止】以「外面太陽大」「天氣熱」開頭，也不要開頭就引述別人再補評語。"
-            )
-        elif random.random() < 0.65:
-            chosen_syntax = (
-                "【句式要求・簡短自然】：\n"
-                "1. 開頭禁止使用「光會」「笑死」「只會」「連…都」「去什麼」等固定套路詞！\n"
-                "2. 【絕對禁止】以「外面太陽大」「天氣熱」等天氣氣候作為開頭！\n"
-                "3. 用自然第一人稱或直觀動作開場（如「我剛剛…」「等等」「好啦」「其實…」），俐落隨性。"
-                "\n4. 這則可以自然帶問句，但別跟上一句同一個問法。"
+                "【句型模式・直球色誘（12~24字）】：\n"
+                "1. 這則不需要交代你在哪上班、在喝什麼飲料，把生活瑣事全部拿掉！\n"
+                "2. 直接從【純粹的男女肉體張力、觸感、尺寸或敏感帶】直球切入！\n"
+                "3. 大膽發騷，用大白話直接講你想被怎麼幹、想摸哪裡或調侃他硬不硬，短而辛辣！"
             )
         else:
-            # 三條分支都落空（沒 notes 又抽到 0.65 以上）時要有底：不然 chosen_syntax
-            # 沒綁定，下面 f-string 直接 UnboundLocalError，整則回覆炸掉。
+            # 30% 生活場景／自身隨性狀態（15~30字）：原有生活瑣事心境
             chosen_syntax = (
-                "【句式要求・自然口語】：\n"
-                "1. 直接用第一人稱當下動作或一句直球開場，不要引述別人、不要天氣開場。\n"
-                "2. 句子短，收在斷言或動作，問句最多一個。"
+                "【句型模式・生活日常隨念（15~30字）】：\n"
+                "1. 自然帶出你當下隨性的小動作或周圍環境，不用刻意找人名點名。\n"
+                "2. 語法完整自然隨性，就像真實女生在群裡隨手發一條動態一樣輕鬆。"
             )
+
+        if "不准問" in type_note:
+            chosen_syntax += "\n【句式多元指令（嚴禁連續反問）】：上一句水軍就是問句，這則【結尾一定要落在斷言或動作】，【絕對禁止】以「…嗎？」「…吧？」反問收尾。"
+        elif "問句收尾" in type_note:
+            chosen_syntax += "\n【句式指令・把問句要回來】：最近水軍全在下判斷，這則【結尾一定是一個真問題】，讓群友能自然接話。"
 
         # 定向對象優先於抽到的情緒：女性同伴不能被當作男客套用性挑逗。
         peer_gender = ""
@@ -5955,8 +5952,34 @@ class AccountWorker:
             self._burst_register(group_id, picked)
             self._mark_echo_if_any(group_id, picked, echo_humans)
             return picked
+        # 降級放行策略（避免啞巴失蹤）：若換策略重寫仍不合格，且已確定群內有真空（由 group_bot_last_spoke 記錄），
+        # 且非嚴重致命錯誤（無簡體/無代碼洩漏/非時段嚴重違規），才降級為真實日常極短口語，確保群裡不徹底死寂
+        spoke_map = getattr(self.db, "group_bot_last_spoke_data", None)
+        has_vacuum = False
+        if spoke_map is not None:
+            last = max(float(t or 0.0) for t in spoke_map.values()) if spoke_map else 0
+            if last and time.time() - last >= 360:
+                has_vacuum = True
+
+        if has_vacuum and not (self._has_format_leak(text) or self._has_simplified_chars(text) or self._has_time_mismatch(text)):
+            degraded_pool = [
+                "笑死，你很扯欸",
+                "太誇張了吧",
+                "真假啦🤣",
+                "你嘴巴真的很壞欸",
+                "看你們聊成這樣也是蠻好笑的",
+                "先去洗把臉冷靜一下啦",
+                "嘴砲王非你莫屬欸",
+            ]
+            import random
+            degraded_text = random.choice(degraded_pool)
+            self.stats["gate_degraded_pass"] = int(self.stats.get("gate_degraded_pass", 0)) + 1
+            print(f"[{self.name}] gate-degraded: 真空期重寫未達標，降級為短碎句放行 {degraded_text!r}", flush=True)
+            self._burst_register(group_id, degraded_text)
+            return degraded_text
+
         self.stats["gate_held"] = int(self.stats.get("gate_held", 0)) + 1
-        print(f"[{self.name}] gate-hold: 換策略重寫仍不合格，暫緩", flush=True)
+        print(f"[{self.name}] gate-hold: 換策略重寫仍不合格且含硬傷，暫緩", flush=True)
         return ""
 
     async def _apply_decision(self, event, *, forced_text: bool):
