@@ -9533,6 +9533,14 @@ class AccountWorker:
                 topic = self._trim_to_cap(topic, _p_cap) or topic
             # 不管最後被哪條規則 drop（或放行）都記：模型下一 cycle 要看到「這些已經出過」
             _note_seen(topic)
+            # 全英文碎片：21:31/21:35 主動路徑連發「Im thinking through」「Initial suspicion is」，
+            # 是模型把思考前言當答案。回覆路徑早有 cjk<2 這關，主動路徑漏掉。
+            if len(re.findall(r"[\u4e00-\u9fff]", topic)) < 2:
+                print(f"[{self.name}] proactive-drop: 無中文碎片 {topic[:24]!r}", flush=True)
+                self.stats["proactive_drop_nochinese"] = (
+                    int(self.stats.get("proactive_drop_nochinese", 0)) + 1
+                )
+                continue
             # 最高優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型
             # 即使同時命中簡體、時段或性別違規，只要屬於複讀就一律直接放棄當輪發言
             if self._is_own_echo(topic, self._own_echo_recent(group_id)):

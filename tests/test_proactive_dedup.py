@@ -239,3 +239,29 @@ def test_claim_group_text_blocks_cross_account_duplicate():
             assert ok3 is True
 
     asyncio.run(main())
+
+
+def test_english_fragment_is_dropped_and_retried():
+    """模型把思考前言當答案（Im thinking through／Initial suspicion is）不能進群。
+
+    回覆路徑已有 cjk<2 這關，主動路徑 21:31、21:35 連兩則英文碎片，這關要一致。
+    """
+
+    async def main():
+        from unittest.mock import AsyncMock
+
+        worker = _worker(
+            303,
+            db=_TopicDB(msgs=[
+                {"role": "user", "sender_name": "群友", "sender_id": 7, "content": "今晚好熱"}
+            ]),
+        )
+        worker._call_ai = AsyncMock(side_effect=[
+            "Im thinking through",
+            "擦著乳液看你們聊，手都停不下來",
+        ])
+        text = await worker._generate_context_topic(-5428680940)
+        assert "thinking" not in text
+        assert worker.stats.get("proactive_drop_nochinese") == 1
+
+    asyncio.run(main())
