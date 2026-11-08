@@ -1112,6 +1112,9 @@ class AccountWorker:
         self._proactive_today = 0
         self._proactive_day = 0
         self._human_today_cache: dict[int, tuple[float, int]] = {}  # gid -> (查詢時間, 真人句數)
+        # 備援模型死了就別再排：agnes-2.5-flash 在網關是 404（模型不存在），
+        # 每次逃生四個階段各排它一次，等於每階白燒一次呼叫、還拖長生成時間。
+        self._dead_models: dict[str, int] = {}
         self._recent_proactive_topics: set[str] = set()
         # 跨 cycle 的反重複記憶：每群最近生成過的主動話題（接受或都被 drop 的都記），
         # 最舊在前、最新在後、上限 12。沒有它，模型每個 cycle 都從零開始、把同一批露骨
@@ -8645,6 +8648,9 @@ class AccountWorker:
             body += ("\n" + extra) if extra else ""
             body += "\n直接寫出你會打出的那一行。"
             for model in (None, *self._fallback_models):
+                if not self._model_alive(model):
+                    self._pcount("dead_model_skipped")
+                    continue
                 self.stats["refusal_escape_try"] = (
                     int(self.stats.get("refusal_escape_try", 0)) + 1
                 )
@@ -8670,6 +8676,15 @@ class AccountWorker:
                     self._pcount(f"refusal_escape_stage{index + 1}")
                 return text
         return ""
+
+    def _model_alive(self, model: str | None) -> bool:
+        """備援模型連兩次 NotFound 就當它不存在，這一輪不再排它。
+
+        主模型（model=None 走設定值）永遠放行：真的壞了上層會自己計數。
+        """
+        if not model:
+            return True
+        return self._dead_models.get(model, 0) < 2
 
     async def _call_ai(
         self,
@@ -8783,6 +8798,7 @@ class AccountWorker:
                 cost_status=cost_status,
             )
             if content:
+                self._dead_models.pop(model, None)
                 self.stats["dbg_usage"] = f"{prompt_tokens}/{completion_tokens}"
                 self.stats["dbg_raw"] = str(content)[:200]
                 cleaned = self._clean_ai_content(content)
@@ -8792,6 +8808,8 @@ class AccountWorker:
             # API 層錯誤（如 402 欠費）與「模型回空」分開計數，控制台一眼看得出，
             # 同時寫入 _recent_errors（附帶 purpose/model）供 /api/status 即時診斷。
             self.stats["ai_api_errors"] = int(self.stats.get("ai_api_errors", 0)) + 1
+            if "NotFound" in type(e).__name__:
+                self._dead_models[model] = int(self._dead_models.get(model, 0)) + 1
             try:
                 stamp = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
                 self._recent_errors.append(
