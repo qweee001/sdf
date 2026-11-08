@@ -8248,7 +8248,22 @@ class AccountWorker:
                     {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
                 ]
                 request_kwargs["extra_body"] = extra
-            resp = await self.ai_client.chat.completions.create(**request_kwargs)
+            # 2026-11-08 上午起網關模型會把整份提示當交辦、只回 "task ready"
+            # （completion_tokens 固定 3，尾端加動作指令也壓不住）。補一則空白
+            # assistant 讓它「續寫」而不是「回報」；網關不吃就退回原本兩則。
+            prefilled = False
+            if not is_gemini_family:
+                request_kwargs["messages"] = request_kwargs["messages"] + [
+                    {"role": "assistant", "content": " "}
+                ]
+                prefilled = True
+            try:
+                resp = await self.ai_client.chat.completions.create(**request_kwargs)
+            except Exception:
+                if not prefilled:
+                    raise
+                request_kwargs["messages"] = request_kwargs["messages"][:-1]
+                resp = await self.ai_client.chat.completions.create(**request_kwargs)
             content = resp.choices[0].message.content
             usage = getattr(resp, "usage", None)
             # F16：文字生成每次呼叫都記一筆（用途、模型、耗時、token、成本狀態）。
