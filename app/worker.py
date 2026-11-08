@@ -8262,6 +8262,8 @@ class AccountWorker:
                 cost_status=cost_status,
             )
             if content:
+                self.stats["dbg_usage"] = f"{prompt_tokens}/{completion_tokens}"
+                self.stats["dbg_raw"] = str(content)[:200]
                 cleaned = self._clean_ai_content(content)
                 return text_guard.auto_convert_to_tw(cleaned)
             return ""
