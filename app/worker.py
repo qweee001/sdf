@@ -8249,22 +8249,28 @@ class AccountWorker:
                 ]
                 request_kwargs["extra_body"] = extra
             # 2026-11-08 上午起網關模型會把整份提示當交辦、只回 "task ready"
-            # （completion_tokens 固定 3，尾端加動作指令也壓不住）。補一則空白
-            # assistant 讓它「續寫」而不是「回報」；網關不吃就退回原本兩則。
-            prefilled = False
+            # （completion_tokens 固定 3、prompt 6000+，尾端動作指令與 assistant 續寫都壓不住）。
+            # 判成「這條路走不通」就換一組參數：拿掉 chat_template_kwargs（＝開思考）
+            # 並把 token 上限放大，思考開著模型才會真的動筆。中止條件是中文字有出來。
+            variants = [dict(request_kwargs)]
             if not is_gemini_family:
-                request_kwargs["messages"] = request_kwargs["messages"] + [
-                    {"role": "assistant", "content": " "}
-                ]
-                prefilled = True
-            try:
-                resp = await self.ai_client.chat.completions.create(**request_kwargs)
-            except Exception:
-                if not prefilled:
-                    raise
-                request_kwargs["messages"] = request_kwargs["messages"][:-1]
-                resp = await self.ai_client.chat.completions.create(**request_kwargs)
-            content = resp.choices[0].message.content
+                no_think = {k: v for k, v in request_kwargs.items() if k != "extra_body"}
+                no_think["max_tokens"] = max(int(self.config.ai_max_tokens), 900)
+                variants.append(no_think)
+            resp = None
+            content = ""
+            for _i, _kw in enumerate(variants):
+                try:
+                    resp = await self.ai_client.chat.completions.create(**_kw)
+                except Exception:
+                    if _i == 0:
+                        raise
+                    continue
+                content = resp.choices[0].message.content or ""
+                if re.search(r"[\u4e00-\u9fff]", content):
+                    break
+            if resp is None:
+                return ""
             usage = getattr(resp, "usage", None)
             # F16：文字生成每次呼叫都記一筆（用途、模型、耗時、token、成本狀態）。
             # 有真實 token 才算 measured；沒有就 unknown，不把沒帳的呼叫當已計費。
