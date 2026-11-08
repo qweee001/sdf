@@ -3384,6 +3384,33 @@ class AccountWorker:
         recent = self._cross_recent_texts(int(group_id), 30 * 60)[-5:]
         return sum(1 for t in recent if "，" in t or "," in t)
 
+    def _declick_cross_opening(self, topic: str, rows, seconds: float = 25.0) -> str:
+        """別號剛用過同一個開場就剪掉開頭，別兩則並排同一個模子。
+
+        19:23:00 小小「掛號不用包紅包，直接包養我…」／19:23:04 小天後「掛號不用包紅包，
+        直接包晚上的房間…」是同秒生成撞的：提示層的跨號起手詞提示看不到另一則
+        還沒送出的句子，只有送出那一刻比對才攔得到。
+        """
+        body = str(topic or "").strip()
+        if len(body) < 8:
+            return body
+        head = body[:6]
+        now = time.time()
+        for row in rows or []:
+            if str(row.get("role")) != "assistant":
+                continue
+            ts = row.get("timestamp")
+            if ts and now - float(ts) > seconds:
+                continue
+            other = str(row.get("content") or "").strip()
+            if len(other) < 8 or other[:6] != head:
+                continue
+            tail = self._strip_lead_to_tail(body, 24)
+            if tail and len(tail) >= 8:
+                self._pcount("declick_opening")
+                return tail
+        return body
+
     def _strip_preamble_head(self, text: str, group_id: int = 0) -> str:
         """剪掉前情報備，只留後半句。提示詞壓不住時用物理方式斷模子。
 
@@ -10769,6 +10796,12 @@ class AccountWorker:
                         )
                         print(f"[{self.name}] proactive-skip: no fresh context topic", flush=True)
                         continue
+                    # 同秒生成的兩則常常同一個開場：送出去之前跟別號剛發的比一次。
+                    try:
+                        _sib_rows = await self.db.get_group_messages(int(group_id), limit=8)
+                    except Exception:
+                        _sib_rows = []
+                    topic = self._declick_cross_opening(topic, _sib_rows)
                     # 錯別字層也要用 context，先預設空；決策層啟用時才取
                     context = ""
                     # 本機自檢基準：本人近期起手詞＋上一句真人原話
