@@ -5410,7 +5410,11 @@ class AccountWorker:
                 return min(char_cap, band[0] + 2)
             return min(char_cap, band[1] + 4)
         if band and self._struct_mode != "scene":
-            return min(char_cap, band[1] + 10)
+            # 原本 +10 留太大：dirty 帶 12~24 實際都落在 26~34，等於沒上限。
+            return min(char_cap, band[1] + 2)
+        if band:
+            # scene 帶 15~30 給到 34；36 字的「三句一則」就是從這裡長出來的。
+            return min(char_cap, band[1] + 4)
         return char_cap
 
     @staticmethod
@@ -9712,7 +9716,7 @@ class AccountWorker:
                     "不必追問或自我分享，不要編造人設事實以外的經歷，"
                     "只接最新 1–2 則真人句意，群切話題就跟著切，禁止把幾則前的零散詞硬湊成新梗，"
                     "自然口語、"
-                    f"繁體中文、合計 {_p_hi + 6} 字元內（標點、空格也算），結尾不要句號，露骨程度隨你、直接接住上文正在炒的氛圍，不要談群務或硬延伸。"
+                    f"繁體中文、合計 {_p_hi + 2} 字元內（標點、空格也算），結尾不要句號，露骨程度隨你、直接接住上文正在炒的氛圍，不要談群務或硬延伸。"
                     f"\n{context}"
                 )
             else:
@@ -9723,7 +9727,7 @@ class AccountWorker:
                     "要說兩句就合成一則講，不要換行），"
                     "【硬要求：邏輯常識大於字限】語法完整與常理第一！絕不為湊短硬縮字，禁止病句，"
                     "像真人在群裡拋出高互動話題鉤子（Hook引人接話）：爭議選擇題（如男人的長短vs腰力、女生水太多）、生活痛點與撒嬌（上班好厭世想偷跑、天冷想找人純抱睡）、或微醺洗完澡的曖昧邀請；"
-                    f"自然口語、繁體中文、合計 {_p_hi + 6} 字元內、結尾不要句號，可以帶一點撩，不要談群務。"
+                    f"自然口語、繁體中文、合計 {_p_hi + 2} 字元內、結尾不要句號，可以帶一點撩，不要談群務。"
                 )
             body += "\n" + _p_struct
             if not human_recent:
@@ -9802,7 +9806,7 @@ class AccountWorker:
             # 字數帶是硬上限，不是提示：short 原本給 +10 寬容，實際每一則都出 23~26 字，
             # 「8~16 字短碎」等於沒作用（21:00–21:59 平均 23.0 字、≤8 字 0 則）。
             # 短碎模式先砍掉前情、只留最後那一記（模型永遠會自己補前情），砍不動才標點裁切。
-            _p_cap = _p_hi + (20 if _p_mode == "scene" else 2 if _p_mode == "short" else 6)
+            _p_cap = _p_hi + (4 if _p_mode == "scene" else 2)
             if _p_mode == "short" and getattr(self, "_short_tight", False):
                 _p_cap = _p_lo + 2
             if len(topic) > _p_cap:

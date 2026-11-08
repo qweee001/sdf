@@ -120,9 +120,9 @@ def test_cap_is_clamped_for_short_mode_only():
     w._struct_mode = "short"
     assert w._struct_char_cap(90) == 20
     w._struct_mode = "dirty"
-    assert w._struct_char_cap(90) == 34
+    assert w._struct_char_cap(90) == 26
     w._struct_mode = "scene"
-    assert w._struct_char_cap(90) == 90
+    assert w._struct_char_cap(90) == 34
     w._struct_mode = ""
     assert w._struct_char_cap(90) == 90
 
