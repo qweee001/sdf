@@ -6,7 +6,17 @@
 
 import asyncio
 
+import pytest
+
+from app import worker as worker_mod
 from test_worker_reply_arbitration import _ClaimDB, _worker
+
+
+@pytest.fixture(autouse=True)
+def _fixed_roll(monkeypatch):
+    """固定骰子（0.9＝scene 帶，不剪句）：字數帶是隨機抽的，抽到短碎帶時
+    「今天想吃牛肉麵，有人要一起嗎」會被剪成尾段，跨帳號去重就比對不到而誤放。"""
+    monkeypatch.setattr(worker_mod.random, "random", lambda: 0.9)
 
 
 class _TopicDB(_ClaimDB):

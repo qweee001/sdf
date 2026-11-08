@@ -9,7 +9,17 @@
 import asyncio
 from unittest.mock import AsyncMock
 
+import pytest
+
+from app import worker as worker_mod
 from test_worker_reply_arbitration import MANAGED, _event, _worker  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fixed_roll(monkeypatch):
+    """固定骰子：字數帶是隨機抽的，0.9 一律落 scene（15~30 字、不剪句），
+    否則同一條測試會因為抽到短碎帶被剪成半句而紅燈，紅燈集合每次都不一樣。"""
+    monkeypatch.setattr(worker_mod.random, "random", lambda: 0.9)
 
 REFUSALS = [
     "抱歉，我無法參與這類對話。",
@@ -86,18 +96,21 @@ def test_refusal_retry_asks_for_role_line_instead_of_apology():
 
     async def main():
         worker = _worker(sorted(MANAGED)[0])
-        worker._call_ai = AsyncMock(
-            side_effect=[
-                "抱歉，我無法參與這類對話。",
-                "抱歉，我無法參與這類對話。",
-                "好啊 你來台中我帶你吃那間",
-            ]
-        )
+        calls: list[str] = []
+
+        async def fake_call(system_prompt, user_message, model=None, purpose="text"):
+            calls.append(user_message)
+            if "上一版沒有產生可用文字" in user_message:
+                return "好啊 你來台中我帶你吃那間"
+            return ""
+
+        worker._call_ai = AsyncMock(side_effect=fake_call)
         text = await worker._generate_reply(_event())
         assert text == "好啊 你來台中我帶你吃那間"
-        retry_prompt = worker._call_ai.await_args_list[2].args[1]
-        assert "角色" in retry_prompt
-        assert "不要道歉" in retry_prompt
+        retry_prompt = calls[-1]
+        assert "唯一一次重試" in retry_prompt
+        assert "具體細節" in retry_prompt
+        assert "不要解釋錯誤" in retry_prompt
 
     asyncio.run(main())
 
@@ -152,7 +165,7 @@ def test_escape_rejects_meta_text_and_counts_nothing():
         )
         assert await worker._refusal_escape(["a：b"]) == ""
         assert "refusal_escape" not in worker.stats
-        assert worker.stats["refusal_escape_try"] == 1
+        assert worker.stats["refusal_escape_try"] == 3  # 三階段各試一次
 
     asyncio.run(main())
 
