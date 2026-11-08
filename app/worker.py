@@ -1111,6 +1111,7 @@ class AccountWorker:
         self._dialogs_refreshed_at = 0.0  # 上次重抓群組清單的時間，防連點
         self._proactive_today = 0
         self._proactive_day = 0
+        self._human_today_cache: dict[int, tuple[float, int]] = {}  # gid -> (查詢時間, 真人句數)
         self._recent_proactive_topics: set[str] = set()
         # 跨 cycle 的反重複記憶：每群最近生成過的主動話題（接受或都被 drop 的都記），
         # 最舊在前、最新在後、上限 12。沒有它，模型每個 cycle 都從零開始、把同一批露骨
@@ -8335,6 +8336,49 @@ class AccountWorker:
         except Exception:
             return True
 
+    # 群友性別判定詞：只當提示，判不出來就不講。真人沒有性別欄位，模型常猜錯
+    # （20:45 Chen 把講「我這雞雞」的萬英尺叫成姊姊）。
+    _MALE_WORDS = ("雞雞", "雞巴", "雞吧", "懶叫", "肉棒", "老二", "我老婆", "女朋友",
+                   "女友", "當兵", "學長", "兄弟", "弟兄", "我媽")
+    _FEMALE_WORDS = ("老公", "月經", "男朋友", "男友", "姊妹", "小褲", "內衣",
+                     "胸部", "我的穴", "我妹", "絲襪", "阿姨")
+    # 自述加權：「我這雞雞」「我老公」是本人自報，比「你雞雞小」這種罵人的更可信。
+    _SELF_MALE_RE = re.compile(r"我(?:的|這)?[^，。！？\s]{0,4}(?:雞雞|雞巴|懶叫|肉棒|老二)")
+    _SELF_FEMALE_RE = re.compile(r"我(?:的)?(?:老公|男友|男朋友)")
+
+    @classmethod
+    def _sender_gender_hint(cls, recent, sender_id, incoming: str = "") -> str:
+        """從這個人自己講過的話判性別；差距兩票以上才算。
+
+        寧可判不出來（回空字串）也不要猜錯——猜錯會叫男生姊姊、對女生問雞雞。
+        自述句加權，是因為「你雞雞很小」女生也常講。
+        """
+        sid = str(sender_id or "")
+        if not sid:
+            return ""
+        texts = [
+            str(m.get("content") or "")
+            for m in (recent or [])
+            if str(m.get("sender_id") or "") == sid
+        ]
+        texts.append(str(incoming or ""))
+        blob = " ".join(texts)
+        if not blob.strip():
+            return ""
+        male = (
+            sum(blob.count(w) for w in cls._MALE_WORDS)
+            + len(cls._SELF_MALE_RE.findall(blob))
+        )
+        female = (
+            sum(blob.count(w) for w in cls._FEMALE_WORDS)
+            + 2 * len(cls._SELF_FEMALE_RE.findall(blob))
+        )
+        if male - female >= 2:
+            return "男"
+        if female - male >= 2:
+            return "女"
+        return ""
+
     def _build_user_message(
         self, event, history: list[dict], *, reply_message=None, char_cap=None
     ) -> str:
@@ -8342,6 +8386,9 @@ class AccountWorker:
         if char_cap is None:
             char_cap = _DEFAULT_REPLY_CHAR_CAP
         recent = history[-10:] if history else []
+        _peer_gender = self._sender_gender_hint(
+            recent, event.sender_id, str(getattr(event, "raw_text", "") or "")
+        )
         context = ""
         if recent:
             context = "最近對話：\n"
@@ -8420,6 +8467,16 @@ class AccountWorker:
             "不能只叫對方繼續說，不要硬延伸或編造人設事實以外的經歷。"
             "只接最新 1–2 則真人句意，群切話題就跟著切（嘲4公分/舔狗就跟著嘲，幹哭/舌頭就接色，切貓就聊貓），禁止把幾則前的舊詞拼進當句。"
             f"性別絕對一致：你是{self.persona.get('gender', '女')}生，嚴禁性別倒錯（女號絕無男性器官，絕不能說「割我雞雞」或自稱有屌）。\n"
+            + (
+                "【最新這句的發言者性別已知是男生（依他自己講過的話判定）】：稱他哥哥，"
+                "生理描述用男人那一套（長短粗細），不要叫他姊姊、不要問他老公。\n"
+                if _peer_gender == "男"
+                else "【最新這句的發言者性別已知是女生（依她自己講過的話判定）】："
+                "稱她妹妹或直接說話，不要對她講雞雞、不要叫她哥哥。\n"
+                if _peer_gender == "女"
+                else ""
+            )
+            +
             "【人物性別常識與精準人稱對象識別】：\n"
             "1. 仔細辨認上文對話者的性別與身份！聊「老公滿足不了」「小玩具壞了」「買衣服顯身材」的發言者很顯然是【女性真人】（例如鈴鐺）。\n"
             "2. 嚴禁把女性真人當成男人來撩！你絕不能對女生說「你要用雞雞幫我塞滿嗎」或找女生求操（這是嚴重常識邏輯崩壞）。\n"
@@ -9389,8 +9446,36 @@ class AccountWorker:
             and time.time() - last_human < self._PROACTIVE_HUMAN_QUIET_SECONDS
         )
 
+    # 目標佔比：水軍發言應佔群內三成。主動額度用它換算，不寫死每日條數。
+    _PROACTIVE_SHARE_TARGET = 0.30
+
+    async def _proactive_budget(self, group_id: int, floor_cap: float) -> float:
+        """今天這個帳號還該講幾句＝群裡真人今天講的量 × 目標佔比，四號均分。
+
+        真人量每五分鐘才查一次（四條迴圈共用同一個快取）。冷場回到底線，
+        不會因為今天只有三十句真人就自嗨；熱場則隨真人量放大，但夾在 300 上限。
+        """
+        gid = int(group_id)
+        now = time.time()
+        cached = self._human_today_cache.get(gid)
+        if not cached or now - cached[0] > 300.0:
+            lt = time.localtime(now)
+            midnight = now - (lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec)
+            try:
+                humans = await self.db.group_human_count_since(gid, midnight)
+            except Exception:
+                humans = 0
+            self._human_today_cache[gid] = (now, humans)
+            cached = (now, humans)
+        humans = int(cached[1] or 0)
+        if humans <= 0:
+            return float(floor_cap)
+        share = self._PROACTIVE_SHARE_TARGET
+        per_acc = humans * share / (1.0 - share) / max(1, len(self.managed_ids or ()))
+        return max(float(floor_cap), min(300.0, per_acc))
+
     def _hot_field(self, group_id: int) -> bool:
-        """1 分鐘內真人 ≥3 則＝熱場，關掉 proactive-join，名額留給 reply。"""
+        """1 分鐘內真人 ≥3 則＝熱場，收窄主動讓路機率。"""
         now = time.time()
         cutoff = now - _HOT_FIELD_WINDOW_SECONDS
         stamps = [
@@ -10638,17 +10723,28 @@ class AccountWorker:
                     continue
                 group_id = random.choice(groups)
                 self._reset_proactive_day()
-                # 每日上限是「防自嗨」不是「配額」：四號各 30 條／天，晚上八點就全部用光，
-                # 之後整晚只剩回覆，而回覆八成被插話取消 → 全員隱形（20:33–20:51 實測 0 則，
-                # 四號 stat 全是 pskip_dailycap）。熱場把上限放大兩倍，冷場照舊。
-                daily_cap = max(
+                # 每日上限是「防自嗨」不是「配額」：固定 60 條／天在真人一天近兩千句
+                # 的群只剩一成多佔比，20:09 四號全部撞頂後整組硬消失 31 分鐘
+                # （期間真人講了一百四十幾句，20:10–20:40 水軍 0 則）。
+                # 改成吃佔比預算：真人今天講多少，決定水軍今天能講多少。
+                hot_now = self._hot_field(group_id)
+                floor_cap = max(
                     60,
-                    self.config.proactive_max_per_day
-                    * (2 if self._hot_field(group_id) else 1),
+                    self.config.proactive_max_per_day * (2 if hot_now else 1),
                 )
-                if self._proactive_today >= daily_cap:
-                    self._pcount("pskip_dailycap")
-                    continue
+                budget = await self._proactive_budget(group_id, floor_cap)
+                if self._proactive_today >= budget:
+                    ratio = self._proactive_today / max(1.0, budget)
+                    # 軟頂：超過預算只降機率，撞到兩倍才真的停手 —— 不要再一次硬牆。
+                    allow_p = (
+                        1.0
+                        if ratio < 0.8
+                        else max(0.10, 1.0 - (ratio - 0.8) * 1.8)
+                    )
+                    if ratio >= 2.0 or random.random() > allow_p:
+                        self._pcount("pskip_dailycap")
+                        continue
+                    self._pcount("dailycap_soft")
                 # 水軍輪替：上一則是自己人時，只在「輪到我」才接（最少發言優先）
                 latest_row: dict | None = None
                 heat = 0

@@ -2476,6 +2476,27 @@ class Database:
         row = await cursor.fetchone()
         return float(row["at"] or 0.0) if row else 0.0
 
+    async def group_human_count_since(self, group_id: int, since: float) -> int:
+        """群內 since 之後的真人訊息數（跨帳號以事件身分去重）。
+
+        主動發言額度要用「今天真人講了幾句」換算佔比，固定每日條數在真人一天
+        近兩千句的群裡只有一成多佔比，撞頂就整組消失。
+        """
+        try:
+            gid = int(group_id)
+        except (TypeError, ValueError):
+            return 0
+        cursor = await self._c.execute(
+            "SELECT COUNT(DISTINCT sender_id || ':' || message_id) AS n FROM messages "
+            "WHERE group_id = ? AND role = 'user' AND timestamp >= ? AND message_id > 0",
+            (gid, float(since)),
+        )
+        row = await cursor.fetchone()
+        try:
+            return int((row["n"] if row else 0) or 0)
+        except (TypeError, ValueError, IndexError):
+            return 0
+
     async def group_bot_last_spoke(self, group_id: int) -> dict[int, float]:
         """群內每個水軍帳號最近一次發言的時間（輪替用：誰最久沒講話誰優先）。
 
