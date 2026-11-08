@@ -110,6 +110,12 @@ _PHRASE_FATIGUE_MIN_REPEAT = 2
 _PHRASE_HISTORY_LIMIT = 200
 # 跨號歷史保留窗：等於（略大於）核心詞冷卻窗，句子留著才抓得到整段慣用語。
 _CROSS_TEXT_KEEP_SECONDS = 180 * 60
+# 字數上限硬剪時的詞界：這些字幾乎都起新子句，剪在它們前面比剪在字中間自然。
+_CLAUSE_START = set("很狠都就要會想把給來去才再還真超先又也然後跟對幫要叫讓被用")
+# 硬剪後要抹掉的尾端孤字（虛詞／連接詞殘尾）。
+_DANGLING_TAIL = set("的是在就此也跟和要把給從到才都還很再會想讓被著過與或而但又更最太對向於")
+# 程度副詞後面一定還要接詞，剪在它後面會留「…超」「…很」這種孤字。
+_DEGREE_CHARS = set("超很真最太更點好")
 # 跨號意象冷卻：任一號用過的核心詞，同群其他號 90 分鐘內避開。
 _PHRASE_CORE_COOLDOWN_SECONDS = 90 * 60
 # 回覆遲到偵測：目標訊息已超過 N 秒、群裡又冒出 M 則真人發言 → 話題早就翻頁
@@ -885,6 +891,21 @@ class AccountWorker:
         return len(re.sub(r"[A-Za-z0-9]+", "A", str(text or "")))
 
     @staticmethod
+    def _strip_dangling(text: str, floor: int) -> str:
+        """剪完再修掉尾端孤字（虛詞／連接詞開頭被切一半殘留的那種）。"""
+        out = str(text or "").rstrip("，、。！？ 　")
+        for tail in ("的話", "然後", "因為", "可是", "就是", "所以", "而且", "或是"):
+            if out.endswith(tail) and len(out) - len(tail) >= floor:
+                out = out[: -len(tail)]
+                break
+        while out and len(out) > floor:
+            if out[-1] in _DANGLING_TAIL:
+                out = out[:-1]
+            else:
+                break
+        return out
+
+    @staticmethod
     def _trim_to_cap(text: str, cap: int) -> str:
         """超長就地收在逗號，不再整則丟掉。
 
@@ -904,18 +925,43 @@ class AccountWorker:
         # 窄帶（≤12 字）時「至少要 10 字才發」會反過來讓每一則都退回原長度，
         # 底線降到 6：寧可短得自然，也不要窄帶失效。
         floor = 6 if cap <= 12 else 10
-        head = t[:cap]
+        # 頭也按「顯示長度」取，不然「方sir」會被原生索引多扣三格，提早斷在詞中間。
+        head_chars = []
+        cost = 0
+        in_ascii = False
+        for ch in t:
+            if ch.isascii() and ch.isalnum():
+                if not in_ascii:
+                    cost += 1
+                    in_ascii = True
+            else:
+                in_ascii = False
+                cost += 1
+            if cost > cap:
+                break
+            head_chars.append(ch)
+        head = "".join(head_chars)
+        if AccountWorker._visual_len(head) <= floor:
+            return ""
         cut = max(head.rfind("，"), head.rfind("、"), head.rfind("。"))
         if cut < floor:
-            # 整句沒標點（老司機裁判改寫後很常見）→ 硬剪在上限內，
-            # 只修掉尾端殘字，別再送回模型重寫（重寫 10 秒還會被插話取消）。
-            out = head.rstrip("，、。！？ 　")
-            for tail in ("的", "是", "在", "就", "也", "跟", "和"):
-                if out.endswith(tail) and len(out) > floor + 2:
-                    out = out[: -len(tail)]
-            return out if len(out) >= floor else ""
-        out = t[:cut].rstrip("，、。 ")
-        return out if len(out) >= floor else ""
+            # 整句沒標點（老司機裁判改寫後很常見）→ 先往回找一個「詞界」再剪：
+            # 副詞／連接詞幾乎都起新子句，剪在它前面不會留孤字。
+            # 8 字上限時「…腿間狠」「…難道要」這種尾巴就是硬剪在 cap 造成的。
+            for p in range(len(head) - 1, floor, -1):
+                if (
+                    head[p] in _CLAUSE_START
+                    and head[p - 1] not in _DEGREE_CHARS
+                    and AccountWorker._visual_len(head[:p]) > floor
+                ):
+                    cut = p
+                    break
+            if cut < floor:
+                out = head.rstrip("，、。！？ 　")
+                out = AccountWorker._strip_dangling(out, floor)
+                return out if AccountWorker._visual_len(out) > floor - 1 else ""
+        out = head[:cut].rstrip("，、。 ")
+        return out if AccountWorker._visual_len(out) >= floor else ""
 
     @staticmethod
     def _extend_cut_word(raw: str, cut: str) -> str:
