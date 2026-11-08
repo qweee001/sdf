@@ -3318,7 +3318,16 @@ class AccountWorker:
             if not loose or not self._BEAT_MARKS.search(body):
                 return False
         # 後段才落到人（你／問句／點名／邀約），否則前段只是長句的第一截。
-        return self._tail_aims_at_person(tail, group_id)
+        if self._tail_aims_at_person(tail, group_id):
+            return True
+        # 對象已經在前段講掉了（「摸魚看後天聊女廁，我都害羞臉紅了」／
+        # 「在店裡掛新衣服看和進出口擔心被抓，越刺激我下面越濕」），後段全講自己
+        # 仍是同一個骨架，只是人擺在前面。head 裡有人就不必再要求後段有人。
+        return (
+            any(n in head for n in self._speaker_names(int(group_id)))
+            or "你" in head
+            or "妳" in head
+        )
 
     def _preamble_flow(self, group_id: int) -> int:
         """最近五則水軍有幾則是兩段式前情報備（詞換光、骨架照抄也算）。"""
@@ -3340,6 +3349,12 @@ class AccountWorker:
         head, _sep, tail = t.partition("，")
         tail = tail.strip()
         bare = head.lstrip(self._OPEN_STRIP).strip()
+        # 前段裡有名字：名字留著，剪掉名字前後那截鋪陳
+        for name in self._speaker_names(int(group_id)):
+            if name and name in head:
+                merged = f"{name}，{tail}"
+                if 8 <= len(merged) <= 34:
+                    return merged
         # 前段只是喊名字：保留名字，剪掉名字與後半句之間那截動作
         if 2 <= len(bare) <= 4 and not self._BEAT_MARKS.search(bare):
             merged = f"{bare}，{tail}"
@@ -3963,13 +3978,22 @@ class AccountWorker:
         return sum(1 for t in recent if self._is_watch_frame(t))
 
     @staticmethod
-    def _strip_spectator_head(text: str) -> str:
-        """直接把「動作＋看…」整個前段剪掉，只留對人的那一句。"""
+    def _strip_spectator_head(text: str, names=()) -> str:
+        """直接把「動作＋看…」整個前段剪掉，只留對人的那一句。
+
+        前段裡點了名的（在店裡掛新衣服看和進出口擔心被抓，…）剪完把名字補回去，
+        否則剪成純自爆就丟了對象。
+        """
         body = str(text or "").strip()
         parts = body.split("，")
         if len(parts) < 2:
             return ""
-        tail = "，".join(parts[1:]).strip()
+        head, tail = parts[0], "，".join(parts[1:]).strip()
+        for name in names or ():
+            if name and name in head:
+                merged = f"{name}，{tail}"
+                if 8 <= len(merged) <= 34:
+                    return merged
         return tail if 6 <= len(tail) <= 34 else ""
 
     def _echo_human_opening(self, candidate: str, humans: str) -> str:
@@ -7869,7 +7893,9 @@ class AccountWorker:
             and self._is_watch_frame(reply)
             and self._watch_frame_flow(group_id) >= 2
         ):
-            stripped_spectator = self._strip_spectator_head(reply)
+            stripped_spectator = self._strip_spectator_head(
+                reply, self._speaker_names(group_id)
+            )
             if stripped_spectator:
                 self.stats["strip_spectator"] = int(self.stats.get("strip_spectator", 0)) + 1
                 reply = stripped_spectator
@@ -10038,7 +10064,7 @@ class AccountWorker:
                     topic = _sp
             # 語流連續兩則「動作＋看」：剪掉動作那截，只留對人的句尾。
             if self._is_watch_frame(topic) and self._watch_frame_flow(int(group_id)) >= 2:
-                _ss = self._strip_spectator_head(topic)
+                _ss = self._strip_spectator_head(topic, self._speaker_names(int(group_id)))
                 if _ss:
                     self._pcount("strip_spectator")
                     topic = _ss
