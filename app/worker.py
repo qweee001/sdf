@@ -10281,7 +10281,9 @@ class AccountWorker:
             # 字數帶是硬上限，不是提示：short 原本給 +10 寬容，實際每一則都出 23~26 字，
             # 「8~16 字短碎」等於沒作用（21:00–21:59 平均 23.0 字、≤8 字 0 則）。
             # 短碎模式先砍掉前情、只留最後那一記（模型永遠會自己補前情），砍不動才標點裁切。
-            _p_cap = _p_hi + (4 if _p_mode == "scene" else 2)
+            # short 原本跟 dirty 一樣吃 +2，上限 18 就讓 17~18 字整批過關，
+            # 「8~16」實際只有 46%（部署後 13 則）。短帶就守帶頂 16。
+            _p_cap = _p_hi + 4 if _p_mode == "scene" else _p_hi + (0 if _p_mode == "short" else 2)
             if _p_mode == "short" and getattr(self, "_short_tight", False):
                 _p_cap = _p_lo + 2
             # 兩段式已經連四則：這則直接斷成單句，連人名那段一起斷（指名留給

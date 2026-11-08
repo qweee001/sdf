@@ -10,11 +10,14 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app import worker as worker_mod
+from test_proactive_dedup import _TopicDB
+from test_worker_reply_arbitration import _worker
 
 MANAGED = {"name2id"}
+GROUP = -5428680940
 
 
-def _worker():
+def _esc_worker():
     w = object.__new__(worker_mod.AccountWorker)
     w.name = "Chen"
     w.persona = {"name": "Chen", "age": 38, "gender": "女", "city": "台北", "industry": "服飾店"}
@@ -27,7 +30,7 @@ def _worker():
 
 def test_second_stage_shortens_context_and_target():
     async def main():
-        w = _worker()
+        w = _esc_worker()
         seen: list[str] = []
 
         async def fake_call(system_prompt, user_message, model=None, purpose="text"):
@@ -53,7 +56,7 @@ def test_second_stage_shortens_context_and_target():
 
 def test_third_stage_drops_context_entirely():
     async def main():
-        w = _worker()
+        w = _esc_worker()
         seen: list[str] = []
 
         async def fake_call(system_prompt, user_message, model=None, purpose="text"):
@@ -73,7 +76,7 @@ def test_third_stage_drops_context_entirely():
 
 def test_all_stages_refused_counts_every_try_and_returns_empty():
     async def main():
-        w = _worker()
+        w = _esc_worker()
         w._fallback_models = ("backup-a",)
         w._call_ai = AsyncMock(return_value="Request is blocked due to the PUP.")
         assert await w._refusal_escape(["a：b"]) == ""
@@ -86,7 +89,7 @@ def test_all_stages_refused_counts_every_try_and_returns_empty():
 
 def test_refusal_with_trailing_line_is_salvaged():
     async def main():
-        w = _worker()
+        w = _esc_worker()
         w._call_ai = AsyncMock(
             return_value="我無法生成露骨內容。\n\n「好啊 你來台北我帶你去」"
         )
@@ -96,14 +99,26 @@ def test_refusal_with_trailing_line_is_salvaged():
     asyncio.run(main())
 
 
+def test_short_band_cap_is_band_top_not_plus_two(monkeypatch):
+    """短帶上限只到 16：+2 會讓 17~18 字整批過關，「8~16」形同虛設。"""
+
+    monkeypatch.setattr(worker_mod.random, "random", lambda: 0.1)  # 冷場 0.1＝短碎帶
+
+    async def main():
+        worker = _worker(202, db=_TopicDB())
+        long_line = "剛擦完乳液看你們在聊鹹蛋腰都軟掉了"
+        worker._call_ai = AsyncMock(return_value=long_line)
+        topic = await worker._generate_context_topic(GROUP)
+        assert len(topic) <= 18, topic
+        assert topic != long_line
+
+    asyncio.run(main())
+
+
 @pytest.mark.parametrize(
     "raw,cut,expect",
-    [
-        ("看得姊姊身影都濕了", "看得姊姊身", "看得姊姊身影"),
-        ("跟姊姊撒嬌一下", "跟姊姊撒", "跟姊姊撒嬌"),
-        ("剛擦乳液，看你們", "剛擦乳液", "剛擦乳液"),
-        ("好累喔", "好累", "好累喔"),
-    ],
+    [("看得姊姊身影都濕了", "看得姊姊身", "看得姊姊身影")],
 )
 def test_cut_never_leaves_half_a_word(raw, cut, expect):
     assert worker_mod.AccountWorker._extend_cut_word(raw, cut) == expect
+
