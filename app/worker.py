@@ -880,6 +880,11 @@ class AccountWorker:
         return text_guard.split_human_burst(text)
 
     @staticmethod
+    def _visual_len(text: str) -> int:
+        """顯示長度：連續英數算一個字（帶名字的句子不該被 len() 多扣三格）。"""
+        return len(re.sub(r"[A-Za-z0-9]+", "A", str(text or "")))
+
+    @staticmethod
     def _trim_to_cap(text: str, cap: int) -> str:
         """超長就地收在逗號，不再整則丟掉。
 
@@ -891,6 +896,10 @@ class AccountWorker:
         if len(re.findall(r"[\u4e00-\u9fff]", t)) < 2 or text_guard.is_refusal(t) or text_guard.is_meta_speak(t):
             return ""
         if len(t) <= cap:
+            return ""
+        # 英數連續段只算一個字（「方sir」是 2 個字，不是 5 個）。用 len() 數會讓
+        # 帶名字的句子提早三格斷掉，16:53:01「方sir也想跟姊姊撒」就是這樣被砍掉「嬌」。
+        if AccountWorker._visual_len(t) <= cap:
             return ""
         # 窄帶（≤12 字）時「至少要 10 字才發」會反過來讓每一則都退回原長度，
         # 底線降到 6：寧可短得自然，也不要窄帶失效。

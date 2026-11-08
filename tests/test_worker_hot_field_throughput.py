@@ -67,6 +67,9 @@ def test_trim_to_cap_cuts_at_comma_instead_of_dropping():
     assert AccountWorker._trim_to_cap("短短的", 20) == ""
     # 只有第一個逗點、剪不到一半也不再丟 → 直接取上限內的頭段
     assert AccountWorker._trim_to_cap("短，後面超長" + "字" * 40, 10) == "短，後面超長字字字字"
+    # 英數名字只算一格：16:53:01「方sir也想跟姊姊撒」len()=11 但顯示只有 10 字，
+    # 原本會被剪掉「嬌」，留下半個詞
+    assert AccountWorker._trim_to_cap("方sir也想跟姊姊撒嬌", 10) == ""
 
 
 def test_unowned_self_scene_opener_is_not_press_box():
