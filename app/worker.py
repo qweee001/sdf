@@ -7841,10 +7841,13 @@ class AccountWorker:
                 reply = repaired
                 too_long = False
         # 節奏物理層：整段語流已經在報備前情時，直接剪掉這則的前半句。
-        if self._preamble_flow(group_id) >= 3:
+        # 下午場水軍密度只有 0.5 則／分，五則窗等於八到十分鐘，門檻三則永遠
+        # 追不到（部署後 44% 前情率、一次都沒剪）；兩則就動刀。
+        if self._preamble_flow(group_id) >= 2:
             stripped_preamble = self._strip_preamble_head(reply, group_id)
             if stripped_preamble:
                 reply = stripped_preamble
+                self._pcount("strip_preamble")
         # 跨號同梗：別的號一分鐘內已經在講同一個對象／同一個梗，後到的這則
         # 剪短或剪掉前情，別兩個小姐搶同一個男人講同一件事。
         if group_id:
@@ -10029,7 +10032,7 @@ class AccountWorker:
                     if repaired:
                         topic = repaired
             # 語流已在報備前情：這則直接剪掉前半句，斷掉模子。
-            if self._preamble_flow(int(group_id)) >= 3:
+            if self._preamble_flow(int(group_id)) >= 2:
                 _sp = self._strip_preamble_head(topic, int(group_id))
                 if _sp:
                     topic = _sp
