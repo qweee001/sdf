@@ -2151,7 +2151,11 @@ class AccountWorker:
         sender_id = int(event.sender_id or 0)
         owner_id = self._active_owner(self.human_owners.get((group_id, sender_id)))
         is_my_dialog = owner_id and owner_id == int(self.tg_user_id or 0)
-        if not is_my_dialog:
+        # 有人貼圖＝把東西丟到大家面前，不必點名也是一句「你們看」。照片不吃
+        # 90 秒扎堆讓位也不擲骰：16:52:27 輕輕貼一張，四號全數跳過，
+        # images_seen 有記、回覆零、連識圖都沒跑。
+        is_photo = isinstance(getattr(event, "media", None), MessageMediaPhoto)
+        if not is_my_dialog and not is_photo:
             try:
                 spoke = await self.db.group_bot_last_spoke(group_id)
                 if spoke:
@@ -2176,7 +2180,7 @@ class AccountWorker:
         default_prob = float(getattr(self.config, "base_reply_probability", 0.35))
         base_prob = await self._get_runtime_float("base_reply_probability", default_prob)
         probability = max(0.0, min(1.0, base_prob))
-        if probability <= 0:
+        if probability <= 0 and not is_photo:
             return False
         pressure = await self._interaction_pressure(group_id)
         human_5m = int(pressure.get("human_5m", 0) or 0)
@@ -2198,12 +2202,15 @@ class AccountWorker:
                     stale = time.time() - last_any_bot >= 360.0
             except Exception:
                 pass
-            if not stale and (
+            if not stale and not is_photo and (
                 already_5m >= hot_budget(human_5m)
                 or int(pressure.get("ordinary_claimed_20s", 0) or 0) >= 1
             ):
                 return False
             probability = min(probability, 0.15)
+        # 照片在熱場也照答：四號靠 claim 排隊，只有一個會真的送出。
+        if is_photo:
+            probability = 1.0
         score = int.from_bytes(
             hashlib.blake2b(
                 f"human-probability:{group_id}:{message_id}".encode(),
