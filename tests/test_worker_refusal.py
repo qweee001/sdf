@@ -152,6 +152,29 @@ def test_escape_rejects_meta_text_and_counts_nothing():
         )
         assert await worker._refusal_escape(["a：b"]) == ""
         assert "refusal_escape" not in worker.stats
+        assert worker.stats["refusal_escape_try"] == 1
+
+    asyncio.run(main())
+
+
+def test_escape_sweeps_fallback_model_when_primary_still_refuses():
+    """拒答多來自 Gemini 系：短提示在原模型若還是拒，就要換備援模型。"""
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker._fallback_models = ("backup-a",)
+        seen: list[str | None] = []
+
+        async def fake_call(system_prompt, user_message, model=None, purpose="text"):
+            seen.append(model)
+            if model:
+                return "好啊 你來台中我帶你吃那間"
+            return "The prompt could not be submitted."
+
+        worker._call_ai = AsyncMock(side_effect=fake_call)
+        assert await worker._refusal_escape(["a：b"]) == "好啊 你來台中我帶你吃那間"
+        assert seen == [None, "backup-a"]
+        assert worker.stats["refusal_escape"] == 1
 
     asyncio.run(main())
 

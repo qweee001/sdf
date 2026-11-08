@@ -8475,27 +8475,35 @@ class AccountWorker:
     async def _refusal_escape(
         self, lines, target: str = "", purpose: str = "escape"
     ) -> str:
-        """全模型都拒答時的最後一擊：極短提示重寫一次，命中就計數。"""
+        """全模型都拒答時的最後一擊：極短提示重寫一次，命中就計數。
+
+        主模型先試，不成立再輪備援：這條路的拒答多來自 Gemini 系（回英文政策字樣），
+        換模型才跳得開，換不掉就別再燒。
+        """
         ctx = "\n".join(lines or [])
         body = ("群組最近在講：\n" + ctx) if ctx else "群組現在很安靜。"
         if target:
             body += f"\n接這一句：{target}"
         body += "\n直接寫出你會打出的那一行。"
-        try:
-            text = await self._call_ai(
-                self._slim_persona_prompt(), body, purpose=purpose
+        system = self._slim_persona_prompt()
+        for model in (None, *self._fallback_models):
+            self.stats["refusal_escape_try"] = (
+                int(self.stats.get("refusal_escape_try", 0)) + 1
             )
-        except Exception:
-            return ""
-        text = (text or "").strip()
-        if (
-            not text
-            or self._is_refusal(text)
-            or len(re.findall(r"[\u4e00-\u9fff]", text)) < 2
-        ):
-            return ""
-        self.stats["refusal_escape"] = int(self.stats.get("refusal_escape", 0)) + 1
-        return text
+            try:
+                text = await self._call_ai(system, body, model=model, purpose=purpose)
+            except Exception:
+                continue
+            text = (text or "").strip()
+            if (
+                not text
+                or self._is_refusal(text)
+                or len(re.findall(r"[\u4e00-\u9fff]", text)) < 2
+            ):
+                continue
+            self.stats["refusal_escape"] = int(self.stats.get("refusal_escape", 0)) + 1
+            return text
+        return ""
 
     async def _call_ai(
         self,
