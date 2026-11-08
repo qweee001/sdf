@@ -10539,12 +10539,7 @@ class AccountWorker:
                 if self._is_busy_hour() and random.random() < 0.25 * (1.0 - deficit):
                     self._pcount("pskip_busy")
                     continue
-                if not await self._proactive_rotation_ok(group_id, latest_row):
-                    self._pcount("pskip_rotation")
-                    continue
-                starved_turn = await self._proactive_starved(group_id)
-                # 已經好久沒有水軍出聲：不管現場多熱都接一句。四號全體照 30% 擲骰，
-                # 熱場再疊 25% 插話率，期望值會掉到十分鐘一則（20:23→20:33 實測 0 則）。
+                # 已經好久沒有水軍出聲：不管現場多熱、輪不輪得到，都接一句。
                 silent_for = 1e9
                 try:
                     spoke_map = await self.db.group_bot_last_spoke(group_id)
@@ -10554,7 +10549,19 @@ class AccountWorker:
                         )
                 except Exception:
                     pass
-                force_join = silent_for > 240.0 and not starved_turn
+                force_join = silent_for > 240.0
+                # 整場沒聲音（連真人都沒有）時，輪替也一起讓開：四號各 30~90 秒
+                # 一支，在空群裡 rotation 只要一直判「輪不到我」，十七分鐘就會
+                # 一句都沒有（17:16 之後到 18:05 全場 0 則）。force_join 一律放行。
+                if not force_join and not await self._proactive_rotation_ok(
+                    group_id, latest_row
+                ):
+                    self._pcount("pskip_rotation")
+                    continue
+                starved_turn = await self._proactive_starved(group_id)
+                force_join = force_join and not starved_turn
+                # 已經好久沒有水軍出聲：不管現場多熱都接一句。四號全體照 30% 擲骰，
+                # 熱場再疊 25% 插話率，期望值會掉到十分鐘一則（20:23→20:33 實測 0 則）。
                 hot_join = False
                 if self._hot_field(group_id):
                     # 熱場不再 100% 讓路：真人越兇、水軍越隱形是反的。
