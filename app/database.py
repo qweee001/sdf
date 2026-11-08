@@ -2133,11 +2133,14 @@ class Database:
         slot: int,
         account_id: str,
         min_interval_seconds: float,
+        key_suffix: str = "",
     ) -> bool:
         if not group_id or slot < 0:
             return False
         now = time.time()
         key = f"proactive:{group_id}:{slot}"
+        if key_suffix:
+            key = f"{key}:{key_suffix}"
         cutoff = now - max(0.0, float(min_interval_seconds))
         async with self._claim_lock:
             cursor = await self._c.execute(
@@ -2152,7 +2155,7 @@ class Database:
             return cursor.rowcount == 1
 
     async def release_proactive_slot(
-        self, group_id: int, slot: int, account_id: str
+        self, group_id: int, slot: int, account_id: str, key_suffix: str = ""
     ) -> bool:
         """歸還主動發言的時間窗口（生成不出來／③ 退回時用）。
 
@@ -2160,10 +2163,13 @@ class Database:
         """
         if not group_id or slot < 0:
             return False
+        key = f"proactive:{int(group_id)}:{int(slot)}"
+        if key_suffix:
+            key = f"{key}:{key_suffix}"
         async with self._claim_lock:
             cursor = await self._c.execute(
                 "DELETE FROM outbound_claims WHERE claim_key = ? AND account_id = ?",
-                (f"proactive:{int(group_id)}:{int(slot)}", account_id),
+                (key, account_id),
             )
             await self._commit()
             return cursor.rowcount > 0

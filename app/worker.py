@@ -414,6 +414,9 @@ _CONSUME_DENSITY_HITS = 2
 _SPECTATOR_FRAME_FADE = 40 * 60
 _SPECTATOR_FRAME_HITS = 2
 _SPECTATOR_MARKERS = ("看你們", "你們吵", "你們鬥", "看你們這樣", "你們這齣", "聽你們", "你們互嗆")
+# 前情報備的動作／體感字：兩段式模子的前半句幾乎都掛這些（剛點好、擦著乳液、冷氣好冷、
+# 吹頭髮手超痠）。只當判前段的輔助證據，不是封殺詞。
+_PREAMBLE_CUES = re.compile(r"[剛正才還先邊著在好超很]|洗完|吹|擦|喝|吃|聞|躺|坐|穿|脫")
 # 兩號前後幾秒疊一對時，兩個人都用「一邊做自己的事一邊看你們吵」最刺眼
 # （15:28:27 RICH「邊喝微糖烏龍邊看你們吵」→ 15:28:30 小天後「犯睏聽你們互嗆」）。
 # 這對不看密度，只看上一則水軍有沒有同一個骨架。
@@ -887,18 +890,21 @@ class AccountWorker:
             return ""
         if len(t) <= cap:
             return ""
+        # 窄帶（≤12 字）時「至少要 10 字才發」會反過來讓每一則都退回原長度，
+        # 底線降到 6：寧可短得自然，也不要窄帶失效。
+        floor = 6 if cap <= 12 else 10
         head = t[:cap]
         cut = max(head.rfind("，"), head.rfind("、"), head.rfind("。"))
-        if cut < 10:
+        if cut < floor:
             # 整句沒標點（老司機裁判改寫後很常見）→ 硬剪在上限內，
             # 只修掉尾端殘字，別再送回模型重寫（重寫 10 秒還會被插話取消）。
             out = head.rstrip("，、。！？ 　")
             for tail in ("的", "是", "在", "就", "也", "跟", "和"):
-                if out.endswith(tail) and len(out) > 12:
+                if out.endswith(tail) and len(out) > floor + 2:
                     out = out[: -len(tail)]
-            return out if len(out) >= 10 else ""
+            return out if len(out) >= floor else ""
         out = t[:cut].rstrip("，、。 ")
-        return out if len(out) >= 10 else ""
+        return out if len(out) >= floor else ""
 
     @staticmethod
     def _strip_lead_to_tail(text: str, cap: int) -> str:
@@ -1104,6 +1110,8 @@ class AccountWorker:
         # 本則的句型模式（short/dirty/scene）：字數帶與硬上限都靠它，
         # 沒設就是回覆前的預設（_build_reply 自己會退回 6~50）。
         self._struct_mode: str = ""
+        # 短碎模式裡再切一刀的窄帶旗標（見 _build_directors_note 抽樣處）。
+        self._short_tight: bool = False
         # 外部釘死模式用（測試、重寫沿用同一組字數）；空字串＝照抽樣走。
         self._struct_mode_force: str = ""
         self._band_lo, self._band_hi = _HUMAN_LINE_MIN, _HUMAN_LINE_MAX
@@ -2866,6 +2874,21 @@ class AccountWorker:
                 "（最近的水軍都在引述別人再補一句評語，你這則別引述、別提名字，"
                 "用自己的當下狀態或直接對他下一個動作開頭）"
             )
+        # 節奏軸：不是講什麼的問題，是「先演自己、後半句才對人」的順序。
+        # 10:00–10:17 九則全掛這個模子（香氛蠟燭…／擦著乳液…／冷氣好冷，…／
+        # 華發少自作多情，我正…），單軸檢查全部放行，只有整段看節奏才抓得到。
+        if group_id:
+            _pre_hits = sum(
+                1
+                for t in self._recent_bot_pool(own_texts, group_id, history)
+                if self._is_preamble_beat(t, int(group_id))
+            )
+            if _pre_hits >= 2:
+                notes.append(
+                    f"（最近三則水軍有 {_pre_hits} 則是「先講自己在幹嘛，逗號後面才對著人講」，"
+                    "你這則別再交代前情：把對象或動作直接放句首，全句最多一個逗號；"
+                    "要嘛整句只講一件事）"
+                )
         if not self_talk:
             notes.append(
                 "（最近六則沒人講到自己，你這則要帶一句自己的身體感覺或當下狀態，"
@@ -3211,6 +3234,61 @@ class AccountWorker:
             return False
         head = re.split(r"[，,。！？…]", body)[0]
         return any(m in head for m in _SPECTATOR_MARKERS)
+
+    def _is_preamble_beat(self, text: str, group_id: int = 0) -> bool:
+        """兩段式模子：前段先報備自己在幹嘛，後段才對人撩／嗆。
+
+        無對象軸（_is_nameless_open）擋的是「整句都在演自己」；今天 10:00–10:17
+        九則全場都合格過關，卻全部同一個節奏——香氛蠟燭…／擦著乳液…／冷氣好冷，…／
+        吹頭髮手超痠…／我都邊喝咖啡邊看…。有自曝、有指名、有對象、不是問句，
+        四道單軸檢查逐條放行，因為病灶不在任一軸，在**順序**：前半句零對象、
+        後半句才有你。真人講這種話十次裡只有兩三次，不會九連發。
+        判前段：剝掉開頭喊的人名後，若沒有你／妳、又不是純招呼，且帶自己的狀態或動作。
+        """
+        t = str(text or "").replace(",", "，").strip()
+        head, sep, tail = t.partition("，")
+        if not sep:
+            # 沒有逗號但同一個呼吸裡也是先演自己：對象要出現在半句之後才算
+            # （「脫掉內衣揉著胸看你一直吵能不煩嘛」，你 在第九個字）。
+            body = head.lstrip(self._OPEN_STRIP)
+            for name in self._speaker_names(int(group_id)):
+                if body.startswith(name):
+                    body = body[len(name):].lstrip(self._OPEN_STRIP)
+                    break
+            idx = max(body.find("你"), body.find("妳"))
+            if idx < 6:
+                return False
+            front = body[:idx]
+            return bool(
+                any(c in front for c in self._SELF_CUES)
+                or any(c in front for c in self._BODY_CUES)
+                or _PREAMBLE_CUES.search(front)
+            )
+        if not tail.strip():
+            return False
+        body = head.lstrip(self._OPEN_STRIP)
+        for name in self._speaker_names(int(group_id)):
+            if body.startswith(name):
+                body = body[len(name):].lstrip(self._OPEN_STRIP)
+                break
+        body = body.strip()
+        if len(body) < 4:
+            return False
+        bare = body.replace("你們", "").replace("大家", "")
+        if "你" in bare or "妳" in bare:
+            return False
+        # 「少在那邊出一張嘴」「光看顏色哪夠」這種前段是直接開嗆，不是報備生活，
+        # 放過；要的是「我剛點好香氛蠟燭」這一類。主詞或體感／動作字至少命中一個。
+        if not (
+            any(c in body for c in self._SELF_CUES)
+            or any(c in body for c in self._BODY_CUES)
+            or _PREAMBLE_CUES.search(body)
+        ):
+            return False
+        # 後段才落到人（你／問句／點名），否則前段只是長句的第一截。
+        if "你" in tail or "妳" in tail or self._is_question(tail):
+            return True
+        return any(n in tail for n in self._speaker_names(int(group_id)))
 
     @staticmethod
     def _is_spectator_anywhere(text: str) -> bool:
@@ -4197,6 +4275,12 @@ class AccountWorker:
         self.stats[f"band_{self._struct_mode}"] = (
             int(self.stats.get(f"band_{self._struct_mode}", 0)) + 1
         )
+        # 模型永遠寫到字數帶的上緣：8~16 帶實測九則全在 11~19、0 則 ≤8 字，
+        # 短碎等於只存在於提示詞。短碎模式再抽 45% 走「一句話」窄帶（上限 10 字），
+        # 讓「真的假的」這種三到五字反應真的出現，而不是每句都是兩個子句。
+        self._short_tight = self._struct_mode == "short" and random.random() < 0.45
+        if self._short_tight:
+            self.stats["band_short_tight"] = int(self.stats.get("band_short_tight", 0)) + 1
         self.stats[f"band_heat_{'hot' if heat >= _HOT_BURST_HUMANS else 'warm' if heat >= _WARM_BURST_HUMANS else 'cold'}"] = (
             int(self.stats.get(f"band_heat_{'hot' if heat >= _HOT_BURST_HUMANS else 'warm' if heat >= _WARM_BURST_HUMANS else 'cold'}", 0)) + 1
         )
@@ -4212,6 +4296,11 @@ class AccountWorker:
             chosen_syntax += (
                 "\n【現場正在洗屏】：大家現在是一句 5~10 字在接話，節奏很快。"
                 "這則不要交代前情、不要開新場景，直接接現在這一句在講的事，一句話講完。"
+            )
+        if getattr(self, "_short_tight", False):
+            chosen_syntax += (
+                "\n【這則只有一句話】：十個字以內講完，像群組裡脫口而出的三到五字反應"
+                "（「真的假的」「我會笑死」「脫掉啦」「最好是」），不准有逗號前的前情。"
             )
 
         if "不准問" in type_note:
@@ -5316,6 +5405,9 @@ class AccountWorker:
         band = _STRUCT_BANDS.get(self._struct_mode)
         if self._struct_mode == "short":
             # 只有 4 字緩衝：實測給到 26 字，模型就一路寫到 20~26，短碎等於沒發生。
+            # 窄帶再加一刀：上限 10 字，逼出三到五字的一句反應。
+            if getattr(self, "_short_tight", False):
+                return min(char_cap, band[0] + 2)
             return min(char_cap, band[1] + 4)
         if band and self._struct_mode != "scene":
             return min(char_cap, band[1] + 10)
@@ -9551,6 +9643,10 @@ class AccountWorker:
                             else "warm" if _p_heat >= _WARM_BURST_HUMANS else "cold")
         )
         _p_lo, _p_hi = _STRUCT_BANDS[_p_mode]
+        # 短碎再切窄帶：跟回覆路徑同一個旗標，主動路徑也要吃，否則上限永遠是帶頂＋2。
+        self._short_tight = _p_mode == "short" and random.random() < 0.45
+        if self._short_tight:
+            self._pcount("band_short_tight")
         _p_struct = {
             "short": "這則走極短碎念（8~16字）：不交代場景、不點名，像隨口丟一句。",
             "dirty": "這則走直球色誘（12~24字）：把生活瑣事拿掉，直接講身體或性張力。",
@@ -9660,6 +9756,8 @@ class AccountWorker:
             # 「8~16 字短碎」等於沒作用（21:00–21:59 平均 23.0 字、≤8 字 0 則）。
             # 短碎模式先砍掉前情、只留最後那一記（模型永遠會自己補前情），砍不動才標點裁切。
             _p_cap = _p_hi + (20 if _p_mode == "scene" else 2 if _p_mode == "short" else 6)
+            if _p_mode == "short" and getattr(self, "_short_tight", False):
+                _p_cap = _p_lo + 2
             if len(topic) > _p_cap:
                 if _p_mode == "short":
                     clipped = self._strip_lead_to_tail(topic, _p_cap)
@@ -10002,6 +10100,11 @@ class AccountWorker:
                             else 65.0 if heat >= _WARM_BURST_HUMANS
                             else 90.0
                         )
+                        # 久沒講話的號不吃水軍互相冷卻：小小 10:00–10:17 九次搶格
+                        # 全敗、連生成都輪不到（band 統計 0 筆），因為四條迴圈重啟後
+                        # 相位對齊，永遠同一個號先搶到同一格。
+                        if starved_turn:
+                            bot_gap = min(bot_gap, 12.0)
                         if time.time() - last_any_bot < bot_gap:
                             print(f"[{self.name}] proactive-skip: 群內 {time.time() - last_any_bot:.0f}s 前已有水軍發言，保持冷卻讓群友聊", flush=True)
                             self._pcount("pskip_botgap")
@@ -10023,11 +10126,20 @@ class AccountWorker:
                     cooldown *= 0.45
                 elif heat >= _WARM_BURST_HUMANS:
                     cooldown *= 0.7
+                # 久沒講話的號走專屬 claim key：同一格只有一個人搶得到，四條迴圈
+                # 重啟後相位對齊，誰先 tick 誰贏，慢的一路餓死（10:00–10:17 小小
+                # 九連敗、0 則）。starved 時換自己的 key 並把冷卻壓到 15 秒，
+                # 讓它插得回場；飢餓判準是「自己 >600 秒沒講、別人一直講」。
+                claim_suffix = ""
+                if starved_turn:
+                    claim_suffix = str(self.tg_user_id or self.account_id)
+                    cooldown = min(cooldown, 15.0)
                 if not await self.db.claim_proactive_slot(
                     group_id,
                     slot,
                     self.account_id,
                     cooldown,
+                    claim_suffix,
                 ):
                     print(f"[{self.name}] proactive-skip: slot already claimed by another account", flush=True)
                     self._pcount("pskip_slot")
@@ -10256,7 +10368,7 @@ class AccountWorker:
                 finally:
                     if not delivered:
                         await self.db.release_proactive_slot(
-                            group_id, slot, self.account_id
+                            group_id, slot, self.account_id, claim_suffix
                         )
             except asyncio.CancelledError:
                 return
