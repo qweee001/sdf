@@ -3912,10 +3912,11 @@ class AccountWorker:
         （看萬英尺、聽地暖鋪著）之後整批漏掉，這裡放寬到「前半句出現看／聽」。
         """
         body = str(text or "").strip()
-        head = body.split("，")[0][:12]
         if len(body) < 8:
             return False
-        return "看" in head or "聽" in head
+        # 用整句開頭十四字而不是第一個逗號前：開場改成先點名（後天，誰要聽他唱歌…）
+        # 之後，看／聽 落在第二截，只看第一截會整批漏掉。
+        return "看" in body[:14] or "聽" in body[:14]
 
     def _watch_frame_flow(self, group_id: int) -> int:
         """最近三則水軍有幾則用「動作＋看」進場。"""
