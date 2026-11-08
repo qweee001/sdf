@@ -7587,6 +7587,9 @@ class AccountWorker:
         )
         if director_note:
             user_message += f"\n{director_note}"
+        # 網關模型（2026-11-08 上午起）會把整份提示當交辦事項、只回一句 "task ready"：
+        # completion_tokens 固定 3、內容兩個字。把最後一句壓成動作指令。
+        user_message += "\n【直接輸出那一則台詞，只寫台詞】"
 
         async def call_reply(message: str) -> str:
             if image and self.media_service:
@@ -9715,7 +9718,7 @@ class AccountWorker:
             cross_hint = self._cross_opening_note(int(group_id))
             if cross_hint:
                 body += f"\n{cross_hint}"
-            return body + self._time_hint()
+            return body + self._time_hint() + "\n\n【直接輸出那一則台詞，只寫台詞】"
 
         # 生成不出可用的一句就重試（最多 3 次）：重試時把「已經講過的」餵回去，
         # 逼模型換說法；三次都撞句／穿幫就這一輪不開口，也不塞罐頭句。
