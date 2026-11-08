@@ -432,7 +432,7 @@ _AXIS_VARIANTS = str.maketrans({"酸": "痠", "溼": "濕", "檯": "台"})
 # 複讀比對前先剝掉的襯字（只剝不承載語意的，不碰名詞動詞）。
 _FILLER_STRIP = str.maketrans("", "", "一了啦喔欸嘛啊呀耶哦囉")
 # 句子不可能停在這些字上（停住就是模型被切斷）：14:18 RICH「變態才」三個字就送出去。
-_TAIL_DANGLE = set("才就都又也還卻而但跟和與讓把被從比在進沒")
+_TAIL_DANGLE = set("才就都又也還卻而但跟和與讓把被從比在進沒夠")
 # 兩字副詞同樣懸空（「一定被」「我都直接」）：被剪在這兩組後面，句子讀起來是斷的。
 _DANGLE_TAIL_WORDS = ("一定", "直接", "乾脆", "其實", "整個", "根本", "而且", "我")
 _SCENE_MOSAIC_SOURCES = 3
@@ -3237,7 +3237,22 @@ class AccountWorker:
         head = re.split(r"[，,。！？…]", body)[0]
         return any(m in head for m in _SPECTATOR_MARKERS)
 
-    def _is_preamble_beat(self, text: str, group_id: int = 0) -> bool:
+    _BEAT_MARKS = re.compile(r"[了著過的得好在把被剛正才邊先太超很沒那麼這麼有點快]")
+    _TAIL_PERSON = ("你", "妳", "哥哥", "姊姊", "姐姐", "妹妹", "弟弟", "老公", "寶貝")
+    _TAIL_INVITE = ("不如", "敢不敢", "要不要", "誰要", "誰幫", "來試", "來摸", "來舔", "幫我", "願不願")
+
+    def _tail_aims_at_person(self, tail: str, group_id: int = 0) -> bool:
+        if not tail:
+            return False
+        if any(w in tail for w in self._TAIL_PERSON):
+            return True
+        if any(w in tail for w in self._TAIL_INVITE):
+            return True
+        if self._is_question(tail):
+            return True
+        return any(n in tail for n in self._speaker_names(int(group_id)))
+
+    def _is_preamble_beat(self, text: str, group_id: int = 0, loose: bool = False) -> bool:
         """兩段式模子：前段先報備自己在幹嘛，後段才對人撩／嗆。
 
         無對象軸（_is_nameless_open）擋的是「整句都在演自己」；今天 10:00–10:17
@@ -3274,6 +3289,16 @@ class AccountWorker:
                 body = body[len(name):].lstrip(self._OPEN_STRIP)
                 break
         body = body.strip()
+        # 前段只是喊一個人（後天，煮雞蛋麵不如煮你自己給姊姊吃／和進出口，煮給我吃
+        # 再床上見真章）：骨架上仍是「先鋪一段、後段才對人」，一樣算 beat。
+        # 名字來源不必維護清單——短前段、沒有自稱、沒有文法助詞就是稱呼。
+        if 2 <= len(body) <= 4 and not self._BEAT_MARKS.search(body) and not any(
+            c in body for c in self._SELF_CUES
+        ) or not body:
+            # 對象已經在名字裡，後半句不必再有你／問句：「和進出口，煮給我吃再床上
+            # 見真章」後段全是自己的事，卻完全聽得出在對誰講。
+            # 前段被暱稱剝光（後天，…）也一樣：名字本身就是對象。
+            return True
         if len(body) < 4:
             return False
         bare = body.replace("你們", "").replace("大家", "")
@@ -3281,37 +3306,46 @@ class AccountWorker:
             return False
         # 「少在那邊出一張嘴」「光看顏色哪夠」這種前段是直接開嗆，不是報備生活，
         # 放過；要的是「我剛點好香氛蠟燭」這一類。主詞或體感／動作字至少命中一個。
-        if not (
+        strong = (
             any(c in body for c in self._SELF_CUES)
             or any(c in body for c in self._BODY_CUES)
             or _PREAMBLE_CUES.search(body)
-        ):
-            return False
-        # 後段才落到人（你／問句／點名），否則前段只是長句的第一截。
-        if "你" in tail or "妳" in tail or self._is_question(tail):
-            return True
-        return any(n in tail for n in self._speaker_names(int(group_id)))
+        )
+        # loose：詞全換光、骨架照抄（換新內衣勒得好緊，…／練過深蹲夾得更緊，…）。
+        # 語料裡這類前段一定帶文法助詞（了著過得把被剛這麼…），用助詞兜底；
+        # 判語流仍是硬 cue，免得整場都算成前情。
+        if not strong:
+            if not loose or not self._BEAT_MARKS.search(body):
+                return False
+        # 後段才落到人（你／問句／點名／邀約），否則前段只是長句的第一截。
+        return self._tail_aims_at_person(tail, group_id)
 
     def _preamble_flow(self, group_id: int) -> int:
-        """最近三則水軍有幾則是兩段式前情報備。"""
+        """最近五則水軍有幾則是兩段式前情報備（詞換光、骨架照抄也算）。"""
         if not group_id:
             return 0
-        return sum(
-            1
-            for t in self._recent_bot_pool([], int(group_id), None)
-            if self._is_preamble_beat(t, int(group_id))
-        )
+        recent = self._cross_recent_texts(int(group_id), 30 * 60)[-5:]
+        return sum(1 for t in recent if self._is_preamble_beat(t, int(group_id), loose=True))
 
     def _strip_preamble_head(self, text: str, group_id: int = 0) -> str:
         """剪掉前情報備，只留後半句。提示詞壓不住時用物理方式斷模子。
 
-        語流已經連續兩則都是「先演自己、後半句才對人」時才動刀，單則不動，
-        免得把正常的兩段句一起剪碎。
+        語流已經連續幾則都是「先演自己、後半句才對人」時才動刀，單則不動，
+        免得把正常的兩段句一起剪碎。名字在前的（和進出口，…）剪掉動作仍留名字，
+        點名是好事，不要一起剪掉。
         """
         t = str(text or "").replace(",", "，").strip()
-        if not self._is_preamble_beat(t, int(group_id)):
+        if not self._is_preamble_beat(t, int(group_id), loose=True):
             return ""
-        tail = t.partition("，")[2].strip()
+        head, _sep, tail = t.partition("，")
+        tail = tail.strip()
+        bare = head.lstrip(self._OPEN_STRIP).strip()
+        # 前段只是喊名字：保留名字，剪掉名字與後半句之間那截動作
+        if 2 <= len(bare) <= 4 and not self._BEAT_MARKS.search(bare):
+            merged = f"{bare}，{tail}"
+            return merged if 8 <= len(merged) <= 34 else (tail if 6 <= len(tail) <= 40 else "")
+        if not self._tail_aims_at_person(tail, int(group_id)):
+            return ""
         return tail if 6 <= len(tail) <= 40 else ""
 
     @staticmethod
@@ -3652,6 +3686,9 @@ class AccountWorker:
         t = str(text or "").strip().rstrip("，,、 ")
         if not t or len(t) > 30:
             return False
+        # 「不夠」是收得住的（錢不夠），其餘停在「夠」都是斷的（14:04「看你雞雞夠」）
+        if t[-1] == "夠":
+            return not t.endswith("不夠")
         return t[-1] in _TAIL_DANGLE or t.endswith(_DANGLE_TAIL_WORDS)
 
     @classmethod
@@ -7804,10 +7841,24 @@ class AccountWorker:
                 reply = repaired
                 too_long = False
         # 節奏物理層：整段語流已經在報備前情時，直接剪掉這則的前半句。
-        if self._preamble_flow(group_id) >= 2:
+        if self._preamble_flow(group_id) >= 3:
             stripped_preamble = self._strip_preamble_head(reply, group_id)
             if stripped_preamble:
                 reply = stripped_preamble
+        # 跨號同梗：別的號一分鐘內已經在講同一個對象／同一個梗，後到的這則
+        # 剪短或剪掉前情，別兩個小姐搶同一個男人講同一件事。
+        if group_id:
+            _tg = self._cross_target_burst(reply, group_id)
+            if _tg:
+                self._pcount("target_burst")
+                print(f"[{self.name}] target-burst: 「{_tg}」60 秒內別號也在講 → {reply[:24]!r}", flush=True)
+                _cut = self._strip_preamble_head(reply, group_id)
+                if _cut:
+                    reply = _cut
+                elif len(reply) > 18:
+                    _trimmed = self._trim_to_cap(reply, 16)
+                    if _trimmed and not self._is_dangling(_trimmed):
+                        reply = _trimmed
         # 旁觀模子：近三則有兩則是「先演個動作再看別人」（吸著冰手搖看你們嫌、
         # 咬著便當看…）。提示詞拿不掉，直接剪掉前面那截動作，只留對人的那句。
         if (
@@ -9390,6 +9441,46 @@ class AccountWorker:
             return True
         return False
 
+    _TARGET_BURST_SECONDS = 60.0
+    _TARGET_STOP3 = ("我們", "你們", "他們", "這個", "那個", "就是", "可以", "真的", "這樣", "那麼")
+
+    def _cross_target_burst(self, candidate: str, group_id: int) -> str:
+        """60 秒內別的帳號已經在講同一個對象／同一個梗（前八字三字重疊）。
+
+        14:23:04 Chen「和進出口，不穿日料改把我剝光在流理台吃個夠」、
+        14:23:09 小小「和進出口，煮給我吃再床上見真章」——兩號五秒內同一個
+        「煮飯→上床」梗，字面幾乎不重疊，撞詞軸與 _burst_echo（只比本號）
+        兩道都放行，觀眾看到的是兩個小姐搶同一個男人講同一件事。
+        """
+        if not group_id:
+            return ""
+        body = "".join(ch for ch in str(candidate) if "一" <= ch <= "鿿")
+        if len(body) < 6:
+            return ""
+        head = body[:6]
+        if len(head) < 3:
+            return ""
+        grams = [head[i:i + 3] for i in range(len(head) - 2)]
+        best = ""
+        for text, _age in self._cross_recent_items(int(group_id), self._TARGET_BURST_SECONDS):
+            other = "".join(ch for ch in str(text) if "一" <= ch <= "鿿")
+            for g in grams:
+                if g in self._TARGET_STOP3:
+                    continue
+                pos = other.find(g)
+                if pos < 0:
+                    continue
+                # 往兩邊長出去，取整段共用的字串（名字會被切成「和進出／進出口」）
+                start, i = pos, head.index(g)
+                while i > 0 and start > 0 and head[i - 1] == other[start - 1]:
+                    i, start = i - 1, start - 1
+                end, j = pos + len(g), head.index(g) + len(g)
+                while j < len(head) and end < len(other) and head[j] == other[end]:
+                    j, end = j + 1, end + 1
+                if j - i > len(best):
+                    best = head[i:j]
+        return best
+
     # 自稱講法（文法第一人稱候選，不是封殺清單）：只用來數哪一種被用爛了
     _SELF_REF_TOKENS = ("姊姊", "老娘", "本小姐", "人家", "小妹")
     _FRAME_STOP = set("我你他她它的是在了也就都還很有一套個這那有會要不能把被給跟和")
@@ -9938,7 +10029,7 @@ class AccountWorker:
                     if repaired:
                         topic = repaired
             # 語流已在報備前情：這則直接剪掉前半句，斷掉模子。
-            if self._preamble_flow(int(group_id)) >= 2:
+            if self._preamble_flow(int(group_id)) >= 3:
                 _sp = self._strip_preamble_head(topic, int(group_id))
                 if _sp:
                     topic = _sp

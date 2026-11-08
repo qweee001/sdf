@@ -37,13 +37,15 @@ PREAMBLE = [
     "擦著乳液看地暖鋪著自己打手槍，留給姊姊用小穴榨不是更爽嗎",
     "我都邊喝咖啡邊看，你真的會怕喔",
     "冷氣好冷，要肉身貼緊保護我嗎",
+    # 名字前置也是同一個骨架，只是鋪的那截換成人名（14:23 兩號連發同一組）
+    "和進出口，煮給我吃再床上見真章",
+    "和進出口，不穿日料改把我剝光在流理台吃個夠",
 ]
 
 # 單句、或前段就已經在對人開嗆 → 不算
 NOT_PREAMBLE = [
     "上班偷喝冰美式才醒得來",
     "少在那邊出一張嘴，有本事當面來驗貨啊",
-    "後天，煮雞蛋麵不如煮你自己給姊姊吃",
     "真的假的",
     "我會笑死",
 ]
@@ -144,4 +146,31 @@ def test_flow_counts_only_preamble_beats():
         "真的假的",
     ]
     w._recent_texts_at[GID] = [NOW - 120, NOW - 60, NOW - 10]
+    assert w._preamble_flow(GID) == 2
+
+
+def test_name_first_head_keeps_the_name_when_cut():
+    """名字在前：剪掉的是名字後面那截動作，不是名字本身。"""
+    w = _worker()
+    assert (
+        w._strip_preamble_head("後天，煮雞蛋麵還邊滑手機不如煮你自己給姊姊吃", GID)
+        == "後天，煮雞蛋麵還邊滑手機不如煮你自己給姊姊吃"
+    )
+    assert w._strip_preamble_head("和進出口，煮給我吃再床上見真章", GID) == (
+        "和進出口，煮給我吃再床上見真章"
+    )
+
+
+def test_flow_needs_three_of_last_five():
+    """詞換光也照算，但單則不動刀：五則裡要三則才是語流。"""
+    w = _worker()
+    beats = [
+        "換新內衣勒得好緊，怕壓壞娃娃不如改把哥哥按在床上搖",
+        "剛試穿新裙子拉鍊卡住，不裝了誰幫我剝掉它",
+        "練過深蹲夾得更緊，今晚敢不敢來試我的姿勢",
+    ]
+    w._recent_texts_at[GID] = [NOW - 240, NOW - 180, NOW - 60, NOW - 30, NOW - 10]
+    w._recent_texts_by_group[GID] = beats + ["真的假的", "我會笑死"]
+    assert w._preamble_flow(GID) == 3
+    w._recent_texts_by_group[GID] = beats[:2] + ["真的假的", "我會笑死", "上班偷喝冰美式才醒得來"]
     assert w._preamble_flow(GID) == 2

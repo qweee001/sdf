@@ -81,3 +81,10 @@ def test_tail_repair_drops_the_hanging_word():
     # 完整句不動，太短剪不動就回空字串交給重寫
     assert AccountWorker._repair_dangling_tail("這種我最愛") == ""
     assert AccountWorker._repair_dangling_tail("你這樣跟") == ""
+
+
+def test_gou_tail_is_dangling_unless_bu_gou():
+    """14:04「隨便約也得看你雞雞夠」停在補語；「錢不夠」是收得住的。"""
+    assert AccountWorker._is_dangling("隨便約也得看你雞雞夠")
+    assert AccountWorker._repair_dangling_tail("隨便約也得看你雞雞夠") == "隨便約也得看你雞雞"
+    assert not AccountWorker._is_dangling("這樣就錢不夠")
