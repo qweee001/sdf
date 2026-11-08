@@ -20,7 +20,7 @@ GROUP = -5428680940
 def _esc_worker():
     w = object.__new__(worker_mod.AccountWorker)
     w.name = "Chen"
-    w.persona = {"name": "Chen", "age": 38, "gender": "女", "city": "台北", "industry": "服飾店"}
+    w.persona = {"name": "Chen", "age": 38, "gender": "女", "city": "台北", "industry": "服飾店", "personality": "飢渴騷熟女、喜歡年輕強壯肉棒"}
     w.stats = {}
     w._fallback_models = ()
     w._counters = {}
@@ -74,13 +74,34 @@ def test_third_stage_drops_context_entirely():
     asyncio.run(main())
 
 
+def test_fourth_stage_drops_the_personality_line():
+    """個性裡帶露骨字（Chen 寫「肉棒」）時，最後一階連個性都不給。"""
+
+    async def main():
+        w = _esc_worker()
+        systems: list[str] = []
+
+        async def fake_call(system_prompt, user_message, model=None, purpose="text"):
+            systems.append(system_prompt)
+            if "肉棒" in system_prompt:
+                return "The prompt could not be submitted."
+            return "自己一個人也行啊"
+
+        w._call_ai = AsyncMock(side_effect=fake_call)
+        assert await w._refusal_escape(["a：b"], target="肉棒") == "自己一個人也行啊"
+        assert "肉棒" not in systems[-1]
+        assert w._counters["refusal_escape_stage4"] == 1
+
+    asyncio.run(main())
+
+
 def test_all_stages_refused_counts_every_try_and_returns_empty():
     async def main():
         w = _esc_worker()
         w._fallback_models = ("backup-a",)
         w._call_ai = AsyncMock(return_value="Request is blocked due to the PUP.")
         assert await w._refusal_escape(["a：b"]) == ""
-        assert w.stats["refusal_escape_try"] == 6  # 3 階段 × 2 個模型
+        assert w.stats["refusal_escape_try"] == 8  # 3 階段 × 2 個模型
         assert "refusal_escape" not in w.stats
         assert "refusal_escape_stage2" not in w._counters
 

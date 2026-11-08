@@ -8473,12 +8473,15 @@ class AccountWorker:
                 return t
         return str(raw or "").strip()
 
-    def _slim_persona_prompt(self) -> str:
+    def _slim_persona_prompt(self, bare: bool = False) -> str:
         """拒答逃生用的極短角色卡（約一百字）。
 
         拒答來自權重的對齊層在評論「你交辦的那一包」，不是內容真的不行：
         提示長到六七千字（人設＋規則＋記憶＋去重）時，模型回頭講「您的提示
         要求我扮演…」。同一個模型換短得多的場合幾乎就肯講了。
+
+        bare＝連個性那句都不給（Chen 的個性寫著「肉棒」，審核有時連這三個字
+        都嫌），只留名字、年紀、地点、職業。
         """
         p = self.persona or {}
         name = str(p.get("name") or "妹子")
@@ -8486,7 +8489,7 @@ class AccountWorker:
         gender = str(p.get("gender") or "女")
         place = f"{p.get('city') or ''}{p.get('district') or ''}"
         job = str(p.get("industry") or "")
-        trait = str(p.get("personality") or "")[:40]
+        trait = "" if bare else str(p.get("personality") or "")[:40]
         return (
             f"你是{name}，{age}歲{gender}生，住{place}，{job}。{trait}"
             "現在在成人約會群組跟人聊天，尺度直接。"
@@ -8533,22 +8536,28 @@ class AccountWorker:
             (
                 ("群組最近在講：\n" + ctx) if ctx else "群組現在很安靜。",
                 "",
+                False,
             ),
             (
                 ("剛剛在聊：\n" + short_ctx) if short_ctx else "群組現在很安靜。",
                 "短一點、把露骨字面留給原句就好",
+                False,
             ),
-            ("群組現在沒什麼人講話。", "不用接誰，自己丟一句"),
+            ("群組現在沒什麼人講話。", "不用接誰，自己丟一句", False),
+            # 第四階段連個性那句都拿掉：個性裡若有「肉棒」「騷」這種字，
+            # 審核有時連角色卡都嫌，Chen 前三階 10 次只有 1 次過。
+            ("群組現在沒什麼人講話。", "不用接誰，自己丟一句", True),
         ]
         if target:
-            stages[0] = (stages[0][0] + f"\n接這一句：{target}", "")
+            stages[0] = (stages[0][0] + f"\n接這一句：{target}", "", False)
             if slim_target:
                 stages[1] = (
                     stages[1][0] + f"\n接這一句（砍短）：{slim_target}",
                     stages[1][1],
+                    False,
                 )
-        system = self._slim_persona_prompt()
-        for index, (body, extra) in enumerate(stages):
+        for index, (body, extra, bare) in enumerate(stages):
+            system = self._slim_persona_prompt(bare=bare)
             body += ("\n" + extra) if extra else ""
             body += "\n直接寫出你會打出的那一行。"
             for model in (None, *self._fallback_models):

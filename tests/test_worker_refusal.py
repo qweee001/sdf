@@ -165,7 +165,7 @@ def test_escape_rejects_meta_text_and_counts_nothing():
         )
         assert await worker._refusal_escape(["a：b"]) == ""
         assert "refusal_escape" not in worker.stats
-        assert worker.stats["refusal_escape_try"] == 3  # 三階段各試一次
+        assert worker.stats["refusal_escape_try"] == 4  # 四階段各試一次
 
     asyncio.run(main())
 
