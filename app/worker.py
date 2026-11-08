@@ -3372,6 +3372,18 @@ class AccountWorker:
         recent = self._cross_recent_texts(int(group_id), 30 * 60)[-5:]
         return sum(1 for t in recent if self._is_preamble_beat(t, int(group_id), loose=True))
 
+    def _comma_flow(self, group_id: int) -> int:
+        """最近五則水軍有幾則帶逗號＝兩段式模子（不管前段是動作還是人名）。
+
+        前情剪枝只認得「先演自己」那種；「戰豆，慾望不強怎麼把你吸乾呀」
+        「請教這麼乖，偷跑出來喝酒敢嗎」前段是人名或短語，剪不到，一小時
+        23 則裡 13 則照樣兩段。這裡改成純骨架：整句都靠逗號撐著就斷它。
+        """
+        if not group_id:
+            return 0
+        recent = self._cross_recent_texts(int(group_id), 30 * 60)[-5:]
+        return sum(1 for t in recent if "，" in t or "," in t)
+
     def _strip_preamble_head(self, text: str, group_id: int = 0) -> str:
         """剪掉前情報備，只留後半句。提示詞壓不住時用物理方式斷模子。
 
@@ -10272,6 +10284,13 @@ class AccountWorker:
             _p_cap = _p_hi + (4 if _p_mode == "scene" else 2)
             if _p_mode == "short" and getattr(self, "_short_tight", False):
                 _p_cap = _p_lo + 2
+            # 兩段式已經連四則：這則直接斷成單句，連人名那段一起斷（指名留給
+            # 決策層另外補，四號九則是「名字＋台詞」同一個模子更刺眼）。
+            if self._comma_flow(int(group_id)) >= 4:
+                _tail_only = self._strip_lead_to_tail(topic, 20)
+                if _tail_only and len(_tail_only) >= 8:
+                    topic = _tail_only
+                    self._pcount("strip_comma_flow")
             if len(topic) > _p_cap:
                 _orig_topic = topic
                 if _p_mode == "short":
