@@ -6833,27 +6833,41 @@ class AccountWorker:
         return None
 
     async def _incoming_image(self, event) -> tuple[bytes, str] | None:
+        """照片轉 bytes；每一條擋下的路都留計數。
+
+        識圖一直 images_seen 有、images_understood 0、errors 也 0，就是這條
+        路上有幾處靜默 return None，沒有證據看不出是哪一關。
+        """
         if not isinstance(getattr(event, "media", None), MessageMediaPhoto):
             return None
         if not self.media_service or not getattr(self.config, "media_enabled", False):
+            self._img_reject("no_service")
             return None
         file_info = getattr(event, "file", None)
         size = int(getattr(file_info, "size", 0) or 0)
         max_bytes = int(getattr(self.config, "media_max_input_bytes", 0) or 0)
         if max_bytes <= 0 or size <= 0 or size > max_bytes:
+            self._img_reject("bad_size")
             return None
         try:
             data = await asyncio.wait_for(
                 event.download_media(file=bytes), timeout=30
             )
         except Exception:
+            self._img_reject("download")
             return None
         if not isinstance(data, (bytes, bytearray)) or not data:
+            self._img_reject("empty")
             return None
         if len(data) > max_bytes:
+            self._img_reject("too_big")
             return None
         mime_type = str(getattr(file_info, "mime_type", "") or "image/jpeg")
         return bytes(data), mime_type
+
+    def _img_reject(self, reason: str) -> None:
+        key = f"img_none_{reason}"
+        self.stats[key] = int(self.stats.get(key, 0)) + 1
 
     @staticmethod
     def _active_gate_run_id(gate: Any, chat_id: int | None = None) -> str | None:
