@@ -9747,6 +9747,7 @@ class AccountWorker:
                 or self._has_format_leak(topic)
             ):
                 print(f"[{self.name}] proactive-drop: 異常輸出/無中文/拒答 {topic[:24]!r}", flush=True)
+                self.stats["dbg_drop"] = topic[:80]
                 self.stats["proactive_drop_nochinese"] = (
                     int(self.stats.get("proactive_drop_nochinese", 0)) + 1
                 )
