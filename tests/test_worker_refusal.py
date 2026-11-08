@@ -58,7 +58,11 @@ def test_casual_and_explicit_lines_are_not_refusals():
 
 
 def test_generation_drops_reply_when_model_refuses_twice():
-    """兩次都拒答就不發送，且理由記為 refusal 而不是當成正常回覆送出去。"""
+    """兩次都拒答就不發送，且理由記為 refusal 而不是當成正常回覆送出去。
+
+    現在全拒時會多打一次「極短提示」逃生，所以呼叫次數是三次以上；
+    逃生也拒答才丟，行為不變。
+    """
 
     async def main():
         worker = _worker(sorted(MANAGED)[0])
@@ -66,7 +70,7 @@ def test_generation_drops_reply_when_model_refuses_twice():
         event = _event()
         text = await worker._generate_reply(event)
         assert text == ""
-        assert worker._call_ai.await_count == 2
+        assert worker._call_ai.await_count >= 3
         assert worker._generation_reasons.get(worker._generation_key(event)) == (
             "refusal"
         )
@@ -75,21 +79,79 @@ def test_generation_drops_reply_when_model_refuses_twice():
 
 
 def test_refusal_retry_asks_for_role_line_instead_of_apology():
-    """重試提示要把它拉回「角色會打什麼字」，而不是再說一次『不符合要求』。"""
+    """重試提示要把它拉回「角色會打什麼字」，而不是再說一次『不符合要求』。
+
+    主模型拒答 → 極短提示逃生也拒答 → 才進到重寫那一次。
+    """
 
     async def main():
         worker = _worker(sorted(MANAGED)[0])
         worker._call_ai = AsyncMock(
             side_effect=[
                 "抱歉，我無法參與這類對話。",
+                "抱歉，我無法參與這類對話。",
                 "好啊 你來台中我帶你吃那間",
             ]
         )
         text = await worker._generate_reply(_event())
         assert text == "好啊 你來台中我帶你吃那間"
-        retry_prompt = worker._call_ai.await_args_list[1].args[1]
+        retry_prompt = worker._call_ai.await_args_list[2].args[1]
         assert "角色" in retry_prompt
         assert "不要道歉" in retry_prompt
+
+    asyncio.run(main())
+
+
+def test_short_prompt_escape_rescues_a_refused_reply():
+    """長提示被拒答時，極短角色卡那一次要救回一則可發的台詞。"""
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+
+        async def fake_call(system_prompt, user_message, model=None, purpose="text"):
+            if "成人約會群組" in system_prompt:  # 極短角色卡
+                return "好啊 你來台中我帶你吃那間"
+            return "作為一個 AI，我沒有辦法回應這個請求。"
+
+        worker._call_ai = AsyncMock(side_effect=fake_call)
+        text = await worker._generate_reply(_event())
+        assert text == "好啊 你來台中我帶你吃那間"
+        assert worker.stats["refusal_escape"] == 1
+        assert worker._call_ai.await_count == 2
+
+    asyncio.run(main())
+
+
+def test_escape_is_not_spent_when_fallback_model_answers():
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker._fallback_models = ("backup-a",)
+
+        async def fake_call(system_prompt, user_message, model=None, purpose="text"):
+            if "成人約會群組" in system_prompt:
+                return "極短提示來的句子"
+            if model:
+                return "好啊 你來台中我帶你吃那間"
+            return "作為一個 AI，我沒有辦法回應這個請求。"
+
+        worker._call_ai = AsyncMock(side_effect=fake_call)
+        text = await worker._generate_reply(_event())
+        assert text == "好啊 你來台中我帶你吃那間"
+        assert "refusal_escape" not in worker.stats
+
+    asyncio.run(main())
+
+
+def test_escape_rejects_meta_text_and_counts_nothing():
+    """逃生那一次若自己也回拒答／英文，不可當成台詞用。"""
+
+    async def main():
+        worker = _worker(sorted(MANAGED)[0])
+        worker._call_ai = AsyncMock(
+            return_value="The prompt could not be submitted."
+        )
+        assert await worker._refusal_escape(["a：b"]) == ""
+        assert "refusal_escape" not in worker.stats
 
     asyncio.run(main())
 
