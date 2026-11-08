@@ -3290,6 +3290,28 @@ class AccountWorker:
             return True
         return any(n in tail for n in self._speaker_names(int(group_id)))
 
+    def _preamble_flow(self, group_id: int) -> int:
+        """最近三則水軍有幾則是兩段式前情報備。"""
+        if not group_id:
+            return 0
+        return sum(
+            1
+            for t in self._recent_bot_pool([], int(group_id), None)
+            if self._is_preamble_beat(t, int(group_id))
+        )
+
+    def _strip_preamble_head(self, text: str, group_id: int = 0) -> str:
+        """剪掉前情報備，只留後半句。提示詞壓不住時用物理方式斷模子。
+
+        語流已經連續兩則都是「先演自己、後半句才對人」時才動刀，單則不動，
+        免得把正常的兩段句一起剪碎。
+        """
+        t = str(text or "").replace(",", "，").strip()
+        if not self._is_preamble_beat(t, int(group_id)):
+            return ""
+        tail = t.partition("，")[2].strip()
+        return tail if 6 <= len(tail) <= 40 else ""
+
     @staticmethod
     def _is_spectator_anywhere(text: str) -> bool:
         """整句版旁觀判定。head 版看不到「規範被嘴到不敢吭聲，這時間犯睏聽你們互嗆」這種
@@ -7704,6 +7726,11 @@ class AccountWorker:
             if trimmed:
                 reply = trimmed
                 too_long = False
+        # 節奏物理層：整段語流已經在報備前情時，直接剪掉這則的前半句。
+        if self._preamble_flow(group_id) >= 2:
+            stripped_preamble = self._strip_preamble_head(reply, group_id)
+            if stripped_preamble:
+                reply = stripped_preamble
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
@@ -9818,6 +9845,11 @@ class AccountWorker:
                     trimmed = self._trim_to_cap(topic, _p_cap)
                     if trimmed:
                         topic = trimmed
+            # 語流已在報備前情：這則直接剪掉前半句，斷掉模子。
+            if self._preamble_flow(int(group_id)) >= 2:
+                _sp = self._strip_preamble_head(topic, int(group_id))
+                if _sp:
+                    topic = _sp
             _note_seen(topic)
 
             # 最高優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型

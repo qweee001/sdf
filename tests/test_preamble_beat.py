@@ -123,3 +123,25 @@ def test_short_tight_cap_is_ten_chars():
     assert w._struct_char_cap(90) == 10
     w._short_tight = False
     assert w._struct_char_cap(90) == 20
+
+
+def test_strip_keeps_only_the_tail_half():
+    w = _worker()
+    assert (
+        w._strip_preamble_head("冷氣好冷，要肉身貼緊保護我嗎", GID)
+        == "要肉身貼緊保護我嗎"
+    )
+    # 非兩段式不動刀
+    assert w._strip_preamble_head("上班偷喝冰美式才醒得來", GID) == ""
+    assert w._strip_preamble_head("少在那邊出一張嘴，有本事當面來驗貨啊", GID) == ""
+
+
+def test_flow_counts_only_preamble_beats():
+    w = _worker()
+    w._recent_texts_by_group[GID] = [
+        "冷氣好冷，要肉身貼緊保護我嗎",
+        "我都邊喝咖啡邊看，你真的會怕喔",
+        "真的假的",
+    ]
+    w._recent_texts_at[GID] = [NOW - 120, NOW - 60, NOW - 10]
+    assert w._preamble_flow(GID) == 2
