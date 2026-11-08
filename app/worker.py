@@ -433,6 +433,8 @@ _AXIS_VARIANTS = str.maketrans({"酸": "痠", "溼": "濕", "檯": "台"})
 _FILLER_STRIP = str.maketrans("", "", "一了啦喔欸嘛啊呀耶哦囉")
 # 句子不可能停在這些字上（停住就是模型被切斷）：14:18 RICH「變態才」三個字就送出去。
 _TAIL_DANGLE = set("才就都又也還卻而但跟和與讓把被從比在")
+# 兩字副詞同樣懸空（「一定被」「我都直接」）：被剪在這兩組後面，句子讀起來是斷的。
+_DANGLE_TAIL_WORDS = ("一定", "直接", "乾脆", "其實", "整個", "根本", "而且", "我")
 _SCENE_MOSAIC_SOURCES = 3
 # 群務說明句：入會／找助理這種本來就該講外面的事，不套自曝要求。
 _INFO_WORDS = ("助理", "入會", "會員", "排隊", "私訊")
@@ -3648,7 +3650,37 @@ class AccountWorker:
     def _is_dangling(text: str) -> bool:
         """句尾停在連接詞／虛字上＝被切斷（「變態才」「我剛在」）。"""
         t = str(text or "").strip().rstrip("，,、 ")
-        return bool(t) and t[-1] in _TAIL_DANGLE and len(t) <= 30
+        if not t or len(t) > 30:
+            return False
+        return t[-1] in _TAIL_DANGLE or t.endswith(_DANGLE_TAIL_WORDS)
+
+    @classmethod
+    def _repair_dangling_tail(cls, text: str) -> str:
+        """句尾停在虛字就把那個字剪掉，別為了它再燒一次模型。
+
+        12:06 小小「帶鹹酥雞上捷運一定被」、12:33 Chen「跟姊姊開黃腔我都直接」
+        都是模型自己寫到字數目標就停手，剪完其實已經是完整的短句。重寫要十幾秒，
+        洗屏時常常還沒回來就過期，能自己收乾淨就不要退回去。
+        """
+        raw = str(text or "").strip()
+        if not cls._is_dangling(raw):
+            return ""
+        t = raw
+        for _ in range(3):
+            core = t.rstrip("，,、 ")
+            hit = next((w for w in _DANGLE_TAIL_WORDS if core.endswith(w)), "")
+            if not hit and core and core[-1] in _TAIL_DANGLE:
+                hit = core[-1]
+            if not hit:
+                break
+            cand = core[: -len(hit)].rstrip("，,、 ")
+            if len(cand) < 6:
+                break
+            t = cand
+        out = t.rstrip("，,、 ")
+        if out == raw or len(out) < 6 or cls._is_dangling(out):
+            return ""
+        return out
 
     @staticmethod
     def _strip_fillers(text: str) -> str:
@@ -5945,14 +5977,22 @@ class AccountWorker:
             pass
         # 洗屏時每個分支（裁判、具名重寫）都是額外 2~4 秒延遲：本機自檢（複讀／連三問／
         # 起手詞／對象軸）已經跑完，這裡直接放行比讓句子過期好。姊妹句同時在跑才續留裁判。
+        break_hot = ""
         if not strict and self._burst_heat(rows) >= _HOT_BURST_HUMANS:
-            self.stats["gate_hot_skip"] = int(self.stats.get("gate_hot_skip", 0)) + 1
-            print(
-                f"[{self.name}] gate-hot: 現場洗屏，略過裁判直接發 {text[:20]!r}",
-                flush=True,
-            )
-            self._burst_register(group_id, text)
-            return text
+            # 但自檢本身是純字串比對、零延遲，不能連它一起跳過：12:22:50 RICH
+            # 「…想去沖水了」→ 12:23:11 小小「…就想去沖水了」，兩號 21 秒接力同一個詞，
+            # 就是被這裡整段略過放行的。撞了才走下去重寫，沒撞照舊當場發。
+            break_hot = self._local_veto(text, own_texts, last_human, group_id)
+            if not break_hot:
+                self.stats["gate_hot_skip"] = int(self.stats.get("gate_hot_skip", 0)) + 1
+                print(
+                    f"[{self.name}] gate-hot: 現場洗屏，略過裁判直接發 {text[:20]!r}",
+                    flush=True,
+                )
+                self._burst_register(group_id, text)
+                return text
+            self.stats["gate_hot_veto"] = int(self.stats.get("gate_hot_veto", 0)) + 1
+            print(f"[{self.name}] gate-hot-veto: {break_hot} {text[:20]!r}", flush=True)
         # 這一小時全場都在當裁判、這版又只補一句評語：不論走哪條路都要落到一個人身上。
         need_target = self._needs_target_retry(group_id, text)
         # 兩人在互嗆：這則沒點名就退回重寫（互嗆的場，名字比什麼都重要）。
@@ -5982,7 +6022,7 @@ class AccountWorker:
             duel_names=duel,
             nameless_flow=flow,
             hot_names=hot_names,
-        )
+        ) or break_hot
         if veto:
             self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
             _code = "veto_" + self._veto_code(veto)
@@ -7725,6 +7765,12 @@ class AccountWorker:
             trimmed = self._trim_to_cap(reply, char_cap)
             if trimmed:
                 reply = trimmed
+                too_long = False
+        # 停在虛字上就自己收乾淨（重寫要十幾秒，洗屏時常常回來就過期了）
+        if self._is_dangling(reply):
+            repaired = self._repair_dangling_tail(reply)
+            if repaired:
+                reply = repaired
                 too_long = False
         # 節奏物理層：整段語流已經在報備前情時，直接剪掉這則的前半句。
         if self._preamble_flow(group_id) >= 2:
@@ -9845,6 +9891,10 @@ class AccountWorker:
                     trimmed = self._trim_to_cap(topic, _p_cap)
                     if trimmed:
                         topic = trimmed
+                if self._is_dangling(topic):
+                    repaired = self._repair_dangling_tail(topic)
+                    if repaired:
+                        topic = repaired
             # 語流已在報備前情：這則直接剪掉前半句，斷掉模子。
             if self._preamble_flow(int(group_id)) >= 2:
                 _sp = self._strip_preamble_head(topic, int(group_id))

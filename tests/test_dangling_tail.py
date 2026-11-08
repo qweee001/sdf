@@ -73,3 +73,11 @@ def test_complete_line_passes_the_veto():
     w._recent_texts_by_group[GID] = []
     w._recent_texts_at[GID] = [now]
     assert "斷在" not in w._local_veto("變態才有人愛啊", [], "", GID)
+
+def test_tail_repair_drops_the_hanging_word():
+    """停在虛字就自己收乾淨：12:06「帶鹹酥雞上捷運一定被」、12:33「跟姊姊開黃腔我都直接」。"""
+    assert AccountWorker._repair_dangling_tail("帶鹹酥雞上捷運一定被") == "帶鹹酥雞上捷運"
+    assert AccountWorker._repair_dangling_tail("跟姊姊開黃腔我都直接") == "跟姊姊開黃腔"
+    # 完整句不動，太短剪不動就回空字串交給重寫
+    assert AccountWorker._repair_dangling_tail("這種我最愛") == ""
+    assert AccountWorker._repair_dangling_tail("你這樣跟") == ""

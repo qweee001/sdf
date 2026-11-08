@@ -187,3 +187,42 @@ def test_cold_start_rewrites_the_first_line_of_the_day():
         assert out == "和進出口你昨天嘴這麼硬，今天還敢嗎"
 
     asyncio.run(main())
+
+def test_hot_field_still_runs_the_free_local_veto():
+    """洗屏可以省裁判，不能連零延遲的本機自檢一起省。
+
+    12:22:50 RICH「流汗就想衝去沖水了」→ 12:23:11 小小「…就想去沖水了」，
+    兩號 21 秒接力同一個詞，就是洗屏直接放行造成的。
+    """
+
+    async def main():
+        from test_worker_reply_arbitration import _event
+
+        worker = _worker()
+        now = time.time()
+        rows = [
+            {
+                "role": "user",
+                "timestamp": now - i,
+                "sender_name": "群友",
+                "content": f"話{i}",
+            }
+            for i in range(14)
+        ]
+        worker.db = SimpleNamespace(
+            get_group_messages=AsyncMock(return_value=rows),
+            recent_replies_by_name=AsyncMock(return_value=[]),
+        )
+        worker._review_candidate = AsyncMock(return_value={"issue": "none", "sendable": 0.9})
+        worker._recent_texts_by_group[-5428680940] = ["流汗就想衝去沖水了"]
+        worker._recent_texts_at[-5428680940] = [now - 20]
+        worker._pick_passing_candidate = AsyncMock(return_value="扒便當全身黏 誰先來幫我沖")
+        out = await worker._gate_reply(
+            _event(), "扒著便當我出個汗全身黏就想去沖水了"
+        )
+        assert out == "扒便當全身黏 誰先來幫我沖"
+        assert worker.stats["gate_hot_veto"] == 1
+        assert worker.stats.get("gate_hot_skip", 0) == 0
+        assert "自檢退回" in worker._pick_passing_candidate.await_args.args[2]
+
+    asyncio.run(main())
