@@ -9636,11 +9636,12 @@ class AccountWorker:
                 if run in other:
                     return run
                 # 整段沒有完全一樣（一邊「精液小穴都濕了」、一邊「只收滾燙的精液」）
-                # 就退到這段裡任一個兩字片段。
-                for i in range(len(run) - 1):
-                    gram = run[i:i + 2]
-                    if gram in other:
-                        return gram
+                # 就退到這段裡的片段，長的先試（大雞雞勝過大雞）。
+                for size in (3, 2):
+                    for i in range(len(run) - size + 1):
+                        gram = run[i:i + size]
+                        if gram in other:
+                            return gram
         return ""
 
     def _content_runs(self, body: str, cap: int = 8) -> list[str]:
