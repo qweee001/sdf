@@ -8191,6 +8191,18 @@ class AccountWorker:
                     t = t[cjk_idx:].strip()
         return t
 
+    @staticmethod
+    def _last_line(raw: str) -> str:
+        """思考開著時 content 會帶整段推論，答案在最後一行。
+
+        取最後一個有中文的非空行，剝掉條列符號與引號；抓不到就回原字串。
+        """
+        for line in reversed(str(raw or "").splitlines()):
+            t = line.strip().lstrip("-*•　 ").strip().strip("「」『』\"'")
+            if re.search(r"[\u4e00-\u9fff]", t):
+                return t
+        return str(raw or "").strip()
+
     async def _call_ai(
         self,
         system_prompt: str,
@@ -8256,6 +8268,12 @@ class AccountWorker:
             if not is_gemini_family:
                 no_think = {k: v for k, v in request_kwargs.items() if k != "extra_body"}
                 no_think["max_tokens"] = max(int(self.config.ai_max_tokens), 900)
+                _msgs = [dict(m) for m in no_think["messages"]]
+                _msgs[-1]["content"] = (
+                    _msgs[-1]["content"]
+                    + "\n\n思考完，最後一行只寫那一句台詞，不要任何說明或引號。"
+                )
+                no_think["messages"] = _msgs
                 variants.append(no_think)
             resp = None
             content = ""
@@ -8267,6 +8285,8 @@ class AccountWorker:
                         raise
                     continue
                 content = resp.choices[0].message.content or ""
+                if _i > 0:
+                    content = self._last_line(content)
                 if re.search(r"[\u4e00-\u9fff]", content):
                     break
             if resp is None:
