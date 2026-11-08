@@ -3904,6 +3904,36 @@ class AccountWorker:
             and self._is_question(prev[1])
         )
 
+    @staticmethod
+    def _is_watch_frame(text: str) -> bool:
+        """「先演一個動作、再『看／聽』別人」的旁觀模子（吸著冰手搖看你們嫌…）。
+
+        `_is_spectator_frame` 只認「看你們／聽你們」這種代名詞；開場改成點名
+        （看萬英尺、聽地暖鋪著）之後整批漏掉，這裡放寬到「前半句出現看／聽」。
+        """
+        body = str(text or "").strip()
+        head = body.split("，")[0][:12]
+        if len(body) < 8:
+            return False
+        return "看" in head or "聽" in head
+
+    def _watch_frame_flow(self, group_id: int) -> int:
+        """最近三則水軍有幾則用「動作＋看」進場。"""
+        if not group_id:
+            return 0
+        recent = self._cross_recent_texts(int(group_id), 30 * 60)[-3:]
+        return sum(1 for t in recent if self._is_watch_frame(t))
+
+    @staticmethod
+    def _strip_spectator_head(text: str) -> str:
+        """直接把「動作＋看…」整個前段剪掉，只留對人的那一句。"""
+        body = str(text or "").strip()
+        parts = body.split("，")
+        if len(parts) < 2:
+            return ""
+        tail = "，".join(parts[1:]).strip()
+        return tail if 6 <= len(tail) <= 34 else ""
+
     def _echo_human_opening(self, candidate: str, humans: str) -> str:
         """候選開頭幾個字是否直接從真人最近三句照抄。"""
         body = str(candidate or "").lstrip(self._OPEN_STRIP)
@@ -7777,6 +7807,17 @@ class AccountWorker:
             stripped_preamble = self._strip_preamble_head(reply, group_id)
             if stripped_preamble:
                 reply = stripped_preamble
+        # 旁觀模子：近三則有兩則是「先演個動作再看別人」（吸著冰手搖看你們嫌、
+        # 咬著便當看…）。提示詞拿不掉，直接剪掉前面那截動作，只留對人的那句。
+        if (
+            group_id
+            and self._is_watch_frame(reply)
+            and self._watch_frame_flow(group_id) >= 2
+        ):
+            stripped_spectator = self._strip_spectator_head(reply)
+            if stripped_spectator:
+                self.stats["strip_spectator"] = int(self.stats.get("strip_spectator", 0)) + 1
+                reply = stripped_spectator
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
@@ -9900,6 +9941,12 @@ class AccountWorker:
                 _sp = self._strip_preamble_head(topic, int(group_id))
                 if _sp:
                     topic = _sp
+            # 語流連續兩則「動作＋看」：剪掉動作那截，只留對人的句尾。
+            if self._is_watch_frame(topic) and self._watch_frame_flow(int(group_id)) >= 2:
+                _ss = self._strip_spectator_head(topic)
+                if _ss:
+                    self._pcount("strip_spectator")
+                    topic = _ss
             _note_seen(topic)
 
             # 最高優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型
