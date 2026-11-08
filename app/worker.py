@@ -10183,7 +10183,9 @@ class AccountWorker:
         elif _p_heat >= _WARM_BURST_HUMANS:
             _p_mode = "short" if _p_roll < 0.5 else "dirty" if _p_roll < 0.8 else "scene"
         else:
-            _p_mode = "short" if _p_roll < 0.3 else "dirty" if _p_roll < 0.65 else "scene"
+            # 冷場（19:30 後 3.5 則／分）原本只有三成走短碎，其餘全落 dirty／scene，
+            # 實測中位數又回到 20 字、8~16 只 0 則。冷場就該是短氣泡為主。
+            _p_mode = "short" if _p_roll < 0.5 else "dirty" if _p_roll < 0.8 else "scene"
         self._pcount(f"band_{_p_mode}")
         self._pcount(
             "band_heat_" + ("hot" if _p_heat >= _HOT_BURST_HUMANS
