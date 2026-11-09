@@ -3773,7 +3773,13 @@ class AccountWorker:
         hard = 300.0 if (text_ready or in_escape) else 180.0
         if age > hard:
             return "cancel"
-        if same_sender and age >= max(15.0, budget * 0.5):
+        # 句子已經生成好了，同一個人再補一句也不砍：正確性由發送前的
+        # _context_still_fresh 把關（它會看新句是否還在同一個話題上），砍掉只是
+        # 白燒一次生成、順便把已認領的 claim 一起放掉，這一則就永遠沒人回。
+        # 熱場實測（19:02–19:47 桃花源，真人 3.8 則/分）重啟後 claimed 56 只送出
+        # 17，37 條全死在 human_interrupt；目標群友每 10～20 秒講一句，永遠等不到
+        # 生成完。同一個人補話仍然要在「還沒生成好」時砍（那時留下來一定答錯句）。
+        if same_sender and not text_ready and age >= max(15.0, budget * 0.5):
             return "cancel"
         if age > budget and not text_ready and not in_escape:
             if starved < _SPARE_SILENCE_SECONDS:
@@ -4126,6 +4132,22 @@ class AccountWorker:
         prev = [self._bare_tail(t) for t in (own_texts or [])[:1]]
         return any(p and p[-1] in self._ASK_TAILS for p in prev)
 
+    def _cross_ask_tail(self, group_id: int, window: float = 4 * 60) -> bool:
+        """群裡最後一則水軍（不管哪一號）也是問句收尾。
+
+        `_ask_tail_repeat` 只看自己的句子，於是兩號接力連問照樣放行：
+        19:33:37 小小「床上功夫跟嘴砲一樣嗎」→ 19:36:22 小天後「要不要直接來試
+        深淺」，群友眼裡就是同一個人在兩分多鐘內連問兩次。連問是跨號的。
+        """
+        if not group_id:
+            return False
+        items = self._cross_recent_items(int(group_id), window)
+        if not items:
+            return False
+        latest = min(items, key=lambda pair: pair[1])
+        body = self._bare_tail(latest[0])
+        return bool(body) and body[-1] in self._ASK_TAILS
+
     def _soft_tail_repeat(self, own_texts, candidate: str) -> bool:
         """換個語氣詞收尾不算換語域。
 
@@ -4257,7 +4279,7 @@ class AccountWorker:
                     "上一則水軍也是「一邊做自己的事＋看你們吵」的旁觀句，"
                     "請直接順著上一句話題接話或撩撥，不必報備自己在做什麼"
                 )
-        if self._ask_tail_repeat(own_texts, candidate) and not (
+        if (self._ask_tail_repeat(own_texts, candidate) or self._cross_ask_tail(group_id)) and not (
             group_id and self._assert_run(int(group_id))
         ):
             return "又是問句收尾，跟上一則一樣，改成斷言或動作收"

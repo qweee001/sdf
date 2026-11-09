@@ -159,6 +159,15 @@ def test_question_tail_still_blocked_right_after_a_question():
     assert w._local_veto("你先講，這樣塞進來你撐得住嗎", own, "", GID)
 
 
+def test_cross_account_question_tail_is_blocked():
+    """別號剛問完，自己這則也用問句收 → 群友眼裡是同一人在連問。"""
+    w = _worker()
+    _seed(w, [(200, "洗完澡床上等你約我實戰"), (160, "床上功夫跟嘴砲一樣嗎")])
+    own = ["和進出口前戲夠久我就選你"]  # 自己上一則是斷言
+    assert w._ask_tail_repeat(own, "要不要直接來試深淺") is False
+    assert "問句" in w._local_veto("規範你行不行啊，要不要直接來試深淺", own, "", GID)
+
+
 # ---- 骨架本身也是硬軸 ----------------------------------------------------
 
 

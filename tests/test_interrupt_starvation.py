@@ -36,6 +36,16 @@ def test_text_ready_never_cancelled_by_strangers():
     assert A(70.0, 65.0, False, True, 0.0) == "hold"
 
 
+def test_text_ready_same_sender_holds_too():
+    """句子已經進到「只剩檢查與發送」，本人再補一句也不砍。
+
+    熱場裡目標群友十幾秒就一句，砍了等於這一則永遠沒人回（claimed 56／sent 17）。
+    正確性交給發送前的 _context_still_fresh。
+    """
+    assert A(20.0, 40.0, True, True, 0.0) == "hold"
+    assert A(40.0, 65.0, True, True, 700.0) == "hold"
+
+
 def test_hard_ceiling_still_wins():
     """硬上限還在，但句子已生成好／正卡在拒答逃生時放寬到 300 秒。"""
     assert A(200.0, 65.0, False, True, 900.0) == "hold"
