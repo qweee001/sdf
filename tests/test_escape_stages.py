@@ -23,6 +23,7 @@ def _esc_worker():
     w.persona = {"name": "Chen", "age": 38, "gender": "女", "city": "台北", "industry": "服飾店", "personality": "飢渴騷熟女、喜歡年輕強壯肉棒"}
     w.stats = {}
     w._fallback_models = ()
+    w._dead_models = {}
     w._counters = {}
     w._pcount = lambda key: w._counters.__setitem__(key, w._counters.get(key, 0) + 1)
     return w
@@ -121,7 +122,11 @@ def test_refusal_with_trailing_line_is_salvaged():
 
 
 def test_short_band_cap_is_band_top_not_plus_two(monkeypatch):
-    """短帶上限只到 16：+2 會讓 17~18 字整批過關，「8~16」形同虛設。"""
+    """短帶上限只到 16：+2 會讓 17~18 字整批過關，「8~16」形同虛設。
+
+    10:05 起取消生成後的硬剪，上限改由提示詞自己咬住，所以這裡驗的是送進模型的
+    那行字限是 18 字元、且長句原樣保留（不再被剪成殘句）。
+    """
 
     monkeypatch.setattr(worker_mod.random, "random", lambda: 0.1)  # 冷場 0.1＝短碎帶
 
@@ -130,8 +135,9 @@ def test_short_band_cap_is_band_top_not_plus_two(monkeypatch):
         long_line = "剛擦完乳液看你們在聊鹹蛋腰都軟掉了"
         worker._call_ai = AsyncMock(return_value=long_line)
         topic = await worker._generate_context_topic(GROUP)
-        assert len(topic) <= 18, topic
-        assert topic != long_line
+        prompt = worker._call_ai.await_args.args[1]
+        assert "最多 18 字元" in prompt, prompt[-160:]
+        assert topic == long_line
 
     asyncio.run(main())
 

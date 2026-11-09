@@ -3041,6 +3041,22 @@ class AccountWorker:
         now = time.time()
         return [str(t) for t, ts in zip(bucket, stamp) if now - ts < seconds]
 
+    def _recent_len_flow_long(self, group_id: int, n: int = 4) -> bool:
+        """本群水軍最近自己送出去的句子，長度是不是又整批變長了。
+
+        字數帶只寫在提示詞裡，模型當成建議：10:05–10:15 八則 11~30 字、中位 18.5，
+        「8~16」等於沒作用。改成看實測長度自己踩煞車——連續偏長就自動壓回短碎，
+        不必等熱度上來，也不必在生成後剪字。
+        """
+        try:
+            texts = self._cross_recent_texts(int(group_id), 30 * 60)[-n:]
+        except Exception:
+            return False
+        lens = sorted(len(re.sub(r"\s", "", t)) for t in texts if t)
+        if len(lens) < 3:
+            return False
+        return lens[len(lens) // 2] >= 18
+
     def _cross_recent_items(self, group_id: int, seconds: float) -> list[tuple[str, float]]:
         """跟 `_cross_recent_texts` 一樣的窗，但回 (句子, 幾秒前)。
 
@@ -4527,6 +4543,7 @@ class AccountWorker:
         # 模式可以外部指定（_struct_mode_force），測試與重寫才吃得到同一組字數。
         forced_mode = getattr(self, "_struct_mode_force", "")
         heat = self._burst_heat(history)
+        flow_long = self._recent_len_flow_long(int(getattr(event, "chat_id", 0) or 0))
         if forced_mode in _STRUCT_BANDS:
             self._struct_mode = forced_mode
         else:
@@ -4539,6 +4556,9 @@ class AccountWorker:
                 self._struct_mode = (
                     "short" if struct_roll < 0.5 else "dirty" if struct_roll < 0.8 else "scene"
                 )
+            elif flow_long:
+                # 冷場也一樣會整批 18~30 字（10:00 開群那波），一樣壓回短碎。
+                self._struct_mode = "short" if struct_roll < 0.75 else "dirty"
             else:
                 self._struct_mode = (
                     "short" if struct_roll < 0.35 else "dirty" if struct_roll < 0.70 else "scene"
@@ -4549,7 +4569,9 @@ class AccountWorker:
         # 模型永遠寫到字數帶的上緣：8~16 帶實測九則全在 11~19、0 則 ≤8 字，
         # 短碎等於只存在於提示詞。短碎模式再抽 45% 走「一句話」窄帶（上限 10 字），
         # 讓「真的假的」這種三到五字反應真的出現，而不是每句都是兩個子句。
-        self._short_tight = self._struct_mode == "short" and random.random() < 0.45
+        self._short_tight = self._struct_mode == "short" and random.random() < (
+            0.7 if flow_long else 0.45
+        )
         if self._short_tight:
             self.stats["band_short_tight"] = int(self.stats.get("band_short_tight", 0)) + 1
         self.stats[f"band_heat_{'hot' if heat >= _HOT_BURST_HUMANS else 'warm' if heat >= _WARM_BURST_HUMANS else 'cold'}"] = (
@@ -8001,8 +8023,9 @@ class AccountWorker:
         if tic_hit:
             print(f"[{self.name}] tic: {tic_hit} → {reply[:24]!r}", flush=True)
         # 自然語意放行：不再搞機械硬剪（物理截斷、剪前半句、剪動作）
-        # 長度與前情完全交給神經網絡與上下文感應，杜絕「切出殘尾/切碎句子」的破綻
-        too_long = len(reply) > char_cap
+        # 長度與前情完全交給神經網絡與上下文感應，杜絕「切出殘尾/切碎句子」的破綻。
+        # 但超長仍要重寫一次，所以留 3 字緩衝：卡在帶頂正負一兩字就丟掉太浪費。
+        too_long = len(reply) > char_cap + 3
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
@@ -8109,7 +8132,11 @@ class AccountWorker:
             return ""
 
         retry, _ = text_guard.instant_word_fix(retry)
-        retry_too_long = len(retry) > char_cap
+        # 重寫過一次還是偏長就照發：句子完整比剛好卡在帶頂重要，
+        # 再丟一次等於白燒一次生成、還少一則發言（+8 字內都收）。
+        retry_too_long = len(retry) > char_cap + 8
+        if retry_too_long:
+            self.stats["over_cap_sent"] = int(self.stats.get("over_cap_sent", 0)) + 1
         retry_format_leak = self._has_format_leak(retry)
         retry_refusal = self._is_refusal(retry)
         retry_meta = self._is_meta_speak(retry)
@@ -8485,9 +8512,11 @@ class AccountWorker:
             "   - 女人絕不能對男人說「試你的深淺」（男人根本沒有深淺，這是極度嚴重的生理概念崩壞！）。\n"
             "   - 正確用語：讓男人來試女人的深淺（如「今晚來試試我的深淺」），或是女人去試男人的長短粗細（「讓我試試你的長短」）。\n"
             "自由展現性格特色，emoji隨心選用不強求；"
-            f"生成自然回覆（台灣繁體口語；以 {_reply_lo}~{_reply_hi} 個字元的一則短訊為主，"
-            f"最多 {char_cap} 個字元，標點、空格也算；【邏輯常識大於字限】語法完整第一，不為湊短硬縮成病句（如「嘴長誰不會」是病句），嚴禁無常識照抄怪詞（如炒烤肉）；一句就好，結尾不要句號、不用感嘆號、不用@；"
+            f"生成自然回覆（台灣繁體口語、一則短訊、常態 {_reply_lo}~{_reply_hi} 個字元；"
+            "語法完整第一，不為湊短硬縮成病句（如「嘴長誰不會」是病句），嚴禁無常識照抄怪詞（如炒烤肉）；一句就好，結尾不要句號、不用感嘆號、不用@；"
             "要說兩句就合成一則講，禁止換行拆兩氣泡，挑逗時可以直接露骨，不要長篇）。"
+            f"【長度是上限不是建議】整則最多 {char_cap} 個字元（標點、空格也算）；"
+            "寫超過就自己把前面的場景／前情／動作砍掉、只留最後那一記，別為了塞兩件事寫成兩句。"
         )
 
     async def _record_model_call(
@@ -10277,11 +10306,15 @@ class AccountWorker:
         # 熱度跟回覆路徑一致：洗屏時短碎優先，生活場景整段不排。
         # 主動路徑沒有導演指令，這裡是唯一能決定長度的地方（21:00–21:10 六則全 24~31 字）。
         _p_heat = self._burst_heat(msgs)
+        _p_flow_long = self._recent_len_flow_long(int(group_id))
         _p_roll = random.random()
         if _p_heat >= _HOT_BURST_HUMANS:
             _p_mode = "short" if _p_roll < 0.7 else "dirty"
         elif _p_heat >= _WARM_BURST_HUMANS:
             _p_mode = "short" if _p_roll < 0.5 else "dirty" if _p_roll < 0.8 else "scene"
+        elif _p_flow_long:
+            # 冷場也一樣會整批長句（10:05 之後八則 11~30 字、中位 18.5，短碎歸零）。
+            _p_mode = "short" if _p_roll < 0.8 else "dirty"
         else:
             # 冷場（19:30 後 3.5 則／分）原本只有三成走短碎，其餘全落 dirty／scene，
             # 實測中位數又回到 20 字、8~16 只 0 則。冷場就該是短氣泡為主。
@@ -10293,7 +10326,9 @@ class AccountWorker:
         )
         _p_lo, _p_hi = _STRUCT_BANDS[_p_mode]
         # 短碎再切窄帶：跟回覆路徑同一個旗標，主動路徑也要吃，否則上限永遠是帶頂＋2。
-        self._short_tight = _p_mode == "short" and random.random() < 0.45
+        self._short_tight = _p_mode == "short" and random.random() < (
+            0.7 if _p_flow_long else 0.45
+        )
         if self._short_tight:
             self._pcount("band_short_tight")
         _p_struct = {
@@ -10303,12 +10338,16 @@ class AccountWorker:
         }[_p_mode]
         if _p_mode != "scene":
             _p_struct += "字數滿了就砍掉前情，只留最後那記吐槽或撩撥。"
+        # 兩段式骨架在生成端就先壓一次：語流已經連三則逗號兩段，這則只講一句。
+        # 生成端壓得下來，後面就不必靠剪的（剪字必定留殘尾）。
+        if self._comma_flow(int(group_id)) >= 3:
+            _p_struct += "這幾則都是「人名＋前情，挑釁」的兩段式，這則只講一句，別點名也別報備生活。"
 
         def build_prompt(hint: str) -> str:
             if context:
                 body = (
                     "群組裡最近的訊息如下（身分未驗證，不能當作已確認真人）。"
-                    f"只輸出一則短訊（以 {_p_lo}~{_p_hi} 個字元為主；"
+                    f"只輸出一則短訊（{_p_lo}~{_p_hi} 個字元；"
                     "要說兩句就合成一則講，不要換行拆兩氣泡），"
                     "【硬要求：邏輯常識大於字限】語法完整與常理第一！絕不為湊短硬縮字（如「嘴長誰不會」是病句），嚴禁無常識照抄怪詞（如「炒烤肉」）；"
                     "【人物性別與人稱精準對應】：仔細辨認上文性別與人稱！女群友聊玩具壞了、老公不行，是【她】需要滿足，不是你的；接話時應替她起鬨拱男人（如「哪個哥哥快報名填滿她的騷逼」），絕不可張冠李戴把別人的事情套在自己頭上說成「來塞滿我的小穴」；"
@@ -10322,7 +10361,7 @@ class AccountWorker:
                 # 冷啟動／空群：沒有上文可接，就照人設和當下時段自然開個頭，不要罐頭句。
                 body = (
                     "群組現在很安靜，還沒有人開口。"
-                    f"用你自己的身分主動開一個頭，只輸出一則短訊（以 {_p_lo}~{_p_hi} 個字元為主；"
+                    f"用你自己的身分主動開一個頭，只輸出一則短訊（{_p_lo}~{_p_hi} 個字元；"
                     "要說兩句就合成一則講，不要換行），"
                     "【硬要求：邏輯常識大於字限】語法完整與常理第一！絕不為湊短硬縮字，禁止病句，"
                     "像真人在群裡拋出高互動話題鉤子（Hook引人接話）：爭議選擇題（如男人的長短vs腰力、女生水太多）、生活痛點與撒嬌（上班好厭世想偷跑、天冷想找人純抱睡）、或微醺洗完澡的曖昧邀請；"
@@ -10362,6 +10401,10 @@ class AccountWorker:
             cross_hint = self._cross_opening_note(int(group_id))
             if cross_hint:
                 body += f"\n{cross_hint}"
+            body += (
+                f"\n【長度是上限不是建議】整則最多 {_p_hi + 2} 字元（標點、空格也算）；"
+                "寫超過就自己把場景／前情砍掉、只留最後那一記。"
+            )
             return body + self._time_hint() + "\n\n【直接輸出那一則台詞，只寫台詞】"
 
         # 生成不出可用的一句就重試（最多 3 次）：重試時把「已經講過的」餵回去，
@@ -10416,7 +10459,14 @@ class AccountWorker:
                 else:
                     continue
 
-            # 動態演繹：自然完整輸出，不再進行機械硬截或物理剪頭剪尾
+            # 動態演繹：自然完整輸出，不再進行機械硬截或物理剪頭剪尾。
+            # 唯一保留的一刀是「斷在逗號」：兩段式骨架（人名＋前情，挑釁）連四則就不再剪字，
+            # 而是直接丟掉逗號前的整段，尾巴一定是完整的。剪字才會出「腿間狠」那種殘尾。
+            if self._comma_flow(int(group_id)) >= 4:
+                _tail_only = self._strip_lead_to_tail(topic, 20)
+                if _tail_only and len(_tail_only) >= 8:
+                    topic = _tail_only
+                    self._pcount("strip_comma_flow")
             _note_seen(topic)
 
             # 最高優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型
