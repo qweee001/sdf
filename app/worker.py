@@ -1164,6 +1164,11 @@ class AccountWorker:
         # 該群最近一次「四階全滅」的時間：十分鐘內再遇到拒答就直接從第二階起步，
         # 別再拿整包上下文去撞同一道審核（每階 × 每個模型都是一次白燒）。
         self._refusal_heat: dict[int, float] = {}
+        # 正在跑「拒答逃生」的執行緒數：逃生是四階×備援模型的序列呼叫，實測一趟
+        # 上百秒，還照 180 秒硬上限砍就是每條都死在半路（15:00 場四號一次回覆都送不出）。
+        self._escape_inflight: int = 0
+        # 最近被真人插話砍掉的時間點：連三次以上就對路人插話關掉取消，先讓句子活著。
+        self._cancel_ts: list[float] = []
         self._recent_proactive_topics: set[str] = set()
         # 跨 cycle 的反重複記憶：每群最近生成過的主動話題（接受或都被 drop 的都記），
         # 最舊在前、最新在後、上限 12。沒有它，模型每個 cycle 都從零開始、把同一批露骨
@@ -1643,11 +1648,18 @@ class AccountWorker:
                         # 正確性由發送前的 _context_still_fresh 把關，砍掉只是白花一次生成。
                         # 19:06–19:34 一小時十三次認領全部取消、送出零則，就是這樣死的。
                         text_ready = bool(getattr(task, "_sdf_text_ready", False))
+                        now_c = time.time()
+                        self._cancel_ts = [
+                            t2 for t2 in self._cancel_ts if now_c - t2 < 900.0
+                        ]
                         if self._interrupt_action(
-                            age, budget, same_sender, text_ready, starved
+                            age, budget, same_sender, text_ready, starved,
+                            in_escape=bool(getattr(self, "_escape_inflight", 0)),
+                            breaker=len(self._cancel_ts) >= 3,
                         ) == "cancel":
                             task.cancel()
                             cancelled += 1
+                            self._cancel_ts.append(now_c)
                     except Exception:
                         continue
                 if cancelled:
@@ -3743,20 +3755,31 @@ class AccountWorker:
         same_sender: bool,
         text_ready: bool,
         starved: float,
+        in_escape: bool = False,
+        breaker: bool = False,
     ) -> str:
         """真人插話時這條待辦要「cancel」還是留著（hold）。
 
         同一個人自己又補話一律砍——留下來就會答到上一句。
         路人插話只在超時又還沒生成好時砍；但群裡已經六分鐘沒水軍出聲時不砍：
         那時這條是插話不是答話，砍了就是整場消失（19:41–19:52 二十分鐘四號零輸出，
-        期間真人講了六十幾句）。硬上限一百八十秒仍在，避免無限拖著。
+        期間真人講了六十幾句）。
+
+        硬上限不吃死 180 秒：句子已經生成好、或正卡在拒答逃生（四階×備援模型的
+        序列呼叫）時放寬到 300 秒——那時砍掉不是省成本，是整條丟掉重跑一次逃生
+        （15:00–15:10 四號十則全是主動、回覆路徑零送出就是這樣死的）。
+        正確性由發送前的 _context_still_fresh 把關。
         """
-        if age > 180.0:
+        hard = 300.0 if (text_ready or in_escape) else 180.0
+        if age > hard:
             return "cancel"
         if same_sender and age >= max(15.0, budget * 0.5):
             return "cancel"
-        if age > budget and not text_ready:
-            return "cancel" if starved < _SPARE_SILENCE_SECONDS else "hold"
+        if age > budget and not text_ready and not in_escape:
+            if starved < _SPARE_SILENCE_SECONDS:
+                # 這個號連三條都被路人砍掉：換誰講話都不砍了，先讓一句活著落地。
+                return "hold" if breaker else "cancel"
+            return "hold"
         return "hold"
 
     def _adaptive_interrupt_budget(self, human_ts, now: float, group_id: int) -> float:
@@ -4205,7 +4228,14 @@ class AccountWorker:
         if duel_names and not third_party and not any(n in str(candidate) for n in duel_names):
             pass
         if nameless_flow and self._is_nameless_open(candidate, group_id):
-            pass
+            # 95c577b 拔掉「名字放第一個逗號前」的硬格式指令時，把這一軸的 veto 一起
+            # 拔成 pass：軸還在判、卻永遠不退，等於整條無對象語流沒有煞車。
+            who = next((n for n in hot_names if n), "")
+            target = f"「{who}」" if who else "某一個人"
+            return (
+                f"第一個逗號前還是只有你自己的場景、沒有對象，改成對著{target}講"
+                "（從他身上或他那句話開場，自己的前情留一半就好）"
+            )
         # 旁觀骨架軸：四號同一個模子「我一邊做某事＋看你們吵＋補一句」。
         # 提示模型自然切入，不要死板報備
         if group_id and self._is_spectator_frame(candidate):
@@ -4239,6 +4269,11 @@ class AccountWorker:
             near_heads = [
                 t2[0] for t2 in (self._opening_token(x, group_id) for x in near) if t2
             ]
+            # 同一個起手詞（前兩字全同）十二分鐘內已有人用：15:16 小小「下午摸魚伸懶腰」
+            # → 15:19 小天後「下午還沒睡醒」，只比上一則（RICH 的「加班」）抓不到。
+            dup_tok = [x for x in near if self._opening_token(x, group_id) == head]
+            if dup_tok:
+                return f"「{head}」這個起手最近才有人用過（{dup_tok[-1][:14]}…），換一個起頭"
             if near_heads:
                 if head[0] == near_heads[-1]:
                     return f"上一則水軍也從「{head[0]}」開頭，連著兩則同一格，換一個字起頭"
@@ -6877,6 +6912,7 @@ class AccountWorker:
             raise
         finally:
             if telegram_dispatched:
+                self._cancel_ts.clear()
                 if is_human_reply and not human_counted:
                     self.stats["human_sent"] += 1
                 if not sent_audited:
@@ -7941,11 +7977,17 @@ class AccountWorker:
             # 收成極短角色卡＋最近三句再問一次，這是拒答唯一有效的破口。
             # 空手（timeout／API 錯）不在此列，交給呼叫方既有的 ai_empty 重試一次。
             if self._is_refusal(text):
-                escaped = await self._refusal_escape(
-                    self._slim_lines(history),
-                    target=str(reply_message or ""),
-                    group_id=int(getattr(event, "chat_id", 0) or 0),
-                )
+                self._escape_inflight = int(getattr(self, "_escape_inflight", 0)) + 1
+                try:
+                    escaped = await self._refusal_escape(
+                        self._slim_lines(history),
+                        target=str(reply_message or ""),
+                        group_id=int(getattr(event, "chat_id", 0) or 0),
+                    )
+                finally:
+                    self._escape_inflight = max(
+                        0, int(getattr(self, "_escape_inflight", 0)) - 1
+                    )
                 if escaped:
                     return escaped
             return text
