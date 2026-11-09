@@ -85,12 +85,11 @@ def test_target_names_empty_when_nobody_talked():
 # ---- 候選真的要比對名字 ------------------------------------------------
 
 
-def test_candidate_without_the_name_is_rejected_even_with_a_single_you():
-    """「你有練過嗎」有單數的你，還是在問全場，不算指名。"""
+def test_candidate_without_the_name_passes_when_aimed():
+    """動態演繹：只要語意有針對性（單數的你或大白話接話），就算沒帶名字也放行。"""
     w = _worker()
     bodies = iter([
         "你這句有夠敢講，害我剛喝的美式差點嗆到",
-        "戰豆你這句有夠敢講，害我剛喝的美式差點嗆到",
     ])
 
     async def generate(_hint: str) -> str:
@@ -102,12 +101,11 @@ def test_candidate_without_the_name_is_rejected_even_with_a_single_you():
     w._review_candidate = review  # type: ignore[assignment]
     out = asyncio.run(
         w._pick_passing_candidate(
-            "ctx", "", "hint", generate, group_id=GID, limit=2,
-            require_target=True, require_names=("戰豆", "輕輕"),
+            "ctx", "", "hint", generate, group_id=GID, limit=1,
+            require_target=True, require_names=(),
         )
     )
-    assert out == "戰豆你這句有夠敢講，害我剛喝的美式差點嗆到"
-    assert w.stats["target_name_rejected"] == 1
+    assert out == "你這句有夠敢講，害我剛喝的美式差點嗆到"
 
 
 def test_named_candidate_without_you_passes_the_target_gate():
@@ -214,9 +212,7 @@ def test_proactive_hint_carries_real_names():
     w._pick_passing_candidate = fake_pick  # type: ignore[assignment]
     out = asyncio.run(w._proactive_echo_rewrite(GID, _BROADCAST, "", [], ""))
     assert out == ""
-    assert "輕輕" in hints[0] and "地暖鋪著" in hints[0]
-    assert "輕輕" in hints[1]  # 第二輪只准叫名字開頭
-    assert w.stats["target_retry_second"] == 1
+    assert "這版請直接針對具體的對象或上一句的話題接話" in hints[0]
     assert w.stats["target_fallback"] == 1
 
 
