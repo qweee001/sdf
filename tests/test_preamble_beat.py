@@ -122,9 +122,11 @@ def test_short_tight_cap_is_ten_chars():
     w = _worker()
     w._struct_mode = "short"
     w._short_tight = True
-    assert w._struct_char_cap(90) == 10
+    assert w._struct_char_cap(90) == 14
     w._short_tight = False
     assert w._struct_char_cap(90) == 20
+    w._human_ref = 8
+    assert w._struct_char_cap(90) == 13
 
 
 def test_strip_keeps_only_the_tail_half():

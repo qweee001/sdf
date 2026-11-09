@@ -3044,12 +3044,33 @@ class AccountWorker:
         now = time.time()
         return [str(t) for t, ts in zip(bucket, stamp) if now - ts < seconds]
 
-    def _recent_len_flow_long(self, group_id: int, n: int = 4) -> bool:
+    def _human_len_ref(self, history: list[dict]) -> int | None:
+        """群友（真人）最近講話的字數中位數，當成本則長度的即時基準。
+
+        固定帶（8~16）是對著空氣定的：12:26 這小時真人中位 8 字、水軍 15.5 字，
+        水軍在群裡永遠是「那個講長句的」。所以天花板不寫死，改成跟著真人的嘴巴走。
+        """
+        lens: list[int] = []
+        for row in list(history or [])[-40:]:
+            if str(row.get("role")) != "user":
+                continue
+            body = re.sub(r"\s", "", str(row.get("content") or ""))
+            if 4 <= len(body) <= 60:
+                lens.append(len(body))
+        if len(lens) < 6:
+            return None
+        lens.sort()
+        return max(6, min(18, lens[len(lens) // 2]))
+
+    def _recent_len_flow_long(
+        self, group_id: int, n: int = 4, ref: int | None = None
+    ) -> bool:
         """本群水軍最近自己送出去的句子，長度是不是又整批變長了。
 
         字數帶只寫在提示詞裡，模型當成建議：10:05–10:15 八則 11~30 字、中位 18.5，
         「8~16」等於沒作用。改成看實測長度自己踩煞車——連續偏長就自動壓回短碎，
         不必等熱度上來，也不必在生成後剪字。
+        ref＝真人中位數；有基準就跟真人比（1.5 倍），沒有才退回絕對門檻 18。
         """
         try:
             texts = self._cross_recent_texts(int(group_id), 30 * 60)[-n:]
@@ -3058,7 +3079,10 @@ class AccountWorker:
         lens = sorted(len(re.sub(r"\s", "", t)) for t in texts if t)
         if len(lens) < 3:
             return False
-        return lens[len(lens) // 2] >= 18
+        mid = lens[len(lens) // 2]
+        if ref:
+            return mid >= max(11, int(ref * 1.5))
+        return mid >= 18
 
     def _cross_recent_items(self, group_id: int, seconds: float) -> list[tuple[str, float]]:
         """跟 `_cross_recent_texts` 一樣的窗，但回 (句子, 幾秒前)。
@@ -3344,7 +3368,7 @@ class AccountWorker:
 
     _BEAT_MARKS = re.compile(r"[了著過的得好在把被剛正才邊先太超很沒那麼這麼有點快]")
     _TAIL_PERSON = ("你", "妳", "哥哥", "姊姊", "姐姐", "妹妹", "弟弟", "老公", "寶貝")
-    _TAIL_INVITE = ("不如", "敢不敢", "要不要", "誰要", "誰幫", "來試", "來摸", "來舔", "幫我", "願不願")
+    _TAIL_INVITE = ("不如", "敢不敢", "要不要", "誰要", "誰幫", "來試", "來摸", "來舔", "幫我", "願不願", "有沒有", "想來", "快來")
 
     def _tail_aims_at_person(self, tail: str, group_id: int = 0) -> bool:
         if not tail:
@@ -4546,7 +4570,11 @@ class AccountWorker:
         # 模式可以外部指定（_struct_mode_force），測試與重寫才吃得到同一組字數。
         forced_mode = getattr(self, "_struct_mode_force", "")
         heat = self._burst_heat(history)
-        flow_long = self._recent_len_flow_long(int(getattr(event, "chat_id", 0) or 0))
+        # 真人講多短，這則的天花板就多低：跟著群友的嘴走，不跟固定帶走。
+        self._human_ref = self._human_len_ref(history)
+        flow_long = self._recent_len_flow_long(
+            int(getattr(event, "chat_id", 0) or 0), ref=self._human_ref
+        )
         if forced_mode in _STRUCT_BANDS:
             self._struct_mode = forced_mode
         else:
@@ -4598,6 +4626,15 @@ class AccountWorker:
                 "\n【這則只有一句話】：十個字以內講完，像群組裡脫口而出的三到五字反應"
                 "（「真的假的」「我會笑死」「脫掉啦」「最好是」），不准有逗號前的前情。"
             )
+        # 兩段式骨架在回覆路徑一直是「提示有寫、模型照做」：12:26 這小時 24 則水軍
+        # 有 12 則帶逗號前情。語流真的連三則兩段，就把這則的逗號前整段當成必刪。
+        _comma_n = self._comma_flow(int(getattr(event, "chat_id", 0) or 0))
+        if _comma_n >= 3:
+            chosen_syntax += (
+                f"\n【前情太多則】：最近五則水軍有 {_comma_n} 則是「先演自己在幹嘛，"
+                "逗號後面才對人講」。這則寫完先在心裡把逗號前那整段刪掉再輸出，"
+                "直接從對象或動作開始，最多一個逗號。"
+            )
 
         if "不准問" in type_note:
             chosen_syntax += "\n【句式多元指令（嚴禁連續反問）】：上一句水軍就是問句，這則【結尾一定要落在斷言或動作】，【絕對禁止】以「…嗎？」「…吧？」反問收尾。"
@@ -4619,9 +4656,12 @@ class AccountWorker:
             )
 
         band_lo, band_hi = _STRUCT_BANDS.get(self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX))
+        # 提示詞的數字就是天花板：真人講 8 字就別給 30 的額度，模型會一路寫到上緣。
+        band_hi = min(band_hi, self._struct_char_cap(band_hi))
         return (
-            f"\\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\n"
-            f"1. 扮演真實的台灣女生 {name}，以 {band_lo}~{band_hi} 字內的極致自然口語短句隨性說話，不帶句號。\n"
+            f"\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\n"
+            f"1. 扮演真實的台灣女生 {name}，以 {band_lo}~{band_hi} 字內的極致自然口語短句隨性說話，不帶句號；"
+            f"{band_hi} 字是硬上限，滿了就砍前情、只留最想講的那一句。\n"
             f"2. {chosen_mood}\n"
             f"3. {chosen_syntax}\n"
             f"5. 嚴禁任何客服推銷感；只有對方主動苦苦求約時才隨手提助理，平時全心當個鮮活撩人的台灣女生！"
@@ -5697,21 +5737,29 @@ class AccountWorker:
 
         90 字是給場景模式用的。短碎模式若也放 90，模型一律寫到 30 字，短碎就
         永遠只存在於提示詞；多給 10 字緩衝，讓它自己在逗號處收。
+        真人中位（self._human_ref）在場時再套一層倍率天花板：帶是固定的、嘴巴不是，
+        群友講 8 字而水軍寫 26 字，破的是「像真人」而不是「超過 8~16」。
         """
         band = _STRUCT_BANDS.get(self._struct_mode)
+        ref = getattr(self, "_human_ref", None)
         if self._struct_mode == "short":
             # 只有 4 字緩衝：實測給到 26 字，模型就一路寫到 20~26，短碎等於沒發生。
             # 窄帶再加一刀逼出短反應；10 太窄（多數自然句 14~15 字會被判超長而多跑一次
             # 生成），取 12。
             if getattr(self, "_short_tight", False):
-                return min(char_cap, band[0] + 6)
-            return min(char_cap, band[1] + 4)
+                cap = min(char_cap, band[0] + 6)
+                return min(cap, int(ref * 1.4)) if ref else cap
+            cap = min(char_cap, band[1] + 4)
+            return min(cap, int(ref * 1.7)) if ref else cap
         if band and self._struct_mode != "scene":
             # 原本 +10 留太大：dirty 帶 12~24 實際都落在 26~34，等於沒上限。
-            return min(char_cap, band[1] + 2)
+            cap = min(char_cap, band[1] + 2)
+            return min(cap, int(ref * 2.0)) if ref else cap
         if band:
             # scene 帶 15~30 給到 34；36 字的「三句一則」就是從這裡長出來的。
-            return min(char_cap, band[1] + 4)
+            # 生活場景天生要交代前情，倍率放寬一點，但絕不讓它超過真人兩倍多。
+            cap = min(char_cap, band[1] + 4)
+            return min(cap, int(ref * 2.2)) if ref else cap
         return char_cap
 
     @staticmethod
@@ -7762,6 +7810,8 @@ class AccountWorker:
                 group_id, limit=12
             )
         # 本人近期發言（DB，跨對話窗）＋上一句真人原話：起手詞撞車與複讀的比對基準
+        # 本則長度天花板跟著真人嘴巴走；真人樣本不足時退回 None（只用固定帶）。
+        self._human_ref = self._human_len_ref(history)
         own_texts: list[str] = []
         last_human = ""
         try:
@@ -8001,6 +8051,19 @@ class AccountWorker:
             self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX)
         )
         reply, _ = text_guard.instant_word_fix(reply)
+        # 兩段式骨架的唯一一刀（跟主動路徑同一個門檻）：語流連四則「前情，挑釁」就丟掉
+        # 逗號前整段，尾巴完整。回覆路徑先前根本沒接這刀，提示詞寫了也是照樣兩段。
+        if group_id and self._comma_flow(int(group_id)) >= 4 and self._is_preamble_beat(
+            reply, int(group_id)
+        ):
+            _tail = self._strip_lead_to_tail(reply, 20)
+            _names = self._speaker_names(int(group_id))
+            _lost_name = any(n in reply for n in _names) and not any(n in _tail for n in _names)
+            if _tail and len(_tail) >= 8 and not (_lost_name and not re.search("[你妳]", _tail)):
+                reply = _tail
+                self.stats["strip_comma_flow_reply"] = (
+                    int(self.stats.get("strip_comma_flow_reply", 0)) + 1
+                )
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)
         meta_speak = self._is_meta_speak(reply)
@@ -10370,7 +10433,8 @@ class AccountWorker:
         # 熱度跟回覆路徑一致：洗屏時短碎優先，生活場景整段不排。
         # 主動路徑沒有導演指令，這裡是唯一能決定長度的地方（21:00–21:10 六則全 24~31 字）。
         _p_heat = self._burst_heat(msgs)
-        _p_flow_long = self._recent_len_flow_long(int(group_id))
+        self._human_ref = self._human_len_ref(msgs)
+        _p_flow_long = self._recent_len_flow_long(int(group_id), ref=self._human_ref)
         _p_roll = random.random()
         if _p_heat >= _HOT_BURST_HUMANS:
             _p_mode = "short" if _p_roll < 0.7 else "dirty"
@@ -10395,10 +10459,19 @@ class AccountWorker:
         )
         if self._short_tight:
             self._pcount("band_short_tight")
+        # 提示詞的數字要跟真人走：真人講 8 字還給 30 的額度，模型一律寫到 20 幾。
+        if self._human_ref:
+            _p_factor = (
+                1.4 if self._short_tight
+                else 1.7 if _p_mode == "short"
+                else 2.0 if _p_mode == "dirty"
+                else 2.2
+            )
+            _p_hi = max(_p_lo, min(_p_hi, int(self._human_ref * _p_factor)))
         _p_struct = {
-            "short": "這則走極短碎念（8~16字）：不交代場景、不點名，像隨口丟一句。",
-            "dirty": "這則走直球色誘（12~24字）：把生活瑣事拿掉，直接講身體或性張力。",
-            "scene": "這則走生活隨念（15~30字）：帶一個當下的小動作或環境就好。",
+            "short": f"這則走極短碎念（{_p_lo}~{_p_hi}字）：不交代場景、不點名，像隨口丟一句。",
+            "dirty": f"這則走直球色誘（{_p_lo}~{_p_hi}字）：把生活瑣事拿掉，直接講身體或性張力。",
+            "scene": f"這則走生活隨念（{_p_lo}~{_p_hi}字）：帶一個當下的小動作或環境就好。",
         }[_p_mode]
         # 提示詞裡的數字就是天花板：之前寫 hi+2（18），模型一律寫到 18~19。
         if _p_mode != "scene":

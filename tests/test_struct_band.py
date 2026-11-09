@@ -75,8 +75,24 @@ def test_bands_are_three_distinct_widths():
 def test_short_roll_puts_short_band_in_director_note():
     w, note = _note_at(0.0)
     assert w._struct_mode == "short"
-    assert "8~16" in note
+    # 沒有真人語料時仍走固定帶；短碎這則抽到窄帶，天花板就是 8+6
+    assert "8~14 字內" in note
     assert "15~45" not in note
+
+
+def test_short_band_ceiling_follows_human_median():
+    """真人只講 8 字時，提示詞的天花板要跟著壓下來，不能還給 16。"""
+    w = _worker()
+    old = random.random
+    random.random = lambda: 0.2          # 短碎＋窄帶，天花板只剩真人倍率
+    try:
+        history = [{"role": "user", "content": "字" * n} for n in (6, 7, 7, 8, 8, 9)]
+        note = w._build_directors_note(_event(), history=history, own_texts=[], last_human="")
+    finally:
+        random.random = old
+    assert w._struct_mode == "short"
+    assert "8~16" not in note
+    assert "11 字是硬上限" in note
 
 
 def test_dirty_roll_uses_mid_band():
