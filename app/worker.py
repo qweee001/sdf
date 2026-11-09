@@ -8051,19 +8051,7 @@ class AccountWorker:
             self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX)
         )
         reply, _ = text_guard.instant_word_fix(reply)
-        # 兩段式骨架的唯一一刀（跟主動路徑同一個門檻）：語流連四則「前情，挑釁」就丟掉
-        # 逗號前整段，尾巴完整。回覆路徑先前根本沒接這刀，提示詞寫了也是照樣兩段。
-        if group_id and self._comma_flow(int(group_id)) >= 4 and self._is_preamble_beat(
-            reply, int(group_id)
-        ):
-            _tail = self._strip_lead_to_tail(reply, 20)
-            _names = self._speaker_names(int(group_id))
-            _lost_name = any(n in reply for n in _names) and not any(n in _tail for n in _names)
-            if _tail and len(_tail) >= 8 and not (_lost_name and not re.search("[你妳]", _tail)):
-                reply = _tail
-                self.stats["strip_comma_flow_reply"] = (
-                    int(self.stats.get("strip_comma_flow_reply", 0)) + 1
-                )
+        # 兩段式骨架的唯一一刀已徹底廢除：不再對生成的對話進行任何機械裁剪
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)
         meta_speak = self._is_meta_speak(reply)
@@ -10600,13 +10588,6 @@ class AccountWorker:
                     continue
 
             # 動態演繹：自然完整輸出，不再進行機械硬截或物理剪頭剪尾。
-            # 唯一保留的一刀是「斷在逗號」：兩段式骨架（人名＋前情，挑釁）連四則就不再剪字，
-            # 而是直接丟掉逗號前的整段，尾巴一定是完整的。剪字才會出「腿間狠」那種殘尾。
-            if self._comma_flow(int(group_id)) >= 4:
-                _tail_only = self._strip_lead_to_tail(topic, 20)
-                if _tail_only and len(_tail_only) >= 8:
-                    topic = _tail_only
-                    self._pcount("strip_comma_flow")
             _note_seen(topic)
 
             # 最高優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型
