@@ -6477,7 +6477,12 @@ class AccountWorker:
                 context,
                 directive,
                 "上一版對全場發言。這版請直接針對具體的對象或上一句的話題接話，"
-                "像真人群聊自然切入，語氣隨性，別再用「你們」這種全場視角。",
+                "像真人群聊自然切入，語氣隨性，別再用「你們」這種全場視角。"
+                + (
+                    f"正在講話的是 {'、'.join(list(hot_names)[:2])}，直接叫他名字。"
+                    if hot_names
+                    else ""
+                ),
                 lambda hint: self._generate_reply(event, extra_hint=hint),
                 recent_bots=recent_bots,
                 own_texts=own_texts,
@@ -10807,6 +10812,13 @@ class AccountWorker:
                 "最近幾則水軍全是先講自己身上的小事、對象含糊，接著看像同一個人在自語。"
                 "這版請直接針對他剛講的那句自然接著講或直球調侃，語氣隨性，別再自說自話。"
             )
+        # 只寫「針對他」模型手上沒有人名，端回來的還是「你們」或無主語短句
+        # （15:02／15:18 連兩則退在這裡）。正在講話的人是誰要直接塞進提示。
+        if names and (need_target or flow):
+            hint += (
+                f"（正在講話的是 {'、'.join(names[:2])}，挑其中一個直接叫名字接話，"
+                "整句不要出現「你們」）"
+            )
         if openers:
             hint += f"（最近幾則的開場動作：{openers}，別再抽同一類，換一個不一樣的當下場景）"
         if group_id and sum(
@@ -10841,7 +10853,8 @@ class AccountWorker:
             picked = await self._pick_passing_candidate(
                 context,
                 "",
-                f"上一版還是對全場講。這次請直接針對剛才那句撩撥或吐槽，講你對他的反應，整句不要出現「你們」。",
+                f"上一版還是對全場講。這次請直接針對剛才那句撩撥或吐槽，講你對他的反應，整句不要出現「你們」。"
+                f"正在講話的是 {'、'.join(names[:2])}，直接叫他名字。",
                 lambda hint2: self._generate_context_topic(group_id, extra_hint=hint2),
                 recent_bots=await self._recent_bot_lines(group_id),
                 own_texts=own_texts,
