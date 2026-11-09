@@ -2990,8 +2990,7 @@ class AccountWorker:
         if group_id and self._broadcast_hits(int(group_id)) >= 2:
             notes.append(
                 "（最近的水軍都在對全場下判決（「你們」「這群」「只會…」），"
-                "沒有一則落在單一男人身上，你這則挑一個人講——"
-                "把他的名字或「你」放進句子，自曝留著但別再接第二段評語）"
+                "你這則請直接針對上一句的話題或具體對象接話，語氣隨性，別再用全場視角）"
             )
         return "".join(notes)
 
@@ -4200,26 +4199,13 @@ class AccountWorker:
         echo = self._echo_human_opening(candidate, last_human)
         if echo:
             return f"開頭直接搬真人那句的「{echo}」，換個角度起頭"
-        # 兩個人在互嗆、這則卻一個人名都沒有 → 退回，逼它挑一個叫名字。
+        # 廢除強迫點名邏輯：群友互嗆或聊天時，自然順著話題聊即可，絕不強迫句子非得出現名字。
         if third_party and third_party not in str(candidate):
-            return (
-                f"這半小時全在講那兩個互嗆，{third_party}在旁邊講自己的事卻沒人接；"
-                f"這則改挑{third_party}，接他／她剛講的那句，別再對著那兩個補評語"
-            )
+            pass
         if duel_names and not third_party and not any(n in str(candidate) for n in duel_names):
-            who = "、".join(duel_names)
-            return (
-                f"{who}正在互嗆，這則沒點到名，只像旁邊補一句；"
-                f"挑{duel_names[0]}或{duel_names[-1]}其中一個，把名字放進句子，接他剛講的那句"
-            )
-        # 無對象開場軸（旁觀語流改善）：若近幾則全是對象含糊的自言自語，引導候選有明確互動對象。
-        # 允許自然對話與直球切入，不強加死板「名字放第一個逗號前」硬格式。
+            pass
         if nameless_flow and self._is_nameless_open(candidate, group_id):
-            who = "、".join([n for n in hot_names if n][:2]) or "剛剛講話最兇那個"
-            return (
-                "最近好幾則水軍都是對象含糊自言自語；"
-                f"這則請明確針對{who}的話題或剛才的互動接話，可把名字放進第一個逗號前，語氣自然隨性，別再自說自話"
-            )
+            pass
         # 旁觀骨架軸：四號同一個模子「我一邊做某事＋看你們吵＋補一句」。
         # 字面全不同所以起手詞／消耗物／場地三軸都會放行，骨架卻一模一樣。
         if group_id and self._is_spectator_frame(candidate):
@@ -5801,8 +5787,7 @@ class AccountWorker:
         )
         target_block = (
             "【這則的硬要求】這一小時的水軍都在對全場下判決（「你們」「這群」「只會…」），"
-            "候選必須落在一個具體的男人身上：把他的名字或單數的「你」放進句子，"
-            "只在句尾對全場補一句評語就算不合格。\n"
+            "候選必須自然接話，直接針對上一句話題切入，別用全場視角。\n"
             if require_target
             else ""
         )
@@ -6031,10 +6016,7 @@ class AccountWorker:
                 else ""
             )
             + (
-                "【這則的硬要求】這一小時水軍全是場邊裁判：候選必須落在一個具體男人身上，"
-                "把他的名字或單數的「你」放進句子（「誰去安慰一下」「比較像破防吧」這種"
-                "對全場的判決不行）。只在句尾補一句評語就算不合格，issue 判 repeat，"
-                "sendable 壓到 0.25 以下，reason 寫「還是對全場下判決，沒落到一個人身上」。"
+                "【這則的硬要求】候選必須自然接話，直接針對上一句話題切入，別用「你們」這種全場視角。"
                 if require_target
                 else ""
             )
@@ -6405,22 +6387,16 @@ class AccountWorker:
                 print(f"[{self.name}] echo-forced: 全場播報但已十分鐘沒水軍，照發 {text[:20]!r}", flush=True)
                 self._burst_register(group_id, text)
                 return text
-        # 有自曝但整則還是對全場下判決（13:30 RICH「請客就想白幹嗎…誰買單吧」）：
-        # 換一條點名一個人的版本，換不到就發原本那句——它已經過得了自檢。
+        # 有自曝但整則還是對全場下判決：換一條針對個人的版本，不強求字面帶名字
         if need_target:
             self.stats["target_rewrite"] = int(self.stats.get("target_rewrite", 0)) + 1
             print(f"[{self.name}] target-retry: 又對全場下判決 {text[:20]!r}", flush=True)
             names = self._target_names(rows)
-            name_note = (
-                f"就從這幾個人裡挑一個：{'、'.join(names)}，他的名字要出現在句子裡。"
-                if names else ""
-            )
             picked = await self._pick_passing_candidate(
                 context,
                 directive,
-                "這一小時全場都在當裁判，上一版還是只對全場下判決。這版挑一個具體的"
-                "男人對他說，把「你」或他的名字放進句子，講你對他這句的反應，"
-                "別再對「你們」發言。" + name_note,
+                "上一版對全場發言。這版請直接針對具體的對象或上一句的話題接話，"
+                "像真人群聊自然切入，語氣隨性，別再用「你們」這種全場視角。",
                 lambda hint: self._generate_reply(event, extra_hint=hint),
                 recent_bots=recent_bots,
                 own_texts=own_texts,
@@ -6430,29 +6406,8 @@ class AccountWorker:
                 sister_recent=sister_recent,
                 strict=strict,
                 require_target=True,
-                require_names=tuple(names),
+                require_names=(),
             )
-            # 三個策略都還端回全場 → 再一輪，這次只准用名字開頭叫他，不寫「你們」。
-            if not picked and names:
-                self.stats["target_retry_second"] = (
-                    int(self.stats.get("target_retry_second", 0)) + 1
-                )
-                picked = await self._pick_passing_candidate(
-                    context,
-                    directive,
-                    f"上一版還是對全場講。這次請直接針對「{names[0]}」剛才那句撩撥或吐槽，"
-                    "講你對他的反應，整句不要出現「你們」。",
-                    lambda hint: self._generate_reply(event, extra_hint=hint),
-                    recent_bots=recent_bots,
-                    own_texts=own_texts,
-                    last_human=last_human,
-                    group_id=group_id,
-                    limit=2,
-                    sister_recent=sister_recent,
-                    strict=strict,
-                    require_target=True,
-                    require_names=tuple(names),
-                )
             if picked:
                 self.stats["gate_pass_after_rewrite"] = (
                     int(self.stats.get("gate_pass_after_rewrite", 0)) + 1
@@ -6460,12 +6415,9 @@ class AccountWorker:
                 self._burst_register(group_id, picked)
                 self._mark_echo_if_any(group_id, picked, echo_humans)
                 return picked
-            # 換不到就發原本那句，但要把回退記下來：上一輪三則全退成全場判決，
-            # 統計裡卻看不到半次回退，等於對象軸有沒有作用沒人知道。
             self.stats["target_fallback"] = (
                 int(self.stats.get("target_fallback", 0)) + 1
             )
-            print(f"[{self.name}] target-fallback: 換不到具名版本，照發全場判決", flush=True)
             return text
         review = None
         if self._is_meta_speak(text):
@@ -10721,8 +10673,7 @@ class AccountWorker:
             if flow:
                 hint = (
                     "上一版整句都在講別人的事、自己身上一句都沒講，只像場邊播報。"
-                    "這版名字放最前面，動作和身體感覺挪到名字後面補，"
-                    "別再開場就報你在做什麼。"
+                    "這版請自然隨性表達你當下的反應或身體感受，別再像場邊解說員。"
                 )
             else:
                 hint = (
@@ -10732,11 +10683,9 @@ class AccountWorker:
                 )
         if need_target:
             hint += (
-                "這一小時全場都在當裁判，這版挑一個具體的男人對他說，把「你」或他的名字"
-                "放進句子，講你對他這句的反應，別再對「你們」發言。"
+                "上一版對全場發言。這版請直接針對具體的對象或上一句的話題接話，"
+                "像真人群聊自然切入，語氣隨性，別再用「你們」這種全場視角。"
             )
-            if names:
-                hint += f"就從這幾個人裡挑一個：{'、'.join(names)}，他的名字要出現在句子裡。"
         if flow:
             hint += (
                 "最近幾則水軍全是先講自己身上的小事、對象含糊，接著看像同一個人在自語。"
@@ -10770,15 +10719,13 @@ class AccountWorker:
             hot_names=tuple(names),
         )
         if not picked and names and (need_target or flow):
-            # 兩條都還是全場 → 第二輪只准叫名字開頭，整句不准出現「你們」。
             self.stats["target_retry_second"] = (
                 int(self.stats.get("target_retry_second", 0)) + 1
             )
             picked = await self._pick_passing_candidate(
                 context,
                 "",
-                f"上一版還是對全場講。這次句子開頭直接叫「{names[0]}」，"
-                "第一句就講他剛才那句哪裡讓你受不了或想接，整句不要出現「你們」。",
+                f"上一版還是對全場講。這次請直接針對剛才那句撩撥或吐槽，講你對他的反應，整句不要出現「你們」。",
                 lambda hint2: self._generate_context_topic(group_id, extra_hint=hint2),
                 recent_bots=await self._recent_bot_lines(group_id),
                 own_texts=own_texts,
@@ -10786,7 +10733,7 @@ class AccountWorker:
                 group_id=group_id,
                 limit=2,
                 require_target=True,
-                require_names=tuple(names),
+                require_names=(),
             )
         if not picked and need_target:
             self.stats["target_fallback"] = (
