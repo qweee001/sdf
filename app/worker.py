@@ -305,15 +305,48 @@ _LIFE_ANCHORS: dict[str, list[tuple[str, str]]] = {
 }
 
 
-def _life_escape_targets(name: str, used: set[str], limit: int = 2) -> list[str]:
+# 錨點分組：場景撞不撞是看「哪一組生活」，不是看字面。
+# 洗完澡／擦乳液／吹頭髮／敷面膜／紅酒 字面全不同，群友看到的是同一件事：
+# 四個女生輪流報備同一套睡前美容流程（20:42–21:25 六則）。分組才能判成撞。
+_ANCHOR_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("外出", ("夜市", "騎車", "紅燈", "安全帽", "巷口", "騎樓", "便利商店", "逛")),
+    ("工作", ("收工", "站櫃", "櫃", "店", "改稿", "業務", "瑜珈", "開店", "打烊", "帳", "鐵門")),
+    ("吃的", ("鹹酥雞", "宵夜", "外送", "蛋餅", "麵", "吃", "喝湯")),
+    ("喝的", ("紅酒", "梅酒", "酒", "微醺", "小酌")),
+    ("睡前", ("洗澡", "洗完", "泡澡", "乳液", "吹頭髮", "敷", "面膜", "睡裙", "睡袍",
+             "躺", "趴", "棉被", "被窩", "暖氣", "冷氣", "床上")),
+)
+# 一小時窗、兩個號以上：同一組場景這一小時被兩個不同的人做過就算模子
+# （一個號自己連兩次不算，那在自檢的 own 軸已經擋掉）。窗不拉長：四小時窗
+# 會變成整晚封鎖同一組，改寫三輪還是被擋就一路 hold。
+_ANCHOR_GROUP_FADE = 60 * 60
+_ANCHOR_GROUP_HITS = 2
+
+
+def _anchor_groups(text: str) -> set[str]:
+    """句子用到哪幾組生活場景（只回組代號，判定不封殺字面）。"""
+    s = str(text or "").translate(_AXIS_VARIANTS) if "_AXIS_VARIANTS" in globals() else str(text or "")
+    return {code for code, words in _ANCHOR_GROUPS if any(w in s for w in words)}
+
+
+def _life_escape_targets(
+    name: str, used: set[str], limit: int = 2, avoid_groups: set[str] | None = None
+) -> list[str]:
     """這號還能拿來當退路的場景（標籤沒被 used 蓋到的優先）。
 
     場所撞車時光叫模型「換場景」，對櫃姐等於叫它別講工作 —— 它還是會寫店裡。
-    給具體的替代場景，重寫才有地方去。used 是近期已經用過的標籤／場景字詞。
+    給具體的替代場景，重寫才有地方去。used 是近期已經用過的標籤／場景字詞；
+    avoid_groups 是這輪要避開的場景組，同組的先往後排（被逼著換組，不是換字）。
     """
     pool = _LIFE_ANCHORS.get(next((k for k in _LIFE_ANCHORS if k in name), "小小"), [])
+    avoid = avoid_groups or set()
     scored = [
-        (sum(1 for u in used if u and u in tag + scene), tag, scene)
+        (
+            sum(1 for u in used if u and u in tag + scene)
+            + (10 if _anchor_groups(tag + scene) & avoid else 0),
+            tag,
+            scene,
+        )
         for tag, scene in pool
     ]
     scored.sort(key=lambda x: x[0])
@@ -427,6 +460,8 @@ _PREAMBLE_CUES = re.compile(r"[剛正才還先邊著在好超很]|洗完|吹|擦
 # （15:28:27 RICH「邊喝微糖烏龍邊看你們吵」→ 15:28:30 小天後「犯睏聽你們互嗆」）。
 # 這對不看密度，只看上一則水軍有沒有同一個骨架。
 _SPECTATOR_ADJACENT = 120
+# 生活前情開頭的字數上限：超過就是長句的第一截，不是報備。
+_ANCHOR_HEAD_MAX = 14
 # 第三人軸：互嗆那兩個把版面佔滿，旁邊還有真人在講自己的事卻沒人接
 # （11:34~11:51 琪琪在講午餐、膝蓋，九則水軍全黏在男男互咬上）。
 # 這人在近 12 分鐘講滿 3 句、又不在互嗆名單、水軍近 25 分鐘沒點過她 → 這則改挑她。
@@ -1187,6 +1222,9 @@ class AccountWorker:
         )
         # 本帳號自己做過的身體動作（群組 → [(句子, 時間]），窗比跨號長四倍
         self._own_scene_by_group: dict[int, list[tuple[str, float]]] = {}
+        # 這一號最近被唸過的替代場景（群組 → 場景字串）：撞場景時換著唸，
+        # 否則同一號連續被擋都收到同一句「跑業務」，改寫只是在抄那一句。
+        self._alt_ring: dict[int, list[str]] = {}
         # 最後一次從 DB 回填跨號語料的時間（重啟後共享桶是空的，閘門會全部失效）
         self._cross_seeded_at: dict[int, float] = {}
         # 閘門已放行、還沒送出的候選（群組 → [(account_id, name, text, ts)]）。
@@ -1648,6 +1686,11 @@ class AccountWorker:
                         # 正確性由發送前的 _context_still_fresh 把關，砍掉只是白花一次生成。
                         # 19:06–19:34 一小時十三次認領全部取消、送出零則，就是這樣死的。
                         text_ready = bool(getattr(task, "_sdf_text_ready", False))
+                        # 已經在跑模型：這時同一人再補一句也不砍。生成要二三十秒，
+                        # 群友每 10~20 秒一句，15 秒門檻等於「只要有在生成就一定被砍」，
+                        # 砍掉的還是已經在燒 token 的那一條（21:00–21:30 認領 63 送出 18，
+                        # 39 條全死在這裡）。留下來答錯的風險由發送前的 _context_still_fresh 兜。
+                        gen_started = bool(getattr(task, "_sdf_gen_started", False))
                         now_c = time.time()
                         self._cancel_ts = [
                             t2 for t2 in self._cancel_ts if now_c - t2 < 900.0
@@ -1656,6 +1699,7 @@ class AccountWorker:
                             age, budget, same_sender, text_ready, starved,
                             in_escape=bool(getattr(self, "_escape_inflight", 0)),
                             breaker=len(self._cancel_ts) >= 3,
+                            gen_started=gen_started,
                         ) == "cancel":
                             task.cancel()
                             cancelled += 1
@@ -3515,6 +3559,69 @@ class AccountWorker:
                 return tail
         return body
 
+    def _anchor_lead(self, text: str, group_id: int = 0) -> tuple[str, str]:
+        """回 (前情段, 後半句)：前半句是「自己在幹嘛」才算，喊名字不算。
+
+        `_is_preamble_beat` 判的是整句骨架（後段才對人），這支只判前半句是不是
+        生活前情，用來量語流密度與剪前情。男女互嗆的短句沒有自稱、沒有動作字，
+        不會被誤認。
+        """
+        t = str(text or "").replace(",", "，").strip()
+        head, sep, tail = t.partition("，")
+        if not sep or not tail.strip():
+            return "", ""
+        bare = head.lstrip(self._OPEN_STRIP).strip()
+        named = ""
+        for name in self._speaker_names(int(group_id)):
+            if name and bare.startswith(name):
+                named = name
+                bare = bare[len(name):].lstrip(self._OPEN_STRIP).strip()
+                break
+        if "你" in bare or "妳" in bare:
+            return "", ""
+        if not 2 <= len(bare) <= _ANCHOR_HEAD_MAX:
+            return "", ""
+        # 名字本身可能帶動作字（「地暖鋪著…」的「著」），只看名字後面會漏
+        if not _PREAMBLE_CUES.search(bare + named):
+            return "", ""
+        return head, tail.strip()
+
+    def _anchor_flow(self, group_id: int, n: int = 5) -> int:
+        """最近 n 則水軍有幾則開在生活前情（量語流，判單則沒有意義）。"""
+        if not group_id:
+            return 0
+        recent = self._cross_recent_texts(int(group_id), 30 * 60)[-n:]
+        return sum(1 for t in recent if self._anchor_open(t, int(group_id)))
+
+    def _anchor_open(self, text: str, group_id: int = 0) -> bool:
+        """這則是不是開在生活前情（沒有逗號的單氣泡也算，只是剪不動）。"""
+        if self._anchor_lead(text, group_id)[0]:
+            return True
+        t = str(text or "").replace(",", "，").strip()
+        if "，" in t:
+            return False
+        bare = t.lstrip(self._OPEN_STRIP)
+        return bool(
+            len(bare) >= 6
+            and len(bare) <= 30
+            and "你" not in bare[:8]
+            and "妳" not in bare[:8]
+            and _PREAMBLE_CUES.search(bare[:10])
+        )
+
+    def _strip_anchor_head(self, text: str, group_id: int = 0) -> str:
+        """剪掉生活前情，只留後半句（後半句要還對著人講才剪）。"""
+        head, tail = self._anchor_lead(text, int(group_id))
+        if not head or not self._tail_aims_at_person(tail, int(group_id)):
+            return ""
+        # 前段開頭是喊人：名字留著（點名是好事，剪掉名字只剩自言自語）
+        bare = head.lstrip(self._OPEN_STRIP).strip()
+        for name in self._speaker_names(int(group_id)):
+            if name and bare.startswith(name):
+                merged = f"{name}，{tail}"
+                return merged if 8 <= len(merged) <= 34 else (tail if 6 <= len(tail) <= 40 else "")
+        return tail if 6 <= len(tail) <= 40 else ""
+
     def _strip_preamble_head(self, text: str, group_id: int = 0) -> str:
         """剪掉前情報備，只留後半句。提示詞壓不住時用物理方式斷模子。
 
@@ -3757,6 +3864,7 @@ class AccountWorker:
         starved: float,
         in_escape: bool = False,
         breaker: bool = False,
+        gen_started: bool = False,
     ) -> str:
         """真人插話時這條待辦要「cancel」還是留著（hold）。
 
@@ -3779,9 +3887,15 @@ class AccountWorker:
         # 熱場實測（19:02–19:47 桃花源，真人 3.8 則/分）重啟後 claimed 56 只送出
         # 17，37 條全死在 human_interrupt；目標群友每 10～20 秒講一句，永遠等不到
         # 生成完。同一個人補話仍然要在「還沒生成好」時砍（那時留下來一定答錯句）。
-        if same_sender and not text_ready and age >= max(15.0, budget * 0.5):
+        if text_ready:
+            return "hold"
+        # 模型已經在跑（gen_started）就先讓它跑完：15 秒門檻在熱場等於必砍，
+        # 砍的是正在燒 token 的那條，砍掉連 claim 一起放掉，這一則永遠沒人回。
+        # 只有排隊中（還沒開始生成）才用 15 秒快砍；已在生成則放寬到 90 秒，
+        # 更久就當它卡住（正確性仍由發送前的 _context_still_fresh 兜）。
+        if same_sender and (age >= 90.0 if gen_started else age >= max(15.0, budget * 0.5)):
             return "cancel"
-        if age > budget and not text_ready and not in_escape:
+        if age > budget and not text_ready and not in_escape and not gen_started:
             if starved < _SPARE_SILENCE_SECONDS:
                 # 這個號連三條都被路人砍掉：換誰講話都不砍了，先讓一句活著落地。
                 return "hold" if breaker else "cancel"
@@ -4342,6 +4456,35 @@ class AccountWorker:
                     return (
                         "最近幾則才有人在喝／吃同一類東西（換品項也一樣：拿鐵、美式、"
                         "黑咖啡是同一件事），這則換一類或改用手上正在做的事開頭"
+                    )
+        # 場景組軸：字面不同的同一件事。洗完澡／擦乳液／吹頭髮／敷面膜 是同一組，
+        # 兩小時內由三個不同的號輪流報備，群友看到的是四個人共用一套行程表。
+        # 所以判「組」不判字，撞了就逼換組，並直接給一條不同組的錨點。
+        if group_id:
+            cand_groups = _anchor_groups(candidate)
+            if cand_groups:
+                hit_rows = [
+                    (t, age)
+                    for t, age in self._cross_recent_items(int(group_id), _ANCHOR_GROUP_FADE)
+                    if _anchor_groups(t) & cand_groups
+                ]
+                if len(hit_rows) >= _ANCHOR_GROUP_HITS:
+                    ring = self._alt_ring.setdefault(int(group_id), [])
+                    alts = _life_escape_targets(
+                        str(self.persona.get("name") or ""),
+                        set(ring),
+                        limit=3,
+                        avoid_groups=cand_groups,
+                    )
+                    shown = next((a for a in alts if a not in ring), alts[0] if alts else "")
+                    if shown:
+                        ring.append(shown)
+                        del ring[:-4]
+                    tail = f"，換成{shown}這種不同組的場景" if shown else "，換一組生活場景"
+                    return (
+                        f"這組場景（{'、'.join(sorted(cand_groups))}）這一小時已經 "
+                        f"{len(hit_rows)} 則有人用過，字面不同但群友看的是同一件事"
+                        + tail
                     )
         # 場地軸：連著兩三則都「我在櫃檯／辦公椅／茶水間」開場，場所字串全不同。
         # 只比開頭十四字，場所落在後半句不算；撞到就改成從身體感覺或對方那句話起頭。
@@ -6879,6 +7022,12 @@ class AccountWorker:
                     "真實台灣女生在群裡絕不會輕易發照，嚴禁答應發圖，必須用傲嬌反撩或開條件推託！"
                     f"你的專屬口吻參考：{deflect_eg}，45 字內直接回絕反撩，結尾不帶句號。"
                 )
+            try:
+                _gt = asyncio.current_task()
+                if _gt is not None:
+                    _gt._sdf_gen_started = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
             text = await self._generate_reply(event, extra_hint=photo_hint)
             vision_succeeded = self._take_successful_vision(event)
             generation_reason = self._take_generation_reason(event)
@@ -6918,6 +7067,15 @@ class AccountWorker:
                     return
                 # 固定說法校正（找助理→聯絡助理），零模型成本
                 text = text_guard.fix_phrases(text)
+                # 兩段式模子壓不住時用物理方式斷：語流已經連三則「先報自己在幹嘛，
+                # 逗號後才對人講」，提示詞寫了模型照寫，這裡直接把逗號前那段剪掉。
+                # 只剪前情、留後半句，對象與自曝都還在後半句（21:00–21:25 六則
+                # 洗完澡／擦乳液／吹頭髮是同一件事換字，提示層完全沒煞車）。
+                if self._anchor_flow(int(event.chat_id or 0)) >= 3:
+                    _stripped = self._strip_anchor_head(text, int(event.chat_id or 0))
+                    if _stripped and _stripped != text:
+                        self._pcount("strip_preamble_head")
+                        text = _stripped
                 # 發送前最後一道：這段時間有沒有真人搶先講了新話（回過時話題＝當場破戲）
                 if not await self._context_still_fresh(event):
                     self._record_reply_drop("stale_context")
@@ -11352,6 +11510,13 @@ class AccountWorker:
                     # 依主人指示：精確控制 70% 概率純文字，30% 概率允許保留 emoji 表情
                     if random.random() >= _EMOJI_ALLOW_PROBABILITY:
                         topic = self._strip_emoji(topic)
+                    # 兩段式模子同樣在主動路徑斷一次：連三則「先報自己在幹嘛，逗號後
+                    # 才對人講」就把前情剪掉（21:00–21:25 六則是同一件睡前事換字）。
+                    if self._anchor_flow(int(group_id)) >= 3:
+                        _strip_p = self._strip_anchor_head(topic, int(group_id))
+                        if _strip_p and _strip_p != topic:
+                            self._pcount("strip_preamble_head")
+                            topic = _strip_p
 
                     burst = self._split_human_burst(topic)
                     sent = False

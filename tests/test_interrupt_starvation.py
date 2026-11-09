@@ -58,6 +58,19 @@ def test_escape_chain_gets_longer_ceiling():
     assert A(320.0, 65.0, False, False, 0.0, in_escape=True) == "cancel"
 
 
+def test_generation_in_flight_survives_same_sender_again():
+    """已經在跑模型就不砍：15 秒門檻在熱場等於「有在生成就必砍」。
+
+    21:00–21:30 認領 63 只送出 18，39 條全死在 human_interrupt；砍掉的都是
+    正在燒 token 的那條，砍了還一併放掉 claim。排隊中才快砍（省一次生成）。
+    """
+    assert A(20.0, 40.0, True, False, 0.0, gen_started=True) == "hold"
+    assert A(60.0, 65.0, True, False, 0.0, gen_started=True) == "hold"
+    assert A(100.0, 65.0, True, False, 0.0, gen_started=True) == "cancel"
+    # 路人插話在生成中也只能等到硬上限
+    assert A(100.0, 65.0, False, False, 30.0, gen_started=True) == "hold"
+
+
 def test_consecutive_cancel_breaker_stops_stranger_cancels():
     """連三條都被路人砍掉就換誰講都不砍，先讓一句活著落地。"""
     assert A(70.0, 65.0, False, False, 30.0, breaker=True) == "hold"

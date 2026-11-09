@@ -99,6 +99,74 @@ def test_scene_veto_names_a_concrete_alternative_scene():
     assert "「" in veto.split("或直接改用")[-1]
 
 
+def test_scene_group_veto_blocks_same_routine_different_words():
+    """字面不同的同一件事要判成撞，並給不同組的場景。
+
+    20:42–21:25 四個號輪流報備同一套睡前美容：擦乳液／洗完澡擦頭髮／敷面膜／
+    吹頭髮／躺床／開暖氣。動作字面全不同，群友看到的是四個人共用一張行程表。
+    """
+    w = _worker("RICH")
+    _seed(
+        w,
+        [
+            (35 * 60, "擦著乳液聽小萬聊吃辣我都流汗想被抱緊了"),
+            (18 * 60, "吹頭髮吹到好熱，你舌頭夠靈活嗎"),
+        ],
+    )
+    veto = w._local_veto("敷著面膜配冰紅酒最讚了", [], "", GID)
+    assert "睡前" in veto
+    assert "不同組的場景" in veto
+
+
+def test_scene_group_passes_when_group_is_fresh():
+    """同組最近沒人做過就放行，不是看到洗澡就一律擋。"""
+    w = _worker("RICH")
+    _seed(w, [(30 * 60, "剛跑完業務回到家累死"), (20 * 60, "夜市紙袋油到透出來")])
+    veto = w._local_veto("剛剛在試穿新買的蕾絲丁字褲勒得好緊", [], "", GID)
+    assert "睡前" not in veto
+
+
+def test_preamble_flow_cuts_the_head_physically():
+    """語流連三則報備前情時，直接剪掉逗號前那段，不是只寫在提示裡。
+
+    提示詞寫了「這則不要交代前情」，模型照寫（21:00–21:25 六則）；剪前情留後半句，
+    對象與撩撥都還在後半句。
+    """
+    w = _worker("小小")
+    _seed(
+        w,
+        [
+            (9 * 60, "擦著乳液聽小萬聊吃辣我都流汗想被抱緊了"),
+            (6 * 60, "規範是多久沒射才這麼暴躁，剛洗完澡擦頭髮看琪琪罵人超狠"),
+            (3 * 60, "吹頭髮吹到好熱，你舌頭夠靈活嗎"),
+        ],
+    )
+    assert w._anchor_flow(GID) >= 3
+    cut = w._strip_anchor_head("剛擦完乳液躺上床，這件睡衣是不是太露", GID)
+    assert cut and "剛擦完乳液" not in cut
+    assert "睡衣" in cut
+
+
+def test_anchor_flow_counts_no_comma_anchor_lines():
+    """沒逗號的整句也算前情（擦著乳液…想被抱緊了），密度才量得準。"""
+    w = _worker("小小")
+    _seed(
+        w,
+        [
+            (8 * 60, "擦著乳液聽小萬聊吃辣我都流汗想被抱緊了"),
+            (5 * 60, "吹頭髮吹到好熱，你舌頭夠靈活嗎"),
+            (2 * 60, "趴在床上看森森罵狗，害我好想被按著撞"),
+        ],
+    )
+    assert w._anchor_flow(GID) >= 2
+
+
+def test_preamble_head_kept_when_flow_is_short():
+    w = _worker("小小")
+    _seed(w, [(5 * 60, "三上悠亞不好嗎")])
+    assert w._strip_preamble_head("剛擦完乳液躺上床，這件睡衣是不是太露", GID)
+
+
 def test_vetoes_press_box_when_two_thirds_of_recent_bots_are_press_box():
     w = _worker()
     _seed(
