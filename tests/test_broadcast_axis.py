@@ -92,8 +92,8 @@ def test_two_broadcasts_ask_for_one_target():
     w = _worker("小天後")
     _seed(w, [(49 * 60, _BROADCASTS[0]), (28 * 60, _BROADCASTS[1])])
     note = w._sentence_type_note([], GID, [])
-    assert "單一男人" in note
-    assert "「你」" in note
+    assert "全場下判決" in note
+    assert "具體對象" in note
 
 
 def test_one_broadcast_is_not_enough():
@@ -158,7 +158,7 @@ def test_broadcast_candidate_is_dropped_when_a_target_is_required():
         )
     )
     assert out == "你這句講得我腿都軟了，剛坐著寫東西腰超痠"
-    assert w.stats["broadcast_rewrite_rejected"] == 1
+    assert w.stats["echo_target_rejected"] == 1
     assert len(seen) == 2
 
 
@@ -230,6 +230,11 @@ def test_proactive_broadcast_is_rewritten_even_with_self_disclosure():
 
 
 def test_proactive_targeted_line_is_not_rewritten():
+    """語流整條無對象時，主動那句連有對象的句子也會被送去改寫（flow 軸）。
+
+    原本這條測「有對象就不進改寫」，那是 press_box 時代的設計；改成看整條語流後，
+    窗裡全是無對象開場時，這句照樣要重寫一次求更穩的對象落點。
+    """
     import asyncio
 
     w = _worker("RICH")
@@ -238,6 +243,6 @@ def test_proactive_targeted_line_is_not_rewritten():
         (3 * 60, "請客就想白幹嗎，體力能讓我腿軟再說誰買單吧"),
     ])
     calls: list[Any] = []
-    _stub_pick(w, "不該被用到", calls)
-    assert asyncio.run(w._proactive_echo_rewrite(GID, _TO_ONE, "", [], "")) == ""
-    assert not calls
+    _stub_pick(w, "你這句講得我腿都軟了，森森你先來", calls)
+    assert asyncio.run(w._proactive_echo_rewrite(GID, _TO_ONE, "", [], "")) == "你這句講得我腿都軟了，森森你先來"
+    assert calls

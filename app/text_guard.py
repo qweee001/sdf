@@ -87,7 +87,7 @@ _TRADITIONAL_BIG5_EXCEPTIONS = frozenset(
 # OpenCC 的「s2t」（通用簡轉繁）預設會把台灣標準的「床」硬轉成古體/港式「牀」（如「牀上」），
 # 以及「吃→喫、台→臺、里→裏、么→麼、游→遊、群→羣、准→準」。
 # 台灣教育部標準國字與日常繁體一律寫「床」，絕不寫「牀」！
-_S2T_FALSE_KILL_CHARS = frozenset("床吃台里么游群准")
+_S2T_FALSE_KILL_CHARS = frozenset("床吃台里么游群准于")
 try:
     # 優先使用 s2tw（簡體到台灣繁體標準），避免 s2t 轉出古體字「牀」
     _S2T_CONVERTER = _OpenCC("s2tw") if _OpenCC is not None else None

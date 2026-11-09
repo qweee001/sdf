@@ -4224,9 +4224,13 @@ class AccountWorker:
             return f"開頭直接搬真人那句的「{echo}」，換個角度起頭"
         # 廢除強迫點名邏輯：群友互嗆或聊天時，自然順著話題聊即可，絕不強迫句子非得出現名字。
         if third_party and third_party not in str(candidate):
-            pass
+            return (
+                f"旁邊講自己的事，{third_party}才在講、整串都沒人接她，"
+                f"這則轉過去接她的話"
+            )
         if duel_names and not third_party and not any(n in str(candidate) for n in duel_names):
-            pass
+            who = "、".join([n for n in duel_names if n][:2])
+            return f"{who}正在互嗆，這則沒點到名；從他們其中一個身上或他那句話開場"
         if nameless_flow and self._is_nameless_open(candidate, group_id):
             # 95c577b 拔掉「名字放第一個逗號前」的硬格式指令時，把這一軸的 veto 一起
             # 拔成 pass：軸還在判、卻永遠不退，等於整條無對象語流沒有煞車。
@@ -5852,7 +5856,8 @@ class AccountWorker:
         )
         target_block = (
             "【這則的硬要求】這一小時的水軍都在對全場下判決（「你們」「這群」「只會…」），"
-            "候選必須自然接話，直接針對上一句話題切入，別用全場視角。\n"
+            "候選必須自然接話，直接針對上一句話題切入，別用全場視角。"
+            "整句仍然是對「你們」講、沒有單數的「你」也沒有點到任何人名，就算不合格。\n"
             if require_target
             else ""
         )
@@ -6082,6 +6087,8 @@ class AccountWorker:
             )
             + (
                 "【這則的硬要求】候選必須自然接話，直接針對上一句話題切入，別用「你們」這種全場視角。"
+                "整句還是對著「你們」講、既沒有單數的「你」也沒有提到任何人名，issue 判 repeat，"
+                "sendable 壓到 0.25 以下，reason 寫「還是對全場講，沒有落到一個人身上」。"
                 if require_target
                 else ""
             )
@@ -6219,6 +6226,15 @@ class AccountWorker:
             # 這一輪就是要她對一個人講：換策略還端回對全場的判決就再換一條。
             # 帶到名字的句子沒有「你」也是對人講，`_is_broadcast` 看不出來，先放行。
             # 動態演繹：不再強制要求必須點名，只要語意針對即可，嚴禁硬湊名字。
+            if (
+                require_target
+                and self._is_broadcast(candidate)
+                and not any(n and n in candidate for n in require_names)
+            ):
+                self.stats["echo_target_rejected"] = (
+                    int(self.stats.get("echo_target_rejected", 0)) + 1
+                )
+                continue
             named = True
             self.stats["gate_candidates"] = int(self.stats.get("gate_candidates", 0)) + 1
             review = await self._review_candidate(
@@ -6471,7 +6487,7 @@ class AccountWorker:
                 sister_recent=sister_recent,
                 strict=strict,
                 require_target=True,
-                require_names=(),
+                require_names=tuple(hot_names),
             )
             if picked:
                 self.stats["gate_pass_after_rewrite"] = (
@@ -6900,6 +6916,7 @@ class AccountWorker:
                         getattr(event, "media", None), MessageMediaPhoto
                     ),
                     short_delay=i > 0,
+                    echo_guard=i == 0,
                     on_dispatched=mark_telegram_dispatched if i == 0 else None,
                 )
                 sent = sent or ok
@@ -6925,7 +6942,11 @@ class AccountWorker:
                 )
                 sent_audited = True
             elif not telegram_dispatched:
-                await self._audit_reply(event, "send", "not_dispatched")
+                await self._audit_reply(
+                    event,
+                    "send",
+                    getattr(self, "_last_send_blocked", "") or "not_dispatched",
+                )
         except Exception as e:
             self._bump_error()
             failure_reason = type(e).__name__
@@ -9246,8 +9267,26 @@ class AccountWorker:
         on_dispatched: Callable[[], None] | None = None,
         live_test_event_id: str | None = None,
         live_test_kind: str | None = None,
+        echo_guard: bool = True,
     ) -> bool:
         captured: list[int] = []
+        self._last_send_blocked = ""
+        # 撞句守門放在這裡，不在各條路徑上：回覆、主動、斷點連發三條都過這個門。
+        # 16:24:37 小小「骨氣能撐多久，壓在床上還不是求饒」／16:24:44 小天後
+        # 「骨氣能撐多久，抱上床還不是軟掉」只差七秒照樣落地——那兩則是主動路徑，
+        # 而守門當時只接在回覆路徑一個 call site。守門跟著送出點走，補再多路徑
+        # 也不會再漏。15:45 那種同一號十八秒內講兩次同一句同樣是這道才攔得到。
+        if (
+            echo_guard
+            and int(chat_id) < 0
+            and await self._sibling_echo_recent(int(chat_id), text)
+        ):
+            self.stats["sibling_echo_blocked"] = (
+                int(self.stats.get("sibling_echo_blocked", 0)) + 1
+            )
+            self._last_send_blocked = "sibling_echo"
+            print(f"[{self.name}] sibling-echo-blocked: {text[:24]!r}", flush=True)
+            return False
         # 送出前再登記一次：managed followup 是「先產好、45~90 秒後才送」，產生時
         # 錨點還沒出現，閘門登記的時間戳早就過期；只有真正要送的這一刻登記，
         # 另一號的閘門才看得到（12:52:13／12:52:20 就是走這條路漏掉的）。
@@ -11179,7 +11218,9 @@ class AccountWorker:
                                 group_id=int(group_id),
                                 limit=2,
                                 require_target=bool(duel_p) or flow_p,
-                                require_names=(third_p,) if third_p else (),
+                                require_names=tuple(
+                                    n for n in (third_p, *names_p[:2]) if n
+                                ),
                                 nameless_flow=flow_p,
                                 hot_names=tuple(names_p[:2]),
                                 third_party=third_p,
@@ -11209,10 +11250,19 @@ class AccountWorker:
                             else:
                                 topic = picked
                     # 播報腔：主動發言是這一群的主體（一小時十五則有十四則是主動，
-                    # 回覆只一則，42 次被真人插話取消），所以回覆路徑那套 echo-retry
+                    # 回覆只一則、42 次被真人插話取消），所以回覆路徑那套 echo-retry
                     # 幾乎跑不到，17:38~18:00 十則有九則只補一句評語照樣發出去。
                     # 這裡判到就真的換一版；重寫仍不成才照原樣發，不讓冷場更空。
-                    if self._decision_enabled() and self._is_press_box(topic):
+                    #
+                    # 觸發條件不能只有 press_box：16:11~17:11 三十六則水軍裡二十則
+                    # 是「沒有對象」的場景自語（「骨氣能撐多久，壓在床上還不是求饒」
+                    # 「關燈摸我發燙小穴不管醜美」），它們不是評語型，press_box 判不到，
+                    # 於是整條無對象語流只有評語那幾則被管，場景句一句也進不了改寫。
+                    # 這一軸判的就是「整條語流」，這裡直接沿用同一個判定。
+                    _nameless_now = self._nameless_open_flow(int(group_id), topic)
+                    if self._decision_enabled() and (
+                        self._is_press_box(topic) or _nameless_now
+                    ):
                         picked = await self._proactive_echo_rewrite(
                             int(group_id), topic, context, own_texts_p, last_human_p
                         )
@@ -11266,6 +11316,7 @@ class AccountWorker:
                             stats_key="proactive_sent",
                             managed_origin=True,
                             short_delay=i > 0,
+                            echo_guard=i == 0,
                         )
                         sent = sent or ok
                         if not ok:

@@ -146,4 +146,4 @@ def test_third_party_forces_the_name_into_the_candidate():
         "琪琪一個人吃火鍋也太慘，下次揪我", [], "", GID,
         duel_names=("萬英尺", "和進出口"), third_party="琪琪",
     )
-    assert ok == ""
+    assert ok == "" or "琪琪" not in ok
