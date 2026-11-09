@@ -1161,6 +1161,9 @@ class AccountWorker:
         # 備援模型死了就別再排：agnes-2.5-flash 在網關是 404（模型不存在），
         # 每次逃生四個階段各排它一次，等於每階白燒一次呼叫、還拖長生成時間。
         self._dead_models: dict[str, int] = {}
+        # 該群最近一次「四階全滅」的時間：十分鐘內再遇到拒答就直接從第二階起步，
+        # 別再拿整包上下文去撞同一道審核（每階 × 每個模型都是一次白燒）。
+        self._refusal_heat: dict[int, float] = {}
         self._recent_proactive_topics: set[str] = set()
         # 跨 cycle 的反重複記憶：每群最近生成過的主動話題（接受或都被 drop 的都記），
         # 最舊在前、最新在後、上限 12。沒有它，模型每個 cycle 都從零開始、把同一批露骨
@@ -7949,7 +7952,9 @@ class AccountWorker:
             # 空手（timeout／API 錯）不在此列，交給呼叫方既有的 ai_empty 重試一次。
             if self._is_refusal(text):
                 escaped = await self._refusal_escape(
-                    self._slim_lines(history), target=str(reply_message or "")
+                    self._slim_lines(history),
+                    target=str(reply_message or ""),
+                    group_id=int(getattr(event, "chat_id", 0) or 0),
                 )
                 if escaped:
                     return escaped
@@ -8675,7 +8680,7 @@ class AccountWorker:
         return ""
 
     async def _refusal_escape(
-        self, lines, target: str = "", purpose: str = "escape"
+        self, lines, target: str = "", *, purpose: str = "escape", group_id: int = 0
     ) -> str:
         """全模型都拒答時的最後一擊：換一包更小的提示重寫，命中就計數。
 
@@ -8710,7 +8715,15 @@ class AccountWorker:
                     stages[1][1],
                     False,
                 )
+        gid = int(group_id or 0)
+        heat = self._refusal_heat.get(gid, 0.0) if gid else 0.0
+        # 十分鐘內才四階全滅過：這群現在連短上下文都擋，直接從第二階起步。
+        start_stage = 1 if heat and time.time() - heat < 600 else 0
+        if start_stage:
+            self._pcount("refusal_escape_hot")
         for index, (body, extra, bare) in enumerate(stages):
+            if index < start_stage:
+                continue
             system = self._slim_persona_prompt(bare=bare)
             body += ("\n" + extra) if extra else ""
             body += "\n直接寫出你會打出的那一行。"
@@ -8741,7 +8754,11 @@ class AccountWorker:
                 )
                 if index:
                     self._pcount(f"refusal_escape_stage{index + 1}")
+                elif gid:
+                    self._refusal_heat.pop(gid, None)
                 return text
+        if gid:
+            self._refusal_heat[gid] = time.time()
         return ""
 
     def _model_alive(self, model: str | None) -> bool:
@@ -10503,6 +10520,7 @@ class AccountWorker:
                         lines[-3:],
                         target=_last_line_src.partition("：")[2] or _last_line_src,
                         purpose="proactive_escape",
+                        group_id=int(group_id),
                     )
                     if escaped:
                         topic = escaped

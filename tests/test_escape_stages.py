@@ -5,6 +5,7 @@ Chen 上線後 16 次逃生全滅（卡裡帶「肉棒」、原句也照送）�
 """
 
 import asyncio
+import time
 from unittest.mock import AsyncMock
 
 import pytest
@@ -149,3 +150,37 @@ def test_short_band_cap_is_band_top_not_plus_two(monkeypatch):
 def test_cut_never_leaves_half_a_word(raw, cut, expect):
     assert worker_mod.AccountWorker._extend_cut_word(raw, cut) == expect
 
+
+
+def test_recent_total_failure_starts_at_stage_two(monkeypatch):
+    """十分鐘內才四階全滅過：直奔第二階，別再拿整包上下文撞同一道審核。"""
+
+    async def main():
+        w = _esc_worker()
+        w._refusal_heat = {}
+        seen: list[str] = []
+        w._call_ai = AsyncMock(side_effect=lambda _s, body, **_k: seen.append(body) or "The prompt could not be submitted.")
+
+        assert await w._refusal_escape(["a：b", "c：d"], group_id=-1) == ""
+        assert -1 in w._refusal_heat
+
+        seen.clear()
+        w._call_ai = AsyncMock(side_effect=lambda _s, body, **_k: seen.append(body) or "你倒是來啊")
+        assert await w._refusal_escape(["a：b", "c：d"], group_id=-1) == "你倒是來啊"
+        assert seen[0].startswith("剛剛在聊"), seen[0]
+        assert "群組最近在講" not in seen[0]
+
+    asyncio.run(main())
+
+
+def test_success_on_stage_one_clears_the_heat():
+    async def main():
+        w = _esc_worker()
+        # 熱度過期（20 分鐘前）：回到第一階，成功就清掉。
+        w._refusal_heat = {-1: time.time() - 1200}
+        w._call_ai = AsyncMock(return_value="剛脫下高跟鞋腿還痠")
+        assert await w._refusal_escape(["a：b"], group_id=-1) == "剛脫下高跟鞋腿還痠"
+        assert -1 not in w._refusal_heat
+        assert "refusal_escape_hot" not in w._counters
+
+    asyncio.run(main())
