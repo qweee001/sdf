@@ -8035,7 +8035,11 @@ class AccountWorker:
         # 群務語意閘：女號不得替群組發言（群規、管理員、收費、保證約到）。
         # 這是語意分類器判定，不是關鍵詞黑名單；先過高召回預篩，可疑才打模型。
         group_meta = await self._candidate_mentions_current_group_meta(reply)
-        fact_bad = time_mismatch or gender_term or simplified or group_meta or meta_speak
+        # 視訊／直播：這群實際是換 LINE 加好友，講「打視訊」會被問要怎麼視訊。
+        video_topic = AccountWorker._mentions_video_topic(reply)
+        fact_bad = (
+            time_mismatch or gender_term or simplified or group_meta or meta_speak or video_topic
+        )
 
         if not format_leak and not refusal and not own_echo and not too_long and not fact_bad and not tic_hit:
             if image:
@@ -8066,6 +8070,8 @@ class AccountWorker:
                 if meta_speak
                 else "group_meta"
                 if group_meta
+                else "video_topic"
+                if video_topic
                 else "own_echo"
                 if own_echo
                 else "tic"
@@ -8105,6 +8111,11 @@ class AccountWorker:
                 "那不是你這個女生會替他宣布的事。不要解釋拒絕原因，"
                 "這一版只講你自己的感受與生活，完全不要提群組怎麼運作。"
             )
+        if video_topic:
+            correction += (
+                "上一版提到視訊或直播，這裡實際是換 LINE 加好友再約，"
+                "改口成「先換 LINE」「之後有空約出來見面」這種，不要承諾開鏡頭或視訊。"
+            )
         if own_echo:
             correction += "上一版與你剛講過的話太相似，請換一個完全不同的角度或切入點。"
         if tic_hit:
@@ -8133,8 +8144,9 @@ class AccountWorker:
 
         retry, _ = text_guard.instant_word_fix(retry)
         # 重寫過一次還是偏長就照發：句子完整比剛好卡在帶頂重要，
-        # 再丟一次等於白燒一次生成、還少一則發言（+8 字內都收）。
-        retry_too_long = len(retry) > char_cap + 8
+        # 再丟一次等於白燒一次生成、還少一則發言。
+        # 下限 20 字：窄帶（上限 10）時 19 字的正常句不該被丟。
+        retry_too_long = len(retry) > max(char_cap + 8, 20)
         if retry_too_long:
             self.stats["over_cap_sent"] = int(self.stats.get("over_cap_sent", 0)) + 1
         retry_format_leak = self._has_format_leak(retry)
@@ -8148,6 +8160,7 @@ class AccountWorker:
         retry_gender_term = bool(self._gender_term_violation(retry))
         retry_simplified = self._has_simplified_chars(retry)
         retry_group_meta = await self._candidate_mentions_current_group_meta(retry)
+        retry_video_topic = AccountWorker._mentions_video_topic(retry)
 
         if (
             retry_too_long
@@ -8160,6 +8173,7 @@ class AccountWorker:
             or retry_gender_term
             or retry_simplified
             or retry_group_meta
+            or retry_video_topic
         ):
             reason = (
                 "refusal"
@@ -8176,6 +8190,8 @@ class AccountWorker:
                 if retry_meta
                 else "group_meta"
                 if retry_group_meta
+                else "video_topic"
+                if retry_video_topic
                 else "own_echo"
                 if retry_own_echo
                 else "tic"
@@ -8406,6 +8422,28 @@ class AccountWorker:
             return "女"
         return ""
 
+    def _sibling_recent_note(self, group_id: int, seconds: float = 90.0) -> str:
+        """別的帳號剛講完的句子，直接標給模型看。
+
+        10:29:13 Chen「躲著偷聽也太憋了吧」→ 10:29:48 小小「躲著偷聽鈴鐺講話也太憋了吧」，
+        35 秒內兩號同一個梗同一個收尾，群裡看到的就是兩個小姐講同一句。
+        提示詞只給上下文，模型分不出「這是別的小姐剛講的」，所以明講。
+        """
+        if not group_id:
+            return ""
+        try:
+            items = self._cross_recent_items(int(group_id), seconds)
+            own = set(self._own_echo_recent(int(group_id)))
+        except Exception:
+            return ""
+        others = [t for t, _age in items if t and t not in own]
+        if not others:
+            return ""
+        return (
+            f"別的小姐剛講過「{others[-1][:40]}」"
+            "（同群另一位水軍，別跟她講同一件事、也別用同一個收尾詞）"
+        )
+
     def _build_user_message(
         self, event, history: list[dict], *, reply_message=None, char_cap=None
     ) -> str:
@@ -8456,6 +8494,8 @@ class AccountWorker:
             else:
                 cross_talk_guide += "對方性別未確認，不要猜測身體或關係。\n"
         incoming = str(event.raw_text or "").strip()
+        sibling_note = self._sibling_recent_note(int(getattr(event, "chat_id", 0) or 0))
+        sibling_block = f"{sibling_note}\n" if sibling_note else ""
         if isinstance(getattr(event, "media", None), MessageMediaPhoto):
             incoming = f"{incoming} [圖片]".strip()
         reply_context = "回覆對象：未知（沒有已確認的父訊息內容）\n"
@@ -8483,6 +8523,7 @@ class AccountWorker:
             f"最新消息：[{sender_name or '有人'} sender_id={event.sender_id or '未知'}]{water_hint} {incoming}\n"
             f"{reply_context}"
             f"{cross_talk_guide}"
+            f"{sibling_block}"
             "來源不確定時明示未知；顯示名不代表同一人，也不代表已驗證真人。"
             "「你／妹妹」不一定指目前帳號，不要自行對號入座；"
             "圖片人物不等於目前帳號或發圖者；共享筆記不是你的親身經歷。\n"
@@ -10012,24 +10053,33 @@ class AccountWorker:
         bucket = (self._recent_texts_by_group.get(int(group_id)) or [])[-8:]
         if len(bucket) < _PHRASE_FATIGUE_MIN_REPEAT + 1:
             return []
-        # 提取 2-4 字連續漢字段，跨句統計出現次數
-        # 用 non-greedy {2,4}? 讓短詞優先匹配（否則貪心匹配會把「腿軟」切成
-        # 「到腿軟」，跨句對不齊）。
-        seg_re = re.compile(r"[\u4e00-\u9fff]{2,4}?")
+        # 跨句統計 2 字與 3 字連續漢字片段。舊版只抓 2 字，3 字名物永遠抓不到：
+        # 10:01 小天後「誰要帶冰美式來救我」、10:07 同號「邊喝冰美式」、10:24 又「剛灌完
+        # 冰美式」，全被切成「美式」兩字、次數湊不到 3 次，提示層一句都沒攔。
+        # 3 字片段本身就比 2 字具體，門檻降到 2 次就成立；2 字仍要 3 次。
         counts: dict[str, int] = {}
         for text in bucket:
-            seen_in_text = set()
-            for seg in seg_re.findall(text):
-                if seg not in seen_in_text:  # 同一句內重複只算一次
-                    seen_in_text.add(seg)
-                    counts[seg] = counts.get(seg, 0) + 1
-        over = [
-            (seg, n)
-            for seg, n in counts.items()
-            if n >= _PHRASE_FATIGUE_MIN_REPEAT + 1
-        ]
-        over.sort(key=lambda item: (-item[1], item[0]))
-        return over
+            seen_in_text: set[str] = set()
+            for run in re.findall(r"[\u4e00-\u9fff]+", text):
+                for size in (2, 3):
+                    for i in range(len(run) - size + 1):
+                        seg = run[i:i + size]
+                        if seg not in seen_in_text:  # 同一句內重複只算一次
+                            seen_in_text.add(seg)
+                            counts[seg] = counts.get(seg, 0) + 1
+        over = []
+        for seg, n in counts.items():
+            need = 2 if len(seg) >= 3 else _PHRASE_FATIGUE_MIN_REPEAT + 1
+            if n >= need:
+                over.append((seg, n))
+        # 同一個詞被 2 字與 3 字各記一次時只留長的（「冰美式」比「美式」具體）。
+        over.sort(key=lambda item: (-item[1], -len(item[0]), item[0]))
+        kept: list[tuple[str, int]] = []
+        for seg, n in over:
+            if any(seg in longer and seg != longer for longer, _ in kept):
+                continue
+            kept.append((seg, n))
+        return kept
 
     def _phrase_fatigue_hint(self, group_id: int) -> str:
         """同一個短詞或道具在該群反覆出鏡時，動態提示換意象。"""
@@ -10100,8 +10150,10 @@ class AccountWorker:
         body = str(text or "")
         if not body:
             return ""
+        # 名字不算疲勞詞：群友就那幾個，兩句點到同一個人是常態，不該為此退句。
+        names = self._speaker_names(group_id) if group_id else []
         for seg, _n in self._fatigued_phrases(group_id):
-            if seg in body:
+            if seg in body and not any(seg in name for name in names):
                 return seg
         for core in self._live_shared_cores(group_id):
             if core in body:

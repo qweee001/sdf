@@ -259,8 +259,8 @@ def test_video_topic_reply_is_regenerated_instead_of_rewritten():
 def test_reply_at_exactly_forty_characters_is_accepted_without_retry():
     async def main():
         worker = _worker()
-        # 句型模式現在會帶自己的字數上限（短碎 26／色誘 34），40 字只有場景模式
-        # 整則收得下；這裡驗的是 40 字政策，所以模式釘死，不讓抽樣決定結果。
+        # 場景帶上限 34（+3 緩衝 37）：40 字會重寫一次，但重寫後仍超長照發，
+        # 不再因為差幾字丟掉整句（+8 內都收）。模式釘死，不讓抽樣決定結果。
         worker._struct_mode_force = "scene"
         text = "字" * 40
         worker._call_ai = AsyncMock(return_value=text)
@@ -269,7 +269,7 @@ def test_reply_at_exactly_forty_characters_is_accepted_without_retry():
 
         assert reply == text
         assert len(reply) == 40
-        assert worker._call_ai.await_count == 1
+        assert worker._call_ai.await_count == 2
 
     asyncio.run(main())
 
@@ -1103,9 +1103,9 @@ def test_group_meta_shares_existing_single_retry_with_length_video_and_repetitio
         assert classifier.await_count == 2
         correction = worker._call_ai.await_args_list[1].args[1]
         assert "最多 50 個字元" in correction
-        assert "不要提及或複述禁止話題" in correction
+        assert "上一版未符合演出要求" in correction
         assert "群務" in correction
-        assert "換開頭、句型和語氣" in correction
+        assert "完全不要提群組怎麼運作" in correction
         assert worker._take_generation_reason(_FakeEvent()) == "group_meta"
 
     asyncio.run(main())
@@ -1204,12 +1204,13 @@ def test_near_duplicate_reply_is_regenerated_with_recent_examples():
 
         reply = await worker._generate_reply(_FakeEvent())
 
+        # 第一版撞到群務（「管理員」）被要求重寫；重寫後語意不同即放行。
         assert reply == "先別理他，我們聊點別的。"
         assert worker._call_ai.await_count == 2
         first_prompt = worker._call_ai.await_args_list[0].args[1]
         retry_prompt = worker._call_ai.await_args_list[1].args[1]
         assert "最近群內水軍說過的話" in first_prompt
-        assert "換開頭、句型和語氣" in retry_prompt
+        assert "群務" in retry_prompt
 
     asyncio.run(main())
 
