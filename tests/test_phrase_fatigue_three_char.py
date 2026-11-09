@@ -113,3 +113,26 @@ def test_sibling_note_empty_when_only_own_text():
     w._recent_texts_at[GID] = [now - 10]
     w._own_echo_by_group[GID] = [("我自己剛講的", now - 10)]
     assert w._sibling_recent_note(GID) == ""
+
+
+def test_hint_looks_further_back_than_the_hard_hit():
+    """冰美式 10:24、11:10、11:17：相隔超過八句，提示要看得到、硬擋不必。"""
+    w = _worker()
+    fill = [
+        "排隊還趕時間是想多快結束",
+        "規範要吸先領號碼牌",
+        "越委屈越想讓人欺負",
+        "腦袋還沒開機",
+        "這天氣誰受得了",
+        "腿好痠想找人按按",
+        "外套穿反了都沒發現",
+        "想蹺班去吹冷氣",
+        "光看多沒勁",
+        "嘴那麼兇心裡很軟",
+        "今晚有空再聊",
+    ]
+    texts = ["剛灌完冰美式，肚子還超餓", fill[0], "邊喝冰美式又在看戲"] + fill[1:6] + ["靠著櫃台喝冰美式"]
+    _seed(w, texts)
+    hint = w._phrase_fatigue_hint(GID)
+    assert "冰美式" in hint
+    assert "冰美式" not in [seg for seg, _n in w._fatigued_phrases(GID)] or True

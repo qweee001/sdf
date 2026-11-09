@@ -10062,14 +10062,14 @@ class AccountWorker:
                 seen.append(c)
         return seen
 
-    def _fatigued_phrases(self, group_id: int) -> list[tuple[str, int]]:
+    def _fatigued_phrases(self, group_id: int, window: int = 8) -> list[tuple[str, int]]:
         """該群最近句子裡達到疲勞閾值的 2–4 字核心詞，按次數降序。
 
         hint 與生成後硬擋共用同一份清單，避免提示換意象、送出層卻放行。
         """
         # 這裡只取最近 8 句：短詞疲勞看的是「連幾句都在玩同一個梗」，
         # 整份時間窗（100 分鐘）攤開會讓正常複用的字也被判疲勞。
-        bucket = (self._recent_texts_by_group.get(int(group_id)) or [])[-8:]
+        bucket = (self._recent_texts_by_group.get(int(group_id)) or [])[-window:]
         if len(bucket) < _PHRASE_FATIGUE_MIN_REPEAT + 1:
             return []
         # 跨句統計 2 字與 3 字連續漢字片段。舊版只抓 2 字，3 字名物永遠抓不到：
@@ -10102,7 +10102,10 @@ class AccountWorker:
 
     def _phrase_fatigue_hint(self, group_id: int) -> str:
         """同一個短詞或道具在該群反覆出鏡時，動態提示換意象。"""
-        over = self._fatigued_phrases(group_id)
+        # 提示層看寬一點（25 句）：一小時才十幾則，8 句只等於 20 分鐘，
+        # 冰美式 10:24、11:10、11:17 三次全落在窗外，提示一次都沒出。
+        # 硬擋（_phrase_fatigue_hit）仍用 8 句，免得正常複用也被退。
+        over = self._fatigued_phrases(group_id, window=25)
         shared = self._live_shared_cores(group_id)
         hot = self._hot_char_core(group_id)
         if not over and not shared and not hot:
