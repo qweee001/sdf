@@ -8000,53 +8000,9 @@ class AccountWorker:
         tic_hit = self._own_tic_hit(reply, group_id)
         if tic_hit:
             print(f"[{self.name}] tic: {tic_hit} → {reply[:24]!r}", flush=True)
+        # 自然語意放行：不再搞機械硬剪（物理截斷、剪前半句、剪動作）
+        # 長度與前情完全交給神經網絡與上下文感應，杜絕「切出殘尾/切碎句子」的破綻
         too_long = len(reply) > char_cap
-        if too_long:
-            trimmed = self._trim_to_cap(reply, char_cap)
-            if trimmed:
-                reply = trimmed
-                too_long = False
-        # 停在虛字上就自己收乾淨（重寫要十幾秒，洗屏時常常回來就過期了）
-        if self._is_dangling(reply):
-            repaired = self._repair_dangling_tail(reply)
-            if repaired:
-                reply = repaired
-                too_long = False
-        # 節奏物理層：整段語流已經在報備前情時，直接剪掉這則的前半句。
-        # 下午場水軍密度只有 0.5 則／分，五則窗等於八到十分鐘，門檻三則永遠
-        # 追不到（部署後 44% 前情率、一次都沒剪）；兩則就動刀。
-        if self._preamble_flow(group_id) >= 2:
-            stripped_preamble = self._strip_preamble_head(reply, group_id)
-            if stripped_preamble:
-                reply = stripped_preamble
-                self._pcount("strip_preamble")
-        # 跨號同梗：別的號一分鐘內已經在講同一個對象／同一個梗，後到的這則
-        # 剪短或剪掉前情，別兩個小姐搶同一個男人講同一件事。
-        if group_id:
-            _tg = self._cross_target_burst(reply, group_id)
-            if _tg:
-                self._pcount("target_burst")
-                print(f"[{self.name}] target-burst: 「{_tg}」60 秒內別號也在講 → {reply[:24]!r}", flush=True)
-                _cut = self._strip_preamble_head(reply, group_id)
-                if _cut:
-                    reply = _cut
-                elif len(reply) > 18:
-                    _trimmed = self._trim_to_cap(reply, 16)
-                    if _trimmed and not self._is_dangling(_trimmed):
-                        reply = _trimmed
-        # 旁觀模子：近三則有兩則是「先演個動作再看別人」（吸著冰手搖看你們嫌、
-        # 咬著便當看…）。提示詞拿不掉，直接剪掉前面那截動作，只留對人的那句。
-        if (
-            group_id
-            and self._is_watch_frame(reply)
-            and self._watch_frame_flow(group_id) >= 2
-        ):
-            stripped_spectator = self._strip_spectator_head(
-                reply, self._speaker_names(group_id)
-            )
-            if stripped_spectator:
-                self.stats["strip_spectator"] = int(self.stats.get("strip_spectator", 0)) + 1
-                reply = stripped_spectator
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
@@ -8154,11 +8110,6 @@ class AccountWorker:
 
         retry, _ = text_guard.instant_word_fix(retry)
         retry_too_long = len(retry) > char_cap
-        if retry_too_long:
-            trimmed = self._trim_to_cap(retry, char_cap)
-            if trimmed:
-                retry = trimmed
-                retry_too_long = False
         retry_format_leak = self._has_format_leak(retry)
         retry_refusal = self._is_refusal(retry)
         retry_meta = self._is_meta_speak(retry)
@@ -10465,47 +10416,7 @@ class AccountWorker:
                 else:
                     continue
 
-            # 字數帶是硬上限，不是提示：short 原本給 +10 寬容，實際每一則都出 23~26 字，
-            # 「8~16 字短碎」等於沒作用（21:00–21:59 平均 23.0 字、≤8 字 0 則）。
-            # 短碎模式先砍掉前情、只留最後那一記（模型永遠會自己補前情），砍不動才標點裁切。
-            # short 原本跟 dirty 一樣吃 +2，上限 18 就讓 17~18 字整批過關，
-            # 「8~16」實際只有 46%（部署後 13 則）。短帶就守帶頂 16。
-            _p_cap = _p_hi + 4 if _p_mode == "scene" else _p_hi + (0 if _p_mode == "short" else 2)
-            if _p_mode == "short" and getattr(self, "_short_tight", False):
-                _p_cap = _p_lo + 2
-            # 兩段式已經連四則：這則直接斷成單句，連人名那段一起斷（指名留給
-            # 決策層另外補，四號九則是「名字＋台詞」同一個模子更刺眼）。
-            if self._comma_flow(int(group_id)) >= 4:
-                _tail_only = self._strip_lead_to_tail(topic, 20)
-                if _tail_only and len(_tail_only) >= 8:
-                    topic = _tail_only
-                    self._pcount("strip_comma_flow")
-            if len(topic) > _p_cap:
-                _orig_topic = topic
-                if _p_mode == "short":
-                    clipped = self._strip_lead_to_tail(topic, _p_cap)
-                    if clipped:
-                        topic = clipped
-                if len(topic) > _p_cap:
-                    trimmed = self._trim_to_cap(topic, _p_cap)
-                    if trimmed:
-                        topic = trimmed
-                topic = self._extend_cut_word(_orig_topic, topic)
-                if self._is_dangling(topic):
-                    repaired = self._repair_dangling_tail(topic)
-                    if repaired:
-                        topic = repaired
-            # 語流已在報備前情：這則直接剪掉前半句，斷掉模子。
-            if self._preamble_flow(int(group_id)) >= 2:
-                _sp = self._strip_preamble_head(topic, int(group_id))
-                if _sp:
-                    topic = _sp
-            # 語流連續兩則「動作＋看」：剪掉動作那截，只留對人的句尾。
-            if self._is_watch_frame(topic) and self._watch_frame_flow(int(group_id)) >= 2:
-                _ss = self._strip_spectator_head(topic, self._speaker_names(int(group_id)))
-                if _ss:
-                    self._pcount("strip_spectator")
-                    topic = _ss
+            # 動態演繹：自然完整輸出，不再進行機械硬截或物理剪頭剪尾
             _note_seen(topic)
 
             # 最高優先檢查近義複讀：命中本帳號 10 分鐘內發言直接 drop，不重試、不再次調用模型
