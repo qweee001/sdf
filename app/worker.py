@@ -4207,24 +4207,21 @@ class AccountWorker:
         if nameless_flow and self._is_nameless_open(candidate, group_id):
             pass
         # 旁觀骨架軸：四號同一個模子「我一邊做某事＋看你們吵＋補一句」。
-        # 字面全不同所以起手詞／消耗物／場地三軸都會放行，骨架卻一模一樣。
+        # 提示模型自然切入，不要死板報備
         if group_id and self._is_spectator_frame(candidate):
             near = self._cross_recent_texts(int(group_id), _SPECTATOR_FRAME_FADE)
             hits = sum(1 for t in near if self._is_spectator_frame(t))
             if hits >= _SPECTATOR_FRAME_HITS:
                 return (
-                    "又是「我一邊做某件小事＋看你們吵＋補一句」的旁觀骨架，"
-                    "最近幾則都同一個模子；這則名字或動作只留一個，"
-                    "人物放前面，別再開場就報你在做什麼"
+                    "又是「一邊做某事＋看你們吵」的旁觀骨架，"
+                    "請直接針對話題自然接話，別再開場報備你在做什麼"
                 )
-        # 上一則水軍才剛用同一個旁觀骨架（15:28:27／15:28:30 三秒疊一對），
-        # 不看密度，直接換：兩句黏在一起時，同一個模子比十則撞一次更明顯。
         if group_id and self._is_spectator_anywhere(candidate):
             prev = self._cross_recent_items(int(group_id), _SPECTATOR_ADJACENT)
             if any(self._is_spectator_anywhere(t) for t, _a in prev):
                 return (
                     "上一則水軍也是「一邊做自己的事＋看你們吵」的旁觀句，"
-                    "兩句黏在一起；這則改成只接一個人剛講的那句，不必報自己在做什麼"
+                    "請直接順著上一句話題接話或撩撥，不必報備自己在做什麼"
                 )
         if self._ask_tail_repeat(own_texts, candidate) and not (
             group_id and self._assert_run(int(group_id))
