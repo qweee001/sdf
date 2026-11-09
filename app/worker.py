@@ -4405,18 +4405,30 @@ class AccountWorker:
                 own_hit = cand_items & own_items
                 head_body = str(candidate).translate(_AXIS_VARIANTS)[:14]
                 head_own = {g for g in own_hit if g in head_body}
+                # 這一軸跟場地軸同一個毛病：只叫她「換一個身體動作」，手上根本沒有
+                # 別的場景可去，重寫三輪還是端回洗澡／床上／夾緊，最後走 hold 照發。
+                # 直接把她自己那組還沒用過的錨點念給她聽。
+                scene_alts = _life_escape_targets(
+                    str(self.persona.get("name") or ""), set(cand_items) | shared_any
+                )
+                scene_tail = (
+                    "，或直接改用「" + "」「".join(scene_alts) + "」這種場景"
+                    if scene_alts
+                    else "，換一個身體動作或別的生活場景"
+                )
                 if head_own and len(shared_any) < 2 and sources < _SCENE_MOSAIC_SOURCES:
-                    return f"「{'、'.join(sorted(head_own))}」自己四小時內在開頭做過了，這一則換一個身體動作"
+                    return f"「{'、'.join(sorted(head_own))}」自己四小時內在開頭做過了{scene_tail}"
                 own_mid = cand_items & self._own_scene_items(int(group_id), 90 * 60)
                 if own_mid and len(shared_any) < 2 and sources < _SCENE_MOSAIC_SOURCES:
-                    return f"「{'、'.join(sorted(own_mid))}」自己九十分鐘內做過了，這一則換一個身體動作"
+                    return f"「{'、'.join(sorted(own_mid))}」自己九十分鐘內做過了{scene_tail}"
                 if len(shared_any) >= 2 or sources >= _SCENE_MOSAIC_SOURCES:
                     return (
                         f"「{'、'.join(sorted(shared_any))}」這幾個點最近已經被拼過"
                         f"（{sources} 則舊句），整句換一組場景，別再拿同樣幾個東西重組"
+                        + scene_tail
                     )
                 if short_dup:
-                    return f"「{'、'.join(sorted(short_dup))}」這動作最近才有人做過，換一個身體動作"
+                    return f"「{'、'.join(sorted(short_dup))}」這動作最近才有人做過{scene_tail}"
             # 狀態軸飽和：兩小時內已經三則在講痠累，換字也是同一個心境
             # （17:16 腰酸背痛→17:37 肩膀發酸→18:01 腰酸死了），這則要有別的場景。
             elif (

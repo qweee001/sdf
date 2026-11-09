@@ -86,6 +86,19 @@ def test_vetoes_body_gesture_done_by_another_account_26_minutes_ago():
     assert "懶腰" in veto
 
 
+def test_scene_veto_names_a_concrete_alternative_scene():
+    """撞動作時要把還能用的場景念出來，不能只叫她「換一個動作」。
+
+    只給抽象指令，模型換字不換格，三輪重寫照樣端回洗澡／床上，最後走 hold
+    照發（20:08 小小第三次「剛洗完澡」就是這樣出貨的）。
+    """
+    w = _worker("小天後")
+    _seed(w, [(12 * 60, "剛洗完澡好熱，誰講你壞話")])
+    veto = w._local_veto("洗完澡床上等你約我實戰", [], "", GID)
+    assert "洗完澡" in veto
+    assert "「" in veto.split("或直接改用")[-1]
+
+
 def test_vetoes_press_box_when_two_thirds_of_recent_bots_are_press_box():
     w = _worker()
     _seed(
