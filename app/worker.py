@@ -5457,6 +5457,39 @@ class AccountWorker:
         target_grams = _cjk_grams(target)
         return any(target_grams & _cjk_grams(c) for c in meaningful)
 
+    async def _sibling_echo_recent(
+        self, group_id: int, text: str, window: float = 90.0
+    ) -> bool:
+        """發送前看剛剛落地的那幾則水軍：同一個起手詞、或整段四字照搬就算撞。
+
+        生成要十幾二十秒，兩條同時在飛時，生成前的本機自檢看不到對方——15:45:56
+        小天後「手勁夠大嗎 按哪裡呀」、15:46:14 同一號「站櫃腿超痠，手勁夠大再來按」，
+        十八秒內自己講兩次同一句，群友看到的就是複讀。只有發送前這一道攔得到。
+        """
+        if not group_id or not str(text or "").strip():
+            return False
+        try:
+            recent = await self.db.get_group_messages(int(group_id), limit=8)
+        except Exception:
+            return False
+        now = time.time()
+        head = self._opening_token(text, group_id)
+        for row in recent:
+            if str(row.get("role")) != "assistant":
+                continue
+            try:
+                age = now - float(row.get("timestamp") or 0)
+            except (TypeError, ValueError):
+                continue
+            if age > window:
+                continue
+            other = str(row.get("content") or "")
+            if head and self._opening_token(other, group_id) == head:
+                return True
+            if self._verbatim_run(text, other, 4):
+                return True
+        return False
+
     async def _decision_input(self, event):
         """回 (state, topic_options)。
 
@@ -6834,6 +6867,11 @@ class AccountWorker:
                 if not await self._context_still_fresh(event):
                     self._record_reply_drop("stale_context")
                     await self._audit_reply(event, "policy", "stale_context")
+                    return
+                # 平行生成期間自己或姊妹剛落地一句同樣的話：生成前看不到，這裡攔。
+                if await self._sibling_echo_recent(int(event.chat_id or 0), text):
+                    self._record_reply_drop("sibling_echo")
+                    await self._audit_reply(event, "policy", "sibling_echo")
                     return
             else:
                 self._record_reply_drop(generation_reason)
