@@ -5,6 +5,7 @@ Chen 上線後 16 次逃生全滅（卡裡帶「肉棒」、原句也照送）�
 """
 
 import asyncio
+import re
 import time
 from unittest.mock import AsyncMock
 
@@ -137,7 +138,9 @@ def test_short_band_cap_is_band_top_not_plus_two(monkeypatch):
         worker._call_ai = AsyncMock(return_value=long_line)
         topic = await worker._generate_context_topic(GROUP)
         prompt = worker._call_ai.await_args.args[1]
-        assert "最多 18 字元" in prompt, prompt[-160:]
+        assert "【長度是上限不是建議】" in prompt
+        cap = int(re.search(r"整則最多 (\d+) 字元", prompt).group(1))
+        assert cap <= 16, prompt[-200:]
         assert topic == long_line
 
     asyncio.run(main())
