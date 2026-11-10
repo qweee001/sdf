@@ -111,23 +111,43 @@ def test_generation_still_reads_db_without_snapshot():
     asyncio.run(main())
 
 
-def test_freshness_blocks_when_human_spoke_later():
+def test_freshness_blocks_when_conversation_moved_on():
+    """連續四則新話、且與要回的那句毫無交集，才算過時（一兩則還接得到）。"""
+
     async def main():
         worker = _worker(101)
         event = _reply_event("今天好累喔", message_id=10)
         event._sdf_seen_at = 1000.0
         worker.db.get_group_messages = AsyncMock(
             return_value=[
-                {
-                    "sender_id": 5,
-                    "sender_name": "阿宏",
-                    "role": "user",
-                    "content": "那先不聊了",
-                    "timestamp": 1200.0,  # 在我們看到目標訊息之後才講的
-                }
+                {"sender_id": 5, "sender_name": "阿宏", "role": "user", "content": "晚上該吃什麼咧", "timestamp": 1200.0},
+                {"sender_id": 8, "sender_name": "和進出口", "role": "user", "content": "便當吧隨便買一買", "timestamp": 1210.0},
+                {"sender_id": 9, "sender_name": "萬英尺", "role": "user", "content": "我要訂位吃火鍋", "timestamp": 1220.0},
+                {"sender_id": 5, "sender_name": "阿宏", "role": "user", "content": "幾點要集合", "timestamp": 1230.0},
             ]
         )
         assert await worker._context_still_fresh(event) is False
+
+    asyncio.run(main())
+
+
+def test_freshness_holds_while_target_still_talking():
+    """目標本人還在補話，話題就還在——後面的路人閒聊不算過時。"""
+
+    async def main():
+        worker = _worker(101)
+        event = _reply_event("今天好累喔", message_id=10)
+        event._sdf_seen_at = 1000.0
+        event._sdf_target_sender = 5
+        worker.db.get_group_messages = AsyncMock(
+            return_value=[
+                {"sender_id": 5, "sender_name": "阿宏", "role": "user", "content": "加班到十點才走", "timestamp": 1200.0},
+                {"sender_id": 8, "sender_name": "和進出口", "role": "user", "content": "便當吧隨便買一買", "timestamp": 1210.0},
+                {"sender_id": 9, "sender_name": "萬英尺", "role": "user", "content": "我要訂位吃火鍋", "timestamp": 1220.0},
+                {"sender_id": 5, "sender_name": "阿宏", "role": "user", "content": "現在完全不想動", "timestamp": 1230.0},
+            ]
+        )
+        assert await worker._context_still_fresh(event) is True
 
     asyncio.run(main())
 

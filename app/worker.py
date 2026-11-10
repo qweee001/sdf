@@ -5678,8 +5678,21 @@ class AccountWorker:
             c for c in newer
             if len(re.sub(r"[^㐀-鿿A-Za-z0-9]", "", c)) >= 4
         ]
-        if len(meaningful) <= 2:
+        # 三則以上新話、且沒有一個共同字串才叫過時。兩則就砍在熱場太嚴：
+        # 群裡一分鐘三句，生成二十幾秒，兩則門檻等於「只要有人在講話就丟」，
+        # 丟掉的 claim 沒有人會接回去（13:1x 一小時 stale 25 次）。
+        if len(meaningful) <= 3:
             return True
+        # 目標本人還在補話：他的話題就還在，接得到。
+        target_sender = str(getattr(event, "_sdf_target_sender", "") or "")
+        if target_sender:
+            for row in recent:
+                if str(row.get("role")) == "assistant":
+                    continue
+                if str(row.get("sender_id")) != target_sender:
+                    continue
+                if float(row.get("timestamp") or 0) > seen_at + 1.0:
+                    return True
         target_grams = _cjk_grams(target)
         return any(target_grams & _cjk_grams(c) for c in meaningful)
 
