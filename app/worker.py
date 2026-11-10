@@ -10991,6 +10991,21 @@ class AccountWorker:
         # 生成端壓得下來，後面就不必靠剪的（剪字必定留殘尾）。
         if self._comma_flow(int(group_id)) >= 3:
             _p_struct += "這幾則都是「人名＋前情，挑釁」的兩段式，這則只講一句，別點名也別報備生活。"
+        # 點名軸與尺度軸在主動路徑原本全缺：回覆路徑有 _sentence_type_note，
+        # 主動路徑只吃字數帶。17:53–18:00 四則主動全是一開口就喊人名再評一句，
+        # 整段像在點名打分；露骨句也全在評他的尺寸。這兩軸要掛到主動路徑上。
+        if self._name_opening_streak(recent_bot_texts, int(group_id)) or (
+            self._name_open_hits(int(group_id)) >= 2
+        ):
+            _p_struct += (
+                "最近幾則水軍都先喊人名再評一句，像在點名打分：這則開頭不要喊名字，"
+                "直接講自己身上現在怎麼了，或直接對他下一個動作。"
+            )
+        if self._dirty_judge_hits([], int(group_id), msgs) >= 2:
+            _p_struct += (
+                "最近幾則露骨句都在評他的尺寸，你自己身上一句都沒有："
+                "這則講你現在哪裡濕、哪裡緊、哪裡燙，或給他一個具體動作。"
+            )
 
         def build_prompt(hint: str) -> str:
             if context:

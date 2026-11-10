@@ -11,8 +11,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 import re
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -176,3 +178,47 @@ def test_dirty_judge_axis_quiet_when_self_body_present():
         "下午摸魚也救不了",
     ]
     assert w._dirty_judge_hits([], GID, []) == 0
+
+
+def test_proactive_prompt_carries_name_and_dirty_axes():
+    """主動路徑原本只吃字數帶，點名軸／尺度軸全缺（17:53–18:00 四則全喊名開場）。"""
+    w = _worker()
+    w.persona.update({
+        "hobbies": ["追劇"], "looking_for": "約會", "city": "台北",
+        "district": "大安", "industry": "服飾", "university": "台大",
+        "personality": "悶騷", "meetups_done": 3,
+    })
+    gid = -1002229799107
+    w.selected_groups = {gid}
+    w._speaker_names_by_group[gid] = ["戰豆", "鈴鐺", "規範"]
+    now = time.time()
+    w._recent_texts_by_group[gid] = [
+        "戰豆這婚明顯結不成了",
+        "規範別光看戲，被嗆到耳根發燙",
+    ]
+    w._recent_texts_at[gid] = [now - 60, now - 60]
+    prompts: list[str] = []
+
+    class _DB:
+        async def get_group_messages(self, group_id, limit=100):
+            return [
+                {"sender_name": "戰豆", "sender_id": 5, "role": "user",
+                 "content": "我雞雞1公分", "timestamp": time.time()},
+            ]
+
+        async def get_group_shared_notes(self, group_id, account_id, limit=10):
+            return []
+
+        async def recent_bot_texts_by_group(self, group_id):
+            return list(w._recent_texts_by_group[gid])
+
+    w.db = _DB()
+
+    async def _ai(*args, **k):
+        prompts.append(args[-1] if len(args) > 1 else args[0])
+        return "標準啦，站起來就頂到我了"
+
+    w._call_ai = _ai
+    asyncio.run(w._generate_context_topic(gid))
+    assert prompts, "主動路徑沒有發生成"
+    assert any("不要喊名字" in p for p in prompts)
