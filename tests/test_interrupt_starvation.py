@@ -15,13 +15,13 @@ def test_fresh_task_holds():
 
 
 def test_same_sender_typing_again_cancels_early():
-    assert A(20.0, 40.0, True, False, 0.0) == "cancel"
+    assert A(35.0, 40.0, True, False, 0.0) == "cancel"
 
 
 def test_same_sender_cancel_threshold_follows_budget():
     """慢場的門檻跟著預算走，不會十五秒就砍（那會砍掉正常生成）。"""
-    assert A(20.0, 65.0, True, False, 0.0) == "hold"
-    assert A(33.0, 65.0, True, False, 0.0) == "cancel"
+    assert A(30.0, 65.0, True, False, 0.0) == "hold"
+    assert A(55.0, 65.0, True, False, 0.0) == "cancel"
 
 
 def test_passers_by_over_budget_still_cancel_when_bots_are_active():
@@ -66,7 +66,8 @@ def test_generation_in_flight_survives_same_sender_again():
     """
     assert A(20.0, 40.0, True, False, 0.0, gen_started=True) == "hold"
     assert A(60.0, 65.0, True, False, 0.0, gen_started=True) == "hold"
-    assert A(100.0, 65.0, True, False, 0.0, gen_started=True) == "cancel"
+    assert A(110.0, 65.0, True, False, 0.0, gen_started=True) == "hold"
+    assert A(130.0, 65.0, True, False, 0.0, gen_started=True) == "cancel"
     # 路人插話在生成中也只能等到硬上限
     assert A(100.0, 65.0, False, False, 30.0, gen_started=True) == "hold"
 
@@ -75,9 +76,9 @@ def test_consecutive_cancel_breaker_stops_stranger_cancels():
     """連三條都被路人砍掉就換誰講都不砍，先讓一句活著落地。"""
     assert A(70.0, 65.0, False, False, 30.0, breaker=True) == "hold"
     # 同一個人自己補話仍然照砍（那條真的會答錯人）
-    assert A(40.0, 65.0, True, False, 30.0, breaker=True) == "cancel"
+    assert A(55.0, 65.0, True, False, 30.0, breaker=True) == "cancel"
 
 
 def test_same_sender_still_cancels_even_when_starved():
     """他自己又補一句，答案就過期了，餓死場也照砍。"""
-    assert A(40.0, 65.0, True, False, 700.0) == "cancel"
+    assert A(55.0, 65.0, True, False, 700.0) == "cancel"

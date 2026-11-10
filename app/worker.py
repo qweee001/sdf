@@ -1707,6 +1707,14 @@ class AccountWorker:
                         ) == "cancel":
                             task.cancel()
                             cancelled += 1
+                            # 哪一條規則砍的：排隊中快砍、生成中、硬上限。
+                            # 沒有分支計數就只看到 53 次 human_interrupt，猜不到來源。
+                            self._pcount(
+                                "intr_hard" if age > (300.0 if text_ready else 180.0)
+                                else "intr_same_gen" if (same_sender and gen_started)
+                                else "intr_same_queued" if same_sender
+                                else "intr_passerby"
+                            )
                             self._cancel_ts.append(now_c)
                     except Exception:
                         continue
@@ -3928,9 +3936,9 @@ class AccountWorker:
             return "hold"
         # 模型已經在跑（gen_started）就先讓它跑完：15 秒門檻在熱場等於必砍，
         # 砍的是正在燒 token 的那條，砍掉連 claim 一起放掉，這一則永遠沒人回。
-        # 只有排隊中（還沒開始生成）才用 15 秒快砍；已在生成則放寬到 90 秒，
+        # 只有排隊中（還沒開始生成）才用 25 秒快砍；已在生成則放寬到 120 秒，
         # 更久就當它卡住（正確性仍由發送前的 _context_still_fresh 兜）。
-        if same_sender and (age >= 90.0 if gen_started else age >= max(15.0, budget * 0.5)):
+        if same_sender and (age >= 120.0 if gen_started else age >= max(25.0, budget * 0.8)):
             return "cancel"
         if age > budget and not text_ready and not in_escape and not gen_started:
             if starved < _SPARE_SILENCE_SECONDS:
@@ -8479,6 +8487,7 @@ class AccountWorker:
         # 再丟一次等於白燒一次生成、還少一則發言。
         # 下限 20 字：窄帶（上限 10）時 19 字的正常句不該被丟。
         retry_too_long = len(retry) > max(char_cap + 8, 20)
+        retry_only_long = retry_too_long  # 只有「偏長」一項沒過就照發（下面改寫）
         if retry_too_long:
             self.stats["over_cap_sent"] = int(self.stats.get("over_cap_sent", 0)) + 1
         retry_format_leak = self._has_format_leak(retry)
@@ -8493,6 +8502,17 @@ class AccountWorker:
         retry_simplified = self._has_simplified_chars(retry)
         retry_group_meta = await self._candidate_mentions_current_group_meta(retry)
         retry_video_topic = AccountWorker._mentions_video_topic(retry)
+        # 重寫後只剩「偏長」一項：整句照發。內容、語意、用字都對，只差三五個字，
+        # 再退一次等於白燒第二次生成、還少一則發言（13 次/小時死在這裡）。
+        if retry_too_long and not (
+            retry_format_leak or retry_refusal or retry_meta or retry_own_echo
+            or retry_tic or retry_time_mismatch or retry_gender_term
+            or retry_simplified or retry_group_meta or retry_video_topic
+        ):
+            self._set_generation_reason(event, "ok")
+            if image:
+                self.stats["images_understood"] += 1
+            return retry
 
         if (
             retry_too_long
