@@ -457,6 +457,11 @@ _CONSUME_DENSITY_HITS = 2
 _SPECTATOR_FRAME_FADE = 40 * 60
 _SPECTATOR_FRAME_HITS = 2
 _SPECTATOR_MARKERS = ("看你們", "你們吵", "你們鬥", "看你們這樣", "你們這齣", "聽你們", "你們互嗆")
+# 反應句（旁白模子）：「聽得我背脊發涼」「這數字看得我想睡」。四號會整段都寫成
+# 對別人遭遇的反應，自己沒有任何身體或動作，群友看完只有資訊沒有慾望。
+_REACTION_ECHO = re.compile(
+    r"(聽得我|看得我|害我|惹我|搞得我|教我|讓我[^，。]{0,4}[發想臉心])"
+)
 # 前情報備的動作／體感字：兩段式模子的前半句幾乎都掛這些（剛點好、擦著乳液、冷氣好冷、
 # 吹頭髮手超痠）。只當判前段的輔助證據，不是封殺詞。
 _PREAMBLE_CUES = re.compile(r"[剛正才還先邊著在好超很]|洗完|吹|擦|喝|吃|聞|躺|坐|穿|脫")
@@ -3066,6 +3071,20 @@ class AccountWorker:
                 "（最近的水軍都在引述別人再補一句評語，你這則別引述、別提名字，"
                 "用自己的當下狀態或直接對他下一個動作開頭）"
             )
+        # 反應軸：「聽得我發毛」「看得我想睡」連發＝四號在替群友的遭遇做反應，
+        # 整段像旁白。觀眾不會被旁白撩到，這裡逼一句有自己身體或直接下指令的。
+        if group_id:
+            _react_hits = sum(
+                1
+                for t in self._recent_bot_pool(own_texts, group_id, history, n=3)
+                if _REACTION_ECHO.search(t)
+            )
+            if _react_hits >= 2:
+                notes.append(
+                    f"（最近三則水軍有 {_react_hits} 則在寫「聽得我…」「看得我…」這種反應句，"
+                    "整段像旁白；你這則別再反應，直接講自己身上現在怎麼了，"
+                    "或直接對他下一個動作）"
+                )
         # 節奏軸：不是講什麼的問題，是「先演自己、後半句才對人」的順序。
         # 10:00–10:17 九則全掛這個模子（香氛蠟燭…／擦著乳液…／冷氣好冷，…／
         # 華發少自作多情，我正…），單軸檢查全部放行，只有整段看節奏才抓得到。
@@ -3183,6 +3202,23 @@ class AccountWorker:
         if ref:
             return mid >= max(11, int(ref * 1.5))
         return mid >= 18
+
+    def _recent_len_flow_short(self, group_id: int, n: int = 4) -> bool:
+        """本群水軍最近幾則是不是整批縮死了（中位 ≤ 11 字）。
+
+        `_recent_len_flow_long` 只在偏長時踩煞車，是單向棘輪：一旦被壓進十幾字，
+        「沒變長」就永遠不觸發，短碎回不來。實測 15:13–16:13 一小時 45 則全落在
+        8~17 字、零長句，dirty 與 scene 兩帶整段消失。這裡做反向偵測，只看水軍
+        自己的句子，不看真人——按真人長度跟走會被短句男群友一起鎖死。
+        """
+        try:
+            texts = self._cross_recent_texts(int(group_id), 30 * 60)[-n:]
+        except Exception:
+            return False
+        lens = sorted(len(re.sub(r"\s", "", t)) for t in texts if t)
+        if len(lens) < 3:
+            return False
+        return lens[len(lens) // 2] <= 11
 
     def _cross_recent_items(self, group_id: int, seconds: float) -> list[tuple[str, float]]:
         """跟 `_cross_recent_texts` 一樣的窗，但回 (句子, 幾秒前)。
@@ -4819,6 +4855,9 @@ class AccountWorker:
         flow_long = self._recent_len_flow_long(
             int(getattr(event, "chat_id", 0) or 0), ref=self._human_ref
         )
+        # 反向棘輪：整批縮死也要有人把帶撐回來（15:13–16:13 實測 45 則全在 8~17、
+        # 一小時零長句，short 一路吃掉 dirty 與 scene）。
+        flow_short = self._recent_len_flow_short(int(getattr(event, "chat_id", 0) or 0))
         if forced_mode in _STRUCT_BANDS:
             self._struct_mode = forced_mode
         else:
@@ -4837,6 +4876,15 @@ class AccountWorker:
             else:
                 self._struct_mode = (
                     "short" if struct_roll < 0.35 else "dirty" if struct_roll < 0.70 else "scene"
+                )
+            # 已經連四則都在 11 字上下：這則一定要出帶。熱場仍以直球為主（短而辛辣、
+            # 不交代前情，插話不會遲到），冷場改走生活場景把句子長回來。
+            if flow_short and self._struct_mode == "short":
+                self._struct_mode = (
+                    "dirty" if heat >= _HOT_BURST_HUMANS or struct_roll < 0.5 else "scene"
+                )
+                self.stats["band_flow_short_rebound"] = (
+                    int(self.stats.get("band_flow_short_rebound", 0)) + 1
                 )
         self.stats[f"band_{self._struct_mode}"] = (
             int(self.stats.get(f"band_{self._struct_mode}", 0)) + 1

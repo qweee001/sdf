@@ -178,3 +178,41 @@ def test_real_night_replay_only_fires_after_two_questions():
         if w._sentence_type_note([], GID):
             fired.append(i)
     assert fired == [1, 2, 3], f"觸發點不對：{fired}"
+
+
+# ---- 反應軸（旁白模子）------------------------------------------------
+# 15:13–16:13 實測：45 則裡「聽得我發涼」「看得我想睡」「害我也心癢」連發，
+# 整段在替群友的遭遇做反應，自己沒有身體也沒有動作，群友看完只有資訊沒有慾望。
+
+
+REACT = [
+    "聽得我背脊發涼欸",
+    "這數字看得我想睡",
+    "下午犯睏，想被人按在床上",
+]
+
+
+def _seed_react(w: AccountWorker, n: int) -> None:
+    w._recent_texts_by_group[GID] = list(REACT[:n])
+    w._recent_texts_at[GID] = [NOW - (n - i) * 60 for i in range(n)]
+
+
+def test_reaction_streak_names_the_fault():
+    w = _worker()
+    _seed_react(w, 3)
+    note = w._sentence_type_note([], GID)
+    assert "反應句" in note
+    assert "旁白" in note
+
+
+def test_single_reaction_does_not_fire():
+    w = _worker()
+    _seed_react(w, 1)
+    assert "反應句" not in w._sentence_type_note([], GID)
+
+
+def test_action_opening_is_not_a_reaction():
+    w = _worker()
+    w._recent_texts_by_group[GID] = ["捏著裙角，鎖骨熱得發癢了", "騎車前先讓我摸摸你的大腿"]
+    w._recent_texts_at[GID] = [NOW - 120, NOW - 60]
+    assert "反應句" not in w._sentence_type_note([], GID)

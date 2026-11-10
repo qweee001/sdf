@@ -11,6 +11,7 @@
 """
 
 import random
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -147,3 +148,40 @@ def test_cap_never_raises_an_already_lower_cap():
     w = _worker()
     w._struct_mode = "short"
     assert w._struct_char_cap(14) == 14
+
+
+# ---- 反向棘輪：整批縮死時不准再抽短碎 -----------------------------------
+# flow_long 只在偏長時踩煞車，「沒變長」永遠不觸發，short 會一路吃掉 dirty 與
+# scene（15:13–16:13 一小時 45 則全在 8~17、零長句）。
+
+SHORT_FLOW = ["聽得我背脊發涼欸", "這數字看得我想睡", "下午犯睏，想被人按在床上", "也太衰了吧"]
+
+
+def _note_with_short_flow(roll: float) -> tuple[AccountWorker, str]:
+    w = _worker()
+    w._recent_texts_by_group[GID] = list(SHORT_FLOW)
+    w._recent_texts_at[GID] = [time.time() - 60] * len(SHORT_FLOW)
+    old = random.random
+    random.random = lambda: roll
+    try:
+        note = w._build_directors_note(_event(), history=[], own_texts=[], last_human="")
+    finally:
+        random.random = old
+    return w, note
+
+
+def test_short_flow_rebounds_off_short_band():
+    w, note = _note_with_short_flow(0.1)
+    assert w._struct_mode != "short"
+    assert w._struct_mode == "dirty"
+    assert "12~24" in note
+
+
+def test_short_flow_rebound_falls_back_to_scene_when_roll_high():
+    w, _note = _note_with_short_flow(0.9)
+    assert w._struct_mode == "scene"
+
+
+def test_short_flow_rebound_is_counted():
+    w, _note = _note_with_short_flow(0.1)
+    assert w.stats["band_flow_short_rebound"] == 1

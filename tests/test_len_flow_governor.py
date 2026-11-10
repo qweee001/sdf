@@ -83,3 +83,39 @@ def test_stale_texts_outside_window_do_not_trigger():
 def test_missing_history_is_safe():
     w = _worker()
     assert not w._recent_len_flow_long(GID)
+
+
+# ---- 反向棘輪：整批縮死也要有人把帶撐回來 -------------------------------
+# flow_long 是單向的：句子一旦被壓進十幾字，「沒變長」就永遠不觸發。
+# 15:13–16:13 一小時 45 則全在 8~17、零長句，dirty 與 scene 兩帶整段消失。
+
+
+def test_short_flow_is_detected():
+    w = _worker()
+    _seed(w, ["聽得我背脊發涼欸", "這數字看得我想睡", "下午犯睏，想被人按在床上", "也太衰了吧"])
+    assert w._recent_len_flow_short(GID)
+
+
+def test_long_flow_does_not_trigger_short():
+    w = _worker()
+    _seed(
+        w,
+        [
+            "啃完飯糰手指還油黏黏的，看人逛賣場腿好美我也想翹班去吹冷氣了",
+            "你說會喜歡我，用嘴巴攻擊不如用大雞雞撞進來吧",
+            "邊喝冰美式邊等開櫃，光說理解也沒看你行動",
+        ],
+    )
+    assert not w._recent_len_flow_short(GID)
+
+
+def test_short_flow_needs_three_samples():
+    w = _worker()
+    _seed(w, ["聽得我發毛", "看得我想睡"])
+    assert not w._recent_len_flow_short(GID)
+
+
+def test_short_flow_ignores_stale_texts():
+    w = _worker()
+    _seed(w, ["聽得我背脊發涼欸"] * 4, age_s=45 * 60)
+    assert not w._recent_len_flow_short(GID)
