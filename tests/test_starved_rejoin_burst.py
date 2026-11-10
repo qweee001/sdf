@@ -76,14 +76,20 @@ def _stub_gates(w: AccountWorker, monkeypatch) -> None:
     monkeypatch.setattr(w, "_interaction_pressure", _pressure)
 
 
-def _stub_spoke(w: AccountWorker, mine: float, others: list[float]) -> None:
+def _stub_spoke(w: AccountWorker, mine: float, others: list[float], *, bots: int = 3, total: int = 10) -> None:
     spoke = {int(w.tg_user_id or 0): mine if mine else 0.0}
     for index, ts in enumerate(others):
         spoke[300 + index] = ts
     async def _spoke(_gid):
         return spoke
 
-    w.db = cast(Any, SimpleNamespace(group_bot_last_spoke=_spoke))
+    async def _window(_gid, _window=180.0):
+        return [
+            {"role": "assistant" if i < bots else "user", "sender_id": i}
+            for i in range(max(total, 1))
+        ]
+
+    w.db = cast(Any, SimpleNamespace(group_bot_last_spoke=_spoke, group_traffic_window=_window))
 
 
 def _as_await(value):

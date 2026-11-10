@@ -1684,6 +1684,21 @@ class Database:
                     claimed_20s = int((claim_row["n20"] if claim_row else 0) or 0)
                     claimed_5m = int((claim_row["n5"] if claim_row else 0) or 0)
                     claimed_10m = int((claim_row["n10"] if claim_row else 0) or 0)
+                    # 讓位預算不能固定秒數／固定則數：閘門那端吃「近窗水軍佔比赤字」，
+                    # 這裡若不跟著算，閘門放行的會被原子層再擋一次，等於沒改。
+                    share_cursor = await event_db.execute(
+                        "SELECT COUNT(*) AS total, "
+                        "SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END) AS bots "
+                        "FROM (SELECT role, sender_id, message_id FROM messages "
+                        "WHERE group_id = ? AND timestamp >= ? "
+                        "GROUP BY sender_id, message_id)",
+                        (int(group_id), now - 180),
+                    )
+                    share_row = await share_cursor.fetchone()
+                    total_n = int((share_row["total"] if share_row else 0) or 0)
+                    bot_n = int((share_row["bots"] if share_row else 0) or 0)
+                    share = (bot_n / total_n) if total_n else 0.0
+                    deficit = max(0.0, min(1.0, (0.30 - share) / 0.30)) if share < 0.30 else 0.0
                     # 回場保底：群很熱但水軍已潛水 ≥6 分鐘 → 本次不受熱場預算限制。
                     # 真人女生不會在男人狂比尺寸時整段閉嘴，固定上限會讓越熱越隱形。
                     last_sent_cursor = await event_db.execute(
@@ -1698,17 +1713,21 @@ class Database:
                         and last_sent > 0
                         and now - last_sent >= 360
                     )
+                    cap_10m = max(8, int(human_5m * 0.6))
+                    tight = deficit < 0.2
                     if stale:
-                        if claimed_10m >= 12:
+                        if claimed_10m >= max(12, cap_10m):
                             await event_db.rollback()
                             return False
-                    elif claimed_10m >= 8 or (
-                        human_5m >= 14
-                        and (
-                            claimed_20s >= 1
-                            or claimed_5m >= hot_budget(human_5m)
-                        )
-                    ):
+                    elif claimed_10m >= cap_10m:
+                        await event_db.rollback()
+                        return False
+                    elif claimed_20s >= 1:
+                        # 20 秒群級鎖：防四號疊在同一拍，任何時候都留著
+                        await event_db.rollback()
+                        return False
+                    elif tight and human_5m >= 14 and claimed_5m >= hot_budget(human_5m):
+                        # 5 分鐘額度是配額：佔比已達標才准擋，缺口大時放行
                         await event_db.rollback()
                         return False
                     cursor = await event_db.execute(
@@ -2518,6 +2537,36 @@ class Database:
             for r in rows
             if int(r["sender_id"] or 0) > 0
         }
+
+    async def group_traffic_window(
+        self, group_id: int, window: float = 180.0
+    ) -> list[dict]:
+        """近窗訊息（去重後）給佔比判斷用：回 role/sender_id，只要夠算比例。
+
+        讓位秒數要隨「群裡水軍還差多少」浮動，不能問一句固定的 90 秒——
+        主動迴圈每兩分鐘就有一隻開口，固定窗在主動密度下等於永遠不讓答。
+        """
+        try:
+            gid = int(group_id)
+        except (TypeError, ValueError):
+            return []
+        since = time.time() - float(window)
+        cursor = await self._c.execute(
+            "SELECT sender_id, role, message_id FROM messages "
+            "WHERE group_id = ? AND timestamp >= ? "
+            "ORDER BY timestamp DESC LIMIT 400",
+            (gid, since),
+        )
+        rows = list(await cursor.fetchall())
+        seen: set = set()
+        out: list[dict] = []
+        for r in rows:
+            key = (int(r["sender_id"] or 0), int(r["message_id"] or 0))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"sender_id": r["sender_id"], "role": r["role"]})
+        return out
 
     async def set_record_review(
         self, record_key: str, group_id: int, reviewed: bool, reviewed_by: str = "admin"

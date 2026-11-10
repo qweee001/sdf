@@ -247,6 +247,12 @@ def test_ordinary_reply_spacing_cooldown():
   worker.db.group_bot_last_spoke = AsyncMock(
       return_value={456: time.time() - 30.0}
   )
+  # 佔比達標（3/10＝30%）→ 讓位秒數才回到 90 秒
+  worker.db.group_traffic_window = AsyncMock(
+      return_value=[
+          {"role": "assistant" if i < 3 else "user", "sender_id": i} for i in range(10)
+      ]
+  )
 
   async def main():
     allowed = await worker._ordinary_reply_allowed(event)
@@ -315,9 +321,15 @@ def test_hot_field_budget_scales_and_stale_override():
     )
     assert await worker._ordinary_reply_allowed(event) is True
 
-    # 只潛水 2 分鐘 → 額度滿就繼續讓路
+    # 只潛水 2 分鐘 → 額度滿就繼續讓路（佔比要先達標，5 分鐘額度才算數）
     worker.db.group_bot_last_spoke = AsyncMock(
         return_value={456: time.time() - 120.0}
+    )
+    worker.db.group_traffic_window = AsyncMock(
+        return_value=[
+            {"role": "assistant" if i < 15 else "user", "sender_id": i}
+            for i in range(30)
+        ]
     )
     assert await worker._ordinary_reply_allowed(event) is False
 

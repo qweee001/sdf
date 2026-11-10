@@ -2289,14 +2289,31 @@ class AccountWorker:
         if not group_id or message_id <= 0:
             return False
 
-        # 女號扎堆搶麥保護：非被@/非指定回覆的普通訊息，若過去 90 秒內已有任何水軍發過言，靜默讓位給群友發酵
+        # 女號扎堆搶麥保護：非被@/非指定回覆的普通訊息，若群裡水軍佔比已經夠了才讓位。
         sender_id = int(event.sender_id or 0)
         owner_id = self._active_owner(self.human_owners.get((group_id, sender_id)))
         is_my_dialog = owner_id and owner_id == int(self.tg_user_id or 0)
         # 有人貼圖＝把東西丟到大家面前，不必點名也是一句「你們看」。照片不吃
-        # 90 秒扎堆讓位也不擲骰：16:52:27 輕輕貼一張，四號全數跳過，
+        # 讓位也不擲骰：16:52:27 輕輕貼一張，四號全數跳過，
         # images_seen 有記、回覆零、連識圖都沒跑。
         is_photo = isinstance(getattr(event, "media", None), MessageMediaPhoto)
+
+        pressure = await self._interaction_pressure(group_id)
+        human_5m = int(pressure.get("human_5m", 0) or 0)
+        claimed_10m = int(pressure.get("ordinary_claimed_10m", 0) or 0)
+        # 讓位秒數吃「佔比赤字」而不是固定 90 秒：主動迴圈每兩分鐘必有一隻開口，
+        # 固定窗在主動密度下等於全域封鎖（實測 claimed 只 1 則／20 分鐘）。
+        # 佔比一句都沒有時只留 20 秒的原子鎖，佔比達標才退回舊的 90 秒。
+        try:
+            share = self._voice_share(
+                await self.db.group_traffic_window(group_id, 180.0),
+                self.managed_ids,
+            )
+        except Exception:
+            share = 0.0
+        deficit = self._share_deficit(share)
+        min_gap = 20.0 + 70.0 * (1.0 - deficit)
+
         if not is_my_dialog and not is_photo:
             try:
                 spoke = await self.db.group_bot_last_spoke(group_id)
@@ -2304,13 +2321,14 @@ class AccountWorker:
                     now = time.time()
                     last_any_bot = max(float(t or 0.0) for t in spoke.values())
                     # 自己手上沒有 owner 時，本來就只剩這條路；若自己又久未發言，
-                    # 90 秒讓位規則會把整個人鎖死在門外（實測 12h43m 零發言）。
+                    # 讓位規則會把整個人鎖死在門外（實測 12h43m 零發言）。
                     mine = float(spoke.get(int(self.tg_user_id or 0), 0.0) or 0.0)
                     starved = (
                         (not mine or now - mine >= _SILENT_REJOIN_SECONDS)
                         and now - last_any_bot >= _SILENT_REJOIN_MIN_GAP
                     )
-                    if now - last_any_bot < 90.0 and not starved:
+                    if now - last_any_bot < min_gap and not starved:
+                        self._pcount("reply_block_gap")
                         return False
                     if starved and now - last_any_bot < 90.0:
                         self.stats["starved_rejoin"] = (
@@ -2324,10 +2342,9 @@ class AccountWorker:
         probability = max(0.0, min(1.0, base_prob))
         if probability <= 0 and not is_photo:
             return False
-        pressure = await self._interaction_pressure(group_id)
-        human_5m = int(pressure.get("human_5m", 0) or 0)
-        claimed_10m = int(pressure.get("ordinary_claimed_10m", 0) or 0)
-        if claimed_10m >= _MAX_ORDINARY_CLAIMS_10M:
+        # 10 分鐘認領上限跟著真人量走：固定 8 則在 3 則/分的群是自己把自己噤聲。
+        if claimed_10m >= max(_MAX_ORDINARY_CLAIMS_10M, int(human_5m * 0.6)):
+            self._pcount("reply_block_cap")
             return False
         if human_5m >= _HIGH_TRAFFIC_HUMANS_5M:
             already_5m = max(
@@ -2344,12 +2361,17 @@ class AccountWorker:
                     stale = time.time() - last_any_bot >= 360.0
             except Exception:
                 pass
-            if not stale and not is_photo and (
-                already_5m >= hot_budget(human_5m)
-                or int(pressure.get("ordinary_claimed_20s", 0) or 0) >= 1
-            ):
-                return False
-            probability = min(probability, 0.15)
+            # 20 秒群級鎖是「防疊拍」的節奏機制，任何時候都留著；
+            # 5 分鐘額度才是配額，佔比已經達標時才准擋（缺口大時它只是自我噤聲）。
+            if not stale and not is_photo:
+                if int(pressure.get("ordinary_claimed_20s", 0) or 0) >= 1:
+                    self._pcount("reply_block_pile")
+                    return False
+                if deficit < 0.2 and already_5m >= hot_budget(human_5m):
+                    self._pcount("reply_block_hot")
+                    return False
+            # 佔比越缺、擲骰越寬（達標 0.15／零發言 0.65），不然熱場永遠答不上。
+            probability = min(probability, 0.15 + 0.5 * deficit)
         # 照片在熱場也照答：四號靠 claim 排隊，只有一個會真的送出。
         if is_photo:
             probability = 1.0

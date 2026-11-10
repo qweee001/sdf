@@ -60,13 +60,22 @@ def test_mature_account_may_call_herself_sister():
     assert "弟弟" in prompt
 
 
-async def _seed(db, group_id, humans, *, span=250.0):
+async def _seed(db, group_id, humans, *, span=250.0, bots=0):
     now = time.time()
     for index in range(humans):
         await db._c.execute(
             "INSERT INTO group_events (group_id, message_id, sender_kind, observed_at) "
             "VALUES (?, ?, 'human', ?)",
             (group_id, 1000 + index, now - span + index),
+        )
+    # messages 表是佔比（水軍 vs 真人）的來源，閘門與原子層都讀它；
+    # 佔比窗是 180 秒，所以這裡一律塞在近窗內（group_events 那批只算人頭）
+    for index in range(humans + bots):
+        role = "assistant" if index >= humans else "user"
+        await db._c.execute(
+            "INSERT INTO messages (account_id, group_id, message_id, sender_id, "
+            "sender_name, role, content, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("a0", group_id, 2000 + index, 700 + index, "n", role, "x", now - 170 + index),
         )
     await db._c.commit()
 
@@ -83,7 +92,7 @@ async def _claim_aged(db, group_id, message_id, age, account="a0"):
 async def _scenario(path, pressure_claims: int, last_sent_age: float | None, humans: int = 45):
     db = Database(str(path))
     await db.connect()
-    await _seed(db, 777, humans)
+    await _seed(db, 777, humans, bots=pressure_claims)
     for index in range(pressure_claims):
         await _claim_aged(db, 777, 5000 + index, 60 + index)
     if last_sent_age is not None:
@@ -109,8 +118,14 @@ def test_return_to_field_after_long_silence_overrides_budget(tmp_path):
 
 
 def test_short_silence_still_respects_budget(tmp_path):
-    # 只潛水 2 分鐘，額度（45 則真人 → 6）滿了就繼續讓路，不准搶麥
-    assert asyncio.run(_scenario(tmp_path / "c.db", pressure_claims=6, last_sent_age=120)) is False
+    # 45 則真人但水軍只有 6 則（佔比 12%，還差目標 30% 一大截）→ 舊式「額度滿了就閉嘴」
+    # 在這裡是錯的，缺口大時要放行
+    assert asyncio.run(_scenario(tmp_path / "c.db", pressure_claims=6, last_sent_age=120)) is True
+
+
+def test_budget_bites_once_share_is_met(tmp_path):
+    # 30 則真人／12 則水軍＝佔比 40% 已達標 → 5 分鐘額度（hot_budget(30)=5）才准擋
+    assert asyncio.run(_scenario(tmp_path / "d.db", pressure_claims=12, last_sent_age=120, humans=30)) is False
 
 
 async def _dead_claim(db, group_id, message_id, age):
@@ -142,5 +157,11 @@ def test_dead_claims_give_the_budget_back(tmp_path):
     assert asyncio.run(_dead_scenario(tmp_path / "e.db")) is True
 
 
-def test_ten_minute_claim_cap_still_applies(tmp_path):
-    assert asyncio.run(_scenario(tmp_path / "d.db", pressure_claims=8, last_sent_age=30, humans=45)) is False
+def test_ten_minute_claim_cap_scales_with_real_volume(tmp_path):
+    # 45 則真人 → 10 分鐘上限放寬到 27（舊固定 8 在 3 則/分的群是自綁手腳）
+    assert asyncio.run(_scenario(tmp_path / "d.db", pressure_claims=27, last_sent_age=30, humans=45)) is False
+
+
+def test_small_volume_keeps_floor_cap(tmp_path):
+    # 冷群（5 則真人）仍有 8 則地板，不會因為放寬而讓水軍洗版
+    assert asyncio.run(_scenario(tmp_path / "e.db", pressure_claims=9, last_sent_age=30, humans=5)) is False
