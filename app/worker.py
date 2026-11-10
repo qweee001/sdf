@@ -10809,6 +10809,7 @@ class AccountWorker:
         _p_heat = self._burst_heat(msgs)
         self._human_ref = self._human_len_ref(msgs)
         _p_flow_long = self._recent_len_flow_long(int(group_id), ref=self._human_ref)
+        _p_flow_short = self._recent_len_flow_short(int(group_id))
         _p_roll = random.random()
         if _p_heat >= _HOT_BURST_HUMANS:
             _p_mode = "short" if _p_roll < 0.7 else "dirty"
@@ -10821,6 +10822,11 @@ class AccountWorker:
             # 冷場（19:30 後 3.5 則／分）原本只有三成走短碎，其餘全落 dirty／scene，
             # 實測中位數又回到 20 字、8~16 只 0 則。冷場就該是短氣泡為主。
             _p_mode = "short" if _p_roll < 0.5 else "dirty" if _p_roll < 0.8 else "scene"
+        # 反向棘輪（跟回覆路徑同一條規則）：整批已經縮死在 11 字上下就一定要出帶，
+        # 熱場仍以直球為主，冷場改回生活隨念把句子長回來。
+        if _p_flow_short and _p_mode == "short":
+            _p_mode = "dirty" if _p_heat >= _HOT_BURST_HUMANS or _p_roll < 0.5 else "scene"
+            self._pcount("band_flow_short_rebound")
         self._pcount(f"band_{_p_mode}")
         self._pcount(
             "band_heat_" + ("hot" if _p_heat >= _HOT_BURST_HUMANS

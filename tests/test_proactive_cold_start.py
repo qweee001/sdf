@@ -52,7 +52,8 @@ def test_first_tick_sleeps_short_and_later_ticks_use_loop_range(monkeypatch):
         await worker._proactive_loop()
 
         assert delays[0] <= 50 + 21, delays
-        assert 300 <= delays[1] <= 900, delays
+        # 第二輪起回到 loop 帶（赤字提示會再打 0.55 折，下界放寬）
+        assert 150 <= delays[1] <= 900, delays
 
     asyncio.run(main())
 

@@ -110,3 +110,51 @@ def test_restart_backfill_keeps_newer_in_memory_value():
     worker.db = SimpleNamespace(group_last_human_ts=AsyncMock(return_value=now - 600))
     asyncio.run(worker._restore_last_human_activity())
     assert worker.last_human_activity[-1002229799107] == now
+
+
+# ---- 反向棘輪：主動路徑也吃（15:13–16:13 實測 45 則全在 8~17、零長句）---
+GROUP = -1001
+
+
+def test_short_flow_forces_dirty_band_on_proactive(monkeypatch):
+    """整批縮死時主動發言不准再抽短碎，至少要有一則出帶。"""
+
+    async def main():
+        worker = _worker()
+        now = time.time()
+        worker._recent_texts_by_group[GROUP] = [
+            "聽得我背脊發涼欸",
+            "這數字看得我想睡",
+            "下午犯睏，想被人按在床上",
+            "也太衰了吧",
+        ]
+        worker._recent_texts_at[GROUP] = [now - 60] * 4
+
+        class _DB:
+            async def get_group_messages(self, group_id, limit=100):
+                return [
+                    {
+                        "sender_name": "風口浪尖",
+                        "sender_id": 5,
+                        "role": "user",
+                        "content": "真的假的",
+                        "timestamp": time.time(),
+                    }
+                ]
+
+            async def get_group_shared_notes(self, group_id, account_id, limit=10):
+                return []
+
+            async def recent_bot_texts_by_group(self, group_id):
+                return []
+
+        worker.db = _DB()
+        worker._call_ai = AsyncMock(return_value="想被人按在牆上親")
+        monkeypatch.setattr("app.worker.random.random", lambda: 0.1)
+        await worker._generate_context_topic(GROUP)
+
+        assert worker.stats.get("band_flow_short_rebound") == 1
+        assert "band_dirty" in worker.stats
+        assert "band_short" not in worker.stats
+
+    asyncio.run(main())
