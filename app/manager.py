@@ -779,6 +779,13 @@ class AccountManager:
                 self.config.proactive_loop_min_seconds,
                 self.config.proactive_loop_max_seconds,
             ],
+            "model_config": {
+                "ai_model": self.config.ai_model,
+                "ai_base_url": self.config.ai_base_url,
+                "chat_base_url": self.config.chat_base_url,
+                "fallback_models": list(self.config.ai_fallback_models),
+                "vision_model": self.config.vision_model,
+            },
         }
 
     async def _proactive_skip_counters(self) -> dict[str, dict]:
