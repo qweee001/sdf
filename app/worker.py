@@ -2382,9 +2382,10 @@ class AccountWorker:
         # 照片在熱場也照答：四號靠 claim 排隊，只有一個會真的送出。
         if is_photo:
             probability = 1.0
-        # 回覆別人的訊息是「插話」不是「接球」，機率打折但不歸零
+        # 回覆別人的訊息是「插話」不是「接球」，機率打折但不歸零；
+        # 折扣本身也吃缺口——水軍快沒人講話時，插話總比整場隱形好。
         if soft:
-            probability *= 0.55
+            probability *= 0.55 + 0.45 * deficit
         score = int.from_bytes(
             hashlib.blake2b(
                 f"human-probability:{group_id}:{message_id}".encode(),
