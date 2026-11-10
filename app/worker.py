@@ -2135,6 +2135,7 @@ class AccountWorker:
             or "管理员" in display_name_admin
         )
         if is_admin_sender:
+            self._pcount("reply_skip_admin")
             return False
         # 帳號級開關優先；帳號未設定時 fallback 到全域 REPLY_ENABLED
         if not self.reply_enabled:
@@ -2143,14 +2144,17 @@ class AccountWorker:
             return False
         if sender_id in self.managed_ids:
             return await self._should_follow_managed_origin(event)
+        self._pcount("reply_seen_human")
         # 回覆別人或 @別人的訊息不插話；只有真正被指向的帳號可認領。
         if event.is_reply or event.mentioned:
             if not await self._is_directed_at_me(event):
                 if isinstance(getattr(event, "media", None), MessageMediaPhoto):
                     return await self._wait_for_media_claim(event)
+                self._pcount("reply_skip_directed_other")
                 return False
             return await self._claim_human_reply(event, int(self.tg_user_id or 0))
         if not self._is_meaningful_human_message(event):
+            self._pcount("reply_skip_meaningless")
             return False
         if not await self._ordinary_reply_allowed(event):
             return False
@@ -2198,6 +2202,7 @@ class AccountWorker:
             return False
         winner = await self._pick_group_responder(event)
         if not winner:
+            self._pcount("reply_no_responder")
             return False
         return await self._claim_human_reply(
             event, winner, ordinary=True
