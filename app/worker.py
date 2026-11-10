@@ -246,6 +246,7 @@ def _place_opening(text: str) -> str:
 # 句型模式的字數帶（字元）。模式只換內容不夠：長度若仍走固定 15~45，
 # 三種模式在群友眼裡全是同一種長度模子，短碎永遠出不來。
 _STRUCT_BANDS: dict[str, tuple[int, int]] = {
+    "frag": (2, 6),
     "short": (8, 16),
     "dirty": (12, 24),
     "scene": (15, 30),
@@ -257,6 +258,7 @@ _WARM_BURST_HUMANS = 4
 
 # 每個模式對應的內容指令。長度另外由 _STRUCT_BANDS 帶，兩者一起才有差別。
 _STRUCT_SYNTAX: dict[str, str] = {
+    "frag": "【動態情境・碎字反應】：只是一個脫口而出的反應或起鬨（「真假」「我會笑死」「脫掉啦」「最好是」「換我」這種），兩到六個字，不准逗號、不准主詞、不准交代任何前情。",
     "short": "【動態情境・短碎口語】：順著上一句情緒隨性丟一句大白話，短小俐落，不硬扯生活前情，像真人群聊自然起鬨或開嗆。",
     "dirty": "【動態情境・直球色誘】：聚焦男女肉體張力，直接講你身上的具體感覺（哪裡濕、緊、燙、軟）或直接給他一個動作，不要只在旁邊評他的尺寸，短而辛辣，不扯無關瑣事。",
     "scene": "【動態情境・生活隨念】：隨性帶出你當下真實的小動作或生活狀態，自然放鬆，展現真實女生的日常生活感。",
@@ -3068,17 +3070,26 @@ class AccountWorker:
                 "你這則改成問句收尾，問他一個具體的）"
             )
         # 形狀軸：整場都是同一個骨架（引述某人再補一句葷斷言），換字換不掉。
-        if group_id and self._quote_assert_hits(int(group_id)) >= 2:
+        # 兩軸不能寫成 elif：引述軸幾乎在每個熱場都成立（兩句以上、沒有「我」就算），
+        # 一 elif 就把點名軸整條遮掉，17:07–19:19 點名開場反而從 19% 漲到 34%。
+        _name_dense = bool(group_id) and self._name_open_dense(int(group_id))
+        if group_id and self._quote_assert_hits(int(group_id)) >= 2 and not _name_dense:
             notes.append(
                 "（最近的水軍都在引述別人再補一句評語，你這則別引述、別提名字，"
                 "用自己的當下狀態或直接對他下一個動作開頭）"
             )
-        elif group_id and self._name_open_hits(int(group_id)) >= 2:
+        if _name_dense:
             # 更常見的變體：人名＋一句評語（「戰豆，鈴鐺都不信」）。點名句在群裡
-            # 是裁判口吻，連兩則就整段都在替男人打分，沒有自己。
+            # 是裁判口吻，整段連著就變成在替男人打分，沒有自己。
             notes.append(
-                "（最近三則水軍有兩則一開口就喊人名再評一句，像在點名打分；"
+                "（最近十則水軍有四則以上一開口就喊人名再評一句，像在點名打分；"
                 "你這則開頭不要喊名字，直接講自己身上現在怎麼了，或對他下一個動作）"
+            )
+        # 前情模子：連續三則「剛…」開場就是同一句開場白，換字也一樣。
+        if group_id and self._preamble_streak(int(group_id)) >= 3:
+            notes.append(
+                "（最近好幾則水軍都用「剛…」交代前情開場；這則把「剛」拿掉，"
+                "改從他身上、一句問句或一個動作直接開始）"
             )
         # 反應軸：「聽得我發毛」「看得我想睡」連發＝四號在替群友的遭遇做反應，
         # 整段像旁白。觀眾不會被旁白撩到，這裡逼一句有自己身體或直接下指令的。
@@ -3475,6 +3486,36 @@ class AccountWorker:
             if any(body.startswith(n) for n in names):
                 hits += 1
         return hits
+
+    def _name_open_dense(self, group_id: int, seconds: float = 30 * 60) -> bool:
+        """點名開場是不是已經變成整段的主旋律（近十則有四則以上）。
+
+        「近三則有兩則」在熱場幾乎湊不到：水軍十幾秒一則、名字輪流換人，命中率
+        只有 14%（17:07–19:19 實測），可是那兩小時 50 則有 17 則點名開場＝34%，
+        是真人 8% 的四倍。所以判比例不判相鄰則數。
+        """
+        names = self._speaker_names(group_id)
+        if not names:
+            return False
+        recent = self._cross_recent_texts(int(group_id), seconds)[-10:]
+        if len(recent) < 5:
+            return False
+        hits = 0
+        for t in recent:
+            body = str(t or "").lstrip(self._OPEN_STRIP)
+            if any(body.startswith(n) for n in names):
+                hits += 1
+        return hits >= max(3, int(len(recent) * 0.35))
+
+    def _preamble_streak(self, group_id: int, seconds: float = 25 * 60) -> int:
+        """近八則水軍有幾則用「剛／才剛／剛剛」交代前情開場。
+
+        17:07–19:19 兩小時「剛」開頭五則（其中「剛洗完澡」還連兩號各講一次），
+        加上「剛 X，挑釁」就是那條被壓下去又冒回來的兩段式模子。
+        """
+        recent = self._cross_recent_texts(int(group_id), seconds)[-8:]
+        pre = ("剛", "才剛", "剛剛", "剛才")
+        return sum(1 for t in recent if str(t or "").lstrip(self._OPEN_STRIP).startswith(pre))
 
     def _dirty_judge_hits(self, own_texts, group_id: int, history=None) -> int:
         """最近三則水軍有幾則「露骨但沒講到自己的身體」。
@@ -4943,6 +4984,14 @@ class AccountWorker:
                 self._struct_mode = (
                     "short" if struct_roll < 0.35 else "dirty" if struct_roll < 0.70 else "scene"
                 )
+            # 碎字通道：真人四成是兩三字接下來的（「真假」「超頂」「換我」），水軍
+            # 17:07–19:19 五十七則一則都沒有，整場看起來就是每個人都在講完整句。
+            # 洗屏時多一點，冷場少一點（冷場三五字會突兀）。
+            if not flow_long and random.random() < (
+                0.18 if heat >= _HOT_BURST_HUMANS
+                else 0.12 if heat >= _WARM_BURST_HUMANS else 0.07
+            ):
+                self._struct_mode = "frag"
             # 已經連四則都在 11 字上下：這則一定要出帶。熱場仍以直球為主（短而辛辣、
             # 不交代前情，插話不會遲到），冷場改走生活場景把句子長回來。
             if flow_short and self._struct_mode == "short":
@@ -4968,7 +5017,7 @@ class AccountWorker:
         self._len_tail = (
             not self._short_tight
             and not forced_mode
-            and self._struct_mode != "scene"
+            and self._struct_mode not in ("scene", "frag")
             and random.random()
             < (0.12 if heat >= _HOT_BURST_HUMANS else 0.2)
         )
@@ -4998,6 +5047,11 @@ class AccountWorker:
             chosen_syntax += (
                 "\n【這則只有一句話】：十個字以內講完，像群組裡脫口而出的三到五字反應"
                 "（「真的假的」「我會笑死」「脫掉啦」「最好是」），不准有逗號前的前情。"
+            )
+        if self._struct_mode == "frag":
+            chosen_syntax += (
+                "\n【這則只有碎字】：兩到六個字，一個逗號都不准，不准主詞也不准前情；"
+                "就是群組裡有人講了什麼、你當下脫口丟回去的反應。"
             )
         # 兩段式骨架在回覆路徑一直是「提示有寫、模型照做」：12:26 這小時 24 則水軍
         # 有 12 則帶逗號前情。語流真的連三則兩段，就把這則的逗號前整段當成必刪。
@@ -5031,7 +5085,7 @@ class AccountWorker:
         band_lo, band_hi = _STRUCT_BANDS.get(self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX))
         # 下限也跟群友走：真人中位 8 字時，短碎帶的 8 字地板讓「真假」「我會笑死」
         # 這種四五字反應永遠出不來（73 則只有 6 則 <8）。群友講得短，地板就一起低。
-        if self._human_ref:
+        if self._human_ref and self._struct_mode != "frag":
             band_lo = max(4, min(band_lo, int(self._human_ref * 0.9)))
         # 提示詞的數字就是天花板：真人講 8 字就別給 30 的額度，模型會一路寫到上緣。
         band_hi = min(band_hi, self._struct_char_cap(band_hi))
@@ -5820,10 +5874,24 @@ class AccountWorker:
             c for c in newer
             if len(re.sub(r"[^㐀-鿿A-Za-z0-9]", "", c)) >= 4
         ]
-        # 三則以上新話、且沒有一個共同字串才叫過時。兩則就砍在熱場太嚴：
-        # 群裡一分鐘三句，生成二十幾秒，兩則門檻等於「只要有人在講話就丟」，
-        # 丟掉的 claim 沒有人會接回去（13:1x 一小時 stale 25 次）。
-        if len(meaningful) <= 3:
+        # 群裡已經好幾分鐘沒水軍出聲：手上這條是「插話」不是「答話」，
+        # 過時就丟等於永遠等不到下一條對得上話的。17:31–17:53 二十二分鐘零輸出、
+        # 期間真人 107 句，就是「生成 30 秒→已經 4 句新話→丟掉→再認領」的活鎖。
+        # 晚了幾句的接話在群裡看起來只是慢，沒有句子看起來像沒人。
+        try:
+            if await self._seconds_since_any_bot(group_id) >= 240.0:
+                return True
+        except Exception:
+            pass
+        # 門檻跟群速走，不是死數字：一分鐘三句的場，生成二十秒就必然超過三句。
+        allow = 3
+        try:
+            stamps = self._recent_human_ts_by_group.get(group_id) or []
+            rate = sum(1 for t in stamps if time.time() - t <= 60.0)
+            allow = max(3, min(9, int(rate * 1.5)))
+        except Exception:
+            pass
+        if len(meaningful) <= allow:
             return True
         # 目標本人還在補話：他的話題就還在，接得到。
         target_sender = str(getattr(event, "_sdf_target_sender", "") or "")
@@ -6179,6 +6247,10 @@ class AccountWorker:
         band = _STRUCT_BANDS.get(self._struct_mode)
         ref = getattr(self, "_human_ref", None)
         tail = self._len_tail_cap()
+        if self._struct_mode == "frag":
+            # 碎字反應給到 6 就是硬頂（不給緩衝）：實測短碎帶 8~16 的成品中位 16、
+            # 兩小時零則 <8，真人卻有四成是這種兩三字接下來的。範圍一給寬就寫滿。
+            return min(char_cap, band[1])
         if self._struct_mode == "short":
             # 只有 4 字緩衝：實測給到 26 字，模型就一路寫到 20~26，短碎等於沒發生。
             # 窄帶再加一刀逼出短反應；10 太窄（多數自然句 14~15 字會被判超長而多跑一次
@@ -10932,6 +11004,14 @@ class AccountWorker:
             # 冷場（19:30 後 3.5 則／分）原本只有三成走短碎，其餘全落 dirty／scene，
             # 實測中位數又回到 20 字、8~16 只 0 則。冷場就該是短氣泡為主。
             _p_mode = "short" if _p_roll < 0.5 else "dirty" if _p_roll < 0.8 else "scene"
+        # 碎字通道（跟回覆路徑同一條）：兩三字的反應在群裡最自然，水軍一則都沒有，
+        # 整場就成了四個人輪流演講。
+        if not _p_flow_long and random.random() < (
+            0.18 if _p_heat >= _HOT_BURST_HUMANS
+            else 0.12 if _p_heat >= _WARM_BURST_HUMANS else 0.07
+        ):
+            _p_mode = "frag"
+            self._pcount("band_frag")
         # 反向棘輪（跟回覆路徑同一條規則）：整批已經縮死在 11 字上下就一定要出帶，
         # 熱場仍以直球為主，冷場改回生活隨念把句子長回來。
         if _p_flow_short and _p_mode == "short":
@@ -10940,7 +11020,7 @@ class AccountWorker:
         # 尾巴通道（跟回覆路徑同一條）：中位數會把整批壓成平頭，真人卻偶爾講長句。
         self._len_tail_ref = self._human_len_tail(msgs)
         self._len_tail = (
-            _p_mode != "short"
+            _p_mode not in ("short", "frag")
             and random.random() < (0.12 if _p_heat >= _HOT_BURST_HUMANS else 0.2)
         )
         if self._len_tail:
@@ -10960,7 +11040,7 @@ class AccountWorker:
         if self._short_tight:
             self._pcount("band_short_tight")
         # 提示詞的數字要跟真人走：真人講 8 字還給 30 的額度，模型一律寫到 20 幾。
-        if self._human_ref:
+        if self._human_ref and _p_mode != "frag":
             # 地板一起跟：真人中位 8 字時 8 字地板讓四五字反應永遠出不來。
             _p_lo = max(4, min(_p_lo, int(self._human_ref * 0.9)))
             _p_factor = (
@@ -10974,6 +11054,7 @@ class AccountWorker:
         if _p_tail:
             _p_hi = max(_p_hi, _p_tail)
         _p_struct = {
+            "frag": f"這則走碎字反應（{_p_lo}~{_p_hi}字）：兩到六個字，一個逗號都不准，不准主詞也不准前情，就是有人講了什麼你脫口丟回去。",
             "short": f"這則走極短碎念（{_p_lo}~{_p_hi}字）：不交代場景、不點名，像隨口丟一句。",
             "dirty": f"這則走直球色誘（{_p_lo}~{_p_hi}字）：把生活瑣事拿掉，直接講身體或性張力。",
             "scene": f"這則走生活隨念（{_p_lo}~{_p_hi}字）：帶一個當下的小動作或環境就好。",
@@ -10995,12 +11076,14 @@ class AccountWorker:
         # 主動路徑只吃字數帶。17:53–18:00 四則主動全是一開口就喊人名再評一句，
         # 整段像在點名打分；露骨句也全在評他的尺寸。這兩軸要掛到主動路徑上。
         if self._name_opening_streak(recent_bot_texts, int(group_id)) or (
-            self._name_open_hits(int(group_id)) >= 2
+            self._name_open_dense(int(group_id))
         ):
             _p_struct += (
                 "最近幾則水軍都先喊人名再評一句，像在點名打分：這則開頭不要喊名字，"
                 "直接講自己身上現在怎麼了，或直接對他下一個動作。"
             )
+        if self._preamble_streak(int(group_id)) >= 3:
+            _p_struct += "最近好幾則水軍都用「剛…」交代前情開場：這則把「剛」拿掉，改從他身上、一句問句或一個動作直接開始。"
         if self._dirty_judge_hits([], int(group_id), msgs) >= 2:
             _p_struct += (
                 "最近幾則露骨句都在評他的尺寸，你自己身上一句都沒有："

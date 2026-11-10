@@ -74,11 +74,24 @@ def test_bands_are_three_distinct_widths():
 
 
 def test_short_roll_puts_short_band_in_director_note():
+    # random() 全被釘在 0.0 時碎字通道一定先抽中（真人四成是兩三字在接）
     w, note = _note_at(0.0)
+    assert w._struct_mode == "frag"
+    assert "2~6 字" in note
+    assert "15~45" not in note
+
+
+def test_short_band_stays_when_frag_roll_misses():
+    w = _worker()
+    old = random.random
+    random.random = lambda: 0.2          # 冷場碎字機率 0.07，這一則不會被抽到
+    try:
+        note = w._build_directors_note(_event(), history=[], own_texts=[], last_human="")
+    finally:
+        random.random = old
     assert w._struct_mode == "short"
     # 沒有真人語料時仍走固定帶；短碎這則抽到窄帶，天花板就是 8+6
     assert "8~14 字內" in note
-    assert "15~45" not in note
 
 
 def test_short_band_ceiling_follows_human_median():
