@@ -154,3 +154,65 @@ def test_freshness_threshold_follows_rate():
     # 冷場（一分鐘一句）四句就是真的過時
     worker, event = _fresh_worker(newer, human_per_min=1, starved=60.0)
     assert asyncio.run(worker._context_still_fresh(event)) is False
+
+
+# ---------- 碎字機率跟著真人走（不再被 flow_long 擋死） ----------
+
+
+def _hist(lens):
+    return [
+        {"role": "user", "content": "字" * n, "timestamp": time.time(), "sender_id": 9}
+        for n in lens
+    ]
+
+
+def test_frag_probability_follows_human_frag_ratio():
+    worker = _worker()
+    # 真人十則有六則兩三字：碎字機率要明顯偏高
+    dense = worker._frag_probability(_hist([3, 4, 5, 12, 4, 9, 3, 3, 15, 4]), 0, False)
+    sparse = worker._frag_probability(_hist([18, 22, 19, 25, 14, 30, 21, 19, 24, 16]), 0, False)
+    assert dense > 0.3
+    assert sparse < 0.1
+    assert dense > sparse
+
+
+def test_frag_allowed_when_batch_flow_is_long():
+    worker = _worker()
+    # 真人講得短、水軍整批偏長（flow_long）時，碎字正是解藥，不能被自己的煞車擋掉
+    p = worker._frag_probability(_hist([16, 18, 20, 22]), 0, True)
+    assert p >= 0.25
+    # 熱場再加壓，但有上限
+    assert worker._frag_probability(_hist([16, 18]) * 6, 12, True) <= 0.45
+
+
+def test_frag_probability_needs_enough_human_sample():
+    worker = _worker()
+    assert worker._frag_probability(_hist([3, 3]), 0, False) < 0.1
+
+
+def test_frag_collapse_keeps_the_reaction_not_the_preamble():
+    worker = _worker()
+    assert worker._frag_collapse("剛洗完澡咧，換我了啦") == "換我了啦"
+    assert worker._frag_collapse("真假") == "真假"
+    # 沒有逗號可切：取尾巴，不剪成殘句開頭
+    assert len(worker._frag_collapse("被你蹭到內褲都濕透了")) <= 8
+    assert worker._frag_collapse("換我") == "換我"
+
+
+# ---------- 本人慣用詞自撞 ----------
+
+
+def test_own_repeat_terms_note_flags_own_habit_words():
+    worker = _worker()
+    note = worker._own_repeat_terms_note(
+        ["喝紅酒微醺誰要餵我的嘴", "拉下鐵門倒杯紅酒，你這麼兇幹嘛"]
+    )
+    assert "紅酒" in note
+    assert "避開" in note
+
+
+def test_own_repeat_terms_note_quiet_when_wording_varies():
+    worker = _worker()
+    assert worker._own_repeat_terms_note(["乳酪蛋糕超好吃", "他尺寸是真的大"]) == ""
+    # 樣本不足不亂開
+    assert worker._own_repeat_terms_note(["紅酒好喝"]) == ""

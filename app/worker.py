@@ -2796,6 +2796,26 @@ class AccountWorker:
             return ""
         return f"（{'；'.join(parts)}，這則換個講法別再撞）"
 
+    def _own_repeat_terms_note(self, own_texts) -> str:
+        """你這號自己剛講過的實詞（同詞出現兩次以上）：自己撞自己最刺眼。
+
+        跨帳號熱詞有 `_overused_terms_note` 管，但本人的慣用詞會被長提示和全場熱詞
+        稀釋掉（21:11 兩則間隔十九秒都講「紅酒微醺」，21:33 又一次）。這裡只列
+        本人的，直接點名換掉。
+        """
+        texts = [str(t) for t in (own_texts or []) if str(t or "").strip()][:5]
+        if len(texts) < 2:
+            return ""
+        df: dict = {}
+        for body in texts:
+            for g in {body[i:i + 2] for i in range(len(body) - 1)}:
+                if all("一" <= ch <= "鿿" for ch in g) and g[0] != g[1]:
+                    df[g] = df.get(g, 0) + 1
+        hot = [g for g, n in sorted(df.items(), key=lambda kv: -kv[1]) if n >= 2][:4]
+        if not hot:
+            return ""
+        return f"（你自己最近講過：{'、'.join(hot)}，這則避開這些詞）"
+
     def _recent_own_scene_note(self, name: str, history, own_texts=None) -> str:
         """把你最近用過的開場直接攤在眼前，比叫模型「記得換場景」有效。"""
         if own_texts:
@@ -3268,6 +3288,53 @@ class AccountWorker:
         if len(lens) < 3:
             return False
         return lens[len(lens) // 2] <= 11
+
+    def _human_frag_ratio(self, history) -> float:
+        """真人近十則裡有幾成是兩三字的反應（碎字）。"""
+        rows = [m for m in (history or []) if str(m.get("role")) != "assistant"]
+        lens = [
+            len(re.sub(r"\s", "", str(m.get("content") or ""))) for m in rows[-10:]
+        ]
+        lens = [n for n in lens if n]
+        if len(lens) < 4:
+            return 0.0
+        return sum(1 for n in lens if n <= 6) / len(lens)
+
+    def _frag_probability(self, history, heat: int, flow_long: bool) -> float:
+        """這一則走碎字的機率。
+
+        真人四成是「真假」「超頂」這種兩三字，水軍卻一則都沒有。舊版把碎字掛在
+        `not flow_long` 底下，但偏長正是碎字要解的症狀——整批 11~16 字時 flow_long
+        一直成立，碎字等於被自己的煞車擋死（21:00–21:59 一小時只 3 次、落地 0 則）。
+        改成看真人碎字比例，偏長時再加壓。
+        """
+        p = 0.05 + 0.85 * self._human_frag_ratio(history)
+        if flow_long:
+            p = max(p, 0.25)
+        if heat >= _HOT_BURST_HUMANS:
+            p *= 1.25
+        return min(p, 0.45)
+
+    @staticmethod
+    def _frag_collapse(text: str, cap: int = 8) -> str:
+        """碎字硬收：模型寫不進兩到六字時，就地挑最適合當反應的一小段。
+
+        模型對「兩到六個字」的遵守度很低，重寫一次仍常在十幾個字；這裡先從逗號
+        分段裡找最短且 2~8 字的那一段（通常就是最後那記反應），其次取尾巴，最後
+        才硬截——不整句剪成殘句。
+        """
+        body = str(text or "").strip().strip("，,。、！!？?～~ ")
+        if not body or len(body) <= cap:
+            return body
+        parts = [
+            p.strip("，,。、！!？?～~ ")
+            for p in re.split(r"[，,。、！!？?～~\s]+", body)
+        ]
+        parts = [p for p in parts if 2 <= len(p) <= cap]
+        if parts:
+            return parts[-1]
+        tail = body[-cap:].strip("，,。、！!？?～~ ")
+        return tail if len(tail) >= 2 else body[:cap]
 
     def _cross_recent_items(self, group_id: int, seconds: float) -> list[tuple[str, float]]:
         """跟 `_cross_recent_texts` 一樣的窗，但回 (句子, 幾秒前)。
@@ -4946,6 +5013,7 @@ class AccountWorker:
         chosen_mood += self._overused_terms_note(
             int(getattr(event, "chat_id", 0) or 0), history
         )
+        chosen_mood += self._own_repeat_terms_note(own_texts)
         # 語氣同質化（2026-11-03 21:35~21:58 實測：四則水軍全在審問男人、零自曝）。
         # 舊檢只看自己上一則、還漏掉「啊」收尾的問句，跨號三分鐘內撞同一語域抓不到。
         type_note = self._sentence_type_note(
@@ -4987,10 +5055,7 @@ class AccountWorker:
             # 碎字通道：真人四成是兩三字接下來的（「真假」「超頂」「換我」），水軍
             # 17:07–19:19 五十七則一則都沒有，整場看起來就是每個人都在講完整句。
             # 洗屏時多一點，冷場少一點（冷場三五字會突兀）。
-            if not flow_long and random.random() < (
-                0.18 if heat >= _HOT_BURST_HUMANS
-                else 0.12 if heat >= _WARM_BURST_HUMANS else 0.07
-            ):
+            if random.random() < self._frag_probability(history, heat, flow_long):
                 self._struct_mode = "frag"
             # 已經連四則都在 11 字上下：這則一定要出帶。熱場仍以直球為主（短而辛辣、
             # 不交代前情，插話不會遲到），冷場改走生活場景把句子長回來。
@@ -8586,6 +8651,7 @@ class AccountWorker:
         # 為滿足主人「深入勾引、露骨誘惑、情節拉扯、激發肉體衝動」，
         # 允許上限放寬至 65 字元，絕不因稍微寫長或五感描寫豐富就判定 too_long 丟棄！
         char_cap = self._struct_char_cap(max(char_cap, 90))
+        _frag_mode = self._struct_mode == "frag"
         self._band_lo, self._band_hi = _STRUCT_BANDS.get(
             self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX)
         )
@@ -8673,6 +8739,11 @@ class AccountWorker:
             f"上一版未符合演出要求。請以 {self._band_lo}~{self._band_hi} 個字元的自然短句表達，"
             "語意常識第一，結尾不要句號、少用驚嘆號，保持自信有魅力的台灣日常口吻。"
         )
+        if _frag_mode:
+            correction += (
+                "上一版太長。這一版只留兩到六個字，一個逗號都不准，"
+                "前情全砍掉，只留最關鍵的那個反應或動作。"
+            )
         if refusal:
             correction += (
                 "上一版談的是你自己的限制，不是你這個角色在群裡會說的話。"
@@ -8733,7 +8804,8 @@ class AccountWorker:
         # 重寫過一次還是偏長就照發：句子完整比剛好卡在帶頂重要，
         # 再丟一次等於白燒一次生成、還少一則發言。
         # 下限 20 字：窄帶（上限 10）時 19 字的正常句不該被丟。
-        retry_too_long = len(retry) > max(char_cap + 8, 20)
+        # 碎字帶上限 6，20 字地板讓十五字的「碎字」照樣算過關；碎字一律 8 字上限。
+        retry_too_long = len(retry) > (8 if _frag_mode else max(char_cap + 8, 20))
         retry_only_long = retry_too_long  # 只有「偏長」一項沒過就照發（下面改寫）
         if retry_too_long:
             self.stats["over_cap_sent"] = int(self.stats.get("over_cap_sent", 0)) + 1
@@ -8756,6 +8828,9 @@ class AccountWorker:
             or retry_tic or retry_time_mismatch or retry_gender_term
             or retry_simplified or retry_group_meta or retry_video_topic
         ):
+            if _frag_mode:
+                retry = self._frag_collapse(retry)
+                self.stats["frag_collapse"] = int(self.stats.get("frag_collapse", 0)) + 1
             self._set_generation_reason(event, "ok")
             if image:
                 self.stats["images_understood"] += 1
@@ -11009,10 +11084,7 @@ class AccountWorker:
             _p_mode = "short" if _p_roll < 0.5 else "dirty" if _p_roll < 0.8 else "scene"
         # 碎字通道（跟回覆路徑同一條）：兩三字的反應在群裡最自然，水軍一則都沒有，
         # 整場就成了四個人輪流演講。
-        if not _p_flow_long and random.random() < (
-            0.18 if _p_heat >= _HOT_BURST_HUMANS
-            else 0.12 if _p_heat >= _WARM_BURST_HUMANS else 0.07
-        ):
+        if random.random() < self._frag_probability(msgs, _p_heat, _p_flow_long):
             _p_mode = "frag"
             self._pcount("band_frag")
         # 反向棘輪（跟回覆路徑同一條規則）：整批已經縮死在 11 字上下就一定要出帶，
@@ -11465,8 +11537,17 @@ class AccountWorker:
                         random.uniform(10, 50) + (abs(hash(self.account_id)) % 4) * 7
                     )
                 else:
+                    # 熱場或剛出現斷層就把下一次 tick 拉近：慢速 600~1800 秒在熱場
+                    # 等於十到三十分鐘不在場（21:52:45 之後真人 22 句、四號 0 則，
+                    # 群 21:59 收攤，下面的 force_join 根本沒機會跑到）。
+                    _sleep_lo, _sleep_hi = loop_min, loop_max
+                    if getattr(self, "_last_tick_heat", 0) >= _WARM_BURST_HUMANS:
+                        _sleep_lo, _sleep_hi = min(_sleep_lo, 90.0), min(_sleep_hi, 240.0)
+                    if getattr(self, "_last_tick_silent", 0.0) > 240.0:
+                        _sleep_lo, _sleep_hi = min(_sleep_lo, 60.0), min(_sleep_hi, 150.0)
+                    _sleep_hi = max(_sleep_lo, _sleep_hi)
                     await asyncio.sleep(
-                        random.uniform(loop_min, loop_max) * (1.0 - 0.45 * _deficit_hint)
+                        random.uniform(_sleep_lo, _sleep_hi) * (1.0 - 0.45 * _deficit_hint)
                     )
                 if not self.is_running:
                     return
@@ -11529,6 +11610,16 @@ class AccountWorker:
                 except Exception:
                     latest_rows = []
                     latest_row = None
+                # 下一次 tick 的間隔要吃這一輪看到的現場狀態，所以每輪都記。
+                self._last_tick_heat = heat
+                try:
+                    _spoke_map = await self.db.group_bot_last_spoke(group_id)
+                    self._last_tick_silent = (
+                        time.time() - max(float(t or 0.0) for t in _spoke_map.values())
+                        if _spoke_map else 1e9
+                    )
+                except Exception:
+                    self._last_tick_silent = 0.0
                 # 水軍佔比赤字：這一窗三十則裡水軍只佔 13% 時，還照原本的
                 # 「有人講話就讓路」一路退，就是把自己退到不見（15 點場 0.4 則／分、
                 # 真人 3 則／分，四號整小時只有 13.5% 的發言）。目標佔比三成，
@@ -11541,15 +11632,7 @@ class AccountWorker:
                     self._pcount("pskip_busy")
                     continue
                 # 已經好久沒有水軍出聲：不管現場多熱、輪不輪得到，都接一句。
-                silent_for = 1e9
-                try:
-                    spoke_map = await self.db.group_bot_last_spoke(group_id)
-                    if spoke_map:
-                        silent_for = time.time() - max(
-                            float(t or 0.0) for t in spoke_map.values()
-                        )
-                except Exception:
-                    pass
+                silent_for = float(getattr(self, "_last_tick_silent", 1e9))
                 force_join = silent_for > 240.0
                 # 整場沒聲音（連真人都沒有）時，輪替也一起讓開：四號各 30~90 秒
                 # 一支，在空群裡 rotation 只要一直判「輪不到我」，十七分鐘就會
@@ -11878,7 +11961,16 @@ class AccountWorker:
                             self._pcount("strip_preamble_head")
                             topic = _strip_p
 
-                    burst = self._split_human_burst(topic)
+                    # 主動路徑沒有字數校驗層，碎字靠提示詞只能寫到十幾個字；
+                    # 這裡直接硬收，落地才是真的兩到六字。碎字也不再拆成多段。
+                    if self._struct_mode == "frag":
+                        _collapsed = self._frag_collapse(topic)
+                        if _collapsed and _collapsed != topic:
+                            topic = _collapsed
+                            self._pcount("frag_collapse")
+                        burst = [topic]
+                    else:
+                        burst = self._split_human_burst(topic)
                     sent = False
                     for i, part in enumerate(burst):
                         ok = await self._send_text_recorded(
