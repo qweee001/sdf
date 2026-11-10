@@ -9,6 +9,7 @@
 2. 上限有沒有真的被真人中位壓下來（倍率 1.4／1.7／2.0／2.2）。
 3. 回覆路徑的兩段式那一刀有沒有接上（先前只有主動路徑有）。
 """
+import re
 import time
 from types import SimpleNamespace
 from typing import Any, cast
@@ -112,7 +113,9 @@ def test_directors_note_carries_scaled_ceiling():
     )
     assert "字是硬上限" in note
     assert "8~16" not in note          # 真人 8 字，天花板一定被壓到帶頂以下
-    assert f"8~{w._struct_char_cap(16)}" in note
+    # 地板也跟真人走（8 字中位 → 地板 7），耳朵聽到的四五字反應才出得來
+    # 中位 8 字 → 地板 7；天花板隨窄帶與否在 11~13 之間
+    assert re.search(r"7~1[123] 字內", note)
 
 
 def test_directors_note_flags_comma_flow():

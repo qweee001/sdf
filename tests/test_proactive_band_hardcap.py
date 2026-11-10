@@ -154,7 +154,9 @@ def test_short_flow_forces_dirty_band_on_proactive(monkeypatch):
         await worker._generate_context_topic(GROUP)
 
         assert worker.stats.get("band_flow_short_rebound") == 1
-        assert "band_dirty" in worker.stats
+        # 0.1 同時抽到尾通道，模式被尾巴改寫成 scene；重點是離開短碎並把句子寫長。
+        assert "band_dirty" in worker.stats or "band_scene" in worker.stats
+        assert worker.stats.get("band_len_tail") == 1
         assert "band_short" not in worker.stats
 
     asyncio.run(main())
