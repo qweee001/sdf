@@ -141,3 +141,63 @@ def test_probability_lifts_when_deficit_high(monkeypatch):
             allowed += 1
     # 舊上限 0.15 大約只剩 6 則；赤字大（佔比 3%）應該明顯更多
     assert allowed >= 12
+
+
+def _other_reply(text: str = "他昨天不是才講過同一句") -> SimpleNamespace:
+    event = _event(text)
+    event.is_reply = True
+    return event
+
+
+def test_reply_to_other_is_not_a_dead_end(monkeypatch):
+    """回覆別人的長句＝群裡的一般對話，缺口大時要能接。"""
+    w = _worker()
+    _stub(w, monkeypatch, bots=0, total=30, others=[time.time() - 60])
+
+    async def _not_me(_event):
+        return False
+
+    async def _pick(_event):
+        return 123
+
+    async def _claim(*_a, **_k):
+        return True
+
+    monkeypatch.setattr(w, "_is_directed_at_me", _not_me)
+    monkeypatch.setattr(w, "_pick_group_responder", _pick)
+    monkeypatch.setattr(w, "_claim_human_reply", _claim)
+    event = _other_reply()
+    assert asyncio.run(w._should_reply(event)) is True
+    assert int(w.stats.get("reply_soft_other", 0)) == 1
+
+
+def test_short_agreement_reply_stays_with_humans(monkeypatch):
+    """「真假」「超頂」這種附和句字太少，接起來像插嘴。"""
+    w = _worker()
+    _stub(w, monkeypatch, bots=0, total=30, others=[time.time() - 60])
+
+    async def _not_me(_event):
+        return False
+
+    monkeypatch.setattr(w, "_is_directed_at_me", _not_me)
+    assert asyncio.run(w._should_reply(_other_reply("真假"))) is False
+    assert int(w.stats.get("reply_skip_directed_other", 0)) == 1
+
+
+def test_soft_other_is_discounted_not_free(monkeypatch):
+    """同樣的佔比下，插話的過關率要低於接球（打折 0.55）。"""
+    def _passes(soft: bool) -> int:
+        w = _worker()
+        _stub(w, monkeypatch, bots=4, total=20, others=[time.time() - 120])
+        count = 0
+        for message_id in range(1, 61):
+            event = _event("這句是別人對話裡的一句話")
+            event.id = message_id
+            if asyncio.run(w._ordinary_reply_allowed(event, soft=soft)):
+                count += 1
+        return count
+
+    hard = _passes(False)
+    soft = _passes(True)
+    assert soft < hard
+    assert soft > 0

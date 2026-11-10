@@ -2145,18 +2145,25 @@ class AccountWorker:
         if sender_id in self.managed_ids:
             return await self._should_follow_managed_origin(event)
         self._pcount("reply_seen_human")
-        # 回覆別人或 @別人的訊息不插話；只有真正被指向的帳號可認領。
+        # 被 @／回覆自己 → 直接認領；回覆別人不是死路：群裡九成訊息都在互回，
+        # 真人不會只接點名球（實測 4 分鐘 60 則真人，13/15 全死在這一關）。
+        soft_other = False
         if event.is_reply or event.mentioned:
-            if not await self._is_directed_at_me(event):
-                if isinstance(getattr(event, "media", None), MessageMediaPhoto):
-                    return await self._wait_for_media_claim(event)
+            if await self._is_directed_at_me(event):
+                return await self._claim_human_reply(event, int(self.tg_user_id or 0))
+            if isinstance(getattr(event, "media", None), MessageMediaPhoto):
+                return await self._wait_for_media_claim(event)
+            # 附和級的短句（真假／超頂／+1）留給真人，字太少的接起來反而像插嘴
+            text = unicodedata.normalize("NFKC", str(event.raw_text or ""))
+            if len(re.sub(r"[^\w\u3400-\u9fff]+", "", text)) < 5:
                 self._pcount("reply_skip_directed_other")
                 return False
-            return await self._claim_human_reply(event, int(self.tg_user_id or 0))
+            self._pcount("reply_soft_other")
+            soft_other = True
         if not self._is_meaningful_human_message(event):
             self._pcount("reply_skip_meaningless")
             return False
-        if not await self._ordinary_reply_allowed(event):
+        if not await self._ordinary_reply_allowed(event, soft=soft_other):
             return False
         group_id = int(event.chat_id or 0)
         eligible_in_group = self.active_group_ids.get(group_id, set())
@@ -2289,7 +2296,7 @@ class AccountWorker:
             pass
         return default
 
-    async def _ordinary_reply_allowed(self, event) -> bool:
+    async def _ordinary_reply_allowed(self, event, soft: bool = False) -> bool:
         group_id, message_id = self._reply_claim_key(event)
         if not group_id or message_id <= 0:
             return False
@@ -2380,6 +2387,9 @@ class AccountWorker:
         # 照片在熱場也照答：四號靠 claim 排隊，只有一個會真的送出。
         if is_photo:
             probability = 1.0
+        # 回覆別人的訊息是「插話」不是「接球」，機率打折但不歸零
+        if soft:
+            probability *= 0.55
         score = int.from_bytes(
             hashlib.blake2b(
                 f"human-probability:{group_id}:{message_id}".encode(),
