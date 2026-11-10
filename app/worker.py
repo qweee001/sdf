@@ -2030,6 +2030,7 @@ class AccountWorker:
         if owner_id and claimant_id != int(owner_id):
             if is_photo:
                 return await self._wait_for_media_claim(event)
+            self._pcount("claim_owner_other")
             return False
         if is_photo:
             self._media_claim_signal(key)
@@ -2037,8 +2038,10 @@ class AccountWorker:
         if not claimed:
             if is_photo:
                 return await self._wait_for_media_claim(event)
+            self._pcount("claim_taken")
             return False
         if ordinary and not await self._admit_ordinary_reply(event):
+            self._pcount("claim_admit_reject")
             await self.db.release_message_response_claim(
                 key[0], key[1], self.account_id
             )
@@ -2048,6 +2051,7 @@ class AccountWorker:
                 self._expire_media_claim_state(key, signal, True)
             return False
         self._mark_human_claim(event)
+        self._pcount("claim_ok")
         return True
 
     async def _should_follow_managed_origin(self, event) -> bool:
