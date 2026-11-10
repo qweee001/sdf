@@ -114,7 +114,7 @@ def test_no_tail_keeps_tight_ceiling():
 
 def test_tail_never_fires_on_short_tight_band():
     """窄帶短碎本來就三五字，尾巴留給其它模式。"""
-    w, _note, _lo, _hi = _note_with(0.0, 0.0, 0.1)
+    w, _note, _lo, _hi = _note_with(0.0, 0.9, 0.1)   # 短碎 → 沒抽到碎字 → 窄帶
     assert w._short_tight is True
     assert w._len_tail is False
 

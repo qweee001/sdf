@@ -141,7 +141,7 @@ def _fresh_worker(newer: list[str], human_per_min: int, starved: float):
 def test_freshness_keeps_reply_when_group_starved():
     # 二十二分鐘沒人講話：已經五句新話、毫無共同字串，還是要送
     worker, event = _fresh_worker(
-        ["完全不同一"] * 5, human_per_min=1, starved=1300.0
+        ["完全不同一"] * 5, human_per_min=4, starved=1300.0
     )
     assert asyncio.run(worker._context_still_fresh(event)) is True
 

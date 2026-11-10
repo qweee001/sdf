@@ -3498,14 +3498,14 @@ class AccountWorker:
         if not names:
             return False
         recent = self._cross_recent_texts(int(group_id), seconds)[-10:]
-        if len(recent) < 5:
+        if len(recent) < 3:
             return False
         hits = 0
         for t in recent:
             body = str(t or "").lstrip(self._OPEN_STRIP)
             if any(body.startswith(n) for n in names):
                 hits += 1
-        return hits >= max(3, int(len(recent) * 0.35))
+        return hits >= max(2, round(len(recent) * 0.35))
 
     def _preamble_streak(self, group_id: int, seconds: float = 25 * 60) -> int:
         """近八則水軍有幾則用「剛／才剛／剛剛」交代前情開場。
@@ -5878,11 +5878,6 @@ class AccountWorker:
         # 過時就丟等於永遠等不到下一條對得上話的。17:31–17:53 二十二分鐘零輸出、
         # 期間真人 107 句，就是「生成 30 秒→已經 4 句新話→丟掉→再認領」的活鎖。
         # 晚了幾句的接話在群裡看起來只是慢，沒有句子看起來像沒人。
-        try:
-            if await self._seconds_since_any_bot(group_id) >= 240.0:
-                return True
-        except Exception:
-            pass
         # 門檻跟群速走，不是死數字：一分鐘三句的場，生成二十秒就必然超過三句。
         allow = 3
         try:
@@ -5893,6 +5888,14 @@ class AccountWorker:
             pass
         if len(meaningful) <= allow:
             return True
+        # 場子很熱而自己已經四分鐘沒出聲：這條是插話不是答話，過時也該送。
+        # 只認「熱場」，冷場生成快、過時就是真的過時。
+        if rate >= 2:
+            try:
+                if await self._seconds_since_any_bot(group_id) >= 240.0:
+                    return True
+            except Exception:
+                pass
         # 目標本人還在補話：他的話題就還在，接得到。
         target_sender = str(getattr(event, "_sdf_target_sender", "") or "")
         if target_sender:
