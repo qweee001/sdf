@@ -1250,6 +1250,9 @@ class AccountWorker:
         self._short_tight: bool = False
         # 外部釘死模式用（測試、重寫沿用同一組字數）；空字串＝照抽樣走。
         self._struct_mode_force: str = ""
+        # 冷啟動第一輪：loop 開頭原本一律先睡 5~15 分鐘，整組重啟後群裡就空掉
+        # 一整個 tick（15:11 部署完到 15:25 才有第一句，其中 10 分鐘純空等）。
+        self._first_proactive_tick: bool = True
         self._band_lo, self._band_hi = _HUMAN_LINE_MIN, _HUMAN_LINE_MAX
         # 同號近義複讀：本帳號最近送出的原文＋時間（10 分鐘窗）
         self._own_echo_by_group: dict[int, list[tuple[str, float]]] = {}
@@ -11220,9 +11223,17 @@ class AccountWorker:
                 # 佔比赤字大時連「多久看一次」都縮：讓路機率壓得再低，迴圈睡得久
                 # 一樣輪不到（四號 240~420 秒才 tick 一次，熱場一小時上限就是 44 則）。
                 _deficit_hint = float(getattr(self, "_last_share_deficit", 0.0))
-                await asyncio.sleep(
-                    random.uniform(loop_min, loop_max) * (1.0 - 0.45 * _deficit_hint)
-                )
+                if self._first_proactive_tick:
+                    # 冷啟動第一輪不等整個 tick：抽 10~50 秒，並依帳號錯開 0/7/14/21，
+                    # 免得四號同時插話。之後照常回 5~15 分鐘隨機。
+                    self._first_proactive_tick = False
+                    await asyncio.sleep(
+                        random.uniform(10, 50) + (abs(hash(self.account_id)) % 4) * 7
+                    )
+                else:
+                    await asyncio.sleep(
+                        random.uniform(loop_min, loop_max) * (1.0 - 0.45 * _deficit_hint)
+                    )
                 if not self.is_running:
                     return
                 # 帳號級主動開關優先，全域 PROACTIVE_ENABLED 為 fallback
