@@ -9429,6 +9429,10 @@ class AccountWorker:
             print(f"[{self.name}] FATAL LEAK BLOCKED AT TELEGRAM OUTBOUND: {text[:40]!r}", flush=True)
             return False
 
+        # 固定說法校正放在唯一出口：回覆路徑原本有、主動路徑沒有，
+        # 群裡照樣冒出「找助理了解喔」（群裡真人講「聯絡助理」）。
+        text = text_guard.fix_phrases(text)
+
         if len(text) > _MAX_REPLY_CHARS_HARD:
             return False
         client = self.tg_client
