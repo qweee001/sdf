@@ -66,7 +66,7 @@ def _event(text: str = "這句是真人講的普通訊息") -> SimpleNamespace:
     )
 
 
-def _stub(w: AccountWorker, monkeypatch, *, bots: int, total: int, others: list[float]) -> None:
+def _stub(w: AccountWorker, monkeypatch, *, bots: int, total: int, others: list[float], mine_age: float = 0.0) -> None:
     async def _float(_key, default=0.0):
         return default
 
@@ -80,7 +80,7 @@ def _stub(w: AccountWorker, monkeypatch, *, bots: int, total: int, others: list[
         ]
 
     now = time.time()
-    spoke = {int(w.tg_user_id or 0): 0.0}
+    spoke = {int(w.tg_user_id or 0): (now - mine_age) if mine_age else 0.0}
     for index, ts in enumerate(others):
         spoke[300 + index] = ts
 
@@ -101,14 +101,14 @@ def _stub(w: AccountWorker, monkeypatch, *, bots: int, total: int, others: list[
 def test_deficit_opens_the_gate_despite_recent_bot(monkeypatch):
     """群裡 40 則真人 0 則水軍、別人 30 秒前才講過 → 舊版擋死，新版要放行。"""
     w = _worker()
-    _stub(w, monkeypatch, bots=0, total=40, others=[time.time() - 30])
+    _stub(w, monkeypatch, bots=0, total=40, others=[time.time() - 30], mine_age=25)
     assert asyncio.run(w._ordinary_reply_allowed(_event())) is True
 
 
 def test_share_met_restores_ninety_second_yield(monkeypatch):
-    """水軍佔比已達標（40%），別人 40 秒前才發過 → 照舊讓位。"""
+    """水軍佔比已達標（40%），自己 40 秒前才講過 → 照舊讓位。"""
     w = _worker()
-    _stub(w, monkeypatch, bots=8, total=20, others=[time.time() - 40])
+    _stub(w, monkeypatch, bots=8, total=20, others=[time.time() - 40], mine_age=40)
     assert asyncio.run(w._ordinary_reply_allowed(_event())) is False
     assert int(w.stats.get("reply_block_gap", 0)) >= 1
 
@@ -116,12 +116,19 @@ def test_share_met_restores_ninety_second_yield(monkeypatch):
 def test_deficit_midway_scales_gap(monkeypatch):
     """佔比 15%＝赤字一半 → 讓位約 55 秒：30 秒前有人要讓、70 秒前則可答。"""
     w = _worker()
-    _stub(w, monkeypatch, bots=3, total=20, others=[time.time() - 30])
+    _stub(w, monkeypatch, bots=3, total=20, others=[time.time() - 30], mine_age=30)
     assert asyncio.run(w._ordinary_reply_allowed(_event())) is False
 
     w2 = _worker()
-    _stub(w2, monkeypatch, bots=3, total=20, others=[time.time() - 70])
+    _stub(w2, monkeypatch, bots=3, total=20, others=[time.time() - 70], mine_age=70)
     assert asyncio.run(w2._ordinary_reply_allowed(_event())) is True
+
+
+def test_other_accounts_speaking_do_not_block_me(monkeypatch):
+    """姊妹 15 秒前才講過，但我自己 70 秒沒開口 → 我照樣可以接（各講各的）。"""
+    w = _worker()
+    _stub(w, monkeypatch, bots=4, total=20, others=[time.time() - 15], mine_age=70)
+    assert asyncio.run(w._ordinary_reply_allowed(_event())) is True
 
 
 def test_probability_lifts_when_deficit_high(monkeypatch):

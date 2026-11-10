@@ -110,21 +110,21 @@ def test_starved_account_rejoins_despite_recent_bot(monkeypatch):
 
 
 def test_recent_speaker_still_yields(monkeypatch):
-    """自己 2 分鐘前才講過、別人 30 秒前也講 → 照舊讓位。"""
+    """自己 60 秒前才講過（佔比達標的場）→ 照舊讓位給群友發酵。"""
     w = _worker("Chen")
     _stub_gates(w, monkeypatch)
     now = time.time()
-    _stub_spoke(w, mine=now - 120, others=[now - 30])
+    _stub_spoke(w, mine=now - 60, others=[now - 30])
     assert asyncio.run(w._ordinary_reply_allowed(_event())) is False
 
 
 def test_starved_but_burst_under_min_gap_waits(monkeypatch):
-    """餓歸餓，別人 10 秒前才發過還是要等（不疊在同一拍）。"""
+    """餓很久的號可以插回來，但同一拍仍由群級 20 秒鎖擋著（這關過、下一關擋）。"""
     w = _worker("小小")
     _stub_gates(w, monkeypatch)
     now = time.time()
     _stub_spoke(w, mine=now - 4000, others=[now - 10])
-    assert asyncio.run(w._ordinary_reply_allowed(_event())) is False
+    assert asyncio.run(w._ordinary_reply_allowed(_event())) is True
 
 
 def _rows(*items):

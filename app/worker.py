@@ -2324,30 +2324,34 @@ class AccountWorker:
         except Exception:
             share = 0.0
         deficit = self._share_deficit(share)
-        min_gap = 20.0 + 70.0 * (1.0 - deficit)
-
-        if not is_my_dialog and not is_photo:
-            try:
-                spoke = await self.db.group_bot_last_spoke(group_id)
-                if spoke:
-                    now = time.time()
-                    last_any_bot = max(float(t or 0.0) for t in spoke.values())
-                    # 自己手上沒有 owner 時，本來就只剩這條路；若自己又久未發言，
-                    # 讓位規則會把整個人鎖死在門外（實測 12h43m 零發言）。
-                    mine = float(spoke.get(int(self.tg_user_id or 0), 0.0) or 0.0)
-                    starved = (
-                        (not mine or now - mine >= _SILENT_REJOIN_SECONDS)
-                        and now - last_any_bot >= _SILENT_REJOIN_MIN_GAP
-                    )
-                    if now - last_any_bot < min_gap and not starved:
-                        self._pcount("reply_block_gap")
-                        return False
-                    if starved and now - last_any_bot < 90.0:
-                        self.stats["starved_rejoin"] = (
-                            int(self.stats.get("starved_rejoin", 0)) + 1
-                        )
-            except Exception:
-                pass
+        # 節奏用「自己的人聲間隔」而不是「全群最後一隻」：四號輪流主動，全群最後
+        # 一則幾乎永遠落在 30 秒內，用全群當基準等於四個人共用一張嘴（實測 5 分鐘
+        # 117 則真人、57 次 reply_block_gap、認領 1 則）。群級撞拍交給 claimed_20s。
+        own_gap = 20.0 + 70.0 * (1.0 - deficit)
+        starved = False
+        try:
+            spoke = await self.db.group_bot_last_spoke(group_id)
+        except Exception:
+            spoke = {}
+        if spoke:
+            now = time.time()
+            last_any_bot = max(float(t or 0.0) for t in spoke.values())
+            mine = float(spoke.get(int(self.tg_user_id or 0), 0.0) or 0.0)
+            starved = (
+                (not mine or now - mine >= _SILENT_REJOIN_SECONDS)
+                and now - last_any_bot >= _SILENT_REJOIN_MIN_GAP
+            )
+            if not is_my_dialog and not is_photo and mine and now - mine < own_gap and not starved:
+                self._pcount("reply_block_gap")
+                return False
+            if starved and now - last_any_bot < 90.0:
+                self.stats["starved_rejoin"] = (
+                    int(self.stats.get("starved_rejoin", 0)) + 1
+                )
+        # 20 秒群級鎖：四號別疊在同一拍（照片不吃，只有一個會真的送出）
+        if not is_photo and not starved and int(pressure.get("ordinary_claimed_20s", 0) or 0) >= 1:
+            self._pcount("reply_block_pile")
+            return False
 
         default_prob = float(getattr(self.config, "base_reply_probability", 0.35))
         base_prob = await self._get_runtime_float("base_reply_probability", default_prob)
@@ -2363,25 +2367,12 @@ class AccountWorker:
                 int(pressure.get("human_sent_5m", 0) or 0),
                 int(pressure.get("ordinary_claimed_5m", 0) or 0),
             )
-            # 回場保底與熱度縮放要和 admit_ordinary_reply 的原子判斷一致，
-            # 否則這裡先擋掉，後面的放寬額度永遠吃不到。
-            stale = False
-            try:
-                spoke = await self.db.group_bot_last_spoke(group_id)
-                if spoke:
-                    last_any_bot = max(float(t or 0.0) for t in spoke.values())
-                    stale = time.time() - last_any_bot >= 360.0
-            except Exception:
-                pass
-            # 20 秒群級鎖是「防疊拍」的節奏機制，任何時候都留著；
-            # 5 分鐘額度才是配額，佔比已經達標時才准擋（缺口大時它只是自我噤聲）。
-            if not stale and not is_photo:
-                if int(pressure.get("ordinary_claimed_20s", 0) or 0) >= 1:
-                    self._pcount("reply_block_pile")
-                    return False
-                if deficit < 0.2 and already_5m >= hot_budget(human_5m):
-                    self._pcount("reply_block_hot")
-                    return False
+            # 5 分鐘額度是配額，佔比已經達標時才准擋（缺口大時它只是自我噤聲）。
+            # 回場保底與熱度縮放要和 admit_ordinary_reply 的原子判斷一致。
+            stale = time.time() - last_any_bot >= 360.0 if spoke else False
+            if not stale and not is_photo and deficit < 0.2 and already_5m >= hot_budget(human_5m):
+                self._pcount("reply_block_hot")
+                return False
             # 佔比越缺、擲骰越寬（達標 0.15／零發言 0.65），不然熱場永遠答不上。
             probability = min(probability, 0.15 + 0.5 * deficit)
         # 照片在熱場也照答：四號靠 claim 排隊，只有一個會真的送出。

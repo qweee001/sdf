@@ -245,7 +245,7 @@ def test_ordinary_reply_spacing_cooldown():
 
   # 模擬 30 秒前群內已有水軍發言（90 秒保護內）
   worker.db.group_bot_last_spoke = AsyncMock(
-      return_value={456: time.time() - 30.0}
+      return_value={123: time.time() - 30.0, 456: time.time() - 30.0}
   )
   # 佔比達標（3/10＝30%）→ 讓位秒數才回到 90 秒
   worker.db.group_traffic_window = AsyncMock(
@@ -260,7 +260,7 @@ def test_ordinary_reply_spacing_cooldown():
 
     # 超過 95 秒，應放行
     worker.db.group_bot_last_spoke = AsyncMock(
-        return_value={456: time.time() - 95.0}
+        return_value={123: time.time() - 95.0, 456: time.time() - 95.0}
     )
     worker.db.get_runtime_setting = AsyncMock(return_value="1.0")
     allowed_later = await worker._ordinary_reply_allowed(event)
@@ -302,7 +302,7 @@ def test_hot_field_budget_scales_and_stale_override():
 
   async def main():
     worker.db.group_bot_last_spoke = AsyncMock(
-        return_value={456: time.time() - 120.0}
+        return_value={123: time.time() - 120.0, 456: time.time() - 120.0}
     )
     assert await worker._ordinary_reply_allowed(event) is True
 
@@ -317,13 +317,13 @@ def test_hot_field_budget_scales_and_stale_override():
         }
     )
     worker.db.group_bot_last_spoke = AsyncMock(
-        return_value={456: time.time() - 420.0}
+        return_value={123: time.time() - 420.0, 456: time.time() - 420.0}
     )
     assert await worker._ordinary_reply_allowed(event) is True
 
     # 只潛水 2 分鐘 → 額度滿就繼續讓路（佔比要先達標，5 分鐘額度才算數）
     worker.db.group_bot_last_spoke = AsyncMock(
-        return_value={456: time.time() - 120.0}
+        return_value={123: time.time() - 120.0, 456: time.time() - 120.0}
     )
     worker.db.group_traffic_window = AsyncMock(
         return_value=[
