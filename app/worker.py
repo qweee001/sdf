@@ -7667,6 +7667,13 @@ class AccountWorker:
                     need = 10.0
                 elif age <= _BOT_STAGGER_WINDOW_SECONDS:
                     need = 4.0
+                # 極熱場（近 5 分鐘 ≥12 則真人）讓路給新鮮度：18 秒在 4 則/分的場
+                # 就是三四句之後，錯峰賺到的節奏會被 stale 吐回去。
+                try:
+                    if int((await self._interaction_pressure(gid)).get("human_5m", 0) or 0) >= 12:
+                        need = min(need, 6.0)
+                except Exception:
+                    pass
                 deadline = time.time() + 75.0
                 while need and time.time() < deadline:
                     last = await self.db.last_bot_ts_by_group(gid) or 0.0
