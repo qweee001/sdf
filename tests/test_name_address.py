@@ -78,6 +78,20 @@ def test_variant_name_is_repaired_then_broken():
     assert w._fix_name_address("規範幫妹妹出頭超帥", GID) == "規范，幫妹妹出頭超帥"
 
 
+def test_abbreviated_handle_is_broken_too():
+    """15:01 實句「地暖我睏到小穴都癢」：群友叫他地暖，全名地暖鋪著，只喊前段也要斷。"""
+    w = _worker()
+    w._remember_speaker_name(GID, "地暖鋪著")
+    assert w._fix_name_address("地暖我睏到小穴都癢", GID) == "地暖，我睏到小穴都癢"
+
+
+def test_abbreviation_needs_two_chars():
+    """只撞一個字還是別人的名字時不動（免得把詞當人喊）。"""
+    w = _worker()
+    w._remember_speaker_name(GID, "地暖鋪著")
+    assert w._fix_name_address("地瓜好吃的嗎", GID) == "地瓜好吃的嗎"
+
+
 def test_single_char_variant_name_is_repaired():
     w = _worker()
     assert w._fix_name_address("範挺懂憐香惜玉嘛", GID) == "規范，挺懂憐香惜玉嘛"

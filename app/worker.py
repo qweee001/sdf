@@ -2968,6 +2968,21 @@ class AccountWorker:
 
         name = next((n for n in names if body.startswith(n)), "")
         if not name:
+            # 只喊暱稱前段（地暖鋪著→地暖）：15:01 實測「地暖我睏到」整串黏死，
+            # 取最長可用前綴、長度 ≥2 且不是別人的全名，後面的標點交給下面統一補。
+            for n in sorted(names, key=len, reverse=True):
+                if len(n) < 3:
+                    continue
+                for k in range(len(n) - 1, 1, -1):
+                    pref = n[:k]
+                    if pref in names:
+                        break
+                    if body.startswith(pref) and len(body) > k:
+                        name = pref
+                        break
+                if name:
+                    break
+        if not name:
             # 同音別字：等長、只差一個字、且那個前綴本身不是別人的名字
             for n in near_names:
                 pref = body[: len(n)]
