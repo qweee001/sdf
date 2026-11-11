@@ -3310,12 +3310,14 @@ class AccountWorker:
         一直成立，碎字等於被自己的煞車擋死（21:00–21:59 一小時只 3 次、落地 0 則）。
         改成看真人碎字比例，偏長時再加壓。
         """
-        p = 0.05 + 0.85 * self._human_frag_ratio(history)
+        p = 0.04 + 0.70 * self._human_frag_ratio(history)
         if flow_long:
             p = max(p, 0.25)
         if heat >= _HOT_BURST_HUMANS:
-            p *= 1.25
-        return min(p, 0.45)
+            p *= 1.15
+        # 11:00–11:47 實測：真人碎字 35%，水軍卻 53%（回覆與主動兩條都吃這個
+        # 機率，熱場再乘 1.25 直接頂到上限 0.45）。回檔到貼著真人走，上限 0.38。
+        return min(p, 0.38)
 
     @staticmethod
     def _frag_collapse(text: str, cap: int = 8) -> str:
