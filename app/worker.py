@@ -245,6 +245,28 @@ def _place_opening(text: str) -> str:
     return ""
 
 
+def _one_char_apart(a: str, b: str) -> bool:
+    """兩個等長字串只差一個字（同音別字判定：規范→規範、範）。"""
+    if len(a) != len(b) or a == b:
+        return False
+    return sum(1 for x, y in zip(a, b) if x != y) == 1
+
+
+def _same_glyph(a: str, b: str) -> bool:
+    """同一個字的繁／異體寫法（範／范）：走 s2t 正規化後相等。"""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    conv = getattr(text_guard, "_S2T_CONVERTER", None)
+    if conv is None:  # pragma: no cover - 缺套件
+        return False
+    try:
+        return conv.convert(a) == conv.convert(b)
+    except Exception:  # pragma: no cover
+        return False
+
+
 # 句型模式的字數帶（字元）。模式只換內容不夠：長度若仍走固定 15~45，
 # 三種模式在群友眼裡全是同一種長度模子，短碎永遠出不來。
 _STRUCT_BANDS: dict[str, tuple[int, int]] = {
@@ -2881,6 +2903,109 @@ class AccountWorker:
                 hits += 1
         return hits >= 2
 
+    # 名字後面接這些字＝名字自己就是主語，逗號可以不加（「森森在宣示主權」）。
+    _NAME_SUBJECT_NEXT = set("在還又都也就才卻妳你哥姊姐弟妹的是有不把跟和為")
+    # 名字前面是這些動詞＝名字當受詞（「聽森森講」），句中不必補逗號。
+    _NAME_OBJECT_PREV = set("聽問跟和對找叫說給讓被請像替帶學陪看約虧")
+    # 句中的名字後面接這些字＝在喊人（「萬英尺敢抱著」），前面要斷開。
+    _NAME_CALL_TAIL = set("敢要會快幫別來去想嗎嘛你妳啊耶")
+    _NAME_PUNCT = "，,、。！？!? 　~～…"
+
+    def _named_target_flood(
+        self, candidate: str, group_id: int, seconds: float = 30 * 60
+    ) -> str:
+        """同一個男群友被水軍連著點名：第三則之後硬擋。
+
+        `_group_attention_note` 只把「這人被輪爛了」寫進提示，模型照樣點名：
+        12:50:21／12:51:47／12:54:24 三則都在講森森，而森森當時正在跟鈴鐺對話，
+        四號變成場邊替他們轉播。提示層攔不住的就用字面擋。
+        """
+        if not group_id:
+            return ""
+        names = [n for n in self._speaker_names(int(group_id)) if len(n) >= 3]
+        if not names:
+            return ""
+        recent = self._cross_recent_texts(int(group_id), seconds)[-30:]
+        if len(recent) < 8:
+            return ""
+        hits: dict[str, int] = {}
+        for t in recent:
+            for n in names:
+                if n in t or n[-2:] in t:
+                    hits[n] = hits.get(n, 0) + 1
+        if not hits:
+            return ""
+        top, cnt = max(hits.items(), key=lambda kv: kv[1])
+        if cnt < 3:
+            return ""
+        body = str(candidate or "")
+        if top in body or top[-2:] in body:
+            return f"「{top}」半小時內已經被水軍點名 {cnt} 次，這則別再提他，講自己或換人"
+        return ""
+
+    def _fix_name_address(self, text: str, group_id: int, recent=None) -> str:
+        """喊人名卻沒斷句、或把群友暱稱寫成同形別字時就地補正（零模型成本）。
+
+        12:07:49 RICH「範挺懂憐香惜玉嘛」、12:08:30 小小「規範幫妹妹出頭超帥」——
+        本尊是「規范」，模型自動正規化成「規範／範」；12:37:22「華發害人家喝奶茶
+        差點噴出來」、12:39:07「請教超會哄欸」則是名字直接黏下一句，讀起來像名詞
+        卡在句子裡。三種都只動標點與名字本身，不動內容。
+        """
+        raw = str(text or "")
+        body = raw.lstrip(self._OPEN_STRIP)
+        if not body:
+            return raw
+        lead = raw[: len(raw) - len(body)]
+        names = [n for n in self._speaker_names(int(group_id or 0)) if len(n) >= 2]
+        if not names:
+            return raw
+        # 變體修補只在「剛講過話的人」裡找（同形字太容易誤中），全名相符則放寬到全部
+        if recent:
+            near = {str(x) for x in recent if x}
+            near_names = [n for n in names if n in near] or names
+        else:
+            near_names = names
+
+        name = next((n for n in names if body.startswith(n)), "")
+        if not name:
+            # 同音別字：等長、只差一個字、且那個前綴本身不是別人的名字
+            for n in near_names:
+                pref = body[: len(n)]
+                if len(pref) == len(n) and pref != n and pref not in names:
+                    if _one_char_apart(pref, n):
+                        name = n
+                        body = n + body[len(n):]
+                        break
+            # 只寫名字最後一個字的異體（範←范）。寫的如果是同一個字（發薪水）
+            # 就先不動，免得把「發薪水了」改成「華發，薪水了」。
+            if not name:
+                ch = body[:1]
+                for n in near_names:
+                    if len(n) < 2 or not ch or ch == n[-1] or ch in names:
+                        continue
+                    if ch in _COMMON_HEAD_CHARS or not _same_glyph(ch, n[-1]):
+                        continue
+                    name, body = n, n + body[1:]
+                    break
+        if name:
+            tail = body[len(name):]
+            if tail and tail[0] not in self._NAME_PUNCT and tail[0] not in self._NAME_SUBJECT_NEXT:
+                tail = "，" + tail
+            return lead + name + tail
+
+        # 句中卡名：前面不是動詞、後面接助動詞／問句＝在喊人，補一個逗號就通
+        for n in near_names:
+            idx = body.find(n, 1)
+            if idx < 0:
+                continue
+            prev, nxt = body[idx - 1], body[idx + len(n): idx + len(n) + 1]
+            if prev in self._NAME_PUNCT or prev in self._NAME_OBJECT_PREV:
+                continue
+            if not nxt or nxt not in self._NAME_CALL_TAIL:
+                continue
+            return lead + body[:idx] + "，" + body[idx:]
+        return raw
+
 
     def _opening_repeat_note(self, own_texts, group_id: int = 0) -> str:
         """動態統計自己近期起手詞：撞過的直接點名禁用，不寫死「笑死」「剛下班」清單。
@@ -4881,6 +5006,9 @@ class AccountWorker:
             body = str(candidate or "").lstrip(self._OPEN_STRIP)
             if any(body.startswith(n) for n in names):
                 return "連兩則先喊人名才講話，這則改成不點名的寫法"
+        flood = self._named_target_flood(candidate, int(group_id or 0))
+        if flood:
+            return flood
         # 慣用詞的判定最細，先跑：命中就回它，別被下面比較粗的密度規則蓋掉理由。
         idiom = self._idiom_reuse(candidate, own_texts, cross)
         if idiom:
@@ -7456,6 +7584,16 @@ class AccountWorker:
                     return
                 # 固定說法校正（找助理→聯絡助理），零模型成本
                 text = text_guard.fix_phrases(text)
+                # 喊人卻黏成一串、或把群友暱稱寫成同形別字（規范→規範），就地補正
+                try:
+                    _rows_n = await self.db.get_group_messages(int(event.chat_id), limit=20)
+                    _rec_n = self._target_names(_rows_n, limit=8)
+                except Exception:
+                    _rec_n = []
+                _fixed = self._fix_name_address(text, int(event.chat_id), _rec_n)
+                if _fixed != text:
+                    self._pcount("name_address")
+                    text = _fixed
                 # 兩段式模子壓不住時用物理方式斷：語流已經連三則「先報自己在幹嘛，
                 # 逗號後才對人講」，提示詞寫了模型照寫，這裡直接把逗號前那段剪掉。
                 # 只剪前情、留後半句，對象與自曝都還在後半句（21:00–21:25 六則
@@ -11985,6 +12123,11 @@ class AccountWorker:
                     # 依主人指示：精確控制 70% 概率純文字，30% 概率允許保留 emoji 表情
                     if random.random() >= _EMOJI_ALLOW_PROBABILITY:
                         topic = self._strip_emoji(topic)
+                    # 喊人卻黏成一串、或把群友暱稱寫成同形別字：就地補正
+                    _fixed_p = self._fix_name_address(topic, int(group_id), names_p)
+                    if _fixed_p != topic:
+                        self._pcount("name_address")
+                        topic = _fixed_p
                     # 兩段式模子同樣在主動路徑斷一次：連三則「先報自己在幹嘛，逗號後
                     # 才對人講」就把前情剪掉（21:00–21:25 六則是同一件睡前事換字）。
                     if self._anchor_flow(int(group_id)) >= 3:
