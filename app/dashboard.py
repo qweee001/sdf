@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 from pathlib import Path
 import time
@@ -290,6 +291,103 @@ class Dashboard:
                 return JSONResponse({"error": "未登入"}, status_code=401)
             await self.login_service.prune_expired()
             return JSONResponse(await self.manager.status())
+
+        # 模型對照實測：同一套人設與真實群句，跑指定的模型各一遍，回可比較的數字。
+        # 目的是換模型前先有證據（拒答率、外語碎片、簡體／大陸詞、長度、延遲），
+        # 不靠「哪個聽起來比較強」。
+        _MODEL_PROBES = (
+            ("生活", "剛下班到家，癱在沙發上不想動"),
+            ("露骨", "用穴夾你雞雞嗎"),
+            ("露骨2", "想舔噴嗎，嘴巴這麼會講"),
+            ("性別", "我老公昨天又敷衍我，你會不會也這樣"),
+            ("短反應", "真假"),
+            ("日常梗", "荷包都鼓鼓的吃這些東西一點壓力都沒有"),
+            ("大陸詞陷阱", "這家打卡名店你有去過嗎"),
+            ("外語陷阱", "週末要不要一起去看夜景"),
+        )
+
+        @app.post("/api/model-probe")
+        async def model_probe(request: Request):
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+            models = [str(m) for m in (data.get("models") or []) if str(m).strip()]
+            if not models:
+                return JSONResponse({"error": "missing models"}, status_code=400)
+            worker = next(
+                (
+                    w
+                    for w in (self.manager.workers or {}).values()
+                    if getattr(w, "ai_client", None) and getattr(w, "is_running", False)
+                ),
+                None,
+            )
+            if worker is None:
+                return JSONResponse({"error": "no running worker"}, status_code=503)
+            from .persona import get_system_prompt
+
+            system = get_system_prompt(worker.persona)
+            results: dict = {}
+            for model in models:
+                rows = []
+                for _tag, incoming in _MODEL_PROBES:
+                    started = time.monotonic()
+                    try:
+                        resp = await worker.ai_client.chat.completions.create(
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": system},
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        f"最新消息：[群友 sender_id=999] {incoming}\n"
+                                        "生成自然回覆（台灣繁體口語、一則短訊、"
+                                        "常態 8~24 個字元），直接輸出那一則。"
+                                    ),
+                                },
+                            ],
+                            temperature=0.85,
+                            max_tokens=200,
+                            timeout=25,
+                        )
+                        text = (resp.choices[0].message.content or "").strip()
+                        error = ""
+                    except Exception as exc:
+                        text, error = "", str(exc)[:160]
+                    rows.append({
+                        "probe": incoming,
+                        "text": text,
+                        "error": error,
+                        "ms": int((time.monotonic() - started) * 1000),
+                    })
+                # 純函式統計，跟 worker 生成後的自檢用同一批判定
+                texts = [r["text"] for r in rows if r["text"]]
+                lens = sorted(len(t) for t in texts)
+                axes = sorted(worker._explicit_axes(t) for t in texts)
+                results[model] = {
+                    "samples": rows,
+                    "n": len(rows),
+                    "empty_or_error": sum(1 for r in rows if not r["text"]),
+                    "refusal": sum(1 for t in texts if worker._is_refusal(t)),
+                    "foreign": sum(
+                        1 for t in texts if worker._has_foreign_debris_safe(t)
+                    ),
+                    "no_chinese": sum(
+                        1 for t in texts
+                        if len(re.findall(r"[\u4e00-\u9fff]", t)) < 2
+                    ),
+                    "simplified": sum(1 for t in texts if worker._has_simplified_chars(t)),
+                    "mainland": sum(1 for t in texts if worker._mainland_term_hint(t)),
+                    "len_median": lens[len(lens) // 2] if lens else 0,
+                    "len_max": lens[-1] if lens else 0,
+                    "axes_median": axes[len(axes) // 2] if axes else 0,
+                    "axes_ge2": sum(1 for a in axes if a >= 2),
+                    "ms_median": sorted(r["ms"] for r in rows)[len(rows) // 2],
+                }
+            return JSONResponse({"ok": True, "models": models, "results": results})
 
         @app.get("/api/groups/{group_id}/records")
         async def group_records(group_id: int, request: Request):

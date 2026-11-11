@@ -302,3 +302,14 @@ def test_root_serves_v2_shell_and_classic_keeps_old_console():
         assert classic.status_code == 200
         assert "水軍調度台" in classic.text
         assert "status" in client.get("/health").text
+
+
+def test_model_probe_requires_session_and_models():
+    """模型對照端點：沒登入 401、沒帶 models 400、沒有可用 worker 503。"""
+    with _make_dashboard() as client:
+        assert client.post("/api/model-probe", json={"models": ["x"]}).status_code == 401
+        client.post("/api/login", json={"username": "admin", "password": "secret123"})
+        assert client.post("/api/model-probe", json={}).status_code == 400
+        assert (
+            client.post("/api/model-probe", json={"models": ["x"]}).status_code == 503
+        )

@@ -751,8 +751,40 @@ class AccountManager:
                     self.last_human_activity.get(int(gid), 0) or 0
                 ) if (worker and (gid := _first_selected_group(acc))) else 0.0,
             })
+        # 兩個驗收 KPI（近 10 分鐘水軍佔比／近 30 則單則露骨軸中位數）：
+        # 沒有現值就只能靠感覺調，調完也不知道有沒有變好。
+        traffic_kpi: dict = {}
+        try:
+            gid = 0
+            for acc in await self.db.list_accounts():
+                gid = _first_selected_group(acc)
+                if gid:
+                    break
+            if gid:
+                rows = await self.db.group_traffic_window(int(gid), 600.0)
+                total_rows = len(rows or [])
+                bots = sum(1 for r in rows or [] if str(r.get("role")) == "assistant")
+                traffic_kpi["water_share_10m"] = (
+                    round(bots / total_rows, 3) if total_rows else None
+                )
+                traffic_kpi["msgs_10m"] = total_rows
+                hist = await self.db.get_group_messages(int(gid), limit=60)
+                axes = [
+                    AccountWorker._explicit_axes(str(r.get("content") or ""))
+                    for r in hist
+                    if str(r.get("role")) == "assistant"
+                ][-30:]
+                if axes:
+                    axes.sort()
+                    traffic_kpi["explicit_axis_median_30"] = axes[len(axes) // 2]
+                    traffic_kpi["explicit_axis_ge2_30"] = round(
+                        sum(1 for a in axes if a >= 2) / len(axes), 3
+                    )
+        except Exception:
+            traffic_kpi = traffic_kpi or {}
         return {
             "accounts": accounts,
+            "traffic_kpi": traffic_kpi,
             "reply_audit": reply_audit,
             "total": len(accounts),
             "running": sum(1 for a in accounts if a["is_running"]),
