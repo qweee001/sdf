@@ -1546,6 +1546,25 @@ class Database:
         )
         return [str(row["content"]) for row in await cursor.fetchall()]
 
+    async def bot_msgs_since(
+        self, group_id: int, seconds: float, exclude_user_id: int | None = None
+    ) -> int:
+        """近 N 秒同群水軍發言則數（可排除自己）：撞拍錯峰用。"""
+        cutoff = time.time() - float(seconds)
+        sql = (
+            "SELECT COUNT(*) AS n FROM ("
+            "SELECT sender_id, message_id FROM messages "
+            "WHERE group_id = ? AND role = 'assistant' AND timestamp >= ? "
+            "GROUP BY sender_id, message_id)"
+        )
+        params: list = [int(group_id), float(cutoff)]
+        if exclude_user_id:
+            sql = sql.replace("GROUP BY", "AND sender_id != ? GROUP BY")
+            params.append(int(exclude_user_id))
+        cursor = await self._c.execute(sql, tuple(params))
+        row = await cursor.fetchone()
+        return int((row["n"] if row else 0) or 0)
+
     async def last_bot_ts_by_group(self, group_id: int) -> float:
         """同群最後一則水軍發言的時間；拿不到回 0。
 
@@ -1730,7 +1749,11 @@ class Database:
                     )
                     cap_10m = max(8, int(human_5m * 0.6))
                     tight = deficit < 0.2
-                    if stale:
+                    # 群級真空：五分鐘沒有任何回覆送出、真人卻還在講 → 全部預算失效。
+                    vacuum = bool(last_sent) and human_5m >= 3 and now - last_sent >= 300
+                    if vacuum:
+                        pass
+                    elif stale:
                         if claimed_10m >= max(12, cap_10m):
                             await event_db.rollback()
                             return False

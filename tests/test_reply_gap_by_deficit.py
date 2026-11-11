@@ -208,3 +208,45 @@ def test_soft_other_is_discounted_not_free(monkeypatch):
     soft = _passes(True)
     assert soft < hard
     assert soft > 0
+
+
+def test_starved_bypasses_hot_budget(monkeypatch):
+    """熱場 5 分鐘額度用光、自己 7 分鐘沒講話 → 回場保底要能穿過熱場預算。"""
+    w = _worker()
+    _stub(w, monkeypatch, bots=30, total=40, others=[time.time() - 50], mine_age=420)
+
+    async def _pressure(_gid):
+        return {"human_5m": 30, "ordinary_claimed_20s": 0, "ordinary_claimed_5m": 99, "human_sent_5m": 99}
+
+    monkeypatch.setattr(w, "_interaction_pressure", _pressure)
+
+    def _allowed() -> int:
+        n = 0
+        for message_id in range(1, 21):
+            event = _event()
+            event.id = message_id
+            if asyncio.run(w._ordinary_reply_allowed(event)):
+                n += 1
+        return n
+
+    # 熱場預算若還擋著，這裡會是 0；星號回場必須至少放行一則
+    assert _allowed() >= 1
+
+
+def test_group_vacuum_rejoins_after_five_minutes(monkeypatch):
+    """整群五分鐘沒有水軍、真人還在講 → 真空回場，連 20 秒群級鎖都讓開。"""
+    w = _worker()
+    _stub(w, monkeypatch, bots=2, total=40, others=[time.time() - 400], mine_age=420)
+
+    async def _pressure(_gid):
+        return {"human_5m": 6, "ordinary_claimed_20s": 1, "ordinary_claimed_5m": 20, "human_sent_5m": 20}
+
+    monkeypatch.setattr(w, "_interaction_pressure", _pressure)
+    allowed = 0
+    for message_id in range(1, 21):
+        event = _event()
+        event.id = message_id
+        if asyncio.run(w._ordinary_reply_allowed(event)):
+            allowed += 1
+    assert allowed >= 1
+    assert int(w.stats.get("vacuum_rejoin", 0)) >= 1

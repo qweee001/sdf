@@ -866,6 +866,10 @@ _FOREIGN_SCRIPTS = (
     ("\\u0900-\\u097f", "devanagari"),
 )
 
+_LATIN_OK = frozenset(
+    "ok okay ig fb line tg dc app xd mv ktv mrt ub sir sr nt tv gto cup chen rich baby".split()
+)
+
 def is_foreign_debris(text: str) -> bool:
     """外語碎片偵測：混進假名／韓文／孟加拉文／西里爾，或整串拉丁字母。
 
@@ -882,11 +886,15 @@ def is_foreign_debris(text: str) -> bool:
         if re.search(f"[{rng}]", text):
             return True
     latin = len(re.findall(r"[A-Za-zÀ-ɏ]", text))
-    # 4 個字母起算：群裡真的有人叫「方sir」，"sir" 三個字母會誤殺。
-    if latin >= 4:
-        compact = re.sub(r"\s+", "", text)
-        if compact and latin / len(compact) >= 0.25:
-            return True
+    # 白名單優先：群裡本來就講的英文（sir／baby／IG／app）照放。名單外的 2 字母以上
+    # 拉丁詞一律算模型跑掉——17:27「想 try改滑一點嘛」、17:32「幹嘛 referrals」都是。
+    tokens = re.findall(r"[A-Za-zÀ-ɏ]{2,}", text)
+    if any(tok.lower() not in _LATIN_OK for tok in tokens):
+        return True
+    # 名單詞組成的長串（整句幾乎沒有中文）同樣是跑掉，短句尾綴不算。
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
+    if latin >= 6 and cjk < 3:
+        return True
     return False
 
 def normalized_reply(text: str) -> str:
