@@ -1,0 +1,191 @@
+"""露骨尺度通道：決策檔位要能決定長相、色句要吃到現場色度、冷卻要分階。
+
+實測（11-11 15:00–18:00 桃花源）：2.9 小時水軍 61 則，**單則露骨詞最多 1 個、
+0 則有兩個軸以上**，而現場真人早就在講「用穴夾你雞雞嗎」「可以舔舔噴嗎」。
+根因是決策層的 flirty 只變成提示文字、長度由 random 決定，加上冷卻規則在
+最色的時候下令「絕對禁止再聊性」。這裡把三件事釘住：
+
+1. flirty ≥2 時不准再出碎字／短句
+2. 露骨節拍只看露骨軸數（部位／動作／反應），不看字數
+3. 冷卻分兩階：真人最後一句還在講色＝只降半檔
+"""
+
+import random
+import time
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+
+from app.worker import AccountWorker, _STRUCT_BANDS
+
+GID = -1002
+
+
+def _worker(name: str = "小小") -> AccountWorker:
+    config = SimpleNamespace(
+        ai_model="test-model",
+        ai_temperature=0.8,
+        ai_max_tokens=200,
+        ai_timeout=17,
+        ai_disable_thinking=True,
+        memory_max_messages=10,
+        min_typing_delay=0,
+        max_typing_delay=0,
+        media_enabled=True,
+        media_max_input_bytes=8 * 1024 * 1024,
+        decision_enabled=False,
+    )
+    w = AccountWorker(
+        account_id="w1",
+        session_key="k",
+        tg_api_id=1,
+        tg_api_hash="h",
+        ai_client=cast(Any, None),
+        db=cast(Any, SimpleNamespace()),
+        config=config,
+        managed_ids=set(),
+        on_status_change=lambda *_a, **_k: None,
+        selected_groups=[GID],
+    )
+    w.persona = {"name": name, "gender": "女", "age": 22}
+    for n in ("規范", "縍羣 怠", "小天後", "RICH"):
+        w._remember_speaker_name(GID, n)
+    return w
+
+
+def _rows(texts, role="user", step=20.0):
+    now = time.time()
+    return [
+        {"role": role, "content": t, "timestamp": now - (len(texts) - i) * step}
+        for i, t in enumerate(texts)
+    ]
+
+
+def _event(text="用穴夾你雞雞嗎", flirty=None):
+    ev = SimpleNamespace(
+        chat_id=GID,
+        sender_id=111,
+        raw_text=text,
+        mentioned=False,
+        is_reply=False,
+        id=9001,
+        media=None,
+    )
+    if flirty is not None:
+        ev._sdf_decision = {"action": "reply", "flirty": flirty}
+    return ev
+
+
+# ---- 1. 露骨軸計數 ------------------------------------------------------
+
+
+def test_explicit_axes_counts_part_act_react_once_each():
+    w = _worker()
+    assert w._explicit_axes("") == 0
+    assert w._explicit_axes("真假") == 0
+    # 只有一個軸
+    assert w._explicit_axes("小穴") == 1
+    assert w._explicit_axes("插") == 1
+    # 部位＋反應：兩軸（「好濕」已經有身體反應，不是只有點名器官）
+    assert w._explicit_axes("小穴好濕") == 2
+    # 部位＋動作：兩軸
+    assert w._explicit_axes("小穴被你插到") == 2
+    # 部位＋動作＋反應：三軸
+    assert w._explicit_axes("小穴被插到發抖") == 3
+
+
+def test_human_explicit_ratio_reads_the_field_not_own_lines():
+    w = _worker()
+    hot = _rows(["用穴夾你雞雞嗎", "想舔噴", "好濕"] * 4)
+    cold = _rows(["真假", "吃飽沒", "下班了"] * 4)
+    assert w._human_explicit_ratio(hot) > 0.8
+    assert w._human_explicit_ratio(cold) == 0.0
+    assert w._human_explicit_ratio(_rows(["真假"])) == 0.0
+
+
+# ---- 2. 節拍機率 --------------------------------------------------------
+
+
+def test_beat_probability_follows_field_and_flirty():
+    w = _worker()
+    assert w._beat_probability(0.0, 0) == pytest.approx(0.0)
+    low = w._beat_probability(0.2, 0)
+    mid = w._beat_probability(0.2, 2)
+    top = w._beat_probability(0.6, 3)
+    assert low < mid < top
+    # 上限 0.45：超過就變成四個人輪流演講
+    assert w._beat_probability(1.0, 3) == pytest.approx(0.45)
+
+
+# ---- 3. 決策檔位覆蓋隨機 ------------------------------------------------
+
+
+def test_flirty_two_kills_frag_and_short(monkeypatch):
+    """他明確在撩你（2/3 檔）時，這則不准是碎字或短句。"""
+    w = _worker()
+    history = _rows(["用穴夾你雞雞嗎", "想舔噴", "好濕", "夾得住嗎"])
+    ev = _event(flirty=3)
+    monkeypatch.setattr(random, "random", lambda: 0.05)  # 基礎 roll 會落在 short
+    w._build_directors_note(ev, history, own_texts=["咬回去"], last_human="用穴夾你雞雞嗎")
+    assert w._struct_mode in ("beat", "dirty")
+
+
+def test_flirty_zero_turns_beat_back_into_life_scene(monkeypatch):
+    w = _worker()
+    history = _rows(["吃飽沒", "真假", "下班了", "好累"])
+    ev = _event(text="吃飽沒", flirty=0)
+    monkeypatch.setattr(random, "random", lambda: 0.95)  # 基礎 roll 會落在 beat
+    w._build_directors_note(ev, history, own_texts=["笑死"], last_human="吃飽沒")
+    assert w._struct_mode == "scene"
+
+
+def test_beat_cap_is_not_crushed_by_human_median():
+    """真人中位 8 字時，節拍仍要拿到 45 字的額度，否則三段擠不進去。"""
+    w = _worker()
+    w._struct_mode = "beat"
+    w._human_ref = 8
+    w._len_tail = False
+    assert w._struct_char_cap(90) == _STRUCT_BANDS["beat"][1]
+
+
+# ---- 4. 冷卻分階 --------------------------------------------------------
+
+
+def test_cooldown_half_when_last_human_is_still_explicit():
+    w = _worker()
+    history = _rows(["小穴好濕", "想被插穴", "舔噴嗎", "好硬", "騷穴夾緊"])
+    note = w._topic_heat_hint(GID, history)
+    assert "降半檔" in note
+    assert "絕對禁止" not in note
+
+
+def test_cooldown_hard_when_field_already_moved_on():
+    w = _worker()
+    history = _rows(["小穴好濕", "舔噴", "好硬", "騷穴夾緊", "吃飽沒", "今天好累"])
+    note = w._topic_heat_hint(GID, history)
+    assert "絕對禁止" in note
+
+
+# ---- 5. 軟性退回 --------------------------------------------------------
+
+
+def test_soft_veto_is_marked_and_hard_veto_is_not():
+    w = _worker()
+    w._record_sent_text(GID, "內衣貼在胸口快悶死")
+    soft = w._local_veto("胸口好燙", ["笑死"], "真假", GID)
+    assert w._split_veto(soft)[1] is True
+
+    w2 = _worker()
+    hard = w2._local_veto("他剛說想吃火鍋", [], "他剛說想吃火鍋", GID)
+    assert hard
+    assert w2._split_veto(hard)[1] is False
+
+
+# ---- 6. 名字字形距離 ----------------------------------------------------
+
+
+def test_garbled_two_char_nickname_is_repaired():
+    """16:56 實測「靐羣莫以為舔一句就有獎」：本尊叫「縍羣 怠」。"""
+    w = _worker()
+    assert w._fix_name_address("靐羣莫以為舔一句就有獎", GID) == "縍羣，莫以為舔一句就有獎"

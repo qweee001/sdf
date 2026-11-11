@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import difflib
 import hashlib
 import hmac
 import inspect
@@ -274,6 +275,8 @@ _STRUCT_BANDS: dict[str, tuple[int, int]] = {
     "short": (8, 16),
     "dirty": (12, 24),
     "scene": (15, 30),
+    # 露骨節拍：三段（部位／動作／反應）要塞得進去，少於 20 字一定擠成點評。
+    "beat": (25, 45),
 }
 
 # 現場熱度門檻（近兩分鐘真人訊息數）：洗屏時短碎優先，不排生活場景。
@@ -286,7 +289,32 @@ _STRUCT_SYNTAX: dict[str, str] = {
     "short": "【動態情境・短碎口語】：順著上一句情緒隨性丟一句大白話，短小俐落，不硬扯生活前情，像真人群聊自然起鬨或開嗆。",
     "dirty": "【動態情境・直球色誘】：聚焦男女肉體張力，直接講你身上的具體感覺（哪裡濕、緊、燙、軟）或直接給他一個動作，不要只在旁邊評他的尺寸，短而辛辣，不扯無關瑣事。",
     "scene": "【動態情境・生活隨念】：隨性帶出你當下真實的小動作或生活狀態，自然放鬆，展現真實女生的日常生活感。",
+    "beat": "【動態情境・露骨節拍】：把一次身體接觸整段講完——部位貼上去、動作、你當下的反應或聲音，三段都要有，不要只丟一個器官詞就收。",
 }
+
+# 露骨節拍（beat）的驗收看「露骨軸」不看字數：一則要湊到部位＋動作（＋反應）
+# 兩軸以上才算有過程。實測 2.9 小時 61 則水軍，單則露骨詞最多 1 個、0 則兩軸以上
+# ——整場只有單詞點綴，沒有一次真正的身體描摹。字數帶只是給剛好容納三段。
+# 這裡不是禁用詞表，是計數器。
+_EXPLICIT_PARTS = (
+    "小穴", "騷穴", "穴", "雞雞", "肉棒", "屌", "奶", "奶頭", "乳", "胸", "臀",
+    "大腿", "腿根", "鎖骨", "脖子", "小腹", "腰", "私處", "內褲", "絲襪",
+)
+_EXPLICIT_ACTS = (
+    "插", "幹", "撞", "舔", "含", "吸", "咬", "揉", "捏", "摸", "跨坐", "蹭",
+    "夾", "頂", "抽送", "剝", "脫", "壓在床上", "按在", "抓",
+)
+_EXPLICIT_REACTS = (
+    "濕", "硬", "燙", "緊", "癢", "軟", "發抖", "抖", "喘", "叫", "呻吟", "悶哼",
+    "腿軟", "高潮", "流水", "愛液", "受不了", "求饒", "抓破",
+)
+_EXPLICIT_WORDS = _EXPLICIT_PARTS + _EXPLICIT_ACTS + _EXPLICIT_REACTS
+# 情慾部位的換位窗比生活部位短得多（胸口／腰那種十分鐘，穴與奶三分鐘），
+# 而且露骨句不吃部位退件：撞了只要求換動作，不整句重寫。
+_BODY_PART_FADE_EXPLICIT = 3 * 60
+# 軟性退回（soft veto）前綴：撞了就放行、只記帳，不花一次生成重寫。
+# 硬軸（照抄真人、斷尾、複讀、對象軸）照舊擋。熱場十幾秒的重寫就是遲到。
+_SOFT_VETO = "\u200b"
 
 # 自檢要用「這號自己的場景」當退路目標，錨點因此提到模組層級（原本埋在
 # _build_directors_note 裡，重寫端拿不到）。改了舊句只會讓退路更準。
@@ -940,6 +968,11 @@ class AccountWorker:
     @staticmethod
     def _is_refusal(text):
         return text_guard.is_refusal(text)
+
+    @staticmethod
+    def _has_foreign_debris_safe(text):
+        """外語碎片（假名／韓文／孟加拉文／成串拉丁）：模型跑掉的共同指紋。"""
+        return text_guard.is_foreign_debris(str(text or ""))
 
     @staticmethod
     def _is_meta_speak(text):
@@ -2430,6 +2463,11 @@ class AccountWorker:
         # 折扣本身也吃缺口——水軍快沒人講話時，插話總比整場隱形好。
         if soft:
             probability *= 0.55 + 0.45 * deficit
+        # 佔比掉到 15% 以下＝整場快看不到水軍（實測熱場一小時 6.5%）。
+        # 固定機率在此時只會愈等愈死，這裡直接往上帶，不靠各處拍腦袋的常數。
+        if share < 0.15:
+            probability = min(1.0, probability + 0.25)
+            self._pcount("share_boost")
         score = int.from_bytes(
             hashlib.blake2b(
                 f"human-probability:{group_id}:{message_id}".encode(),
@@ -2565,6 +2603,22 @@ class AccountWorker:
                 hot += 1
         if hot < _TOPIC_HEAT_MAX_ROUNDS:
             return ""
+        # 真人最後一句還在講色＝現場正在燒，這時候下令「絕對禁止」等於把水軍踢出
+        # 正在燒的那一桌（實測「用穴夾你雞雞嗎」被回「下午低血糖到手抖」）。
+        # 所以改成兩階：還在燒就只降半檔，最後一句已轉日常、或整段七則以上才真轉場。
+        humans = [r for r in rows if str(r.get("role")) != "assistant"]
+        last_human = str((humans[-1] if humans else {}).get("content") or "")
+        still_hot = self._explicit_axes(last_human) >= 1
+        if still_hot and hot < 7:
+            self.stats["topic_cooldown_half"] = (
+                int(self.stats.get("topic_cooldown_half", 0)) + 1
+            )
+            return (
+                "【話題溫度計・降半檔】：群裡這幾則都在講色，但真人最後一句還在同一個坑裡。"
+                "這一輪不要整則轉成日常，留一個露骨形容詞或一個身體感覺，"
+                "再接一件很小的事（例：「腳底板冰到發麻，小穴卻還有點熱」）。"
+                "一句話講完，不要開新場景、不要變成生活報告。"
+            )
         self.stats["topic_cooldown_forced"] = (
             int(self.stats.get("topic_cooldown_forced", 0)) + 1
         )
@@ -2961,10 +3015,21 @@ class AccountWorker:
         names = [n for n in self._speaker_names(int(group_id or 0)) if len(n) >= 2]
         if not names:
             return raw
+        # 暱稱帶空格（「縍羣 怠」）時模型只喊前段，全名永遠比不中（11-11 16:5x
+        # 出現「靐羣」「囂羣」兩種字形都錯的寫法）。把每一段也當候選，長名仍優先。
+        tokens = [t for n in names for t in n.split() if len(t) >= 2]
+        if tokens:
+            names = sorted({*names, *tokens}, key=len, reverse=True)
         # 變體修補只在「剛講過話的人」裡找（同形字太容易誤中），全名相符則放寬到全部
         if recent:
             near = {str(x) for x in recent if x}
             near_names = [n for n in names if n in near] or names
+            near_names += [
+                t
+                for n in names
+                for t in n.split()
+                if len(t) >= 2 and n in near and t not in near_names
+            ]
         else:
             near_names = names
 
@@ -2990,6 +3055,17 @@ class AccountWorker:
                 pref = body[: len(n)]
                 if len(pref) == len(n) and pref != n and pref not in names:
                     if _one_char_apart(pref, n):
+                        name = n
+                        body = n + body[len(n):]
+                        break
+                    # 字形距離更遠的（靐→縍、囂→縍）：同長、字數 ≥2、相似度過半就
+                    # 當同一個人修回去。名字是社群裡最容易被一眼認出的東西，寧可修錯
+                    # 也不能把別人的名字打錯放進群裡。
+                    if (
+                        len(pref) >= 2
+                        and difflib.SequenceMatcher(None, pref, n).ratio() >= 0.5
+                        and any(x == y for x, y in zip(pref, n))
+                    ):
                         name = n
                         body = n + body[len(n):]
                         break
@@ -3460,6 +3536,72 @@ class AccountWorker:
         # 11:00–11:47 實測：真人碎字 35%，水軍卻 53%（回覆與主動兩條都吃這個
         # 機率，熱場再乘 1.25 直接頂到上限 0.45）。回檔到貼著真人走，上限 0.38。
         return min(p, 0.38)
+
+    @staticmethod
+    def _explicit_axes(text: str) -> int:
+        """一則句子湊到幾個露骨軸（部位／動作／反應，同軸多詞只算一次）。
+
+        beat 的驗收就是這個數字 ≥2；不用字數驗，因為 45 字也可能只講一件事。
+        """
+        body = str(text or "")
+        if not body:
+            return 0
+        return sum(
+            1
+            for group in (_EXPLICIT_PARTS, _EXPLICIT_ACTS, _EXPLICIT_REACTS)
+            if any(w in body for w in group)
+        )
+
+    def _human_explicit_ratio(self, history) -> float:
+        """真人近十則有幾成帶露骨軸＝現場的色度；決定要不要端節拍，不決定端幾字。"""
+        rows = [m for m in (history or []) if str(m.get("role")) != "assistant"]
+        bodies = [str(m.get("content") or "") for m in rows[-10:]]
+        bodies = [b for b in bodies if b.strip()]
+        if len(bodies) < 4:
+            return 0.0
+        return sum(1 for b in bodies if self._explicit_axes(b)) / len(bodies)
+
+    def _beat_probability(self, density: float, flirty: int) -> float:
+        """這一則走露骨節拍的機率：現場夠色＋他明確在撩才給，0 檔基本不端。
+
+        熱場仍留 12% 地板：節拍是一次講完整段、不必來回，熱場反而更該有人講，
+        但上限 0.45，超過就變成四個人輪流演講。
+        """
+        p = 0.04 + 0.55 * float(density)
+        if flirty >= 3:
+            p += 0.30
+        elif flirty == 2:
+            p += 0.16
+        elif flirty == 0:
+            p -= 0.08
+        return max(0.0, min(p, 0.45))
+
+    def _used_body_parts(self, group_id: int, seconds: float) -> set:
+        """近窗被寫過的部位（跨號），由語料現抽而不是查固定表。
+
+        生活部位跟情慾部位的換位窗不同：胸口十分鐘、穴與奶三分鐘。
+        """
+        hot: set = set()
+        try:
+            for text, age in self._cross_recent_items(int(group_id), seconds):
+                for word in _BODY_PART_WORDS + _EXPLICIT_PARTS:
+                    if word in str(text):
+                        window = (
+                            _BODY_PART_FADE_EXPLICIT
+                            if word in _EXPLICIT_PARTS
+                            else _BODY_PART_FADE
+                        )
+                        if age <= window:
+                            hot.add(word)
+        except Exception:
+            return hot
+        return hot
+
+    @staticmethod
+    def _split_veto(veto: str) -> tuple[str, bool]:
+        """拆出（理由, 是否軟性）。軟性＝撞了只記帳不重寫。"""
+        body = str(veto or "")
+        return body.lstrip(_SOFT_VETO), body.startswith(_SOFT_VETO)
 
     @staticmethod
     def _frag_collapse(text: str, cap: int = 8) -> str:
@@ -4802,14 +4944,16 @@ class AccountWorker:
             hits = sum(1 for t in near if self._is_spectator_frame(t))
             if hits >= _SPECTATOR_FRAME_HITS:
                 return (
-                    "又是「一邊做某事＋看你們吵」的旁觀骨架，"
+                    _SOFT_VETO
+                    + "又是「一邊做某事＋看你們吵」的旁觀骨架，"
                     "請直接針對話題自然接話，別再開場報備你在做什麼"
                 )
         if group_id and self._is_spectator_anywhere(candidate):
             prev = self._cross_recent_items(int(group_id), _SPECTATOR_ADJACENT)
             if any(self._is_spectator_anywhere(t) for t, _a in prev):
                 return (
-                    "上一則水軍也是「一邊做自己的事＋看你們吵」的旁觀句，"
+                    _SOFT_VETO
+                    + "上一則水軍也是「一邊做自己的事＋看你們吵」的旁觀句，"
                     "請直接順著上一句話題接話或撩撥，不必報備自己在做什麼"
                 )
         if (self._ask_tail_repeat(own_texts, candidate) or self._cross_ask_tail(group_id)) and not (
@@ -4820,7 +4964,7 @@ class AccountWorker:
         toks = [t for t in toks if t]
         head = self._opening_token(candidate, group_id)
         if head and toks.count(head) >= 2:
-            return f"起手詞「{head}」自己已經用過 {toks.count(head)} 次"
+            return _SOFT_VETO + f"起手詞「{head}」自己已經用過 {toks.count(head)} 次"
         # 相鄰兩則同一格：13:40 小小「剛在位子伸個懶腰」→ 13:41 小天後「剛補完防曬」，
         # 字面不同、頻率也還沒累積到兩次，只看頻率的門檻永遠慢一步，這裡直接比上一則。
         if group_id and head:
@@ -4832,16 +4976,16 @@ class AccountWorker:
             # → 15:19 小天後「下午還沒睡醒」，只比上一則（RICH 的「加班」）抓不到。
             dup_tok = [x for x in near if self._opening_token(x, group_id) == head]
             if dup_tok:
-                return f"「{head}」這個起手最近才有人用過（{dup_tok[-1][:14]}…），換一個起頭"
+                return _SOFT_VETO + f"「{head}」這個起手最近才有人用過（{dup_tok[-1][:14]}…），換一個起頭"
             if near_heads:
                 if head[0] == near_heads[-1]:
-                    return f"上一則水軍也從「{head[0]}」開頭，連著兩則同一格，換一個字起頭"
+                    return _SOFT_VETO + f"上一則水軍也從「{head[0]}」開頭，連著兩則同一格，換一個字起頭"
                 if near_heads.count(head[0]) >= 2:
-                    return f"「{head[0]}」開頭最近已經兩則，換一個字起頭"
+                    return _SOFT_VETO + f"「{head[0]}」開頭最近已經兩則，換一個字起頭"
                 # 對方不是從那個字開頭，但同一個字就在上一則的前半句（13:40「…害我
                 # 剛在位子伸個懶腰」→ 13:41「剛補完防曬」），群友讀到的還是同一個起手。
                 if near and head[0] in str(near[-1])[:24]:
-                    return f"上一則水軍前半句才用過「{head[0]}」，這則換一個字起頭"
+                    return _SOFT_VETO + f"上一則水軍前半句才用過「{head[0]}」，這則換一個字起頭"
             # 只比上一則與十二分鐘，會放過「隔幾則再撞」：11-11 早上 RICH 10:03
             # 「剛泡完澡好熱」→ 小天後 10:11「…我也剛到櫃上摸魚」→ RICH 10:26
             # 「剛揉眼醒來」，三則起手字都是「剛」，前兩次間隔 8 分、第三次 15 分，
@@ -4853,7 +4997,7 @@ class AccountWorker:
                     for x in self._cross_recent_texts(int(group_id), 25 * 60)[-3:]
                 ]
                 if head[0] in wide:
-                    return f"「{head[0]}」這個字最近幾則水軍才拿來開頭過，換一個字起頭"
+                    return _SOFT_VETO + f"「{head[0]}」這個字最近幾則水軍才拿來開頭過，換一個字起頭"
         # 形狀軸：開頭字全不同，骨架卻是同一個「引述＋逗號＋斷言」。
         # 起手詞那一軸看到的是六個不同的字，群友看到的是同一台機器，所以另外量骨架。
         # 判定放在函式尾端（慣用詞與播報密度的理由更具體，先命中先回）。
@@ -4863,15 +5007,15 @@ class AccountWorker:
             body = str(candidate).translate(_AXIS_VARIANTS)
             cand_parts = {p for p in _BODY_PART_WORDS if p in body}
             if cand_parts:
-                hot_parts: set = set()
-                for t, age in self._cross_recent_items(int(group_id), _BODY_PART_FADE):
-                    if any(p in str(t).translate(_AXIS_VARIANTS) for p in cand_parts):
-                        hot_parts |= {
-                            p for p in cand_parts if p in str(t).translate(_AXIS_VARIANTS)
-                        }
+                hot_parts = {
+                    p for p in cand_parts if p in self._used_body_parts(int(group_id), _BODY_PART_FADE)
+                }
                 if hot_parts:
+                    # 軟退：部位撞了不值得整句重寫（重寫十幾秒＝遲到），
+                    # 而且露骨句本來就那幾個部位可寫，硬擋只會逼回點評。
                     return (
-                        f"「{'、'.join(sorted(hot_parts))}」這個部位十分鐘內才有人寫過，"
+                        _SOFT_VETO
+                        + f"「{'、'.join(sorted(hot_parts))}」這個部位十分鐘內才有人寫過，"
                         "換一個身體部位或直接換場景"
                     )
         # 喝的吃的：同群物件換品項不算換，兩小時內第二則、或二十分鐘內貼身撞就換一類。
@@ -4885,7 +5029,8 @@ class AccountWorker:
                 ]
                 if ages and (min(ages) < _CONSUME_FADE or len(ages) >= _CONSUME_DENSITY_HITS):
                     return (
-                        "最近幾則才有人在喝／吃同一類東西（換品項也一樣：拿鐵、美式、"
+                        _SOFT_VETO
+                        + "最近幾則才有人在喝／吃同一類東西（換品項也一樣：拿鐵、美式、"
                         "黑咖啡是同一件事），這則換一類或改用手上正在做的事開頭"
                     )
         # 場景組軸：字面不同的同一件事。洗完澡／擦乳液／吹頭髮／敷面膜 是同一組，
@@ -4940,7 +5085,8 @@ class AccountWorker:
                 own_place_hits = self._own_place_hits(int(group_id), _OWN_PLACE_FADE)
                 if cand_place in own_places or own_place_hits >= 2:
                     return (
-                        f"「{cand_place}」自己兩小時內已經報過 {own_place_hits} 次場所，"
+                        _SOFT_VETO
+                        + f"「{cand_place}」自己兩小時內已經報過 {own_place_hits} 次場所，"
                         f"這則別再開在{cand_place}，"
                         + tail
                     )
@@ -4948,7 +5094,8 @@ class AccountWorker:
                     place_hits and min(place_hits) <= _PLACE_NEAR
                 ):
                     return (
-                        f"最近幾則水軍都從場地開頭（這則是「{cand_place}」），"
+                        _SOFT_VETO
+                        + f"最近幾則水軍都從場地開頭（這則是「{cand_place}」），"
                         "別再報自己在哪，" + tail
                     )
         # 同一個身體動作短時間內被兩個號做過（小小 13:40 伸懶腰→RICH 14:06 伸懶腰），
@@ -5004,7 +5151,7 @@ class AccountWorker:
                         + scene_tail
                     )
                 if short_dup:
-                    return f"「{'、'.join(sorted(short_dup))}」這動作最近才有人做過{scene_tail}"
+                    return _SOFT_VETO + f"「{'、'.join(sorted(short_dup))}」這動作最近才有人做過{scene_tail}"
             # 狀態軸飽和：兩小時內已經三則在講痠累，換字也是同一個心境
             # （17:16 腰酸背痛→17:37 肩膀發酸→18:01 腰酸死了），這則要有別的場景。
             elif (
@@ -5218,20 +5365,41 @@ class AccountWorker:
             self._struct_mode = forced_mode
         else:
             struct_roll = random.random()
-            # 現場正在洗屏：短碎比重拉到 70%，生活場景整段不排（它一定要交代前情，
-            # 一交代就是 25 字，在 8 句/分的場子裡等於遲到）。
+            # 決策層的露骨檔位要能真的決定長相：他明確在撩你（2/3 檔）就不再給短碎，
+            # 純日常（0 檔）也不硬端節拍。判定與機率見 _beat_probability。
+            _decision = getattr(event, "_sdf_decision", None) or {}
+            try:
+                _flirty = int(_decision.get("flirty") or 0)
+            except (TypeError, ValueError):
+                _flirty = 0
+            _density = self._human_explicit_ratio(history)
+            p_beat = self._beat_probability(_density, _flirty)
+            # 現場正在洗屏：短碎比重拉高，但節拍留 15%——它一次講完整段，
+            # 不必來回，在 8 句/分的場子反而是最划算的一種。
             if heat >= _HOT_BURST_HUMANS:
-                self._struct_mode = "short" if struct_roll < 0.7 else "dirty"
+                self._struct_mode = (
+                    "short" if struct_roll < 0.52
+                    else "dirty" if struct_roll < 0.85 else "beat"
+                )
             elif heat >= _WARM_BURST_HUMANS:
                 self._struct_mode = (
-                    "short" if struct_roll < 0.5 else "dirty" if struct_roll < 0.8 else "scene"
+                    "short" if struct_roll < 0.38
+                    else "dirty" if struct_roll < 0.68
+                    else "scene" if struct_roll < 0.86
+                    else "beat"
                 )
             elif flow_long:
                 # 冷場也一樣會整批 18~30 字（10:00 開群那波），一樣壓回短碎。
-                self._struct_mode = "short" if struct_roll < 0.75 else "dirty"
+                self._struct_mode = (
+                    "short" if struct_roll < 0.6
+                    else "dirty" if struct_roll < 0.86 else "beat"
+                )
             else:
                 self._struct_mode = (
-                    "short" if struct_roll < 0.35 else "dirty" if struct_roll < 0.70 else "scene"
+                    "short" if struct_roll < 0.26
+                    else "dirty" if struct_roll < 0.56
+                    else "scene" if struct_roll < 0.84
+                    else "beat"
                 )
             # 碎字通道：真人四成是兩三字接下來的（「真假」「超頂」「換我」），水軍
             # 17:07–19:19 五十七則一則都沒有，整場看起來就是每個人都在講完整句。
@@ -5247,6 +5415,12 @@ class AccountWorker:
                 self.stats["band_flow_short_rebound"] = (
                     int(self.stats.get("band_flow_short_rebound", 0)) + 1
                 )
+            # 決策 override 放在最後：碎字與棘輪都算過了，使用者意圖優先。
+            if _flirty >= 2 and self._struct_mode in ("frag", "short"):
+                self._struct_mode = "beat" if random.random() < p_beat else "dirty"
+                self._pcount("flirty_override")
+            elif self._struct_mode == "beat" and _flirty == 0 and _density < 0.25:
+                self._struct_mode = "scene"
         # 模型永遠寫到字數帶的上緣：8~16 帶實測九則全在 11~19、0 則 ≤8 字，
         # 短碎等於只存在於提示詞。短碎模式再抽 45% 走「一句話」窄帶（上限 10 字），
         # 讓「真的假的」這種三到五字反應真的出現，而不是每句都是兩個子句。
@@ -5263,7 +5437,7 @@ class AccountWorker:
         self._len_tail = (
             not self._short_tight
             and not forced_mode
-            and self._struct_mode not in ("scene", "frag")
+            and self._struct_mode not in ("scene", "frag", "beat")
             and random.random()
             < (0.12 if heat >= _HOT_BURST_HUMANS else 0.2)
         )
@@ -5284,10 +5458,18 @@ class AccountWorker:
                 "\n【長度優先於心境】：上面心境若叫你用某件事開場，這則仍以本模式字數為準；"
                 "字數滿了就把生活前情砍掉，只留最後那記吐槽或撩撥。"
             )
-        if heat >= _HOT_BURST_HUMANS and not self._len_tail:
+        if heat >= _HOT_BURST_HUMANS and not self._len_tail and self._struct_mode != "beat":
             chosen_syntax += (
                 "\n【現場正在洗屏】：大家現在是一句 5~10 字在接話，節奏很快。"
                 "這則不要交代前情、不要開新場景，直接接現在這一句在講的事，一句話講完。"
+            )
+        if self._struct_mode == "beat":
+            _density_txt = f"（現場近十則真人 {int(round(_density * 10))} 則在講色）" if _density else ""
+            chosen_syntax += (
+                "\n【這則是一段露骨節拍】" + _density_txt + "："
+                "不要只丟一個器官詞。挑一個部位（穴／奶／腿／腰的自己挑一個），"
+                "寫你貼上去或他怎麼弄的動作，再寫你當下的反應或聲音，三段連成一則 25~45 字。"
+                "不要點名、不要開頭報備自己在哪，直接從身體開始。"
             )
         if getattr(self, "_short_tight", False):
             chosen_syntax += (
@@ -5302,7 +5484,7 @@ class AccountWorker:
         # 兩段式骨架在回覆路徑一直是「提示有寫、模型照做」：12:26 這小時 24 則水軍
         # 有 12 則帶逗號前情。語流真的連三則兩段，就把這則的逗號前整段當成必刪。
         _comma_n = self._comma_flow(int(getattr(event, "chat_id", 0) or 0))
-        if _comma_n >= 3:
+        if _comma_n >= 3 and self._struct_mode != "beat":
             chosen_syntax += (
                 f"\n【前情太多則】：最近五則水軍有 {_comma_n} 則是「先演自己在幹嘛，"
                 "逗號後面才對人講」。這則寫完先在心裡把逗號前那整段刪掉再輸出，"
@@ -5331,7 +5513,7 @@ class AccountWorker:
         band_lo, band_hi = _STRUCT_BANDS.get(self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX))
         # 下限也跟群友走：真人中位 8 字時，短碎帶的 8 字地板讓「真假」「我會笑死」
         # 這種四五字反應永遠出不來（73 則只有 6 則 <8）。群友講得短，地板就一起低。
-        if self._human_ref and self._struct_mode != "frag":
+        if self._human_ref and self._struct_mode not in ("frag", "beat"):
             band_lo = max(4, min(band_lo, int(self._human_ref * 0.9)))
         # 提示詞的數字就是天花板：真人講 8 字就別給 30 的額度，模型會一路寫到上緣。
         band_hi = min(band_hi, self._struct_char_cap(band_hi))
@@ -6509,6 +6691,10 @@ class AccountWorker:
                 return min(cap, int(ref * 1.4)) if ref else cap
             cap = min(char_cap, band[1] + 4)
             return min(cap, int(ref * 1.7)) if ref else cap
+        if band and self._struct_mode == "beat":
+            # 節拍不吃真人倍率：真人中位 8 字時 ref*2 只有 16，三段擠不進去。
+            cap = min(char_cap, band[1])
+            return max(cap, min(char_cap, tail)) if tail else cap
         if band and self._struct_mode != "scene":
             # 原本 +10 留太大：dirty 帶 12~24 實際都落在 26~34，等於沒上限。
             cap = min(char_cap, band[1] + 2)
@@ -6911,7 +7097,7 @@ class AccountWorker:
                 continue
             if not candidate:
                 continue
-            if self._local_veto(
+            _cand_veto = self._local_veto(
                 candidate,
                 own_texts or [],
                 last_human,
@@ -6920,7 +7106,10 @@ class AccountWorker:
                 nameless_flow=nameless_flow,
                 hot_names=hot_names,
                 third_party=third_party,
-            ):
+            )
+            # 軟軸（部位／場所／起手字）不當被攔：句子內容沒問題，直接往下進裁判，
+            # 重寫只會把已經接上的內容洗掉。
+            if _cand_veto and not self._split_veto(_cand_veto)[1]:
                 bonus = 2 if any(n and n in candidate for n in hot_names) else 0
                 # 退路也要挑：被攔的候選如果場景還是同一個地方（自己兩小時內
                 # 店裡講第三次），帶回去出貨等於白改一輪。撞場所的重扣。
@@ -7050,8 +7239,17 @@ class AccountWorker:
                 )
                 self._burst_register(group_id, text)
                 return text
-            self.stats["gate_hot_veto"] = int(self.stats.get("gate_hot_veto", 0)) + 1
-            print(f"[{self.name}] gate-hot-veto: {break_hot} {text[:20]!r}", flush=True)
+            if not self._split_veto(break_hot)[1]:
+                self.stats["gate_hot_veto"] = int(self.stats.get("gate_hot_veto", 0)) + 1
+                print(f"[{self.name}] gate-hot-veto: {break_hot} {text[:20]!r}", flush=True)
+            # 軟軸（部位／場所／起手詞）在熱場直接放行：重寫十幾秒等於遲到。
+            else:
+                _soft_code = "soft_pass_" + self._veto_code(break_hot)
+                self.stats[_soft_code] = int(self.stats.get(_soft_code, 0)) + 1
+                self.stats["soft_pass_hot"] = int(self.stats.get("soft_pass_hot", 0)) + 1
+                print(f"[{self.name}] gate-hot-soft: {break_hot} {text[:20]!r}", flush=True)
+                self._burst_register(group_id, text)
+                return text
         # 這一小時全場都在當裁判、這版又只補一句評語：不論走哪條路都要落到一個人身上。
         need_target = self._needs_target_retry(group_id, text)
         # 兩人在互嗆：這則沒點名就退回重寫（互嗆的場，名字比什麼都重要）。
@@ -7082,6 +7280,15 @@ class AccountWorker:
             nameless_flow=flow,
             hot_names=hot_names,
         ) or break_hot
+        veto_reason, veto_soft = self._split_veto(veto)
+        if veto and veto_soft:
+            # 軟軸不重寫：撞的是部位／場所／起手字這種枝節，句子本身沒問題。
+            # 熱場重寫一次十幾秒，等回來話題已經翻頁，這正是水軍佔比掉到 6% 的原因之一。
+            _soft_code = "soft_pass_" + self._veto_code(veto_reason)
+            self.stats[_soft_code] = int(self.stats.get(_soft_code, 0)) + 1
+            self.stats["soft_pass"] = int(self.stats.get("soft_pass", 0)) + 1
+            print(f"[{self.name}] local-soft: {veto_reason} {text[:20]!r}", flush=True)
+            veto = ""
         if veto:
             self.stats["gate_rewrite"] = int(self.stats.get("gate_rewrite", 0)) + 1
             _code = "veto_" + self._veto_code(veto)
@@ -11266,17 +11473,33 @@ class AccountWorker:
         _p_flow_long = self._recent_len_flow_long(int(group_id), ref=self._human_ref)
         _p_flow_short = self._recent_len_flow_short(int(group_id))
         _p_roll = random.random()
+        # 主動路徑沒有決策層（flirty 無從得知），色度只看真人近十則的露骨比例。
+        _p_density = self._human_explicit_ratio(msgs)
+        _p_beat = self._beat_probability(_p_density, 0)
         if _p_heat >= _HOT_BURST_HUMANS:
-            _p_mode = "short" if _p_roll < 0.7 else "dirty"
+            _p_mode = "short" if _p_roll < 0.5 else "dirty" if _p_roll < 0.82 else "beat"
         elif _p_heat >= _WARM_BURST_HUMANS:
-            _p_mode = "short" if _p_roll < 0.5 else "dirty" if _p_roll < 0.8 else "scene"
+            _p_mode = (
+                "short" if _p_roll < 0.38
+                else "dirty" if _p_roll < 0.68
+                else "scene" if _p_roll < 0.86 else "beat"
+            )
         elif _p_flow_long:
             # 冷場也一樣會整批長句（10:05 之後八則 11~30 字、中位 18.5，短碎歸零）。
-            _p_mode = "short" if _p_roll < 0.8 else "dirty"
+            _p_mode = "short" if _p_roll < 0.6 else "dirty" if _p_roll < 0.86 else "beat"
         else:
             # 冷場（19:30 後 3.5 則／分）原本只有三成走短碎，其餘全落 dirty／scene，
             # 實測中位數又回到 20 字、8~16 只 0 則。冷場就該是短氣泡為主。
-            _p_mode = "short" if _p_roll < 0.5 else "dirty" if _p_roll < 0.8 else "scene"
+            _p_mode = (
+                "short" if _p_roll < 0.26
+                else "dirty" if _p_roll < 0.56
+                else "scene" if _p_roll < 0.84 else "beat"
+            )
+        # 露骨節拍 override：現場夠色就把它推上去，不夠色就退回日常。
+        if _p_mode in ("frag", "short", "dirty") and random.random() < _p_beat:
+            _p_mode = "beat"
+        elif _p_mode == "beat" and _p_density < 0.2:
+            _p_mode = "scene"
         # 碎字通道（跟回覆路徑同一條）：兩三字的反應在群裡最自然，水軍一則都沒有，
         # 整場就成了四個人輪流演講。
         if random.random() < self._frag_probability(msgs, _p_heat, _p_flow_long):
@@ -11290,7 +11513,7 @@ class AccountWorker:
         # 尾巴通道（跟回覆路徑同一條）：中位數會把整批壓成平頭，真人卻偶爾講長句。
         self._len_tail_ref = self._human_len_tail(msgs)
         self._len_tail = (
-            _p_mode not in ("short", "frag")
+            _p_mode not in ("short", "frag", "beat")
             and random.random() < (0.12 if _p_heat >= _HOT_BURST_HUMANS else 0.2)
         )
         if self._len_tail:
@@ -11310,7 +11533,7 @@ class AccountWorker:
         if self._short_tight:
             self._pcount("band_short_tight")
         # 提示詞的數字要跟真人走：真人講 8 字還給 30 的額度，模型一律寫到 20 幾。
-        if self._human_ref and _p_mode != "frag":
+        if self._human_ref and _p_mode not in ("frag", "beat"):
             # 地板一起跟：真人中位 8 字時 8 字地板讓四五字反應永遠出不來。
             _p_lo = max(4, min(_p_lo, int(self._human_ref * 0.9)))
             _p_factor = (
@@ -11328,6 +11551,8 @@ class AccountWorker:
             "short": f"這則走極短碎念（{_p_lo}~{_p_hi}字）：不交代場景、不點名，像隨口丟一句。",
             "dirty": f"這則走直球色誘（{_p_lo}~{_p_hi}字）：把生活瑣事拿掉，直接講身體或性張力。",
             "scene": f"這則走生活隨念（{_p_lo}~{_p_hi}字）：帶一個當下的小動作或環境就好。",
+            "beat": f"這則走露骨節拍（{_p_lo}~{_p_hi}字）：不要只丟一個器官詞，"
+                    "挑一個部位、寫動作、再寫你當下的反應或聲音，三段連成一則。",
         }[_p_mode]
         if self._len_tail:
             _p_struct += (
@@ -11335,7 +11560,7 @@ class AccountWorker:
                 "兩三個逗號，把動作、自己的身體反應、對他的評語一起寫完。"
             )
         # 提示詞裡的數字就是天花板：之前寫 hi+2（18），模型一律寫到 18~19。
-        if _p_mode != "scene" and not self._len_tail:
+        if _p_mode not in ("scene", "beat") and not self._len_tail:
             _p_struct += "字數滿了就砍掉前情，只留最後那記吐槽或撩撥。"
         _p_cap_now = (_p_lo + 6) if self._short_tight else _p_hi
         # 兩段式骨架在生成端就先壓一次：語流已經連三則逗號兩段，這則只講一句。
@@ -12014,6 +12239,13 @@ class AccountWorker:
                             hot_names=tuple(names_p[:2]),
                             third_party=third_p,
                         )
+                        if veto_p and self._split_veto(veto_p)[1]:
+                            # 軟軸放行：記帳後照樣進裁判，不再一刀壓成 0.2 退回。
+                            _soft_code_p = "soft_pass_" + self._veto_code(veto_p)
+                            self.stats[_soft_code_p] = (
+                                int(self.stats.get(_soft_code_p, 0)) + 1
+                            )
+                            veto_p = ""
                         if veto_p:
                             _code = "veto_" + self._veto_code(veto_p)
                             self.stats[_code] = int(self.stats.get(_code, 0)) + 1
