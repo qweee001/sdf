@@ -205,6 +205,16 @@ class Dashboard:
         )
         if all_muted or silent_alarm:
             healthy = False
+        # 網關欠費（402）跟模型故障不同：換模型沒用，而且每次呼叫都先燒一輪 timeout。
+        # 20:14 實測四號全靜音 47 分鐘、群裡真人 35 則/10 分鐘，畫面上卻只有綠燈。
+        quota_dead = 0.0
+        for w in workers.values():
+            try:
+                quota_dead = max(quota_dead, float(getattr(w, "stats", {}).get("gateway_quota_dead", 0) or 0))
+            except Exception:
+                continue
+        if quota_dead and time.time() - quota_dead < 600:
+            healthy = False
         payload: dict = {
             "status": "ok" if healthy else "degraded",
             "database": "ok" if database_ok else "failed",
@@ -215,6 +225,8 @@ class Dashboard:
                 "silent_minutes": silent_minutes,
             },
         }
+        if quota_dead:
+            payload["gateway_quota_dead_seconds"] = int(time.time() - quota_dead)
         if ai_calls_24h is not None:
             payload["ai_calls_24h"] = ai_calls_24h
         # #11：bot 健康也要在 /health 看得到（以前 bot task 掛了，health 仍 3/3）

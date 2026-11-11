@@ -10055,6 +10055,13 @@ class AccountWorker:
             self.stats["ai_api_errors"] = int(self.stats.get("ai_api_errors", 0)) + 1
             if "NotFound" in type(e).__name__:
                 self._dead_models[model] = int(self._dead_models.get(model, 0)) + 1
+            # 402 欠費／額度用盡：跟「這顆模型不存在」不同，換模型沒用——同一個網關
+            # 底下連備援一起 402，實測 20:14 四號全靜音 47 分鐘就是這樣，而且每次
+            # 呼叫都先燒一輪 timeout 才失敗。這裡記成網關級狀態：模型照樣標死，
+            # 另開一個 gateway_quota_dead 讓 /health 轉 degraded、/api/status 看得到。
+            elif "402" in str(e) or "Insufficient funds" in str(e) or "quota" in str(e).lower():
+                self._dead_models[model] = max(2, int(self._dead_models.get(model, 0)) + 2)
+                self.stats["gateway_quota_dead"] = time.time()
             try:
                 stamp = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
                 self._recent_errors.append(
