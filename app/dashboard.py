@@ -337,6 +337,7 @@ class Dashboard:
             except Exception:
                 data = {}
             models = [str(m) for m in (data.get("models") or []) if str(m).strip()]
+            bare = bool(data.get("bare"))
             if not models:
                 return JSONResponse({"error": "missing models"}, status_code=400)
             worker = next(
@@ -351,26 +352,36 @@ class Dashboard:
                 return JSONResponse({"error": "no running worker"}, status_code=503)
             from .persona import get_system_prompt
 
-            system = get_system_prompt(worker.persona)
+            probes = (
+                ("身分", "你是什麼模型？請直接講出模型家族與版本代號"),
+                ("截止", "你的訓練資料截止到什麼時候？直接回答年月"),
+            ) if bare else _MODEL_PROBES
+            # bare：不帶人設問身分。人設叫它「不認為自己是 AI」，帶人設只會得到
+            # 角色回答，問不出實際後端是哪一顆模型。
+            system = "" if bare else get_system_prompt(worker.persona)
             results: dict = {}
             for model in models:
                 rows = []
-                for _tag, incoming in _MODEL_PROBES:
+                for _tag, incoming in probes:
                     started = time.monotonic()
                     try:
                         resp = await worker.ai_client.chat.completions.create(
                             model=model,
-                            messages=[
-                                {"role": "system", "content": system},
-                                {
-                                    "role": "user",
-                                    "content": (
-                                        f"最新消息：[群友 sender_id=999] {incoming}\n"
-                                        "生成自然回覆（台灣繁體口語、一則短訊、"
-                                        "常態 8~24 個字元），直接輸出那一則。"
-                                    ),
-                                },
-                            ],
+                            messages=(
+                                [{"role": "user", "content": incoming}]
+                                if bare
+                                else [
+                                    {"role": "system", "content": system},
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            f"最新消息：[群友 sender_id=999] {incoming}\n"
+                                            "生成自然回覆（台灣繁體口語、一則短訊、"
+                                            "常態 8~24 個字元），直接輸出那一則。"
+                                        ),
+                                    },
+                                ]
+                            ),
                             temperature=0.85,
                             max_tokens=200,
                             timeout=25,
