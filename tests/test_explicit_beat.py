@@ -189,3 +189,34 @@ def test_garbled_two_char_nickname_is_repaired():
     """16:56 實測「靐羣莫以為舔一句就有獎」：本尊叫「縍羣 怠」。"""
     w = _worker()
     assert w._fix_name_address("靐羣莫以為舔一句就有獎", GID) == "縍羣，莫以為舔一句就有獎"
+
+
+# ---- 7. 尺度要跟著現場，不是背詞表 ---------------------------------------
+
+
+def test_tension_ladder_follows_corpus_density_not_wordlist():
+    """階梯本來用「洗澡」這種生活詞當 L3 訊號，密度才是真的色度。"""
+    w = _worker()
+    hot = _rows(["小穴被插到發抖", "舔到腿軟", "夾緊一點", "想被插"])
+    cold = _rows(["吃飽沒", "剛洗完澡", "下班了"])
+    assert "L3" in w._tension_ladder_hint(GID, "夾得住嗎", hot)
+    # 「洗澡」以前會被判成 L3，這裡應該還是日常
+    assert "L1" in w._tension_ladder_hint(GID, "吃飽沒", cold)
+
+
+def test_water_only_cap_keeps_second_level_unless_three_in_a_row():
+    """純水軍串才壓到「稍微暗示」；一兩則時仍給「明顯勾引」。"""
+    from app.worker import _WATER_ONLY_FLIRTY_CAP
+
+    assert _WATER_ONLY_FLIRTY_CAP == 1
+
+
+def test_reviewer_prompt_has_intensity_alignment_rule():
+    """審核要看得出「對方在講身體、候選卻回天氣」＝沒接上。"""
+    import inspect
+
+    from app.worker import AccountWorker
+
+    src = inspect.getsource(AccountWorker._review_candidate_gateway)
+    assert "色度對齊" in src
+    assert "offtopic" in src

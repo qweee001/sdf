@@ -2672,16 +2672,17 @@ class AccountWorker:
         2. 從生活細節自然勾入感官誘惑、肉體描寫、性挑釁、讓男群友慾火焚身
         3. 僅 5% 且對方明確開口求約時才順帶提助理。
         """
-        combined = incoming_text + " " + " ".join(str(r.get("content") or "") for r in (history or [])[-4:])
         l4_cues = ("怎麼約", "哪裡約", "多少錢", "今晚可以嗎", "可以約嗎", "想約你", "約出來", "跟妳睡")
-        l3_cues = ("舔", "吸", "濕", "硬", "床單", "敏感帶", "小穴", "雞雞", "屌", "肉棒", "脫", "抱著睡", "嘴巴餵", "大腿", "內衣", "洗澡", "幹", "插", "高潮")
-        l2_cues = ("變態", "色", "妹子", "身材", "肌肉", "嘴砲", "出一張嘴", "男人", "不行", "幾公分", "虛", "微醺", "喝酒", "探班", "想你")
+        # 只有「被明確求約」用字面判（那是意圖不是尺度）；尺度層改用語料現算的
+        # 色度，別再靠靜態詞表——詞表永遠落後現場，還會被「洗澡」這種生活詞誤判成 L3。
+        density = self._human_explicit_ratio(history)
+        axes_now = self._explicit_axes(incoming_text)
 
         if any(w in incoming_text for w in l4_cues):
             current_level = 4
-        elif any(w in combined for w in l3_cues):
+        elif axes_now >= 2 or density >= 0.5:
             current_level = 3
-        elif any(w in combined for w in l2_cues):
+        elif axes_now >= 1 or density >= 0.2:
             current_level = 2
         else:
             current_level = 1
@@ -7007,7 +7008,12 @@ class AccountWorker:
             "8. 【事實一致性】：問候語要對得上當前時段（深夜不可能說早安），自稱性別要符合角色設定（女角色不會說自己有前女友或自己有肉棒），"
             "自稱也要對得上年齡（二十出頭自稱「姊姊」是裝熟，三十幾歲自稱「妹妹」是裝嫩），"
             "地點與生活設定不能自相矛盾。違反者 issue 判 \"contradict\"，sendable 低於 0.3。\n"
-            "9. 【約砲群組頂格色誘】：凡自然符合人設的台灣在地真實生活碎念、大膽直球性張力、挑釁男人尺寸與體力、騷浪性感勾引、床技與感官描摹，發騷發得極致自然，issue 必須為 \"none\"，sendable 應在 0.90~1.0 之間！"
+            "9. 【約砲群組頂格色誘】：凡自然符合人設的台灣在地真實生活碎念、大膽直球性張力、挑釁男人尺寸與體力、騷浪性感勾引、床技與感官描摹，發騷發得極致自然，issue 必須為 \"none\"，sendable 應在 0.90~1.0 之間！\n"
+            "10. 【色度對齊（跟著現場走）】：先看【最近三則真人】最後一句。若它本身就在講身體、"
+            "器官或動作（例如「用穴夾你雞雞嗎」「想舔噴嗎」），候選卻整句 0 個身體字、"
+            "只回天氣／心情／工作，就是沒接上，issue 判 \"offtopic\"，sendable 壓到 0.4 以下，"
+            "reason 寫「對方在講身體，這句完全沒接」。反過來，最後一句只是日常，候選硬寫一整段色"
+            "不算缺點，sendable 不要因此往下壓（最多扣到 0.85）。\n"
         )
 
         user_content = (
@@ -11573,7 +11579,18 @@ class AccountWorker:
         _p_roll = random.random()
         # 主動路徑沒有決策層（flirty 無從得知），色度只看真人近十則的露骨比例。
         _p_density = self._human_explicit_ratio(msgs)
-        _p_beat = self._beat_probability(_p_density, 0)
+        # 主動路徑沒有決策層，用「最後一則真人自己還在不在講色」當 flirty 代理：
+        # 場子正在燒就照 2 檔算，冷掉就 0。不然真人正在撩，主動照樣抽到生活句。
+        _p_last_human = next(
+            (
+                str(m.get("content") or "")
+                for m in reversed(msgs or [])
+                if str(m.get("role")) != "assistant"
+            ),
+            "",
+        )
+        _p_flirty = 2 if self._explicit_axes(_p_last_human) >= 1 else 0
+        _p_beat = self._beat_probability(_p_density, _p_flirty)
         if _p_heat >= _HOT_BURST_HUMANS:
             _p_mode = "short" if _p_roll < 0.5 else "dirty" if _p_roll < 0.82 else "beat"
         elif _p_heat >= _WARM_BURST_HUMANS:
@@ -11709,11 +11726,15 @@ class AccountWorker:
                 )
             body += "\n" + _p_struct
             if not human_recent:
-                # 最近沒有真人講話：不要對空氣邀約、不要互相升級
+                # 最近沒有真人講話：不要對空氣邀約、不要互相升級。
+                # 但整段壓到第 1 檔（「稍微暗示」）會讓沒真人的時段永遠只剩生活碎念，
+                # 所以只在尾端真的連三則水軍互接時才壓；第 2 檔（明顯勾引）留著。
+                _water_streak = self._water_only_streak(msgs)
+                _fcap = _WATER_ONLY_FLIRTY_CAP if _water_streak >= 3 else 2
                 body += (
                     "\n注意：這個群最近沒有真人講話（現在都是同群其他帳號在自言自語）。"
-                    "所以只講自己的日常碎念就好：不要邀約見面、不要問對方在哪、不要說「來找我」，"
-                    f"露骨程度最多到「{_DECISION_FLIRTY_GUIDE[_WATER_ONLY_FLIRTY_CAP]}」，不要升級。"
+                    "所以不要邀約見面、不要問對方在哪、不要說「來找我」；"
+                    f"露骨程度最多到「{_DECISION_FLIRTY_GUIDE[_fcap]}」，不要升級。"
                 )
             if notes_block:
                 body += f"\n{notes_block}"
