@@ -508,9 +508,11 @@ _AXIS_VARIANTS = str.maketrans({"酸": "痠", "溼": "濕", "檯": "台"})
 # 複讀比對前先剝掉的襯字（只剝不承載語意的，不碰名詞動詞）。
 _FILLER_STRIP = str.maketrans("", "", "一了啦喔欸嘛啊呀耶哦囉")
 # 句子不可能停在這些字上（停住就是模型被切斷）：14:18 RICH「變態才」三個字就送出去。
+# 的／法 也算：17:19「三公分也太小的」「手抖現在就無法」都是模型寫到字數就停手，
+# 停在這種字上一定是斷的（群裡短句幾乎不會停在「的」）。
 _TAIL_DANGLE = set("才就都又也還卻而但跟和與讓把被從比在進沒夠")
 # 兩字副詞同樣懸空（「一定被」「我都直接」）：被剪在這兩組後面，句子讀起來是斷的。
-_DANGLE_TAIL_WORDS = ("一定", "直接", "乾脆", "其實", "整個", "根本", "而且", "我")
+_DANGLE_TAIL_WORDS = ("一定", "直接", "乾脆", "其實", "整個", "根本", "而且", "我", "無法")
 _SCENE_MOSAIC_SOURCES = 3
 # 群務說明句：入會／找助理這種本來就該講外面的事，不套自曝要求。
 _INFO_WORDS = ("助理", "入會", "會員", "排隊", "私訊")
@@ -4434,7 +4436,11 @@ class AccountWorker:
         # 「不夠」是收得住的（錢不夠），其餘停在「夠」都是斷的（14:04「看你雞雞夠」）
         if t[-1] == "夠":
             return not t.endswith("不夠")
-        return t[-1] in _TAIL_DANGLE or t.endswith(_DANGLE_TAIL_WORDS)
+        if t[-1] in _TAIL_DANGLE or t.endswith(_DANGLE_TAIL_WORDS):
+            return True
+        # 「的」只在夠長的句子才算斷（17:19「三公分也太小的」）；
+        # 四個字以內的「這是我的」收得住，別為了它重寫。
+        return t[-1] == "的" and len(t) >= 7
 
     @classmethod
     def _repair_dangling_tail(cls, text: str) -> str:
