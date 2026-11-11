@@ -7639,23 +7639,32 @@ class AccountWorker:
                 or self._requested_media_kind(event.raw_text or "")
             )
             try:
-                last_bot_ts = await self.db.last_bot_ts_by_group(int(event.chat_id or 0))
-                if last_bot_ts:
-                    age = time.time() - last_bot_ts
+                gid = int(event.chat_id or 0)
+                me = int(self.tg_user_id or 0)
+                last_bot_ts = await self.db.last_bot_ts_by_group(gid)
+                age = time.time() - last_bot_ts if last_bot_ts else 1e9
+                # 同時被喚醒的姊妹還沒進 DB，只在共享 pending 看得到；漏算就又是同秒。
+                now_ts = time.time()
+                pending = [
+                    e
+                    for e in self.pending_burst.get(gid, [])
+                    if int(e[0]) != me and now_ts - float(e[3]) <= _SISTER_STAGGER_WINDOW_SECONDS
+                ]
+                sisters = await self.db.bot_msgs_since(
+                    gid, _SISTER_STAGGER_WINDOW_SECONDS, exclude_user_id=me
+                )
+                sisters += len(pending)
+                if directed:
                     if age <= _BOT_STAGGER_WINDOW_SECONDS:
                         await asyncio.sleep(random.uniform(*_BOT_STAGGER_SECONDS))
-                    elif not directed:
-                        sisters = await self.db.bot_msgs_since(
-                            int(event.chat_id or 0),
-                            _SISTER_STAGGER_WINDOW_SECONDS,
-                            exclude_user_id=int(self.tg_user_id or 0),
-                        )
-                        if sisters >= 2:
-                            self._pcount("sister_stagger_long")
-                            await asyncio.sleep(random.uniform(*_SISTER_STAGGER_MANY))
-                        elif sisters == 1:
-                            self._pcount("sister_stagger_short")
-                            await asyncio.sleep(random.uniform(*_SISTER_STAGGER_ONE))
+                elif sisters >= 2:
+                    self._pcount("sister_stagger_long")
+                    await asyncio.sleep(random.uniform(*_SISTER_STAGGER_MANY))
+                elif sisters == 1:
+                    self._pcount("sister_stagger_short")
+                    await asyncio.sleep(random.uniform(*_SISTER_STAGGER_ONE))
+                elif age <= _BOT_STAGGER_WINDOW_SECONDS:
+                    await asyncio.sleep(random.uniform(*_BOT_STAGGER_SECONDS))
             except Exception:
                 pass
             media_kind = (
