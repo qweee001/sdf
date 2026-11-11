@@ -198,6 +198,8 @@ _PLACE_WORDS = (
 )
 _PLACE_FADE = 90 * 60
 _PLACE_NEAR = 20 * 60
+# 起手字太普通的一批（任何一則都可能用到），往前三則看時不拿它們當依據。
+_COMMON_HEAD_CHARS = frozenset("我你妳他她這那有是不好真也很都就還又")
 _PLACE_HITS = 2
 # 自己撞自己的場所窗：同一號兩小時內在店裡第三次，比跨號窗更不能放過。
 _OWN_PLACE_FADE = 120 * 60
@@ -225,7 +227,7 @@ _SAME_TOPIC_SKIP_GRAMS = {
 # 場所不固定在開頭（17:10 那句的「坐在辦公椅上」在第三個逗號後面），所以不比字數，
 # 比「在某地」這個句型：場所詞前面四個字內要有在／坐／靠／趴／蹲／站／躺這種介系詞。
 # 「等下拿去茶水間」是被拿去的位置，不算她又報一次自己在哪。
-_PLACE_LEAD_RE = re.compile(r"(在|坐|靠|趴|蹲|站|躺|回到|走到|溜進|躲進|拉下|拉開|打開)[^，,、]{0,4}$")
+_PLACE_LEAD_RE = re.compile(r"(在|坐|靠|趴|蹲|站|躺|回到|走到|到|進|回|溜進|躲進|拉下|拉開|打開)[^，,、]{0,4}$")
 _PLACE_RE = re.compile("|".join(_PLACE_WORDS))
 # 場所詞自己帶動詞的（站櫃、坐櫃檯）沒有前導介系詞，「下午站櫃」照樣是在報自己在哪。
 _PLACE_SELF_LEAD = "坐站躺靠蹲趴"
@@ -3378,6 +3380,20 @@ class AccountWorker:
                 found.add(p)
         return found
 
+    def _own_place_hits(self, group_id: int, seconds: float) -> int:
+        """本帳號在窗內有幾則開場在報自己的場所（不計字面）。
+
+        原本自撞軸只比場所字串，等於只能擋「同一個詞」：小天後 10:11
+        「剛到櫃上摸魚」→10:20「靠在櫃位偷喝手搖」→10:21「站櫃腳超酸」，
+        三個字串全不同、三次都放行，群友看到的還是「我又在店裡」。
+        這裡量的是次數，場所換字也算同一格。
+        """
+        rows = self._own_scene_by_group.get(int(group_id)) or []
+        now = time.time()
+        return sum(
+            1 for text, ts in rows if now - ts < seconds and _place_opening(text)
+        )
+
     def _state_hits(self, group_id: int, seconds: float) -> int:
         """窗內有幾則水軍在講自己的身體狀態（痠累喘麻燙）。"""
         return sum(
@@ -4678,6 +4694,18 @@ class AccountWorker:
                 # 剛在位子伸個懶腰」→ 13:41「剛補完防曬」），群友讀到的還是同一個起手。
                 if near and head[0] in str(near[-1])[:24]:
                     return f"上一則水軍前半句才用過「{head[0]}」，這則換一個字起頭"
+            # 只比上一則與十二分鐘，會放過「隔幾則再撞」：11-11 早上 RICH 10:03
+            # 「剛泡完澡好熱」→ 小天後 10:11「…我也剛到櫃上摸魚」→ RICH 10:26
+            # 「剛揉眼醒來」，三則起手字都是「剛」，前兩次間隔 8 分、第三次 15 分，
+            # 兩個舊條件一個都沒中。往前看三則、窗拉到二十五分鐘，但只認真的起手字
+            # （句首就是那個字）——句中的「洗」不算，否則會蓋掉更準的場景理由。
+            if head[0] not in _COMMON_HEAD_CHARS:
+                wide = [
+                    str(x)[:1]
+                    for x in self._cross_recent_texts(int(group_id), 25 * 60)[-3:]
+                ]
+                if head[0] in wide:
+                    return f"「{head[0]}」這個字最近幾則水軍才拿來開頭過，換一個字起頭"
         # 形狀軸：開頭字全不同，骨架卻是同一個「引述＋逗號＋斷言」。
         # 起手詞那一軸看到的是六個不同的字，群友看到的是同一台機器，所以另外量骨架。
         # 判定放在函式尾端（慣用詞與播報密度的理由更具體，先命中先回）。
@@ -4761,9 +4789,11 @@ class AccountWorker:
                     for t, age in self._cross_recent_items(int(group_id), _PLACE_FADE)
                     if _place_opening(t)
                 ]
-                if cand_place in own_places:
+                own_place_hits = self._own_place_hits(int(group_id), _OWN_PLACE_FADE)
+                if cand_place in own_places or own_place_hits >= 2:
                     return (
-                        f"「{cand_place}」自己兩小時內已經報過，這則別再開在{cand_place}，"
+                        f"「{cand_place}」自己兩小時內已經報過 {own_place_hits} 次場所，"
+                        f"這則別再開在{cand_place}，"
                         + tail
                     )
                 if len(place_hits) >= _PLACE_HITS or (

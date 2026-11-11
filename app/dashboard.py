@@ -181,11 +181,19 @@ class Dashboard:
         workers = getattr(self.manager, "workers", {}) or {}
         running = sum(1 for w in workers.values() if getattr(w, "is_running", False))
         total = len(workers)
+        # 全靜音看得見：11-11 10:32 四號的 回覆＋主動 被關掉，/health 照樣綠燈，
+        # 27 分鐘真空沒人發現。這裡只把它變成一個數字，不自動改狀態
+        # （主人有時候是故意全靜音）。
+        muted = sum(
+            1
+            for w in workers.values()
+            if getattr(w, "is_running", False) and not getattr(w, "reply_enabled", True)
+        )
         healthy = database_ok
         payload: dict = {
             "status": "ok" if healthy else "degraded",
             "database": "ok" if database_ok else "failed",
-            "accounts": {"running": running, "total": total},
+            "accounts": {"running": running, "total": total, "muted": muted},
         }
         if ai_calls_24h is not None:
             payload["ai_calls_24h"] = ai_calls_24h
