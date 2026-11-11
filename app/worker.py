@@ -143,8 +143,8 @@ _GROUP_VACUUM_MIN_HUMANS = 3
 # 非指向回覆撞到姊妹剛講過時拉長錯峰（秒）：實測 18:05:55／:56、18:10:42／:43
 # 四號兩兩差 1 秒，2.5~6 秒的固定抖動擋不住同秒感。真空回場的第一則不吃。
 _SISTER_STAGGER_WINDOW_SECONDS = 90.0
-_SISTER_STAGGER_ONE = (12.0, 25.0)
-_SISTER_STAGGER_MANY = (30.0, 50.0)
+_SISTER_STAGGER_ONE = 10.0
+_SISTER_STAGGER_MANY = 18.0
 # 併發撞點：同一則真人訊息 15 秒內已有姊妹回過，候選要有明顯新角度才准發。
 _SISTER_BURST_SECONDS = 15.0
 # 併發撞點的真正空窗：另一號的句子要等「打字延遲＋送出成功」才寫進 DB，
@@ -7654,17 +7654,28 @@ class AccountWorker:
                     gid, _SISTER_STAGGER_WINDOW_SECONDS, exclude_user_id=me
                 )
                 sisters += len(pending)
+                # 睡眠是平行跑的，兩號同時睡 30 秒還是會同時到；所以不是「睡多久」，
+                # 而是「等到離上一則姊妹發言滿 N 秒」。每輪重讀最後發言時間再補眠。
+                need = 0.0
                 if directed:
-                    if age <= _BOT_STAGGER_WINDOW_SECONDS:
-                        await asyncio.sleep(random.uniform(*_BOT_STAGGER_SECONDS))
+                    need = 4.0 if age <= _BOT_STAGGER_WINDOW_SECONDS else 0.0
                 elif sisters >= 2:
                     self._pcount("sister_stagger_long")
-                    await asyncio.sleep(random.uniform(*_SISTER_STAGGER_MANY))
+                    need = 18.0
                 elif sisters == 1:
                     self._pcount("sister_stagger_short")
-                    await asyncio.sleep(random.uniform(*_SISTER_STAGGER_ONE))
+                    need = 10.0
                 elif age <= _BOT_STAGGER_WINDOW_SECONDS:
-                    await asyncio.sleep(random.uniform(*_BOT_STAGGER_SECONDS))
+                    need = 4.0
+                deadline = time.time() + 75.0
+                while need and time.time() < deadline:
+                    last = await self.db.last_bot_ts_by_group(gid) or 0.0
+                    gap = time.time() - float(last)
+                    if gap >= need:
+                        break
+                    await asyncio.sleep(
+                        min(need - gap, 15.0) + random.uniform(0.0, 2.5)
+                    )
             except Exception:
                 pass
             media_kind = (
