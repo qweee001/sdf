@@ -306,6 +306,28 @@ class Dashboard:
             ("外語陷阱", "週末要不要一起去看夜景"),
         )
 
+        @app.get("/api/model-probe/models")
+        async def model_probe_models(request: Request):
+            """列出網關實際可用的模型 id：猜名字猜不中就只能瞎試。"""
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            worker = next(
+                (
+                    w
+                    for w in (self.manager.workers or {}).values()
+                    if getattr(w, "ai_client", None)
+                ),
+                None,
+            )
+            if worker is None:
+                return JSONResponse({"error": "no worker"}, status_code=503)
+            try:
+                listing = await worker.ai_client.models.list()
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)[:160]}, status_code=502)
+            ids = sorted(str(m.id) for m in (listing.data or []) if getattr(m, "id", ""))
+            return JSONResponse({"ok": True, "models": ids})
+
         @app.post("/api/model-probe")
         async def model_probe(request: Request):
             if not self._check_session(request):
