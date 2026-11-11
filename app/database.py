@@ -1450,6 +1450,21 @@ class Database:
         rows = list(await cursor.fetchall())
         return [dict(r) for r in reversed(rows)]
 
+    async def last_assistant_message_at(self) -> float:
+        """最後一次水軍實際送出的時間（跨群、跨帳號）。
+
+        /health 拿它算「真空幾分鐘」：11-11 15:50 四號全停，群裡照樣有 124 則真人，
+        /health 卻全程綠燈，42 分鐘沒人知道。
+        """
+        try:
+            cursor = await self._c.execute(
+                "SELECT MAX(timestamp) AS last_at FROM messages WHERE role = 'assistant'"
+            )
+            row = await cursor.fetchone()
+            return float((row["last_at"] if row else 0) or 0)
+        except Exception:
+            return 0.0
+
     async def get_group_messages(self, group_id: int, limit: int = 100) -> list[dict]:
         """跨所有帳號讀取某群組的實際訊息串（含人類與水軍），按時間順序回傳，供互動分析。
 

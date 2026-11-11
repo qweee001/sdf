@@ -8847,9 +8847,13 @@ class AccountWorker:
         meta_speak = self._is_meta_speak(reply)
         # 語言硬底線：台灣約砲群發言必須包含中文漢字。全英文或無中文直接視為模型報錯/拒答丟棄！
         cjk_count = len(re.findall(r"[\u4e00-\u9fff]", reply))
+        # 外語碎片同樣算模型跑掉：假名／韓文／孟加拉文／成串拉丁字母。
+        # 這些句子漢字照樣有兩三個，cjk_count 底線擋不住（群馬の精液…、
+        # 天天開心 এসেছেappliquée、喝完KV就ங்க 全都發進群過）。
+        foreign = text_guard.is_foreign_debris(reply)
         # 全英文碎片（Google 的 The prompt could not…）一定沒漢字，直接丟；
         # 中文拒答（中文漢字有兩個以上）留給下面重寫一次，別讓它白燒。
-        if cjk_count < 2:
+        if cjk_count < 2 or foreign:
             self._set_generation_reason(event, "refusal" if refusal else "no_chinese")
             self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
             return ""

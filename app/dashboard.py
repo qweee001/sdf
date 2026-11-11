@@ -190,10 +190,29 @@ class Dashboard:
             if getattr(w, "is_running", False) and not getattr(w, "reply_enabled", True)
         )
         healthy = database_ok
+        last_ai = 0.0
+        if hasattr(self.manager.db, "last_assistant_message_at"):
+            last_ai = await self.manager.db.last_assistant_message_at()
+        silent_minutes = int((time.time() - last_ai) // 60) if last_ai else None
+        # 全靜音就一定會真空，這不是「健康」：11-11 15:50 四號被全停，
+        # 群裡 124 則真人照樣在聊，/health 全程綠燈 42 分鐘。
+        all_muted = bool(total) and muted == total
+        # 沒全靜音但已經 25 分鐘沒送出＝模型或排程卡住（模型端掛掉時就是這樣），
+        # 同樣要看得見。
+        silent_alarm = (
+            not all_muted and silent_minutes is not None and silent_minutes >= 25
+        )
+        if all_muted or silent_alarm:
+            healthy = False
         payload: dict = {
             "status": "ok" if healthy else "degraded",
             "database": "ok" if database_ok else "failed",
-            "accounts": {"running": running, "total": total, "muted": muted},
+            "accounts": {
+                "running": running,
+                "total": total,
+                "muted": muted,
+                "silent_minutes": silent_minutes,
+            },
         }
         if ai_calls_24h is not None:
             payload["ai_calls_24h"] = ai_calls_24h

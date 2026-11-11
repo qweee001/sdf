@@ -855,6 +855,40 @@ def is_refusal(text: str) -> bool:
     normalized = unicodedata.normalize("NFKC", text)
     return any(pattern.search(normalized) for pattern in _REFUSAL_PATTERNS)
 
+_FOREIGN_SCRIPTS = (
+    ("\\u3040-\\u30ff", "kana"),
+    ("\\uac00-\\ud7af\\u1100-\\u11ff", "hangul"),
+    ("\u0980-\u09ff", "bengali"),
+    ("\u0b80-\u0bff", "tamil"),
+    ("\\u0e00-\\u0e7f", "thai"),
+    ("\\u0400-\\u04ff", "cyrillic"),
+    ("\\u0600-\\u06ff", "arabic"),
+    ("\\u0900-\\u097f", "devanagari"),
+)
+
+def is_foreign_debris(text: str) -> bool:
+    """外語碎片偵測：混進假名／韓文／孟加拉文／西里爾，或整串拉丁字母。
+
+    11-11 16:00 前後網關換模型後，輸出開始出現
+    「群馬の精液は直接流し込む」「天天開心 এসেছেappliquée」「喝完KV就ங்க」，
+    全部含 2 個以上漢字，所以 cjk_count<2 的舊底線完全擋不住，直接發進群裡。
+    規則刻意用「哪種文字出現」而不是比例門檻：中文句子幾乎不會夾假名或孟加拉文，
+    出現了就是模型跑掉，該重寫。拉丁字母只在夠長（≥3 字）時才算，
+    免得 "OK"、"IG" 這種正常用法被誤殺。
+    """
+    if not text:
+        return False
+    for rng, _name in _FOREIGN_SCRIPTS:
+        if re.search(f"[{rng}]", text):
+            return True
+    latin = len(re.findall(r"[A-Za-zÀ-ɏ]", text))
+    # 4 個字母起算：群裡真的有人叫「方sir」，"sir" 三個字母會誤殺。
+    if latin >= 4:
+        compact = re.sub(r"\s+", "", text)
+        if compact and latin / len(compact) >= 0.25:
+            return True
+    return False
+
 def normalized_reply(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text or "").casefold()
     return re.sub(r"[^\w\u3400-\u9fff]+", "", normalized)
