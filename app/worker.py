@@ -135,6 +135,16 @@ _BOT_STAGGER_SECONDS = (2.5, 6.0)
 # 沒有水軍」的號能接話，擋扎堆的仍是下面那道 45 秒空窗。
 _SILENT_REJOIN_SECONDS = 200.0
 _SILENT_REJOIN_MIN_GAP = 45.0
+# 群級真空回場：整群 5 分鐘沒有任何水軍發言、而真人近 5 分鐘還有 3 則以上 →
+# 所有「讓位／配額／熱場預算」一律失效。17:44~18:05 四號全靜音 22 分鐘，
+# 期間 24 則真人在跑「睪丸哥」連續劇，就是被 hot_budget＋claimed 上限疊死。
+_GROUP_VACUUM_SECONDS = 300.0
+_GROUP_VACUUM_MIN_HUMANS = 3
+# 非指向回覆撞到姊妹剛講過時拉長錯峰（秒）：實測 18:05:55／:56、18:10:42／:43
+# 四號兩兩差 1 秒，2.5~6 秒的固定抖動擋不住同秒感。真空回場的第一則不吃。
+_SISTER_STAGGER_WINDOW_SECONDS = 90.0
+_SISTER_STAGGER_ONE = (12.0, 25.0)
+_SISTER_STAGGER_MANY = (30.0, 50.0)
 # 併發撞點：同一則真人訊息 15 秒內已有姊妹回過，候選要有明顯新角度才准發。
 _SISTER_BURST_SECONDS = 15.0
 # 併發撞點的真正空窗：另一號的句子要等「打字延遲＋送出成功」才寫進 DB，
@@ -2410,6 +2420,7 @@ class AccountWorker:
         # 117 則真人、57 次 reply_block_gap、認領 1 則）。群級撞拍交給 claimed_20s。
         own_gap = 20.0 + 70.0 * (1.0 - deficit)
         starved = False
+        vacuum = False
         try:
             spoke = await self.db.group_bot_last_spoke(group_id)
         except Exception:
@@ -2422,7 +2433,14 @@ class AccountWorker:
                 (not mine or now - mine >= _SILENT_REJOIN_SECONDS)
                 and now - last_any_bot >= _SILENT_REJOIN_MIN_GAP
             )
-            if not is_my_dialog and not is_photo and mine and now - mine < own_gap and not starved:
+            # 整群真空：真人還在講、卻已經五分鐘沒有半個姊妹出聲＝此刻讓位等於消失。
+            if (
+                now - last_any_bot >= _GROUP_VACUUM_SECONDS
+                and human_5m >= _GROUP_VACUUM_MIN_HUMANS
+            ):
+                vacuum = True
+                self._pcount("vacuum_rejoin")
+            if not is_my_dialog and not is_photo and mine and now - mine < own_gap and not starved and not vacuum:
                 self._pcount("reply_block_gap")
                 return False
             if starved and now - last_any_bot < 90.0:
@@ -2430,7 +2448,7 @@ class AccountWorker:
                     int(self.stats.get("starved_rejoin", 0)) + 1
                 )
         # 20 秒群級鎖：四號別疊在同一拍（照片不吃，只有一個會真的送出）
-        if not is_photo and not starved and int(pressure.get("ordinary_claimed_20s", 0) or 0) >= 1:
+        if not is_photo and not starved and not vacuum and int(pressure.get("ordinary_claimed_20s", 0) or 0) >= 1:
             self._pcount("reply_block_pile")
             return False
 
@@ -2440,7 +2458,7 @@ class AccountWorker:
         if probability <= 0 and not is_photo:
             return False
         # 10 分鐘認領上限跟著真人量走：固定 8 則在 3 則/分的群是自己把自己噤聲。
-        if claimed_10m >= max(_MAX_ORDINARY_CLAIMS_10M, int(human_5m * 0.6)):
+        if claimed_10m >= max(_MAX_ORDINARY_CLAIMS_10M, int(human_5m * 0.6)) and not vacuum and not starved:
             self._pcount("reply_block_cap")
             return False
         if human_5m >= _HIGH_TRAFFIC_HUMANS_5M:
@@ -2451,11 +2469,23 @@ class AccountWorker:
             # 5 分鐘額度是配額，佔比已經達標時才准擋（缺口大時它只是自我噤聲）。
             # 回場保底與熱度縮放要和 admit_ordinary_reply 的原子判斷一致。
             stale = time.time() - last_any_bot >= 360.0 if spoke else False
-            if not stale and not is_photo and deficit < 0.2 and already_5m >= hot_budget(human_5m):
+            if (
+                not stale
+                and not vacuum
+                and not starved
+                and not is_photo
+                and deficit < 0.2
+                and already_5m >= hot_budget(human_5m)
+            ):
                 self._pcount("reply_block_hot")
                 return False
             # 佔比越缺、擲骰越寬（達標 0.15／零發言 0.65），不然熱場永遠答不上。
-            probability = min(probability, 0.15 + 0.5 * deficit)
+            if not vacuum:
+                probability = min(probability, 0.15 + 0.5 * deficit)
+        # 真空回場：這一則是全群五分鐘來的第一句，別再擲骰，直接放。
+        if vacuum:
+            probability = 1.0
+            self._pcount("vacuum_rejoin_pass")
         # 照片在熱場也照答：四號靠 claim 排隊，只有一個會真的送出。
         if is_photo:
             probability = 1.0
@@ -6224,6 +6254,16 @@ class AccountWorker:
         )
         return answers
 
+    def _supports_safety_settings(self) -> bool:
+        """這條網關吃不吃 Gemini 的 safety_settings。
+
+        experientiallabs 的 gateway profile 不吃（400 "not supported by this
+        gateway profile"），送了整條呼叫就失敗；routeway 吃。判別用 base_url，
+        不寫死模型名——同一顆模型換網關結果就不同。
+        """
+        base = str(getattr(self.config, "ai_base_url", "") or "").lower()
+        return "experientiallabs" not in base
+
     def _decision_enabled(self) -> bool:
         if getattr(self.config, "decision_enabled", None) is False:
             return False
@@ -7009,7 +7049,7 @@ class AccountWorker:
                 "timeout": 4.0,
             }
             is_gemini_family = any(k in eval_model.lower() for k in ("gemini", "agnes"))
-            if is_gemini_family:
+            if is_gemini_family and self._supports_safety_settings():
                 req["extra_body"] = {
                     "safety_settings": [
                         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
@@ -7588,10 +7628,34 @@ class AccountWorker:
                 except Exception:
                     pass
             # 防撞防同秒搶話：只有水軍真的剛在 12 秒內講過才錯開。
+            # 非指向的接話撞到姊妹剛發言時，改成依近 90 秒姊妹則數拉長錯峰——固定
+            # 2.5~6 秒抖動擋不住同秒齊發（18:05:55/56、18:10:42/43 各差 1 秒）。
+            directed = bool(
+                getattr(event, "mentioned", False)
+                or (
+                    bool(getattr(event, "is_reply", False))
+                    and bool(getattr(event, "reply_to", None))
+                )
+                or self._requested_media_kind(event.raw_text or "")
+            )
             try:
                 last_bot_ts = await self.db.last_bot_ts_by_group(int(event.chat_id or 0))
-                if last_bot_ts and time.time() - last_bot_ts <= _BOT_STAGGER_WINDOW_SECONDS:
-                    await asyncio.sleep(random.uniform(*_BOT_STAGGER_SECONDS))
+                if last_bot_ts:
+                    age = time.time() - last_bot_ts
+                    if age <= _BOT_STAGGER_WINDOW_SECONDS:
+                        await asyncio.sleep(random.uniform(*_BOT_STAGGER_SECONDS))
+                    elif not directed:
+                        sisters = await self.db.bot_msgs_since(
+                            int(event.chat_id or 0),
+                            _SISTER_STAGGER_WINDOW_SECONDS,
+                            exclude_user_id=int(self.tg_user_id or 0),
+                        )
+                        if sisters >= 2:
+                            self._pcount("sister_stagger_long")
+                            await asyncio.sleep(random.uniform(*_SISTER_STAGGER_MANY))
+                        elif sisters == 1:
+                            self._pcount("sister_stagger_short")
+                            await asyncio.sleep(random.uniform(*_SISTER_STAGGER_ONE))
             except Exception:
                 pass
             media_kind = (
@@ -9886,8 +9950,8 @@ class AccountWorker:
                 request_kwargs["extra_body"] = {
                     "chat_template_kwargs": {"enable_thinking": False}
                 }
-            # 若為 Gemini 類模型，注入安全過濾全關設定
-            if "gemini" in model.lower():
+            # 若為 Gemini 類模型，注入安全過濾全關設定（網關不吃就跳過）
+            if "gemini" in model.lower() and self._supports_safety_settings():
                 extra = request_kwargs.get("extra_body") or {}
                 extra["safety_settings"] = [
                     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
