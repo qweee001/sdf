@@ -2161,7 +2161,16 @@ class AccountWorker:
                 return await self._wait_for_media_claim(event)
             self._pcount("claim_taken")
             return False
-        if ordinary and not await self._admit_ordinary_reply(event):
+        # 群裡已經被晾著：配額層的原子判斷一樣會擋（claim_admit_reject），
+        # 已讀時直接跳過它，只補記 claimed。
+        _lulled = (
+            await self._seconds_since_any_bot(int(event.chat_id or 0))
+            >= _IGNORED_QUIET_SECONDS
+        )
+        if ordinary and _lulled:
+            self._pcount("claim_admit_bypass")
+            await self._audit_reply(event, "claimed", "human")
+        elif ordinary and not await self._admit_ordinary_reply(event):
             self._pcount("claim_admit_reject")
             await self.db.release_message_response_claim(
                 key[0], key[1], self.account_id
