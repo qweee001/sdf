@@ -8252,7 +8252,7 @@ class AccountWorker:
                 # 長鏡頭本來就慢半拍（一百多字要四五秒），它講的是「這一整段」而不是
                 # 某一句的答案，新訊息插進來也還是同一個場景，不必當過期丟掉。
                 if (
-                    getattr(self, "_struct_mode", "") != "long"
+                    getattr(event, "_sdf_mode", getattr(self, "_struct_mode", "")) != "long"
                     and not await self._context_still_fresh(event)
                 ):
                     self._record_reply_drop("stale_context")
@@ -8278,7 +8278,13 @@ class AccountWorker:
                 text = self._strip_emoji(text)
 
             # 真人節奏：模型輸出長句時拆成 2~3 則短訊連發（實測 80% 真人訊息間隔 <10s）
-            burst = self._split_human_burst(text)
+            # 長鏡頭例外：一段到底才是它的意義，拆了就變回 beat（這一直是長句
+            # 落地 0 則的真兇——生成了、送出前被拆成兩三則十幾字）。
+            burst = (
+                [text]
+                if getattr(event, "_sdf_mode", getattr(self, "_struct_mode", "")) == "long"
+                else self._split_human_burst(text)
+            )
             sent = False
             for i, part in enumerate(burst):
                 ok = await self._send_text_recorded(
