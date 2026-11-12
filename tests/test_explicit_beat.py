@@ -518,3 +518,13 @@ def test_fresh_group_keeps_the_pile_lock(monkeypatch):
     monkeypatch.setattr(w, "_is_meaningful_human_message", lambda e: True, raising=False)
     assert asyncio.run(w._ordinary_reply_allowed(ev)) is False
     assert "ignored_fill_pass" not in w.stats
+
+
+def test_long_multiline_is_joined_not_rejected():
+    """長句常分段寫：換行併成逗號（一則一個氣泡），不能原樣帶著 \n 出去。"""
+    w = _worker()
+    raw = "房間只剩床頭那盞小燈\n\n襯衫釦子被解到最後剩兩顆\n肩整片晾在冷氣風裡"
+    out = w._join_long_lines(raw)
+    assert "\n" not in out
+    assert out.count("，") == 2
+    assert w._join_long_lines("從下往上解") == "從下往上解"

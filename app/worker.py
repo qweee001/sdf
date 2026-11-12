@@ -3740,6 +3740,12 @@ class AccountWorker:
         except Exception:
             return False
 
+    @staticmethod
+    def _join_long_lines(text: str) -> str:
+        """長鏡頭分段寫的換行併成逗號：一則一個氣泡，且不被「不准換行」的閘打回。"""
+        body = re.sub(r"[ \t]*[\r\n]+[ \t]*", "，", str(text or ""))
+        return re.sub(r"，+", "，", body).strip("， ")
+
     async def _sister_pick(self, group_id: int, seconds: float = 120.0) -> str:
         """近兩分鐘講過話的姊妹（不含自己）；抽 25% 讓這則回她。
 
@@ -9441,6 +9447,10 @@ class AccountWorker:
             self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX)
         )
         reply, _ = text_guard.instant_word_fix(reply)
+        # 長鏡頭常把整段分段寫（實測 125 字那條帶兩個空行），「一則不准換行」的閘
+        # 會直接把它判成格式外洩打回。長句就併成一段：換行→逗號，維持單氣泡。
+        if _is_long:
+            reply = self._join_long_lines(reply)
         # 兩段式骨架的唯一一刀已徹底廢除：不再對生成的對話進行任何機械裁剪
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)
