@@ -5821,8 +5821,17 @@ class AccountWorker:
             if sister_target
             else ""
         )
+        # 回覆路徑的句子八成都在演自己（「雪松味乳液擦完，你想聞嗎」），真人講運動
+        # 也照樣講自己的：先接住他那句，才輪到自己。
+        reply_first = (
+            f"0. 【先接這一句】最新一句是「{last_human[:40]}」。第一句就接著它回答或反問，"
+            f"把它當成對話，之後才補自己的身體或生活；整則都不能無視它。{BS}n"
+            if last_human
+            else ""
+        )
         return (
             f"\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\n"
+            f"{reply_first}"
             f"1. 扮演真實的台灣女生 {name}，以 {band_lo}~{band_hi} 字內的極致自然口語短句隨性說話，不帶句號；"
             f"{band_hi} 字是硬上限，滿了就砍前情、只留最想講的那一句。{tail_note}\n"
             + (
