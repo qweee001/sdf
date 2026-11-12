@@ -5657,7 +5657,13 @@ class AccountWorker:
             f"\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\n"
             f"1. 扮演真實的台灣女生 {name}，以 {band_lo}~{band_hi} 字內的極致自然口語短句隨性說話，不帶句號；"
             f"{band_hi} 字是硬上限，滿了就砍前情、只留最想講的那一句。{tail_note}\n"
-            f"2. {chosen_mood}\n"
+            + (
+                f"1b. 這則刻意寫長：不是一句就收，三句以上、每句接著上一句往下推，"
+                f"整段都在同一個動作上，寫到 {band_hi} 字上下。\n"
+                if self._struct_mode == "long"
+                else ""
+            )
+            + f"2. {chosen_mood}\n"
             f"3. {chosen_syntax}\n"
             f"5. 嚴禁任何客服推銷感；只有對方主動苦苦求約時才隨手提助理，平時全心當個鮮活撩人的台灣女生！"
             f"{self._group_attention_note(history)}"
