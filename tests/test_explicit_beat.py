@@ -128,7 +128,8 @@ def test_flirty_two_kills_frag_and_short(monkeypatch):
     ev = _event(flirty=3)
     monkeypatch.setattr(random, "random", lambda: 0.05)  # 基礎 roll 會落在 short
     w._build_directors_note(ev, history, own_texts=["咬回去"], last_human="用穴夾你雞雞嗎")
-    assert w._struct_mode in ("beat", "dirty")
+    # 長鏡頭也算（他正在撩，一段到底比碎字更對）
+    assert w._struct_mode in ("beat", "dirty", "long")
 
 
 def test_flirty_zero_turns_beat_back_into_life_scene(monkeypatch):
