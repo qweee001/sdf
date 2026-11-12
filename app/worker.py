@@ -3797,6 +3797,44 @@ class AccountWorker:
             p -= 0.08
         return max(0.0, min(p, 0.45))
 
+    def _demote_repeated_lead(self, text: str, group_id: int) -> str:
+        """同一個名字一直當開頭就把它挪到後面（「和進出口，X」連八次）。
+
+        只動真的被重複使用的名字，其他句子原樣。
+        """
+        body = str(text or "").strip()
+        m = re.match(r"^([^\s，,]{2,4})[，,\s]+(.+)$", body)
+        if not m or not group_id:
+            return body
+        name, rest = m.group(1), m.group(2).strip()
+        if name not in self._speaker_names(int(group_id)):
+            return body
+        recent = [
+            re.sub(r"\s", "", t)
+            for t, _a in self._cross_recent_items(int(group_id), 900.0)
+        ][-10:]
+        if sum(1 for t in recent if t.startswith(name)) < 2:
+            return body
+        parts = [p for p in re.split(r"[，,]", rest) if p.strip()]
+        if not parts:
+            return body
+        if len(parts) >= 2:
+            return f"{parts[0]}，{name}，{'，'.join(parts[1:])}"
+        return f"{parts[0]}，{name}"
+
+    def _dry_streak(self, group_id: int, limit: int = 4) -> int:
+        """近幾則水軍連續都沒有露骨軸（0 軸）。"""
+        if not group_id:
+            return 0
+        streak = 0
+        for text, _age in reversed(self._cross_recent_items(int(group_id), 600.0)):
+            if streak >= limit:
+                break
+            if self._explicit_axes(text) > 0:
+                break
+            streak += 1
+        return streak
+
     def _scene_rush(self, group_id: int, seconds: float = 300.0) -> int:
         """近五分鐘水軍有幾則是一開口就兩軸以上（部位＋動作一起上）。
 
@@ -5851,6 +5889,14 @@ class AccountWorker:
                 self._pcount("flirty_override")
             elif self._struct_mode == "beat" and _flirty == 0 and _density < 0.25:
                 self._struct_mode = "scene"
+            # 三則都沒有一點身體就整場乾掉（實測 0 軸佔 54%：互動上線之後句子
+            # 全變成對話句）。第四則不問角色、直接補一記；短碎也可以帶一句話的濕。
+            if (
+                self._struct_mode in ("frag", "short", "scene", "halt")
+                and self._dry_streak(int(getattr(event, "chat_id", 0) or 0)) >= 3
+            ):
+                self._struct_mode = "dirty" if random.random() < 0.5 else "beat"
+                self._pcount("dry_forced")
         # 模型永遠寫到字數帶的上緣：8~16 帶實測九則全在 11~19、0 則 ≤8 字，
         # 短碎等於只存在於提示詞。短碎模式再抽 45% 走「一句話」窄帶（上限 10 字），
         # 讓「真的假的」這種三到五字反應真的出現，而不是每句都是兩個子句。
@@ -9708,6 +9754,12 @@ class AccountWorker:
         # 會直接把它判成格式外洩打回。長句就併成一段：換行→逗號，維持單氣泡。
         if _is_long:
             reply = self._join_long_lines(reply)
+            # 硬切：第一次就寫到八十幾一百字的不等重寫（重寫只會更長）。
+            if len(reply) > 42:
+                reply = self._soft_trim(reply, 40)
+                self._pcount("long_hard_trim")
+        if self._struct_mode in ("dirty", "beat", "scene", "short", "long"):
+            reply = self._demote_repeated_lead(reply, int(getattr(event, "chat_id", 0) or 0))
         # 兩段式骨架的唯一一刀已徹底廢除：不再對生成的對話進行任何機械裁剪
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)

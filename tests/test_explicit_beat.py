@@ -689,3 +689,64 @@ def test_simplified_line_is_converted_locally_not_rejected():
     assert "着" not in out
     # 台灣標準字不能被誤轉
     assert instant_word_fix("床上很舒服")[0] == "床上很舒服"
+
+
+# ---- 14. 乾場補軸／長句硬切／點名去重 -----------------------------------
+
+def test_dry_streak_counts_zero_axis_lines(monkeypatch):
+    w = _worker()
+    monkeypatch.setattr(
+        w, "_cross_recent_items",
+        lambda *a: [("小穴被插到發抖", 90.0), ("真假", 60.0), ("趴好", 40.0), ("戰力全在嘴上", 20.0)],
+        raising=False,
+    )
+    assert w._dry_streak(GID) == 3
+
+
+def test_dry_field_forces_an_axis(monkeypatch):
+    w = _worker()
+    w._human_ref = 9
+    monkeypatch.setattr(w, "_frag_probability", lambda *a: 0.0, raising=False)
+    monkeypatch.setattr(w, "_long_starved", lambda *a: True, raising=False)
+    monkeypatch.setattr(w, "_burst_heat", lambda *a: 12, raising=False)
+    # 三則 0 軸：短句也要被換成有身體的
+    monkeypatch.setattr(
+        w, "_cross_recent_items",
+        lambda *a: [("真假", 60.0), ("趴好", 40.0), ("戰力全在嘴上", 20.0)],
+        raising=False,
+    )
+    monkeypatch.setattr(random, "random", lambda: 0.9)   # 主骰落在最後一格
+    w._build_directors_note(_event(), _rows(["真假"]), last_human="真假")
+    assert w._struct_mode in ("dirty", "beat")
+    assert w.stats.get("dry_forced") == 1
+
+
+def test_wet_field_keeps_the_roll(monkeypatch):
+    w = _worker()
+    w._human_ref = 9
+    monkeypatch.setattr(w, "_frag_probability", lambda *a: 0.0, raising=False)
+    monkeypatch.setattr(w, "_burst_heat", lambda *a: 0, raising=False)
+    monkeypatch.setattr(
+        w, "_cross_recent_items",
+        lambda *a: [("小穴被插到發抖", 20.0)],
+        raising=False,
+    )
+    monkeypatch.setattr(random, "random", lambda: 0.02)   # 冷場第一格 → long
+    w._build_directors_note(_event(), _rows(["真假"]), last_human="真假")
+    assert w._struct_mode == "long"
+    assert not w.stats.get("dry_forced")
+
+
+def test_repeated_name_lead_is_demoted():
+    w = _worker()
+    # 小天後 已被當開頭兩次
+    w._cross_recent_items = lambda *a: [("小天後，趴好", 40.0), ("小天後，先喇舌", 20.0)]
+    out = w._demote_repeated_lead("小天後，手先別急，按到腰就抖了", GID)
+    assert not out.startswith("小天後")
+    assert "小天後" in out
+
+
+def test_single_name_lead_is_kept():
+    w = _worker()
+    w._cross_recent_items = lambda *a: [("方sir，你好", 40.0)]
+    assert w._demote_repeated_lead("小天後，趴好我來按", GID) == "小天後，趴好我來按"
