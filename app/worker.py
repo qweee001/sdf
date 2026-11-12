@@ -7527,6 +7527,9 @@ class AccountWorker:
         # 263 字生成了卻永遠沒有長句落地。釘在 event 上，改寫也只能是 long。
         if getattr(self, "_struct_mode", "") == "long":
             setattr(event, "_sdf_keep_long", True)
+        # 長句一條要四五秒，三條 A/B/C 在洗屏場等於十五秒，回來人早就跑了。
+        # 長句只挑一條，通過就發（長句講的是整段，本來也不適合逐句改寫）。
+        _cand_limit = 1 if getattr(event, "_sdf_keep_long", False) else _GATE_CANDIDATE_LIMIT
         try:
             context = await self._decision_state(event)
         except Exception as exc:
@@ -7648,7 +7651,7 @@ class AccountWorker:
                 own_texts=own_texts,
                 last_human=last_human,
                 group_id=group_id,
-                limit=_GATE_CANDIDATE_LIMIT,
+                limit=_cand_limit,
                 sister_recent=sister_recent,
                 strict=strict,
                 require_target=need_target or bool(duel) or flow,
@@ -7704,7 +7707,7 @@ class AccountWorker:
                 own_texts=own_texts,
                 last_human=last_human,
                 group_id=group_id,
-                limit=_GATE_CANDIDATE_LIMIT,
+                limit=_cand_limit,
                 sister_recent=sister_recent,
                 strict=strict,
                 require_self=True,
@@ -7749,7 +7752,7 @@ class AccountWorker:
                 own_texts=own_texts,
                 last_human=last_human,
                 group_id=group_id,
-                limit=_GATE_CANDIDATE_LIMIT,
+                limit=_cand_limit,
                 sister_recent=sister_recent,
                 strict=strict,
                 require_target=True,
@@ -7810,7 +7813,7 @@ class AccountWorker:
             own_texts=own_texts,
             last_human=last_human,
             group_id=group_id,
-            limit=_GATE_CANDIDATE_LIMIT,
+            limit=_cand_limit,
             sister_recent=sister_recent,
             strict=strict,
         )
