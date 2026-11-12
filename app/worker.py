@@ -2189,12 +2189,19 @@ class AccountWorker:
         )
         if not candidates or int(self.tg_user_id or 0) not in candidates:
             return False
+        # 被姊妹點名（「小天後你…」）就是叫她名字，真姊妹一定接；一般接龍才吃機率
+        # 與回合上限。實測 managed_claimed/managed_sent 一整輪都是 0：姊妹互相點名
+        # 沒有任何一條回得出去，四人像四個廣播電台。
+        my_name = str(self.persona.get("name") or "").strip()
+        called = bool(my_name) and my_name in text
+        if called:
+            self._pcount("managed_called")
         # 話題回合已滿：本回合 AI 已發言夠多 → 留空間給真人，不繼續接龍
-        if int(self.topic_turn_counts.get(group_id, 0)) >= _MAX_TOPIC_TURNS:
+        elif int(self.topic_turn_counts.get(group_id, 0)) >= _MAX_TOPIC_TURNS:
             return False
         default_cross = float(getattr(self.config, "water_cross_talk_probability", 0.2))
         cross_prob = await self._get_runtime_float("water_cross_talk_probability", default_cross)
-        probability = max(0.0, min(1.0, cross_prob))
+        probability = 0.85 if called else max(0.0, min(1.0, cross_prob))
         probability_key = f"managed-followup:{group_id}:{message_id}".encode()
         score = int.from_bytes(
             hashlib.blake2b(probability_key, digest_size=8).digest(), "big"
@@ -2500,7 +2507,7 @@ class AccountWorker:
                 and not starved
                 and not is_photo
                 and not ignored
-                and deficit < 0.2
+                and deficit < 0.0
                 and already_5m >= hot_budget(human_5m)
             ):
                 self._pcount("reply_block_hot")
@@ -2521,7 +2528,7 @@ class AccountWorker:
         # 回覆別人的訊息是「插話」不是「接球」，機率打折但不歸零；
         # 折扣本身也吃缺口——水軍快沒人講話時，插話總比整場隱形好。
         if soft:
-            probability *= 0.55 + 0.45 * deficit
+            probability *= 0.8 + 0.2 * deficit
         # 佔比掉到 15% 以下＝整場快看不到水軍（實測熱場一小時 6.5%）。
         # 固定機率在此時只會愈等愈死，這裡直接往上帶，不靠各處拍腦袋的常數。
         if share < 0.15:
@@ -8297,6 +8304,9 @@ class AccountWorker:
                     ),
                     short_delay=i > 0,
                     echo_guard=i == 0,
+                    # 自己講出去的話要登記成「可接的原句」，別人才接得到（原本只有
+                    # 主動路徑登記，回覆路的句子姊妹永遠看不到 → 互點全靠運氣）。
+                    managed_origin=True,
                     on_dispatched=mark_telegram_dispatched if i == 0 else None,
                 )
                 sent = sent or ok

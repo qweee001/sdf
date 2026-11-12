@@ -39,7 +39,7 @@ def hot_budget(human_5m: int) -> int:
     3 則／分的群 5 分鐘就有 15 則真人，舊式 2 則額度等於水軍只佔 13%、
     四號輪流排還常常整段隱形；改成每 10 則真人多給 1 則。
     """
-    return 2 + min(6, max(0, int(human_5m)) // 10)
+    return 3 + min(7, max(0, int(human_5m)) // 8)
 
 
 def hot_claim_window(human_5m: int) -> int:
