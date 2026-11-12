@@ -2217,7 +2217,7 @@ class AccountWorker:
         # 話題回合已滿：本回合 AI 已發言夠多 → 留空間給真人，不繼續接龍
         elif int(self.topic_turn_counts.get(group_id, 0)) >= _MAX_TOPIC_TURNS:
             return False
-        default_cross = float(getattr(self.config, "water_cross_talk_probability", 0.2))
+        default_cross = float(getattr(self.config, "water_cross_talk_probability", 0.45))
         cross_prob = await self._get_runtime_float("water_cross_talk_probability", default_cross)
         probability = 0.85 if called else max(0.0, min(1.0, cross_prob))
         probability_key = f"managed-followup:{group_id}:{message_id}".encode()
