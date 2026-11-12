@@ -6903,9 +6903,16 @@ class AccountWorker:
             if require_target
             else ""
         )
+        # 長鏡頭是一整段，長度本身就是目的：不先講，裁判會用群裡的短句尺度判它「太長」。
+        long_block = (
+            "【這則刻意寫長】群友多數在講短句，但這則是要一段到底的長鏡頭，"
+            "長度不算缺點；只要每一句都接著上一句往下推、沒有變成評語或說明就算合格。\n"
+            if getattr(self, "_struct_mode", "") == "long"
+            else ""
+        )
         state = (
-            f"{context}\n{sister_block}{decision_block}{require_block}{target_block}"
-            f"你要發出的回覆：「{str(text).strip()}」"
+            f"{context}\n{sister_block}{decision_block}{long_block}"
+            f"{require_block}{target_block}"
         )
         if getattr(self.config, "decision_api_key", "").strip():
             try:
@@ -7140,6 +7147,13 @@ class AccountWorker:
                 else ""
             )
             + f"【候選發言】：「{str(text).strip()}」"
+            # 長鏡頭：不先講，裁判會拿群裡的短句尺度判它「太長」。
+            + (
+                "【這則刻意寫長】群友多數在講短句，但這則是要一段到底的長鏡頭，長度不算缺點；"
+                "每一句都接著上一句往下推、沒有變成評語或說明就算合格。\n"
+                if getattr(self, "_struct_mode", "") == "long"
+                else ""
+            )
         )
 
         started = time.monotonic()
