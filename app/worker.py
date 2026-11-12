@@ -5519,7 +5519,13 @@ class AccountWorker:
             # 碎字通道：真人四成是兩三字接下來的（「真假」「超頂」「換我」），水軍
             # 17:07–19:19 五十七則一則都沒有，整場看起來就是每個人都在講完整句。
             # 洗屏時多一點，冷場少一點（冷場三五字會突兀）。
-            if random.random() < self._frag_probability(history, heat, flow_long):
+            # 長鏡頭先抽：它是刻意事件，抽中就跳過碎字那一骰（實測被碎字吃掉一半）。
+            if heat < _HOT_BURST_HUMANS and random.random() < (
+                0.10 if heat >= _WARM_BURST_HUMANS else 0.18
+            ):
+                self._struct_mode = "long"
+                self._pcount("band_long")
+            elif random.random() < self._frag_probability(history, heat, flow_long):
                 self._struct_mode = "frag"
             # 已經連四則都在 11 字上下：這則一定要出帶。熱場仍以直球為主（短而辛辣、
             # 不交代前情，插話不會遲到），冷場改走生活場景把句子長回來。
@@ -5530,14 +5536,6 @@ class AccountWorker:
                 self.stats["band_flow_short_rebound"] = (
                     int(self.stats.get("band_flow_short_rebound", 0)) + 1
                 )
-            # 長鏡頭：只在場速低時抽。熱場一則 90 字以上要三四秒，回來就過期。
-            if (
-                heat < _HOT_BURST_HUMANS
-                and self._struct_mode != "frag"
-                and random.random() < (0.10 if heat >= _WARM_BURST_HUMANS else 0.18)
-            ):
-                self._struct_mode = "long"
-                self._pcount("band_long")
             # 決策 override 放在最後：碎字與棘輪都算過了，使用者意圖優先。
             if _flirty >= 2 and self._struct_mode in ("frag", "short"):
                 self._struct_mode = "beat" if random.random() < p_beat else "dirty"
@@ -11737,17 +11735,14 @@ class AccountWorker:
             _p_mode = "beat"
         elif _p_mode == "beat" and _p_density < 0.2:
             _p_mode = "scene"
-        # 長鏡頭：主動是這條路的主力，但一樣只在場速低時抽（深夜、冷場才吃得下 90 字）。
-        if (
-            _p_heat < _HOT_BURST_HUMANS
-            and _p_mode != "frag"
-            and random.random() < (0.05 if _p_heat >= _WARM_BURST_HUMANS else 0.10)
+        # 碎字通道（跟回覆路徑同一條）：兩三字的反應在群裡最自然，水軍一則都沒有，
+        # 整場就成了四個人輪流演講。
+        if _p_heat < _HOT_BURST_HUMANS and random.random() < (
+            0.05 if _p_heat >= _WARM_BURST_HUMANS else 0.10
         ):
             _p_mode = "long"
             self._pcount("band_long")
-        # 碎字通道（跟回覆路徑同一條）：兩三字的反應在群裡最自然，水軍一則都沒有，
-        # 整場就成了四個人輪流演講。
-        if random.random() < self._frag_probability(msgs, _p_heat, _p_flow_long):
+        elif random.random() < self._frag_probability(msgs, _p_heat, _p_flow_long):
             _p_mode = "frag"
             self._pcount("band_frag")
         # 反向棘輪（跟回覆路徑同一條規則）：整批已經縮死在 11 字上下就一定要出帶，
