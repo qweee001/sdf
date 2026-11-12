@@ -9309,6 +9309,8 @@ class AccountWorker:
             self.stats["dbg_long_len"] = len(reply)
             self.stats["dbg_long"] = str(reply)[:80]
         too_long = len(reply) > char_cap + 4
+        # 長鏡頭寫太短就沒意義（實測抽中後常只寫 30 字）：比照超長，重寫一次。
+        too_short = self._struct_mode == "long" and len(reply) < 60
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
@@ -9324,7 +9326,10 @@ class AccountWorker:
             time_mismatch or gender_term or simplified or group_meta or meta_speak or video_topic
         )
 
-        if not format_leak and not refusal and not own_echo and not too_long and not fact_bad and not tic_hit:
+        if (
+            not format_leak and not refusal and not own_echo and not too_long
+            and not too_short and not fact_bad and not tic_hit
+        ):
             if image:
                 self.stats["images_understood"] += 1
             self._set_generation_reason(event, "ok")
@@ -9359,6 +9364,8 @@ class AccountWorker:
                 if own_echo
                 else "tic"
                 if tic_hit
+                else "too_short"
+                if too_short
                 else "too_long"
             )
             self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
@@ -9366,7 +9373,13 @@ class AccountWorker:
             return ""
 
         correction = (
-            f"上一版未符合演出要求。請以 {self._band_lo}~{self._band_hi} 個字元的自然短句表達，"
+            (
+                "上一版太短。這則要一整段：三句以上、每句接著上一句往下推，"
+                f"寫到 {self._band_hi} 字上下，不要收成一句。"
+                if too_short
+                else ""
+            )
+            + f"上一版未符合演出要求。請以 {self._band_lo}~{self._band_hi} 個字元的自然短句表達，"
             "語意常識第一，結尾不要句號、少用驚嘆號，保持自信有魅力的台灣日常口吻。"
         )
         if _frag_mode:
@@ -9500,6 +9513,8 @@ class AccountWorker:
                 if retry_own_echo
                 else "tic"
                 if retry_tic
+                else "too_short"
+                if too_short
                 else "too_long"
             )
             self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
