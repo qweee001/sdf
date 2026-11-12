@@ -358,7 +358,7 @@ def test_scene_rush_counts_two_axis_bot_lines(monkeypatch):
 def test_rush_block_forces_single_axis(monkeypatch):
     w = _worker()
     w._struct_mode_force = "beat"
-    monkeypatch.setattr(w, "_scene_rush", lambda gid: 2, raising=False)
+    monkeypatch.setattr(w, "_scene_rush", lambda gid: 3, raising=False)
     note = w._build_directors_note(_event(), _rows(["用穴夾你雞雞嗎"]), last_human="用穴夾你雞雞嗎")
     assert "只准一個軸" in note
 
@@ -366,7 +366,7 @@ def test_rush_block_forces_single_axis(monkeypatch):
 def test_no_rush_block_when_field_has_room(monkeypatch):
     w = _worker()
     w._struct_mode_force = "beat"
-    monkeypatch.setattr(w, "_scene_rush", lambda gid: 1, raising=False)
+    monkeypatch.setattr(w, "_scene_rush", lambda gid: 2, raising=False)
     note = w._build_directors_note(_event(), _rows(["用穴夾你雞雞嗎"]), last_human="用穴夾你雞雞嗎")
     assert "只准一個軸" not in note
 

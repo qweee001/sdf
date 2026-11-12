@@ -5742,9 +5742,11 @@ class AccountWorker:
         gid = int(getattr(event, "chat_id", 0) or 0)
         # 反 rush：近五分鐘已經兩則一開口就兩軸，這拍壓成單軸，讓群有喘息。
         rush_block = ""
-        if self._struct_mode in ("beat", "dirty", "long"):
+        if self._struct_mode == "beat":
             rush = self._scene_rush(gid)
-            if rush >= 2:
+            # 門檻 3 不是 2：五分鐘窗很容易湊到 2，門檻放 2 會把 beat 全部壓成單軸
+            # （部署後 2 軸由 41.7% 掉到 14.3%，變成另一種單調）。
+            if rush >= 3:
                 rush_block = (
                     "4. 【這拍只准一個軸】近五分鐘已經有人一開口就把部位跟動作"
                     "一起端上去了，你這則只寫反應或感受（哪裡緊、哪裡抖、聲音怎樣），"
