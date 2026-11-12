@@ -292,7 +292,7 @@ _STRUCT_BANDS: dict[str, tuple[int, int]] = {
     "beat": (25, 45),
     # 長鏡頭：整個過程一段到底。實測模型 577 字不斷手，卡住的一直是通道不是模型。
     # 只在場速低（兩分鐘 <4 則真人）時抽，熱場寫長等於遲到。
-    "long": (30, 55),
+    "long": (25, 40),
     # 留白：一句半、停在動作中，不接完也不問。熱場真人常這樣丟一句就沒了。
     "halt": (3, 9),
 }
@@ -5779,9 +5779,9 @@ class AccountWorker:
             # 每條回覆平均會被改寫四五次，而模式只在第一次抽（改寫保留原模式），
             # 所以 0.06/0.10 在這個流程裡等於每十幾條才一條，實務上永遠看不到。
             if _long_ok and _long_roll < (
-                0.25 if heat >= _HOT_BURST_HUMANS
-                else 0.22 if heat >= _WARM_BURST_HUMANS
-                else 0.30
+                0.15 if heat >= _HOT_BURST_HUMANS
+                else 0.15 if heat >= _WARM_BURST_HUMANS
+                else 0.20
             ):
                 self._struct_mode = "long"
                 self._pcount("band_long")
