@@ -8191,6 +8191,9 @@ class AccountWorker:
                     self.stats["managed_generated"] += 1
                 # ③ 決策層審核候選：通過→發；重寫→重生成一次再審核；仍不合格/超時→暫緩
                 text = await self._gate_reply(event, text)
+                if getattr(event, "_sdf_keep_long", False):
+                    # 診斷：長句從審核出來剩幾字（0＝被審核丟掉）
+                    self.stats["dbg_gate_long"] = len(text or "")
                 if not text:
                     self._record_reply_drop("gate_held")
                     await self._audit_reply(event, "policy", "gate_held")
