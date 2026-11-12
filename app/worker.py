@@ -7129,9 +7129,9 @@ class AccountWorker:
             # 生成），取 12。
             if getattr(self, "_short_tight", False):
                 cap = min(char_cap, band[0] + 6)
-                return min(cap, int(ref * 1.4)) if ref else cap
+                return min(cap, int(ref * 1.25)) if ref else cap
             cap = min(char_cap, band[1] + 4)
-            return min(cap, int(ref * 1.7)) if ref else cap
+            return min(cap, int(ref * 1.45)) if ref else cap
         if band and self._struct_mode == "long":
             # 長鏡頭只認自己的帶頂。原本這裡回 max(char_cap, band[1])，而呼叫端
             # 傳 90 進來 → 上限永遠是 90；真人（去管理員）整場最長 40、p99 只有 28。
@@ -7143,13 +7143,13 @@ class AccountWorker:
         if band and self._struct_mode != "scene":
             # 原本 +10 留太大：dirty 帶 12~24 實際都落在 26~34，等於沒上限。
             cap = min(char_cap, band[1] + 2)
-            base = min(cap, int(ref * 2.0)) if ref else cap
+            base = min(cap, int(ref * 1.6)) if ref else cap
             return max(base, min(char_cap, tail)) if tail else base
         if band:
             # scene 帶 15~30 給到 34；36 字的「三句一則」就是從這裡長出來的。
             # 生活場景天生要交代前情，倍率放寬一點，但絕不讓它超過真人兩倍多。
             cap = min(char_cap, band[1] + 4)
-            base = min(cap, int(ref * 2.2)) if ref else cap
+            base = min(cap, int(ref * 1.7)) if ref else cap
             return max(base, min(char_cap, tail)) if tail else base
         return char_cap
 
