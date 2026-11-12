@@ -3718,7 +3718,8 @@ class AccountWorker:
             return ""
         try:
             spoke = await self.db.group_bot_last_spoke(int(group_id))
-        except Exception:
+        except Exception as e:
+            self.stats["dbg_sister"] = f"ERR {type(e).__name__}"
             return ""
         now = time.time()
         me = int(self.tg_user_id or 0)
@@ -3732,6 +3733,7 @@ class AccountWorker:
             name = str((persona or {}).get("name") or "").strip()
             if name:
                 cands.append(name)
+        self.stats["dbg_sister"] = f"n={len(cands)} spoke={len(getattr(spoke, '__len__', lambda: 0)()) if False else len(spoke or {})} me={me}"
         if not cands or random.random() >= 0.25:
             return ""
         self.stats["pick_sister"] = int(self.stats.get("pick_sister", 0)) + 1
