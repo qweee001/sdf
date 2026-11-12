@@ -290,6 +290,8 @@ _STRUCT_BANDS: dict[str, tuple[int, int]] = {
     # 長鏡頭：整個過程一段到底。實測模型 577 字不斷手，卡住的一直是通道不是模型。
     # 只在場速低（兩分鐘 <4 則真人）時抽，熱場寫長等於遲到。
     "long": (90, 150),
+    # 留白：一句半、停在動作中，不接完也不問。熱場真人常這樣丟一句就沒了。
+    "halt": (3, 9),
 }
 
 # 現場熱度門檻（近兩分鐘真人訊息數）：洗屏時短碎優先，不排生活場景。
@@ -303,6 +305,7 @@ _STRUCT_SYNTAX: dict[str, str] = {
     "dirty": "【動態情境・直球色誘】：聚焦男女肉體張力，直接講你身上的具體感覺（哪裡濕、緊、燙、軟）或直接給他一個動作，不要只在旁邊評他的尺寸，短而辛辣，不扯無關瑣事。",
     "scene": "【動態情境・生活隨念】：隨性帶出你當下真實的小動作或生活狀態，自然放鬆，展現真實女生的日常生活感。",
     "beat": "【動態情境・露骨節拍】：把一次身體接觸整段講完——部位貼上去、動作、你當下的反應或聲音，三段都要有，不要只丟一個器官詞就收。",
+    "halt": "【動態情境・留白半句】：只寫半句就停，像話說到一半被身體打斷（「慢一點…」「等一下我」「別這樣」這種），可以停在動作中間，不准問句、不准收尾成完整句、不准解釋。",
     "long": "【動態情境・長鏡頭】：一次講完一整段——從怎麼開始、身體貼上去、一路到受不了，細節自己挑重點寫，中間不要斷、不要換成評語。",
 }
 
@@ -1790,6 +1793,8 @@ class AccountWorker:
                             in_escape=bool(getattr(self, "_escape_inflight", 0)),
                             breaker=len(self._cancel_ts) >= 3,
                             gen_started=gen_started,
+                            # 已讀判定：九十秒沒水軍出聲（不是自己餓，是整組沒人理）
+                            ignored=starved >= 90.0,
                         ) == "cancel":
                             task.cancel()
                             cancelled += 1
@@ -1802,6 +1807,8 @@ class AccountWorker:
                                 else "intr_passerby"
                             )
                             self._cancel_ts.append(now_c)
+                        elif ignored and same_sender:
+                            self._pcount("intr_ignored_hold")
                     except Exception:
                         continue
                 if cancelled:
@@ -3684,6 +3691,51 @@ class AccountWorker:
             p -= 0.08
         return max(0.0, min(p, 0.45))
 
+    def _scene_rush(self, group_id: int, seconds: float = 300.0) -> int:
+        """近五分鐘水軍有幾則是一開口就兩軸以上（部位＋動作一起上）。
+
+        41.7% 的 2 軸佔比＝每次開口都直接跳過前戲，群看起來很色但沒有過程。
+        這裡只回數字，怎麼用由呼叫端決定（≥2 就把這拍壓成單軸）。
+        """
+        if not group_id:
+            return 0
+        try:
+            return sum(
+                1
+                for text, _age in self._cross_recent_items(int(group_id), seconds)
+                if self._explicit_axes(text) >= 2
+            )
+        except Exception:
+            return 0
+
+    async def _sister_pick(self, group_id: int, seconds: float = 120.0) -> str:
+        """近兩分鐘講過話的姊妹（不含自己）；抽 25% 讓這則回她。
+
+        水軍緊接水軍只有 14%，因為對象軸只認「你」或男的人名，四個人永遠在
+        各自對客戶講話。真群是 A 問 B、B 回 A、C 插一句，橫向的線才是群。
+        """
+        if not group_id:
+            return ""
+        try:
+            spoke = await self.db.group_bot_last_spoke(int(group_id))
+        except Exception:
+            return ""
+        now = time.time()
+        me = int(self.tg_user_id or 0)
+        cands = []
+        for acc, ts in (spoke or {}).items():
+            if int(acc) == me:
+                continue
+            if now - float(ts or 0.0) > seconds:
+                continue
+            persona = self.personas.get(acc) or self.personas.get(str(acc)) or {}
+            name = str((persona or {}).get("name") or "").strip()
+            if name:
+                cands.append(name)
+        if not cands or random.random() >= 0.25:
+            return ""
+        return random.choice(cands)
+
     def _used_body_parts(self, group_id: int, seconds: float) -> set:
         """近窗被寫過的部位（跨號），由語料現抽而不是查固定表。
 
@@ -4538,6 +4590,7 @@ class AccountWorker:
         in_escape: bool = False,
         breaker: bool = False,
         gen_started: bool = False,
+        ignored: bool = False,
     ) -> str:
         """真人插話時這條待辦要「cancel」還是留著（hold）。
 
@@ -4567,6 +4620,11 @@ class AccountWorker:
         # 只有排隊中（還沒開始生成）才用 25 秒快砍；已在生成則放寬到 120 秒，
         # 更久就當它卡住（正確性仍由發送前的 _context_still_fresh 兜）。
         if same_sender and (age >= 120.0 if gen_started else age >= max(25.0, budget * 0.8)):
+            # 已讀補位：群裡九十秒沒有水軍出聲，代表大家正被晾著。這時他再補一句
+            # 若照砍，他每講一句都在取消自己那條，永遠回不到（真人連三句無人理
+            # 27 段、142 句就是這樣）。先讓手上這條答完最後一句。
+            if ignored and age < 90.0:
+                return "hold"
             return "cancel"
         if age > budget and not text_ready and not in_escape and not gen_started:
             if starved < _SPARE_SILENCE_SECONDS:
@@ -5357,7 +5415,12 @@ class AccountWorker:
         )
 
     def _build_directors_note(
-        self, event, history: list[dict], own_texts=None, last_human: str = ""
+        self,
+        event,
+        history: list[dict],
+        own_texts=None,
+        last_human: str = "",
+        sister_target: str = "",
     ) -> str:
         """酒館級 In-Chat @ Depth 末端動態演出指令（Author's Note）。
 
@@ -5466,6 +5529,7 @@ class AccountWorker:
             chosen_mood += _named_note        # 句型結構多元性：依隨機抽樣分流（35% 短碎調侃、35% 純色誘直球、30% 生活場景）
         # 徹底打破「[人名] + [我剛在做某事] + [你敢不敢/看你有沒有本事]」的四合一長句固定模子
         # 模式可以外部指定（_struct_mode_force），測試與重寫才吃得到同一組字數。
+        _density = 0.0
         forced_mode = getattr(self, "_struct_mode_force", "")
         heat = self._burst_heat(history)
         # 真人講多短，這則的天花板就多低：跟著群友的嘴走，不跟固定帶走。
@@ -5519,7 +5583,7 @@ class AccountWorker:
             # 碎字通道：真人四成是兩三字接下來的（「真假」「超頂」「換我」），水軍
             # 17:07–19:19 五十七則一則都沒有，整場看起來就是每個人都在講完整句。
             # 洗屏時多一點，冷場少一點（冷場三五字會突兀）。
-            # 長鏡頭先抽：它是刻意事件，抽中就跳過碎字那一骰（實測被碎字吃掉一半）。
+            # 長鏡頭：它是刻意事件，抽中就跳過碎字那一骰（實測被碎字吃掉一半）。
             if heat < _HOT_BURST_HUMANS and random.random() < (
                 0.10 if heat >= _WARM_BURST_HUMANS else 0.18
             ):
@@ -5538,6 +5602,12 @@ class AccountWorker:
                     int(self.stats.get("band_flow_short_rebound", 0)) + 1
                 )
             # 決策 override 放在最後：碎字與棘輪都算過了，使用者意圖優先。
+            # 留白：真人講一講會斷在半句（「慢一點…」「等一下我」），整場沒人這樣收
+            # 就是每句都把話講完，觀感最像客服。只吃本來要講一句完整句的，且他沒在
+            # 明確撩（他在撩時半句太薄）。
+            if self._struct_mode == "short" and _flirty <= 1 and random.random() < 0.18:
+                self._struct_mode = "halt"
+                self._pcount("band_halt")
             if _flirty >= 2 and self._struct_mode in ("frag", "short"):
                 self._struct_mode = "beat" if random.random() < p_beat else "dirty"
                 self._pcount("flirty_override")
@@ -5563,7 +5633,7 @@ class AccountWorker:
             and random.random()
             < (0.12 if heat >= _HOT_BURST_HUMANS else 0.2)
         )
-        if self._len_tail:
+        if self._len_tail and self._struct_mode != "halt":
             self._struct_mode = "scene" if random.random() < 0.4 else "dirty"
             self.stats["band_len_tail"] = int(self.stats.get("band_len_tail", 0)) + 1
         self.stats[f"band_{self._struct_mode}"] = (
@@ -5653,6 +5723,24 @@ class AccountWorker:
                 f"寫到 {band_hi} 字上下，兩三個逗號，把動作、自己的身體反應、對他的評語一起寫完，"
                 "不要只留一句短話。"
             )
+        gid = int(getattr(event, "chat_id", 0) or 0)
+        # 反 rush：近五分鐘已經兩則一開口就兩軸，這拍壓成單軸，讓群有喘息。
+        rush_block = ""
+        if self._struct_mode in ("beat", "dirty", "long"):
+            rush = self._scene_rush(gid)
+            if rush >= 2:
+                rush_block = (
+                    "4. 【這拍只准一個軸】近五分鐘已經有人一開口就把部位跟動作"
+                    "一起端上去了，你這則只寫反應或感受（哪裡緊、哪裡抖、聲音怎樣），"
+                    "不准再開新的部位、不准再給新動作。\n"
+                )
+        # 橫向互接：這則回姊妹，不要每則都在對男的講。
+        sister_block = (
+            f"6. 【這則回姊妹 {sister_target}】直接喊她的名字接她的話（同意、吐槽、"
+            f"補自己的經驗都可以），這則不要對男的講、也不要對全場。\n"
+            if sister_target
+            else ""
+        )
         return (
             f"\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\n"
             f"1. 扮演真實的台灣女生 {name}，以 {band_lo}~{band_hi} 字內的極致自然口語短句隨性說話，不帶句號；"
@@ -5667,6 +5755,7 @@ class AccountWorker:
             f"3. {chosen_syntax}\n"
             f"5. 嚴禁任何客服推銷感；只有對方主動苦苦求約時才隨手提助理，平時全心當個鮮活撩人的台灣女生！"
             f"{self._group_attention_note(history)}"
+            f"{rush_block}{sister_block}"
         )
 
     _ANCHOR_CUE_WORDS = (
@@ -6906,6 +6995,12 @@ class AccountWorker:
             "候選必須自然接話，直接針對上一句話題切入，別用全場視角。"
             "整句仍然是對「你們」講、沒有單數的「你」也沒有點到任何人名，就算不合格。\n"
             if require_target
+            else ""
+        )
+        # 留白半句：裁判預設會要求語意完整，不先講就會被當斷尾打回。
+        halt_block = (
+            "【這則是留白半句】只寫半句、停在動作中間是合格的，不要因為沒有收尾或沒有問句就判不合格；只有前後完全不接才打回。\n"
+            if getattr(self, "_struct_mode", "") == "halt"
             else ""
         )
         # 長鏡頭是一整段，長度本身就是目的：不先講，裁判會用群裡的短句尺度判它「太長」。
@@ -9166,7 +9261,14 @@ class AccountWorker:
         # 依主人指示：酒館級 Author's Note / In-Chat @ Depth 末端動態注入
         # 將最高權重的導演演出指令放在整個 Context 的最後一刻，直接引領模型演繹
         director_note = self._build_directors_note(
-            event, history, own_texts, last_human
+            event,
+            history,
+            own_texts,
+            last_human,
+            # 橫向互接：25% 回姊妹。原本四號只會各自對男的講，水軍緊接水軍 14%。
+            sister_target=await self._sister_pick(
+                int(getattr(event, "chat_id", 0) or 0)
+            ),
         )
         if director_note:
             user_message += f"\n{director_note}"
@@ -11769,7 +11871,10 @@ class AccountWorker:
             _p_mode = "scene"
         # 碎字通道（跟回覆路徑同一條）：兩三字的反應在群裡最自然，水軍一則都沒有，
         # 整場就成了四個人輪流演講。
-        if _p_heat < _HOT_BURST_HUMANS and random.random() < (
+        if random.random() < 0.10:
+            _p_mode = "halt"
+            self._pcount("band_halt")
+        elif _p_heat < _HOT_BURST_HUMANS and random.random() < (
             0.05 if _p_heat >= _WARM_BURST_HUMANS else 0.10
         ):
             _p_mode = "long"

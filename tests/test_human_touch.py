@@ -86,8 +86,13 @@ def test_per_account_rng_is_deterministic_and_private():
     assert seq_a1 != seq_b
 
 
-def test_context_topic_uses_recent_group_messages_and_dedupes():
-    """主動話題即時生成：prompt 要帶上群裡真正的上文，且同一句不重複發。"""
+def test_context_topic_uses_recent_group_messages_and_dedupes(monkeypatch):
+    """主動話題即時生成：prompt 要帶上群裡真正的上文，且同一句不重複發。
+
+    長度帶是隨機的（碎字 2~6、留白 3~9 都會把這句七個字判太長），
+    RNG 固定成 0.5 讓它落在 dirty，這條測的才是上文而不是長度。
+    """
+    monkeypatch.setattr("random.random", lambda: 0.5)
 
     class _CtxDB(_FakeDB):
         def __init__(self):

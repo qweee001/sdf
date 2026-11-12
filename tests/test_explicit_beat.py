@@ -306,3 +306,142 @@ def test_recent_named_note_lists_names_and_pending():
     note = w._recent_named_note(GID)
     assert "規范" in note and "小天後" in note
     assert "換人" in note
+
+
+# ---- 7. 留白半句（halt）-------------------------------------------------
+
+def test_halt_band_is_half_sentence_length():
+    assert _STRUCT_BANDS["halt"] == (3, 9)
+
+
+def test_halt_takes_over_a_short_line(monkeypatch):
+    w = _worker()
+    w._human_ref = 20
+    # 本來要講一句完整的（short）→ 換成半句；碎字先被關掉才輪到留白骰
+    monkeypatch.setattr(w, "_frag_probability", lambda *a: 0.0, raising=False)
+    # 熱場：長鏡頭被擋掉（它只在慢場抽），這則才會落到短句→留白
+    monkeypatch.setattr(w, "_burst_heat", lambda *a: 12, raising=False)
+    monkeypatch.setattr(random, "random", lambda: 0.02)
+    w._build_directors_note(_event(), _rows(["真假", "超頂"]), own_texts=[], last_human="超頂")
+    assert w._struct_mode == "halt"
+
+
+def test_halt_line_is_allowed_to_be_unfinished():
+    w = _worker()
+    w._struct_mode_force = "halt"
+    note = w._build_directors_note(_event(), _rows(["好累"]), own_texts=[], last_human="好累")
+    assert "半句" in note
+    # 留白帶不會被長鏡頭的 90 字下限追殺
+    w._struct_mode_force = ""
+    w._struct_mode = "halt"
+    assert w._struct_char_cap(9) <= 12
+
+
+# ---- 8. 反 rush ---------------------------------------------------------
+
+def test_scene_rush_counts_two_axis_bot_lines(monkeypatch):
+    w = _worker()
+    monkeypatch.setattr(
+        w, "_cross_recent_items",
+        lambda gid, sec: [("小穴被你插到發抖", 20.0), ("想舔噴嗎", 40.0), ("早就濕了", 60.0)],
+        raising=False,
+    )
+    assert w._scene_rush(GID) == 1
+    monkeypatch.setattr(
+        w, "_cross_recent_items",
+        lambda gid, sec: [("小穴被你插到發抖", 20.0), ("奶頭被咬到硬", 40.0)],
+        raising=False,
+    )
+    assert w._scene_rush(GID) == 2
+
+
+def test_rush_block_forces_single_axis(monkeypatch):
+    w = _worker()
+    w._struct_mode_force = "beat"
+    monkeypatch.setattr(w, "_scene_rush", lambda gid: 2, raising=False)
+    note = w._build_directors_note(_event(), _rows(["用穴夾你雞雞嗎"]), last_human="用穴夾你雞雞嗎")
+    assert "只准一個軸" in note
+
+
+def test_no_rush_block_when_field_has_room(monkeypatch):
+    w = _worker()
+    w._struct_mode_force = "beat"
+    monkeypatch.setattr(w, "_scene_rush", lambda gid: 1, raising=False)
+    note = w._build_directors_note(_event(), _rows(["用穴夾你雞雞嗎"]), last_human="用穴夾你雞雞嗎")
+    assert "只准一個軸" not in note
+
+
+# ---- 9. 姊妹互接 --------------------------------------------------------
+
+def test_sister_pick_returns_recent_speaker(monkeypatch):
+    w = _worker()
+    w.tg_user_id = 1
+    w.personas = {"2": {"name": "小天後"}}
+
+    async def _spoke(_gid):
+        return {1: time.time(), 2: time.time()}
+
+    w.db = cast(Any, SimpleNamespace(group_bot_last_spoke=_spoke))
+    monkeypatch.setattr(random, "random", lambda: 0.1)
+    monkeypatch.setattr(random, "choice", lambda seq: list(seq)[0])
+    import asyncio
+    assert asyncio.run(w._sister_pick(GID)) == "小天後"
+
+
+def test_sister_pick_skips_when_unlucky_or_stale(monkeypatch):
+    w = _worker()
+    w.tg_user_id = 1
+    w.personas = {"2": {"name": "小天後"}}
+
+    async def _old(_gid):
+        return {2: time.time() - 600}
+
+    w.db = cast(Any, SimpleNamespace(group_bot_last_spoke=_old))
+    monkeypatch.setattr(random, "random", lambda: 0.1)
+    import asyncio
+    assert asyncio.run(w._sister_pick(GID)) == ""
+    w.db = cast(Any, SimpleNamespace(group_bot_last_spoke=lambda _g: _spoke_now()))
+    monkeypatch.setattr(random, "random", lambda: 0.9)
+    assert asyncio.run(w._sister_pick(GID)) == ""
+
+
+async def _spoke_now():
+    return {2: time.time()}
+
+
+def test_sister_note_is_written_into_director(monkeypatch):
+    w = _worker()
+    w._struct_mode_force = "short"
+    note = w._build_directors_note(
+        _event(), _rows(["真假"]), last_human="真假", sister_target="小天後"
+    )
+    assert "回姊妹 小天後" in note
+
+
+# ---- 10. 已讀補位 -------------------------------------------------------
+
+def test_ignored_group_holds_same_sender_reply():
+    # 群裡九十秒沒水軍出聲：他再補一句，手上這條不砍
+    assert (
+        AccountWorker._interrupt_action(
+            age=30.0, budget=20.0, same_sender=True, text_ready=False,
+            starved=120.0, ignored=True,
+        )
+        == "hold"
+    )
+    # 沒人晾著就照舊砍（留下來一定答錯句）
+    assert (
+        AccountWorker._interrupt_action(
+            age=30.0, budget=20.0, same_sender=True, text_ready=False,
+            starved=5.0, ignored=False,
+        )
+        == "cancel"
+    )
+    # 拖太久仍要砍，補位不是無限等
+    assert (
+        AccountWorker._interrupt_action(
+            age=100.0, budget=20.0, same_sender=True, text_ready=False,
+            starved=200.0, ignored=True,
+        )
+        == "cancel"
+    )
