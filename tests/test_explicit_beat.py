@@ -283,3 +283,16 @@ def test_proactive_review_also_requires_a_target():
 
     src = inspect.getsource(AccountWorker._proactive_loop)
     assert "require_target=_p_need_target" in src
+
+
+def test_pending_name_blocks_the_concurrent_second_line():
+    """兩號同時生成時誰都看不到對方成品，所以過了守門就先佔名。"""
+    w = _worker()
+    w._note_pending_names("規范，先脫褲子再來說", GID)   # 第一則已過守門、還沒落地
+    assert w._same_beat_name("規范，褲子脫了直接驗貨", GID) == "規范"
+
+
+def test_pending_name_expires():
+    w = _worker()
+    w._pending_names[(GID, "規范")] = time.time() - 200
+    assert w._same_beat_name("規范，褲子脫了", GID) == ""

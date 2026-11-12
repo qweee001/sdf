@@ -1289,6 +1289,9 @@ class AccountWorker:
         # 最近被真人插話砍掉的時間點：連三次以上就對路人插話關掉取消，先讓句子活著。
         self._cancel_ts: list[float] = []
         self._recent_proactive_topics: set[str] = set()
+        # 已過守門、還沒落地的點名：兩號同時生成時誰都看不到對方的成品
+        # （11:01 三則同拍都喊「戰豆」），所以過了守門就先佔名，落地後自然過期。
+        self._pending_names: dict[tuple[int, str], float] = {}
         # 跨 cycle 的反重複記憶：每群最近生成過的主動話題（接受或都被 drop 的都記），
         # 最舊在前、最新在後、上限 12。沒有它，模型每個 cycle 都從零開始、把同一批露骨
         # 短句反覆生成再被「repeated topic」drop（實測小天後 12h：163 次 drop 只有 6 次 sent）。
@@ -3053,10 +3056,27 @@ class AccountWorker:
             recent = self._cross_recent_items(gid, seconds)
         except Exception:
             return ""
+        now = time.time()
         for name in names:
             if any(name in str(t) for t, _age in recent):
                 return name
+            stamp = self._pending_names.get((gid, name))
+            if stamp and now - stamp <= seconds:
+                return name
         return ""
+
+    def _note_pending_names(self, text: str, group_id: int) -> None:
+        """這則要送了：它點到的名字先佔住，別號同時生成時看得到。"""
+        gid = int(group_id or 0)
+        if not gid or not text:
+            return
+        now = time.time()
+        for key, stamp in list(self._pending_names.items()):
+            if now - stamp > 120.0:
+                self._pending_names.pop(key, None)
+        for name in self._speaker_names(gid):
+            if len(name) >= 2 and name in str(text):
+                self._pending_names[(gid, name)] = now
 
     def _fix_name_address(self, text: str, group_id: int, recent=None) -> str:
         """喊人名卻沒斷句、或把群友暱稱寫成同形別字時就地補正（零模型成本）。
@@ -5480,9 +5500,9 @@ class AccountWorker:
                 )
             # 長鏡頭：只在場速低時抽。熱場一則 90 字以上要三四秒，回來就過期。
             if (
-                heat < _WARM_BURST_HUMANS
+                heat < _HOT_BURST_HUMANS
                 and self._struct_mode != "frag"
-                and random.random() < 0.12
+                and random.random() < (0.06 if heat >= _WARM_BURST_HUMANS else 0.12)
             ):
                 self._struct_mode = "long"
                 self._pcount("band_long")
@@ -7349,6 +7369,7 @@ class AccountWorker:
                 self.stats["soft_pass_hot"] = int(self.stats.get("soft_pass_hot", 0)) + 1
                 print(f"[{self.name}] gate-hot-soft: {break_hot} {text[:20]!r}", flush=True)
                 self._burst_register(group_id, text)
+                self._note_pending_names(text, group_id)
                 return text
         # 這一小時全場都在當裁判、這版又只補一句評語：不論走哪條路都要落到一個人身上。
         need_target = self._needs_target_retry(group_id, text)
@@ -7549,6 +7570,7 @@ class AccountWorker:
             return ""
         if self._review_passes(review, strict):
             self.stats["gate_pass"] = int(self.stats.get("gate_pass", 0)) + 1
+            self._note_pending_names(text, group_id)
             self._burst_register(group_id, text)
             self._mark_echo_if_any(group_id, text, echo_humans)
             return text
