@@ -3724,6 +3724,22 @@ class AccountWorker:
         except Exception:
             return 0
 
+    def _long_starved(self, group_id: int, seconds: float = 1200.0) -> bool:
+        """這個群二十分鐘沒人讲过 90 字以上（水軍句子），熱場也該補一條長的。
+
+        長鏡頭原本只在慢場抽，但 gap 縮短、產能拉起來之後場速常駐 4 則/分以上，
+        「慢場」幾乎不存在，長句就永遠沒機會（抽中 7 次、0 則送出）。
+        """
+        if not group_id:
+            return False
+        try:
+            return not any(
+                len(str(text)) >= 90
+                for text, _age in self._cross_recent_items(int(group_id), seconds)
+            )
+        except Exception:
+            return False
+
     async def _sister_pick(self, group_id: int, seconds: float = 120.0) -> str:
         """近兩分鐘講過話的姊妹（不含自己）；抽 25% 讓這則回她。
 
@@ -5616,8 +5632,14 @@ class AccountWorker:
             # 17:07–19:19 五十七則一則都沒有，整場看起來就是每個人都在講完整句。
             # 洗屏時多一點，冷場少一點（冷場三五字會突兀）。
             # 長鏡頭：它是刻意事件，抽中就跳過碎字那一骰（實測被碎字吃掉一半）。
-            if heat < _HOT_BURST_HUMANS and random.random() < (
-                0.10 if heat >= _WARM_BURST_HUMANS else 0.18
+            # 熱場也留 6%：二十分鐘沒人講過長句時它就是補位，不該被場速永久封殺。
+            _long_ok = heat < _HOT_BURST_HUMANS or self._long_starved(
+                int(getattr(event, "chat_id", 0) or 0)
+            )
+            if _long_ok and random.random() < (
+                0.06 if heat >= _HOT_BURST_HUMANS
+                else 0.10 if heat >= _WARM_BURST_HUMANS
+                else 0.18
             ):
                 self._struct_mode = "long"
                 self._pcount("band_long")

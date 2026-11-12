@@ -227,7 +227,7 @@ def test_reviewer_prompt_has_intensity_alignment_rule():
 
 
 def test_long_band_only_in_slow_field(monkeypatch):
-    """熱場抽長鏡頭＝遲到，只有兩分鐘 <4 則真人時才准。"""
+    """熱場抽長鏡頭＝遲到，只有兩分鐘 <4 則真人時才准；二十分鐘沒長句則例外。"""
     w = _worker()
     hot = _rows(["用穴夾你雞雞嗎"] * 14, step=3.0)     # 兩分鐘 14 則（>熱場門檻）
     slow = _rows(["吃飽沒", "真假"], step=60.0)          # 兩分鐘 2 則
@@ -235,12 +235,20 @@ def test_long_band_only_in_slow_field(monkeypatch):
     # 碎字機率歸零（否則 frag 會先吃掉這一骰），random 全給 0 讓 long 那骰必中
     monkeypatch.setattr(w, "_frag_probability", lambda *a: 0.0)
     monkeypatch.setattr(random, "random", lambda: 0.0)
+    # 群裡二十分鐘內已經有人講過長句 → 熱場就別再端長的
+    monkeypatch.setattr(w, "_long_starved", lambda *a: False, raising=False)
     w._build_directors_note(ev, hot, own_texts=[], last_human="用穴夾你雞雞嗎")
     hot_mode = w._struct_mode
     w._build_directors_note(ev, slow, own_texts=[], last_human="吃飽沒")
     slow_mode = w._struct_mode
+    # 熱場但二十分鐘沒有長句 → 放行
+    monkeypatch.setattr(w, "_long_starved", lambda *a: True, raising=False)
+    w._build_directors_note(ev, hot, own_texts=[], last_human="用穴夾你雞雞嗎")
+    lenient_mode = w._struct_mode
     assert slow_mode == "long"
     assert hot_mode != "long"
+    # 但二十分鐘沒人講過長句時，熱場也該補一條：場速拉起來之後慢場幾乎不存在
+    assert lenient_mode == "long"
 
 
 def test_long_cap_is_not_dragged_down_by_human_median():
@@ -322,6 +330,7 @@ def test_halt_takes_over_a_short_line(monkeypatch):
     monkeypatch.setattr(w, "_frag_probability", lambda *a: 0.0, raising=False)
     # 熱場：長鏡頭被擋掉（它只在慢場抽），這則才會落到短句→留白
     monkeypatch.setattr(w, "_burst_heat", lambda *a: 12, raising=False)
+    monkeypatch.setattr(w, "_long_starved", lambda *a: False, raising=False)
     monkeypatch.setattr(random, "random", lambda: 0.02)
     w._build_directors_note(_event(), _rows(["真假", "超頂"]), own_texts=[], last_human="超頂")
     assert w._struct_mode == "halt"
