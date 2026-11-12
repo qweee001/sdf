@@ -286,8 +286,8 @@ def _same_glyph(a: str, b: str) -> bool:
 _STRUCT_BANDS: dict[str, tuple[int, int]] = {
     "frag": (2, 6),
     "short": (8, 16),
-    "dirty": (10, 20),
-    "scene": (12, 24),
+    "dirty": (8, 16),
+    "scene": (10, 20),
     # 露骨節拍：三段（部位／動作／反應）要塞得進去，少於 20 字一定擠成點評。
     "beat": (25, 45),
     # 長鏡頭：整個過程一段到底。實測模型 577 字不斷手，卡住的一直是通道不是模型。
@@ -3598,6 +3598,16 @@ class AccountWorker:
             return [str(t) for t in bucket]
         now = time.time()
         return [str(t) for t, ts in zip(bucket, stamp) if now - ts < seconds]
+
+    @staticmethod
+    def _soft_trim(text: str, cap: int) -> str:
+        """超太多就在逗號處切回帶內；只切一次、只切在標點，不留殘尾。"""
+        body = str(text or "").strip()
+        if len(body) <= cap:
+            return body
+        head = body[:cap]
+        cut = max(head.rfind("，"), head.rfind("、"), head.rfind(","))
+        return head[:cut].rstrip("，、,") if cut >= cap * 0.5 else head
 
     def _human_len_ref(self, history: list[dict]) -> int | None:
         """群友（真人）最近講話的字數中位數，當成本則長度的即時基準。
@@ -9873,6 +9883,11 @@ class AccountWorker:
             or retry_tic or retry_time_mismatch or retry_gender_term
             or retry_simplified or retry_group_meta or retry_video_topic
         ):
+            # 超出一倍半就是真的話太多（真人中位 9 字、水軍 19）：切回帶內再發，
+            # 不是整段照發。只在逗號切，不留斷尾。
+            if not _frag_mode and len(retry) > char_cap * 1.5:
+                self._pcount("soft_trim")
+                retry = self._soft_trim(retry, char_cap + 2)
             if _frag_mode:
                 retry = self._frag_collapse(retry)
                 self.stats["frag_collapse"] = int(self.stats.get("frag_collapse", 0)) + 1

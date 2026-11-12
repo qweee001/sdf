@@ -597,3 +597,16 @@ def test_interaction_peer_skips_self_and_stale():
     assert asyncio.run(w._interaction_peer(GID)) == ("", "")
 
 
+
+
+def test_soft_trim_cuts_at_comma_not_mid_word():
+    w = _worker()
+    long_text = "腰被一撈就直接貼過去，腹部隔著布料燙得明顯，下巴抵在肩上漏出一聲低哼，這比跑步累多了"
+    out = w._soft_trim(long_text, 25)
+    assert len(out) <= 25
+    assert not out.endswith("，")
+
+
+def test_soft_trim_keeps_short_text():
+    w = _worker()
+    assert w._soft_trim("真假", 10) == "真假"
