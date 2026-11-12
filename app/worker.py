@@ -2219,7 +2219,9 @@ class AccountWorker:
         _called_early = (bool(_my) and _my in text) or _replied_me
         # 被點名時把候選收成「被叫到的那個人」：原本哈希可能在四號裡挑中別人，
         # 被叫的這一號反而不回（managed_claimed 一整輪 0 的另一半原因）。
-        if _called_early:
+        if _replied_me and int(self.tg_user_id or 0) in candidates:
+            candidates = [int(self.tg_user_id or 0)]
+        elif _called_early:
             _named = []
             for uid in candidates:
                 _nm = str(
