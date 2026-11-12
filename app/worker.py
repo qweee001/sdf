@@ -3724,7 +3724,7 @@ class AccountWorker:
         except Exception:
             return 0
 
-    def _long_starved(self, group_id: int, seconds: float = 600.0) -> bool:
+    def _long_starved(self, group_id: int, seconds: float = 900.0) -> bool:
         """這個群二十分鐘沒人讲过 90 字以上（水軍句子），熱場也該補一條長的。
 
         長鏡頭原本只在慢場抽，但 gap 縮短、產能拉起來之後場速常駐 4 則/分以上，
@@ -5651,9 +5651,9 @@ class AccountWorker:
             # 每條回覆平均會被改寫四五次，而模式只在第一次抽（改寫保留原模式），
             # 所以 0.06/0.10 在這個流程裡等於每十幾條才一條，實務上永遠看不到。
             if _long_ok and _long_roll < (
-                0.10 if heat >= _HOT_BURST_HUMANS
-                else 0.14 if heat >= _WARM_BURST_HUMANS
-                else 0.25
+                0.25 if heat >= _HOT_BURST_HUMANS
+                else 0.22 if heat >= _WARM_BURST_HUMANS
+                else 0.30
             ):
                 self._struct_mode = "long"
                 self._pcount("band_long")
