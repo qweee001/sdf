@@ -9537,14 +9537,25 @@ class AccountWorker:
         if _is_long:
             self.stats["dbg_long_flags"] = (
                 f"fmt{int(format_leak)} ref{int(refusal)} long{int(too_long)}"
-                f" short{int(too_short)} fact{int(bool(fact_bad))}"
+                f" short{int(too_short)} t{int(time_mismatch)} g{int(gender_term)}"
+                f" s{int(simplified)} m{int(group_meta)} v{int(video_topic)}"
                 f" echo{int(own_echo)} tic{int(bool(tic_hit))}"
             )
-        if (
-            not format_leak and not refusal and not too_long
-            and not too_short and not fact_bad
-            and (not own_echo or _is_long) and (not tic_hit or _is_long)
-        ):
+        # 長句只留「真的錯」的閘：一百字的句子一定被語意閘挑到東西（群務、視訊、
+        # 性別詞），全留著等於每條都重寫一次，重寫又要四五秒，最後一條都發不出去
+        # （實測 long_return 1／long_drop 無數，flags 全是 fact1）。
+        # 時段錯亂與簡體字仍硬擋，那兩個是看得出來的硬傷。
+        if _is_long:
+            _blocked = (
+                format_leak or refusal or too_long or too_short
+                or time_mismatch or simplified
+            )
+        else:
+            _blocked = (
+                format_leak or refusal or too_long or too_short
+                or fact_bad or own_echo or tic_hit
+            )
+        if not _blocked:
             if image:
                 self.stats["images_understood"] += 1
             self._set_generation_reason(event, "ok")
