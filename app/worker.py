@@ -292,7 +292,7 @@ _STRUCT_BANDS: dict[str, tuple[int, int]] = {
     "beat": (25, 45),
     # 長鏡頭：整個過程一段到底。實測模型 577 字不斷手，卡住的一直是通道不是模型。
     # 只在場速低（兩分鐘 <4 則真人）時抽，熱場寫長等於遲到。
-    "long": (70, 130),
+    "long": (50, 110),
     # 留白：一句半、停在動作中，不接完也不問。熱場真人常這樣丟一句就沒了。
     "halt": (3, 9),
 }
@@ -9469,7 +9469,7 @@ class AccountWorker:
         # 重寫一次再丟掉：82 次抽中、0 則落地。這條上限放寬到自己一組。
         _is_long = self._struct_mode == "long"
         if _is_long:
-            char_cap = 170
+            char_cap = 140
         _frag_mode = self._struct_mode == "frag"
         self._band_lo, self._band_hi = _STRUCT_BANDS.get(
             self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX)
@@ -9511,7 +9511,7 @@ class AccountWorker:
             self.stats["dbg_long"] = str(reply)[:80]
         too_long = len(reply) > char_cap + (40 if _is_long else 4)
         # 長鏡頭寫太短就沒意義（實測抽中後常只寫 30 字）：比照超長，重寫一次。
-        too_short = _is_long and len(reply) < 55
+        too_short = _is_long and len(reply) < 40
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
@@ -10309,6 +10309,9 @@ class AccountWorker:
         # --------------------------------------------------------------
         import random
         dyn_temp = round(random.uniform(0.88, 1.05), 2)
+        if getattr(self, "_struct_mode", "") == "long":
+            # 長輸出對溫度敏感：實測 6 次有 2 次直接空回，其餘都從同一個生活開場跑掉。
+            dyn_temp = 0.85
         dyn_freq = round(random.uniform(0.55, 0.75), 2)
         dyn_pres = round(random.uniform(0.45, 0.65), 2)
 

@@ -257,7 +257,7 @@ def test_long_cap_is_not_dragged_down_by_human_median():
     w._human_ref = 8
     w._len_tail = False
     # 模型實際會寫到 300 字，帶頂跟著抬（90 字時代 82 次抽中 0 則落地）
-    assert w._struct_char_cap(90) == 130
+    assert w._struct_char_cap(90) == 110
 
 
 # ---- 9. 同一拍撞名 -------------------------------------------------------
