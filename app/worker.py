@@ -3794,21 +3794,41 @@ class AccountWorker:
     }
 
     async def _interaction_peer(self, group_id: int, seconds: float = 150.0) -> tuple[str, str]:
-        """上一個講話的姊妹與她那一句（對位的目標）。超過窗或不是別人就回空。"""
-        mine = str(self.persona.get("name") or "")
-        best = ("", "", 0.0)
-        for name, (text, at) in (self._last_bot_line.get(int(group_id)) or {}).items():
-            if name == mine or not text:
-                continue
-            # 每人只留最近一句：上一則是我自己也不能空手，退而求其次抓別人的
-            if time.time() - float(at) <= seconds and float(at) > best[2]:
-                best = (name, text, float(at))
-        name, text, at = best
-        if not name or not text:
+        """上一個講話的姊妹與她那句話（對位目標）。
+
+        每個帳號是獨立 worker，自己記的「上一則」看不到別人的，所以人名走 DB 的
+        發言時刻、句子走跨號共用記憶，兩邊用時間對齊。
+        """
+        gid = int(group_id)
+        now = time.time()
+        me = int(self.tg_user_id or 0)
+        try:
+            spoke = await self.db.group_bot_last_spoke(gid)
+        except Exception:
             return "", ""
-        if name == str(self.persona.get("name") or ""):
+        others = [
+            (float(ts or 0.0), int(acc))
+            for acc, ts in (spoke or {}).items()
+            if int(acc) != me and 0 < now - float(ts or 0.0) <= seconds
+        ]
+        if not others:
             return "", ""
-        return name, text
+        at, acc = max(others)
+        persona = (
+            self.personas.get(acc)
+            or self.personas.get(str(acc))
+            or self.personas.get(int(acc))
+            or {}
+        )
+        name = str((persona or {}).get("name") or "").strip()
+        if not name:
+            return "", ""
+        texts = self._cross_recent_items(gid, seconds)
+        if not texts:
+            return "", ""
+        # 時間最接近她那句的那一條就是她說的
+        text = min(texts, key=lambda pair: abs((now - float(pair[1])) - (now - at)))[0]
+        return name, str(text)
 
     def _pick_role(self, group_id: int) -> str:
         """這一則在群裡扮什麼角色。

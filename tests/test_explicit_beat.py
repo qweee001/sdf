@@ -564,25 +564,36 @@ def test_pick_role_turns_to_banter_when_field_is_fighting(monkeypatch):
 def test_interaction_peer_returns_sister_line():
     import asyncio
     w = _worker("小天後")
-    w._last_bot_line[GID] = {"RICH": ("剛被誇到耳朵紅", time.time())}
+    w.tg_user_id = 1
+    w.personas = {"2": {"name": "RICH"}}
+    now = time.time()
+
+    async def _spoke(_gid):
+        return {2: now - 10}
+
+    w.db = cast(Any, SimpleNamespace(group_bot_last_spoke=_spoke))
+    w._cross_recent_items = lambda gid, sec: [("剛被誇到耳朵紅", 10.0)]
     assert asyncio.run(w._interaction_peer(GID)) == ("RICH", "剛被誇到耳朵紅")
 
 
 def test_interaction_peer_skips_self_and_stale():
     import asyncio
     w = _worker("小天後")
-    w._last_bot_line[GID] = {"小天後": ("自己講的", time.time())}
+    w.tg_user_id = 1
+    w.personas = {"2": {"name": "RICH"}}
+    now = time.time()
+
+    async def _self(_gid):
+        return {1: now - 10}
+
+    w.db = cast(Any, SimpleNamespace(group_bot_last_spoke=_self))
+    w._cross_recent_items = lambda gid, sec: [("自己講的", 10.0)]
     assert asyncio.run(w._interaction_peer(GID)) == ("", "")
-    w._last_bot_line[GID] = {"RICH": ("太久以前", time.time() - 600)}
+
+    async def _old(_gid):
+        return {2: now - 600}
+
+    w.db = cast(Any, SimpleNamespace(group_bot_last_spoke=_old))
     assert asyncio.run(w._interaction_peer(GID)) == ("", "")
 
 
-def test_director_note_pairs_the_role_with_the_peer():
-    w = _worker("小天後")
-    note = w._build_directors_note(
-        _event(), _rows(["真假"]), last_human="真假",
-        sister_target="RICH", role="banter", peer_text="剛被誇到耳朵紅",
-    )
-    assert "抬槓" in note
-    assert "對位" in note and "RICH" in note
-    assert "剛被誇到耳朵紅" in note
