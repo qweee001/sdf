@@ -220,3 +220,66 @@ def test_reviewer_prompt_has_intensity_alignment_rule():
     src = inspect.getsource(AccountWorker._review_candidate_gateway)
     assert "色度對齊" in src
     assert "offtopic" in src
+
+
+# ---- 8. 長鏡頭通道 -------------------------------------------------------
+
+
+def test_long_band_only_in_slow_field(monkeypatch):
+    """熱場抽長鏡頭＝遲到，只有兩分鐘 <4 則真人時才准。"""
+    w = _worker()
+    hot = _rows(["用穴夾你雞雞嗎"] * 14, step=3.0)     # 兩分鐘 14 則（>熱場門檻）
+    slow = _rows(["吃飽沒", "真假"], step=60.0)          # 兩分鐘 2 則
+    ev = _event(flirty=0)
+    # 碎字機率歸零（否則 frag 會先吃掉這一骰），random 全給 0 讓 long 那骰必中
+    monkeypatch.setattr(w, "_frag_probability", lambda *a: 0.0)
+    monkeypatch.setattr(random, "random", lambda: 0.0)
+    w._build_directors_note(ev, hot, own_texts=[], last_human="用穴夾你雞雞嗎")
+    hot_mode = w._struct_mode
+    w._build_directors_note(ev, slow, own_texts=[], last_human="吃飽沒")
+    slow_mode = w._struct_mode
+    assert slow_mode == "long"
+    assert hot_mode != "long"
+
+
+def test_long_cap_is_150_and_not_dragged_down_by_human_median():
+    w = _worker()
+    w._struct_mode = "long"
+    w._human_ref = 8
+    w._len_tail = False
+    assert w._struct_char_cap(90) == 150
+
+
+# ---- 9. 同一拍撞名 -------------------------------------------------------
+
+
+def test_same_beat_name_vetoes_second_line(monkeypatch):
+    """20:20 RICH 點名規范，20:21 小小也點規范 → 第二則退回。"""
+    w = _worker()
+    w._record_sent_text(GID, "規范，先脫褲子再來說")
+    # 直接驗這條軸（走 _local_veto 時起手詞那條軟軸會先命中，兩條都對）
+    assert w._same_beat_name("規范，褲子脫了直接驗貨", GID) == "規范"
+    assert w._same_beat_name("剛剛規范那個褲子", GID) == "規范"
+    hard = w._local_veto("剛剛規范那個褲子脫了", [], "真假", GID)
+    assert w._veto_code(hard) == "same_beat_name"
+
+
+def test_same_beat_window_expires():
+    from app.worker import _SCENE_FADE_SELF  # noqa: F401  (只確認常數存在)
+
+    w = _worker()
+    w._recent_texts_by_group[GID] = ["規范，先脫褲子再來說"]
+    w._recent_texts_at[GID] = [time.time() - 600]  # 十分鐘前
+    assert w._same_beat_name("規范，褲子脫了", GID) == ""
+
+
+# ---- 10. 主動與回覆同一套判斷 -------------------------------------------
+
+
+def test_proactive_review_also_requires_a_target():
+    import inspect
+
+    from app.worker import AccountWorker
+
+    src = inspect.getsource(AccountWorker._proactive_loop)
+    assert "require_target=_p_need_target" in src

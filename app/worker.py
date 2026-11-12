@@ -287,6 +287,9 @@ _STRUCT_BANDS: dict[str, tuple[int, int]] = {
     "scene": (15, 30),
     # 露骨節拍：三段（部位／動作／反應）要塞得進去，少於 20 字一定擠成點評。
     "beat": (25, 45),
+    # 長鏡頭：整個過程一段到底。實測模型 577 字不斷手，卡住的一直是通道不是模型。
+    # 只在場速低（兩分鐘 <4 則真人）時抽，熱場寫長等於遲到。
+    "long": (90, 150),
 }
 
 # 現場熱度門檻（近兩分鐘真人訊息數）：洗屏時短碎優先，不排生活場景。
@@ -300,6 +303,7 @@ _STRUCT_SYNTAX: dict[str, str] = {
     "dirty": "【動態情境・直球色誘】：聚焦男女肉體張力，直接講你身上的具體感覺（哪裡濕、緊、燙、軟）或直接給他一個動作，不要只在旁邊評他的尺寸，短而辛辣，不扯無關瑣事。",
     "scene": "【動態情境・生活隨念】：隨性帶出你當下真實的小動作或生活狀態，自然放鬆，展現真實女生的日常生活感。",
     "beat": "【動態情境・露骨節拍】：把一次身體接觸整段講完——部位貼上去、動作、你當下的反應或聲音，三段都要有，不要只丟一個器官詞就收。",
+    "long": "【動態情境・長鏡頭】：一次講完一整段——從怎麼開始、身體貼上去、一路到受不了，細節自己挑重點寫，中間不要斷、不要換成評語。",
 }
 
 # 露骨節拍（beat）的驗收看「露骨軸」不看字數：一則要湊到部位＋動作（＋反應）
@@ -3030,6 +3034,30 @@ class AccountWorker:
             return f"「{top}」半小時內已經被水軍點名 {cnt} 次，這則別再提他，講自己或換人"
         return ""
 
+    def _same_beat_name(self, candidate: str, group_id: int, seconds: float = 90.0) -> str:
+        """同一個群友剛被別的號在同一拍點名過（20:20 RICH「規范，先脫褲子再來說」
+        → 20:21 小小「規范，褲子脫了直接驗貨」）。
+
+        名字是群裡最刺眼的重複，一分半內同一個名字＋同一個意思，群友看到的是兩台機器。
+        `_named_target_flood` 只管同一人被連點三次，管不到這種兩號撞同一拍。
+        回命中的人名，沒有回空字串。
+        """
+        gid = int(group_id or 0)
+        body = str(candidate or "")
+        if not gid or not body:
+            return ""
+        names = [n for n in self._speaker_names(gid) if len(n) >= 2 and n in body]
+        if not names:
+            return ""
+        try:
+            recent = self._cross_recent_items(gid, seconds)
+        except Exception:
+            return ""
+        for name in names:
+            if any(name in str(t) for t, _age in recent):
+                return name
+        return ""
+
     def _fix_name_address(self, text: str, group_id: int, recent=None) -> str:
         """喊人名卻沒斷句、或把群友暱稱寫成同形別字時就地補正（零模型成本）。
 
@@ -4422,6 +4450,7 @@ class AccountWorker:
         table = (
             ("旁觀骨架", "spectator_frame"),
             ("旁邊講自己的事", "third_party"),
+            ("被別號點過名", "same_beat_name"),
             ("部位", "body_part"),
             ("拼過", "mosaic"),
             ("自己四小時", "own_scene"),
@@ -5208,6 +5237,9 @@ class AccountWorker:
         flood = self._named_target_flood(candidate, int(group_id or 0))
         if flood:
             return flood
+        same_beat = self._same_beat_name(candidate, int(group_id or 0))
+        if same_beat:
+            return f"「{same_beat}」一分半內才被別號點過名，這則換人講或不點名"
         # 慣用詞的判定最細，先跑：命中就回它，別被下面比較粗的密度規則蓋掉理由。
         idiom = self._idiom_reuse(candidate, own_texts, cross)
         if idiom:
@@ -5446,6 +5478,14 @@ class AccountWorker:
                 self.stats["band_flow_short_rebound"] = (
                     int(self.stats.get("band_flow_short_rebound", 0)) + 1
                 )
+            # 長鏡頭：只在場速低時抽。熱場一則 90 字以上要三四秒，回來就過期。
+            if (
+                heat < _WARM_BURST_HUMANS
+                and self._struct_mode != "frag"
+                and random.random() < 0.12
+            ):
+                self._struct_mode = "long"
+                self._pcount("band_long")
             # 決策 override 放在最後：碎字與棘輪都算過了，使用者意圖優先。
             if _flirty >= 2 and self._struct_mode in ("frag", "short"):
                 self._struct_mode = "beat" if random.random() < p_beat else "dirty"
@@ -5468,7 +5508,7 @@ class AccountWorker:
         self._len_tail = (
             not self._short_tight
             and not forced_mode
-            and self._struct_mode not in ("scene", "frag", "beat")
+            and self._struct_mode not in ("scene", "frag", "beat", "long")
             and random.random()
             < (0.12 if heat >= _HOT_BURST_HUMANS else 0.2)
         )
@@ -5493,6 +5533,11 @@ class AccountWorker:
             chosen_syntax += (
                 "\n【現場正在洗屏】：大家現在是一句 5~10 字在接話，節奏很快。"
                 "這則不要交代前情、不要開新場景，直接接現在這一句在講的事，一句話講完。"
+            )
+        if self._struct_mode == "long":
+            chosen_syntax += (
+                "\n【這則是一整段】：從怎麼開始寫到受不了，中間不要斷、不要跳到評語，"
+                "三段以上、句句接著上一句往下推。"
             )
         if self._struct_mode == "beat":
             _density_txt = f"（現場近十則真人 {int(round(_density * 10))} 則在講色）" if _density else ""
@@ -5544,7 +5589,7 @@ class AccountWorker:
         band_lo, band_hi = _STRUCT_BANDS.get(self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX))
         # 下限也跟群友走：真人中位 8 字時，短碎帶的 8 字地板讓「真假」「我會笑死」
         # 這種四五字反應永遠出不來（73 則只有 6 則 <8）。群友講得短，地板就一起低。
-        if self._human_ref and self._struct_mode not in ("frag", "beat"):
+        if self._human_ref and self._struct_mode not in ("frag", "beat", "long"):
             band_lo = max(4, min(band_lo, int(self._human_ref * 0.9)))
         # 提示詞的數字就是天花板：真人講 8 字就別給 30 的額度，模型會一路寫到上緣。
         band_hi = min(band_hi, self._struct_char_cap(band_hi))
@@ -6732,6 +6777,9 @@ class AccountWorker:
                 return min(cap, int(ref * 1.4)) if ref else cap
             cap = min(char_cap, band[1] + 4)
             return min(cap, int(ref * 1.7)) if ref else cap
+        if band and self._struct_mode == "long":
+            # 長鏡頭只認自己的帶頂，真人中位 8 字照樣給到 150。
+            return max(char_cap, band[1])
         if band and self._struct_mode == "beat":
             # 節拍不吃真人倍率：真人中位 8 字時 ref*2 只有 16，三段擠不進去。
             cap = min(char_cap, band[1])
@@ -7193,6 +7241,12 @@ class AccountWorker:
             )
             if review is None:
                 continue
+            # 色度落差：對方在講身體卻回天氣，是這條管線最常見的失手，要能計數檢討，
+            # 不能只看 KPI 事後猜。
+            if str(review.get("issue")) == "offtopic":
+                self.stats["intensity_mismatch"] = (
+                    int(self.stats.get("intensity_mismatch", 0)) + 1
+                )
             score = float(review.get("sendable") or 0.0)
             if not self._review_passes(review, strict):
                 # 差一點的留起來當最後一條路：不是硬傷、分數也還有基本盤就記著。
@@ -11615,6 +11669,10 @@ class AccountWorker:
             _p_mode = "beat"
         elif _p_mode == "beat" and _p_density < 0.2:
             _p_mode = "scene"
+        # 長鏡頭：主動是這條路的主力，但一樣只在場速低時抽（深夜、冷場才吃得下 90 字）。
+        if _p_heat < _WARM_BURST_HUMANS and _p_mode != "frag" and random.random() < 0.1:
+            _p_mode = "long"
+            self._pcount("band_long")
         # 碎字通道（跟回覆路徑同一條）：兩三字的反應在群裡最自然，水軍一則都沒有，
         # 整場就成了四個人輪流演講。
         if random.random() < self._frag_probability(msgs, _p_heat, _p_flow_long):
@@ -11648,7 +11706,7 @@ class AccountWorker:
         if self._short_tight:
             self._pcount("band_short_tight")
         # 提示詞的數字要跟真人走：真人講 8 字還給 30 的額度，模型一律寫到 20 幾。
-        if self._human_ref and _p_mode not in ("frag", "beat"):
+        if self._human_ref and _p_mode not in ("frag", "beat", "long"):
             # 地板一起跟：真人中位 8 字時 8 字地板讓四五字反應永遠出不來。
             _p_lo = max(4, min(_p_lo, int(self._human_ref * 0.9)))
             _p_factor = (
@@ -11668,6 +11726,8 @@ class AccountWorker:
             "scene": f"這則走生活隨念（{_p_lo}~{_p_hi}字）：帶一個當下的小動作或環境就好。",
             "beat": f"這則走露骨節拍（{_p_lo}~{_p_hi}字）：不要只丟一個器官詞，"
                     "挑一個部位、寫動作、再寫你當下的反應或聲音，三段連成一則。",
+            "long": f"這則走長鏡頭（{_p_lo}~{_p_hi}字）：從怎麼開始寫到受不了，"
+                    "中間不要斷、不要跳評語，三段以上一路往下推。",
         }[_p_mode]
         if self._len_tail:
             _p_struct += (
@@ -11675,7 +11735,7 @@ class AccountWorker:
                 "兩三個逗號，把動作、自己的身體反應、對他的評語一起寫完。"
             )
         # 提示詞裡的數字就是天花板：之前寫 hi+2（18），模型一律寫到 18~19。
-        if _p_mode not in ("scene", "beat") and not self._len_tail:
+        if _p_mode not in ("scene", "beat", "long") and not self._len_tail:
             _p_struct += "字數滿了就砍掉前情，只留最後那記吐槽或撩撥。"
         _p_cap_now = (_p_lo + 6) if self._short_tight else _p_hi
         # 兩段式骨架在生成端就先壓一次：語流已經連三則逗號兩段，這則只講一句。
@@ -12370,9 +12430,12 @@ class AccountWorker:
                             self.stats[_code] = int(self.stats.get(_code, 0)) + 1
                             review = {"sendable": 0.2, "issue": "repeat", "reason": veto_p}
                         else:
+                            # 主動要跟回覆同一套判斷：整段都在對全場下判決時，
+                            # 這則必須落到一個人身上，不能只有回覆路徑在要求。
+                            _p_need_target = self._needs_target_retry(int(group_id), topic)
                             review = await self._review_candidate(
                                 context, topic, recent_bots=await self._recent_bot_lines(int(group_id)),
-                                last_human=last_human_p,
+                                last_human=last_human_p, require_target=_p_need_target,
                             )
                         if review is None:
                             self.stats["proactive_gate_hold"] = (
