@@ -9532,9 +9532,12 @@ class AccountWorker:
             time_mismatch or gender_term or simplified or group_meta or meta_speak or video_topic
         )
 
+        # 長句不吃複讀與口頭禪：一百字的句子片段必然跟舊句重疊幾個詞，判 own_echo
+        # 就當場 drop（連重寫都沒有），長句等於永遠出不去。長度本身就是差異。
         if (
-            not format_leak and not refusal and not own_echo and not too_long
-            and not too_short and not fact_bad and not tic_hit
+            not format_leak and not refusal and not too_long
+            and not too_short and not fact_bad
+            and (not own_echo or _is_long) and (not tic_hit or _is_long)
         ):
             if image:
                 self.stats["images_understood"] += 1
