@@ -110,7 +110,7 @@ def test_starved_account_rejoins_despite_recent_bot(monkeypatch):
 
 
 def test_recent_speaker_still_yields(monkeypatch):
-    """自己 60 秒前才講過（佔比達標的場）→ 照舊讓位給群友發酵。"""
+    """自己 20 秒前才講過（佔比達標的場）→ 照舊讓位給群友發酵。"""
     w = _worker("Chen")
     _stub_gates(w, monkeypatch)
     now = time.time()

@@ -2474,7 +2474,9 @@ class AccountWorker:
         # 節奏用「自己的人聲間隔」而不是「全群最後一隻」：四號輪流主動，全群最後
         # 一則幾乎永遠落在 30 秒內，用全群當基準等於四個人共用一張嘴（實測 5 分鐘
         # 117 則真人、57 次 reply_block_gap、認領 1 則）。群級撞拍交給 claimed_20s。
-        own_gap = 15.0 + 50.0 * (1.0 - deficit)
+        # 水軍一直在 20~25% 徘徊，deficit 小 → 舊的 15~65 秒把自己的嘴封住，
+        # 四號合計只有 4 則/分，跟真人打平就沒有覆蓋。縮到 8~30 秒。
+        own_gap = 8.0 + 22.0 * (1.0 - deficit)
         starved = False
         vacuum = False
         ignored = False
@@ -3828,6 +3830,7 @@ class AccountWorker:
             return "", ""
         # 時間最接近她那句的那一條就是她說的
         text = min(texts, key=lambda pair: abs((now - float(pair[1])) - (now - at)))[0]
+        self._pcount("pick_peer")
         return name, str(text)
 
     def _pick_role(self, group_id: int) -> str:
