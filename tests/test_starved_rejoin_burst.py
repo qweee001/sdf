@@ -114,7 +114,7 @@ def test_recent_speaker_still_yields(monkeypatch):
     w = _worker("Chen")
     _stub_gates(w, monkeypatch)
     now = time.time()
-    _stub_spoke(w, mine=now - 60, others=[now - 30])
+    _stub_spoke(w, mine=now - 5, others=[now - 30])
     assert asyncio.run(w._ordinary_reply_allowed(_event())) is False
 
 
