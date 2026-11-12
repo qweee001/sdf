@@ -286,13 +286,13 @@ def _same_glyph(a: str, b: str) -> bool:
 _STRUCT_BANDS: dict[str, tuple[int, int]] = {
     "frag": (2, 6),
     "short": (8, 16),
-    "dirty": (12, 24),
-    "scene": (15, 30),
+    "dirty": (10, 20),
+    "scene": (12, 24),
     # 露骨節拍：三段（部位／動作／反應）要塞得進去，少於 20 字一定擠成點評。
     "beat": (25, 45),
     # 長鏡頭：整個過程一段到底。實測模型 577 字不斷手，卡住的一直是通道不是模型。
     # 只在場速低（兩分鐘 <4 則真人）時抽，熱場寫長等於遲到。
-    "long": (50, 110),
+    "long": (30, 55),
     # 留白：一句半、停在動作中，不接完也不問。熱場真人常這樣丟一句就沒了。
     "halt": (3, 9),
 }
@@ -309,7 +309,7 @@ _STRUCT_SYNTAX: dict[str, str] = {
     "scene": "【動態情境・生活隨念】：隨性帶出你當下真實的小動作或生活狀態，自然放鬆，展現真實女生的日常生活感。",
     "beat": "【動態情境・露骨節拍】：把一次身體接觸整段講完——部位貼上去、動作、你當下的反應或聲音，三段都要有，不要只丟一個器官詞就收。",
     "halt": "【動態情境・留白半句】：只寫半句就停，像話說到一半被身體打斷（「慢一點…」「等一下我」「別這樣」這種），可以停在動作中間，不准問句、不准收尾成完整句、不准解釋。",
-    "long": "【動態情境・長鏡頭】：一次講完一整段——從怎麼開始、身體貼上去、一路到受不了，細節自己挑重點寫，中間不要斷、不要換成評語。",
+    "long": "【動態情境・長鏡頭・一則一件事】：只講一個場景配一兩個身體細節就走完，不准連續列生活流水帳（龍蝦→滷肉飯→蠟燭→紅酒 這種堆法），形容詞最多兩個。",
 }
 
 # 露骨節拍（beat）的驗收看「露骨軸」不看字數：一則要湊到部位＋動作（＋反應）
@@ -5955,7 +5955,7 @@ class AccountWorker:
             f"1. 扮演真實的台灣女生 {name}，以 {band_lo}~{band_hi} 字內的極致自然口語短句隨性說話，不帶句號；"
             f"{band_hi} 字是硬上限，滿了就砍前情、只留最想講的那一句。{tail_note}\n"
             + (
-                f"1b. 這則刻意寫長：不是一句就收，三句以上、每句接著上一句往下推，"
+                f"1b. 這則刻意寫長：但只寫一個場景＋一兩個身體細節，不要連續堆生活元素；"
                 f"整段都在同一個動作上，寫到 {band_hi} 字上下。\n"
                 if self._struct_mode == "long"
                 else ""
@@ -7133,8 +7133,9 @@ class AccountWorker:
             cap = min(char_cap, band[1] + 4)
             return min(cap, int(ref * 1.7)) if ref else cap
         if band and self._struct_mode == "long":
-            # 長鏡頭只認自己的帶頂，真人中位 8 字照樣給到 150。
-            return max(char_cap, band[1])
+            # 長鏡頭只認自己的帶頂。原本這裡回 max(char_cap, band[1])，而呼叫端
+            # 傳 90 進來 → 上限永遠是 90；真人（去管理員）整場最長 40、p99 只有 28。
+            return band[1]
         if band and self._struct_mode == "beat":
             # 節拍不吃真人倍率：真人中位 8 字時 ref*2 只有 16，三段擠不進去。
             cap = min(char_cap, band[1])
@@ -9645,7 +9646,7 @@ class AccountWorker:
         # 重寫一次再丟掉：82 次抽中、0 則落地。這條上限放寬到自己一組。
         _is_long = getattr(event, "_sdf_mode", self._struct_mode) == "long"
         if _is_long:
-            char_cap = 140
+            char_cap = 60
         _frag_mode = self._struct_mode == "frag"
         self._band_lo, self._band_hi = _STRUCT_BANDS.get(
             self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX)
@@ -9685,9 +9686,9 @@ class AccountWorker:
             # 診斷用：長鏡頭抽中後到底生了多長、內容什麼樣（/api/status 看得到）
             self.stats["dbg_long_len"] = len(reply)
             self.stats["dbg_long"] = str(reply)[:80]
-        too_long = len(reply) > char_cap + (40 if _is_long else 4)
+        too_long = len(reply) > char_cap + (5 if _is_long else 4)
         # 長鏡頭寫太短就沒意義（實測抽中後常只寫 30 字）：比照超長，重寫一次。
-        too_short = _is_long and len(reply) < 40
+        too_short = _is_long and len(reply) < 25
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
