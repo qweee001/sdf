@@ -12212,6 +12212,10 @@ class AccountWorker:
             topic = (raw or "").strip()
             if not topic:
                 continue
+            # 主動路的長句同樣會分段寫，格式外洩的守門（一則不准換行）會直接把它
+            # drop；回覆路徑已在生成後併句，這裡是主動路徑的同一刀。
+            if _p_mode == "long":
+                topic = self._join_long_lines(topic)
             # 物理硬底線守門員（在任何長度裁切或處理之前先驗證）：
             # 必須包含至少 2 個中文漢字，且絕不為系統拒答、元話語或格式標籤
             if (
