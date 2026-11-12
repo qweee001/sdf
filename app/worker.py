@@ -2220,11 +2220,14 @@ class AccountWorker:
         # 被點名時把候選收成「被叫到的那個人」：原本哈希可能在四號裡挑中別人，
         # 被叫的這一號反而不回（managed_claimed 一整輪 0 的另一半原因）。
         if _called_early:
-            _named = [
-                uid
-                for uid in candidates
-                if str((self.personas.get(uid) or {}).get("name") or "") in text
-            ]
+            _named = []
+            for uid in candidates:
+                _nm = str(
+                    (self.personas.get(uid) or self.personas.get(str(uid)) or {}).get("name")
+                    or ""
+                ).strip()
+                if _nm and _nm in text:
+                    _named.append(uid)
             if _named:
                 candidates = _named
         if not text or message_id <= 0 or (expires_at < time.time() and not _called_early):
