@@ -5645,7 +5645,10 @@ class AccountWorker:
             _long_ok = heat < _HOT_BURST_HUMANS or self._long_starved(
                 int(getattr(event, "chat_id", 0) or 0)
             )
-            if _long_ok and random.random() < (
+            self.stats["dbg_long_ok"] = int(_long_ok)
+            _long_roll = random.random()
+            self.stats["dbg_long_roll"] = round(_long_roll, 3)
+            if _long_ok and _long_roll < (
                 0.06 if heat >= _HOT_BURST_HUMANS
                 else 0.10 if heat >= _WARM_BURST_HUMANS
                 else 0.18
