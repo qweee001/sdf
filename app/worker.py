@@ -3734,6 +3734,7 @@ class AccountWorker:
                 cands.append(name)
         if not cands or random.random() >= 0.25:
             return ""
+        self.stats["pick_sister"] = int(self.stats.get("pick_sister", 0)) + 1
         return random.choice(cands)
 
     def _used_body_parts(self, group_id: int, seconds: float) -> set:
