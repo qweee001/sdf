@@ -2217,6 +2217,16 @@ class AccountWorker:
             _tuid, _ = await self._reply_target(event)
             _replied_me = bool(_tuid) and _tuid == int(self.tg_user_id or 0)
         _called_early = (bool(_my) and _my in text) or _replied_me
+        # 被點名時把候選收成「被叫到的那個人」：原本哈希可能在四號裡挑中別人，
+        # 被叫的這一號反而不回（managed_claimed 一整輪 0 的另一半原因）。
+        if _called_early:
+            _named = [
+                uid
+                for uid in candidates
+                if str((self.personas.get(uid) or {}).get("name") or "") in text
+            ]
+            if _named:
+                candidates = _named
         if not text or message_id <= 0 or (expires_at < time.time() and not _called_early):
             if expires_at:
                 self.managed_origins.pop(key, None)
