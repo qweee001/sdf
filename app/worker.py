@@ -609,7 +609,7 @@ _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
 
 # 真人「看見但不說」：被 @／直接回覆很少漏接，普通訊息偶爾默認
 _SILENT_REPLY_PROBABILITY_DIRECTED = 0.05
-_SILENT_REPLY_PROBABILITY_ORDINARY = 0.10
+_SILENT_REPLY_PROBABILITY_ORDINARY = 0.06
 # 睡著的人（凌晨 4-7 點錯峰窗口）基本沒看手機：被@也只有兩成機率接住
 _SLEEP_REPLY_PROBABILITY = 0.20
 # 依主人指示：發訊控制 70% 概率純文字，30% 概率允許保留 emoji 表情
@@ -2438,7 +2438,7 @@ class AccountWorker:
         # 節奏用「自己的人聲間隔」而不是「全群最後一隻」：四號輪流主動，全群最後
         # 一則幾乎永遠落在 30 秒內，用全群當基準等於四個人共用一張嘴（實測 5 分鐘
         # 117 則真人、57 次 reply_block_gap、認領 1 則）。群級撞拍交給 claimed_20s。
-        own_gap = 20.0 + 70.0 * (1.0 - deficit)
+        own_gap = 12.0 + 48.0 * (1.0 - deficit)
         starved = False
         vacuum = False
         ignored = False
@@ -10260,7 +10260,13 @@ class AccountWorker:
                     {"role": "user", "content": user_message},
                 ],
                 "temperature": dyn_temp,
-                "max_tokens": self.config.ai_max_tokens,
+                # 長鏡頭 110~190 字要 250~300 token，用一般上限（200）會被切在半句，
+                # 落地前就被當斷尾或重寫掉（抽中 7 次、0 則送出）。
+                "max_tokens": (
+                    max(int(self.config.ai_max_tokens), 700)
+                    if getattr(self, "_struct_mode", "") == "long"
+                    else self.config.ai_max_tokens
+                ),
                 "timeout": self.config.ai_timeout,
             }
             # 只有在非 gemini/agnes 模型才傳 penalty，避免部分上游 API 或 LiteLLM 網關報 400
