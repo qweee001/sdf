@@ -9534,6 +9534,12 @@ class AccountWorker:
 
         # 長句不吃複讀與口頭禪：一百字的句子片段必然跟舊句重疊幾個詞，判 own_echo
         # 就當場 drop（連重寫都沒有），長句等於永遠出不去。長度本身就是差異。
+        if _is_long:
+            self.stats["dbg_long_flags"] = (
+                f"fmt{int(format_leak)} ref{int(refusal)} long{int(too_long)}"
+                f" short{int(too_short)} fact{int(bool(fact_bad))}"
+                f" echo{int(own_echo)} tic{int(bool(tic_hit))}"
+            )
         if (
             not format_leak and not refusal and not too_long
             and not too_short and not fact_bad
@@ -9542,11 +9548,15 @@ class AccountWorker:
             if image:
                 self.stats["images_understood"] += 1
             self._set_generation_reason(event, "ok")
+            if _is_long:
+                self._pcount("long_return")
             return reply
 
         # 近義複讀／8 秒同一點：直接 drop，不再花一次模型重寫。
         # 重寫多半還是繞回同一個點，卻多拖 10 秒；主人要的是複讀當場閉嘴。
         if own_echo and not refusal and not format_leak:
+            if _is_long:
+                self._pcount("long_drop_own_echo")
             self._set_generation_reason(event, "own_echo")
             self.stats["policy_violation"] = int(self.stats.get("policy_violation", 0)) + 1
             return ""
