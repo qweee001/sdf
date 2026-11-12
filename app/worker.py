@@ -2186,7 +2186,11 @@ class AccountWorker:
         text = self._normalized_reply(str(event.raw_text or ""))
         key = (group_id, sender_id, text)
         expires_at = float(self.managed_origins.get(key, 0) or 0)
-        if not text or message_id <= 0 or expires_at < time.time():
+        # 被點名不必等「這句被我登記過」：她在叫我的名字，本來就該接
+        # （managed_claimed/sent 一整輪都是 0，全部死在這個 key 沒命中）。
+        _my = str(self.persona.get("name") or "").strip()
+        _called_early = bool(_my) and _my in text
+        if not text or message_id <= 0 or (expires_at < time.time() and not _called_early):
             if expires_at:
                 self.managed_origins.pop(key, None)
             return False
@@ -2206,8 +2210,8 @@ class AccountWorker:
         # 被姊妹點名（「小天後你…」）就是叫她名字，真姊妹一定接；一般接龍才吃機率
         # 與回合上限。實測 managed_claimed/managed_sent 一整輪都是 0：姊妹互相點名
         # 沒有任何一條回得出去，四人像四個廣播電台。
-        my_name = str(self.persona.get("name") or "").strip()
-        called = bool(my_name) and my_name in text
+        my_name = _my
+        called = _called_early
         if called:
             self._pcount("managed_called")
         # 話題回合已滿：本回合 AI 已發言夠多 → 留空間給真人，不繼續接龍
@@ -2459,7 +2463,7 @@ class AccountWorker:
         # 節奏用「自己的人聲間隔」而不是「全群最後一隻」：四號輪流主動，全群最後
         # 一則幾乎永遠落在 30 秒內，用全群當基準等於四個人共用一張嘴（實測 5 分鐘
         # 117 則真人、57 次 reply_block_gap、認領 1 則）。群級撞拍交給 claimed_20s。
-        own_gap = 12.0 + 48.0 * (1.0 - deficit)
+        own_gap = 8.0 + 32.0 * (1.0 - deficit)
         starved = False
         vacuum = False
         ignored = False
