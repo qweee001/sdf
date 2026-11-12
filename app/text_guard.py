@@ -502,6 +502,9 @@ def instant_word_fix(text: str) -> tuple[str, bool]:
     if not body:
         return body, False
     original = body
+    # 0) 「着」是簡體寫法，台灣一律「著」（s2tw 被誤殺表擋住，這裡直接換）
+    if "着" in body:
+        body = body.replace("着", "著")
     # 1) 古體／異體字
     for wrong, right in _VARIANT_CHAR_MAP.items():
         if wrong != right and wrong in body:
@@ -517,6 +520,11 @@ def instant_word_fix(text: str) -> tuple[str, bool]:
     for wrong, right in _MAINLAND_TW_TERMS:
         if wrong in body:
             body = body.replace(wrong, right)
+    # 4) 還是簡體就整段簡轉繁。原本只判不修，偵測到就退回重寫，重寫又端回簡體
+    # 就照發——「汇款而已又不是汇身家，我腿废着在拉筋，别拖太久」整句簡體上路。
+    # OpenCC 已經在，就地轉比再叫模型快五秒。
+    if has_simplified_chars(body):
+        body = auto_convert_to_tw(body)
     return body, body != original
 
 

@@ -678,3 +678,14 @@ def test_sister_replying_my_line_counts_as_calling_me():
         assert asyncio.run(w._should_follow_managed_origin(ev)) is True
     finally:
         _r.random = old
+
+
+def test_simplified_line_is_converted_locally_not_rejected():
+    """整句簡體就地轉繁，不退回重寫（重寫常又端回簡體，最後照發簡體上路）。"""
+    from app.text_guard import instant_word_fix
+    out, changed = instant_word_fix("汇款而已又不是汇身家，我腿废着在拉筋，别拖太久")
+    assert changed is True
+    assert out == "匯款而已又不是匯身家，腿廢著在拉筋，別拖太久".replace("腿廢", "我腿廢")
+    assert "着" not in out
+    # 台灣標準字不能被誤轉
+    assert instant_word_fix("床上很舒服")[0] == "床上很舒服"
