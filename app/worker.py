@@ -7437,7 +7437,14 @@ class AccountWorker:
             )
             # 軟軸（部位／場所／起手字）不當被攔：句子內容沒問題，直接往下進裁判，
             # 重寫只會把已經接上的內容洗掉。
-            if _cand_veto and not self._split_veto(_cand_veto)[1]:
+            # 長句一律送審：一百多字的句子開頭撞到字、撞到場景的機率接近必中，
+            # 拿軟軸把長句 continue 掉，等於長句永遠只當退路（gate_veto_carry 8 次、
+            # 落地 0 則）。長度本身就是差異，讓裁判判。
+            if (
+                _cand_veto
+                and not self._split_veto(_cand_veto)[1]
+                and getattr(self, "_struct_mode", "") != "long"
+            ):
                 bonus = 2 if any(n and n in candidate for n in hot_names) else 0
                 # 退路也要挑：被攔的候選如果場景還是同一個地方（自己兩小時內
                 # 店裡講第三次），帶回去出貨等於白改一輪。撞場所的重扣。
