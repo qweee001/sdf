@@ -9297,6 +9297,10 @@ class AccountWorker:
         # 長度與前情完全交給神經網絡與上下文感應，杜絕「切出殘尾/切碎句子」的破綻。
         # 但超長仍要重寫一次，所以留 4 字緩衝：卡在帶頂正負一兩字就丟掉太浪費，
         # 而且現在不剪字，重寫一次就是十幾秒（18 字的正常句不該為 12 字帶重跑）。
+        if self._struct_mode == "long":
+            # 診斷用：長鏡頭抽中後到底生了多長、內容什麼樣（/api/status 看得到）
+            self.stats["dbg_long_len"] = len(reply)
+            self.stats["dbg_long"] = str(reply)[:80]
         too_long = len(reply) > char_cap + 4
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
