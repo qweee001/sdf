@@ -10606,16 +10606,24 @@ class AccountWorker:
             or text_guard.has_format_leak(text)
         ):
             print(f"[{self.name}] FATAL LEAK BLOCKED AT TELEGRAM OUTBOUND: {text[:40]!r}", flush=True)
+            self._last_send_blocked = "precondition"
             return False
 
         # 固定說法校正放在唯一出口：回覆路徑原本有、主動路徑沒有，
         # 群裡照樣冒出「找助理了解喔」（群裡真人講「聯絡助理」）。
         text = text_guard.fix_phrases(text)
 
-        if len(text) > _MAX_REPLY_CHARS_HARD:
+        _hard_cap = (
+            240
+            if getattr(self, "_struct_mode", "") == "long"
+            else min(_MAX_REPLY_CHARS_HARD, 60)
+        )
+        if len(text) > _hard_cap:
+            self._last_send_blocked = "too_long_send"
             return False
         client = self.tg_client
         if not client or not self.is_running or not self._activity_enabled(activity_kind):
+            self._last_send_blocked = "persona"
             return False
         delay = (
             random.uniform(1.0, 3.0) if short_delay

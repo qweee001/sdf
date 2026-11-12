@@ -37,8 +37,10 @@ _DECISION_LENGTH_GUIDE = {
 _DECISION_LENGTH_CAPS = {"one": 20, "two": 50, "standard": 50}
 # 沒有決策（或決策沒選長度）時退回的預設上限＝放寬至 50。
 _DEFAULT_REPLY_CHAR_CAP = _MAX_REPLY_CHARS
-# 送訊層／拆訊層的「通用後備上限」＝所有檔位最寬者（50）。
-_MAX_REPLY_CHARS_HARD = max(_DECISION_LENGTH_CAPS.values())
+# 送訊層的硬上限。原本等於最寬檔位（50），長鏡頭一百多字全部在這裡被
+# 丟掉（標成 text_dup，看板上一則長句都沒有）。一般句仍由 worker 自己守 60，
+# 這裡只當「不可能爆版」的保險絲。
+_MAX_REPLY_CHARS_HARD = 240
 
 _SIMPLIFIED_PHRASE_PATTERNS = (
     re.compile(r"什么|怎么|这么|那么|多么|为什么|什幺"),
