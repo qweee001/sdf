@@ -7539,6 +7539,14 @@ class AccountWorker:
         # 263 字生成了卻永遠沒有長句落地。釘在 event 上，改寫也只能是 long。
         if getattr(event, "_sdf_mode", getattr(self, "_struct_mode", "")) == "long":
             setattr(event, "_sdf_keep_long", True)
+        # 長句直接放行、不進裁判：本機自檢（複讀／斷尾／拒答／格式／時段／簡體）
+        # 已經擋在前面，裁判卻還在拿群裡的短句尺度量它——long_return 兩條全部
+        # 卡在這一關。長句是一次性的演出，讓它出去比讓裁判滿意重要。
+        if getattr(event, "_sdf_keep_long", False):
+            if not text:
+                return ""
+            self._pcount("long_gate_skip")
+            return text
         # 長句一條要四五秒，三條 A/B/C 在洗屏場等於十五秒，回來人早就跑了。
         # 長句只挑一條，通過就發（長句講的是整段，本來也不適合逐句改寫）。
         _cand_limit = 1 if getattr(event, "_sdf_keep_long", False) else _GATE_CANDIDATE_LIMIT
