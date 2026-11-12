@@ -3731,6 +3731,11 @@ class AccountWorker:
                 continue
             persona = self.personas.get(acc) or self.personas.get(str(acc)) or {}
             if not persona:
+                try:
+                    persona = self.personas.get(int(acc)) or {}
+                except (TypeError, ValueError):
+                    persona = {}
+            if not persona:
                 for _v in (self.personas or {}).values():
                     if str((_v or {}).get("tg_user_id") or "") == str(acc):
                         persona = _v
