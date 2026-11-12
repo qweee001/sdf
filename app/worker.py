@@ -5702,6 +5702,9 @@ class AccountWorker:
         if self._len_tail and self._struct_mode != "halt":
             self._struct_mode = "scene" if random.random() < 0.4 else "dirty"
             self.stats["band_len_tail"] = int(self.stats.get("band_len_tail", 0)) + 1
+        # 同一個號可能同時跑兩三條，self._struct_mode 會被後一條蓋掉；釘在 event 上，
+        # 之後的 gate、dbg、送出才讀得到「這一條」是什麼模式。
+        setattr(event, "_sdf_mode", self._struct_mode)
         self.stats[f"band_{self._struct_mode}"] = (
             int(self.stats.get(f"band_{self._struct_mode}", 0)) + 1
         )
@@ -7532,7 +7535,7 @@ class AccountWorker:
             return text
         # 長句一進審核，後面每次改寫都會重抽模式 → 通過的往往是重抽到的短句，
         # 263 字生成了卻永遠沒有長句落地。釘在 event 上，改寫也只能是 long。
-        if getattr(self, "_struct_mode", "") == "long":
+        if getattr(event, "_sdf_mode", getattr(self, "_struct_mode", "")) == "long":
             setattr(event, "_sdf_keep_long", True)
         # 長句一條要四五秒，三條 A/B/C 在洗屏場等於十五秒，回來人早就跑了。
         # 長句只挑一條，通過就發（長句講的是整段，本來也不適合逐句改寫）。
@@ -9467,7 +9470,7 @@ class AccountWorker:
         char_cap = self._struct_char_cap(max(char_cap, 90))
         # 長鏡頭模型實際會寫到 300 字（實測 343），用 150 當上限等於每條都 too_long
         # 重寫一次再丟掉：82 次抽中、0 則落地。這條上限放寬到自己一組。
-        _is_long = self._struct_mode == "long"
+        _is_long = getattr(event, "_sdf_mode", self._struct_mode) == "long"
         if _is_long:
             char_cap = 140
         _frag_mode = self._struct_mode == "frag"
