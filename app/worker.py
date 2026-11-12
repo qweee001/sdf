@@ -3065,6 +3065,35 @@ class AccountWorker:
                 return name
         return ""
 
+    def _recent_named_note(self, group_id: int, seconds: float = 90.0) -> str:
+        """提示層：最近誰才被別號點過，這則別再點他。
+
+        光是事後硬擋不夠——兩號同時生成時第二批已經在跑，等落地才擋就來不及
+        （11:15 小天後與小小同分鐘都點方sir）。提示寫在前面，模型自己會避開。
+        """
+        gid = int(group_id or 0)
+        if not gid:
+            return ""
+        now = time.time()
+        used: list[str] = []
+        try:
+            for text, age in self._cross_recent_items(gid, seconds):
+                for name in self._speaker_names(gid):
+                    if len(name) >= 2 and name in str(text) and name not in used:
+                        used.append(name)
+        except Exception:
+            return ""
+        for (key_gid, name), stamp in self._pending_names.items():
+            if key_gid == gid and now - stamp <= seconds and name not in used:
+                used.append(name)
+        if not used:
+            return ""
+        return (
+            "（最近一分半別號已經點過「"
+            + "、".join(used[:2])
+            + "」，這則換人講，或直接用「你」不點名）"
+        )
+
     def _note_pending_names(self, text: str, group_id: int) -> None:
         """這則要送了：它點到的名字先佔住，別號同時生成時看得到。"""
         gid = int(group_id or 0)
@@ -5431,7 +5460,10 @@ class AccountWorker:
             own_texts, int(getattr(event, "chat_id", 0) or 0), history
         )
         if type_note:
-            chosen_mood += type_note        # 句型結構多元性：依隨機抽樣分流（35% 短碎調侃、35% 純色誘直球、30% 生活場景）
+            chosen_mood += type_note
+        _named_note = self._recent_named_note(int(getattr(event, "chat_id", 0) or 0))
+        if _named_note:
+            chosen_mood += _named_note        # 句型結構多元性：依隨機抽樣分流（35% 短碎調侃、35% 純色誘直球、30% 生活場景）
         # 徹底打破「[人名] + [我剛在做某事] + [你敢不敢/看你有沒有本事]」的四合一長句固定模子
         # 模式可以外部指定（_struct_mode_force），測試與重寫才吃得到同一組字數。
         forced_mode = getattr(self, "_struct_mode_force", "")
@@ -11759,6 +11791,9 @@ class AccountWorker:
         # 提示詞裡的數字就是天花板：之前寫 hi+2（18），模型一律寫到 18~19。
         if _p_mode not in ("scene", "beat", "long") and not self._len_tail:
             _p_struct += "字數滿了就砍掉前情，只留最後那記吐槽或撩撥。"
+        _p_named_note = self._recent_named_note(int(group_id))
+        if _p_named_note:
+            _p_struct += _p_named_note
         _p_cap_now = (_p_lo + 6) if self._short_tight else _p_hi
         # 兩段式骨架在生成端就先壓一次：語流已經連三則逗號兩段，這則只講一句。
         # 生成端壓得下來，後面就不必靠剪的（剪字必定留殘尾）。

@@ -296,3 +296,12 @@ def test_pending_name_expires():
     w = _worker()
     w._pending_names[(GID, "規范")] = time.time() - 200
     assert w._same_beat_name("規范，褲子脫了", GID) == ""
+
+
+def test_recent_named_note_lists_names_and_pending():
+    w = _worker()
+    w._record_sent_text(GID, "規范，先脫褲子再來說")
+    w._note_pending_names("小天後，你敢嗎", GID)
+    note = w._recent_named_note(GID)
+    assert "規范" in note and "小天後" in note
+    assert "換人" in note
