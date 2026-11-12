@@ -610,3 +610,71 @@ def test_soft_trim_cuts_at_comma_not_mid_word():
 def test_soft_trim_keeps_short_text():
     w = _worker()
     assert w._soft_trim("真假", 10) == "真假"
+
+
+# ---- 13. 回覆指向水軍（真人或姊妹）-------------------------------------
+
+def _reply_event(mid=7001):
+    ev = _event()
+    ev.is_reply = True
+    ev.reply_to_msg_id = mid
+    ev.reply_to = SimpleNamespace()
+    return ev
+
+
+def test_human_reply_to_my_message_is_directed():
+    import asyncio
+    w = _worker("RICH")
+    w.tg_user_id = 1
+
+    async def _author(_gid, _mid):
+        return 1, "assistant"
+
+    w.db = cast(Any, SimpleNamespace(message_author=_author))
+    assert asyncio.run(w._is_directed_at_me(_reply_event())) is True
+
+
+def test_human_reply_to_other_bot_is_not_mine():
+    import asyncio
+    w = _worker("RICH")
+    w.tg_user_id = 1
+
+    async def _author(_gid, _mid):
+        return 9, "assistant"
+
+    w.db = cast(Any, SimpleNamespace(message_author=_author))
+    assert asyncio.run(w._is_directed_at_me(_reply_event())) is False
+
+
+def test_sister_replying_my_line_counts_as_calling_me():
+    import asyncio
+    w = _worker("小天後")
+    w.tg_user_id = 1
+
+    async def _author(_gid, _mid):
+        return 1, "assistant"
+
+    async def _spoke(_gid):
+        return {2: time.time()}
+
+    async def _reserve(*_a, **_k):
+        return True
+
+    w.db = cast(Any, SimpleNamespace(
+        message_author=_author, group_bot_last_spoke=_spoke,
+        reserve_managed_followup=_reserve,
+    ))
+    w.personas = {"2": {"name": "RICH"}}
+    w.active_ids = {1, 2}
+    w.tg_client = object()
+    ev = _reply_event()
+    ev.sender_id = 2
+    ev.raw_text = "回你剛剛那句"
+    # 機率骰固定 0 → 只有「算點名」才會通過
+    import random as _r
+    old = _r.random
+    _r.random = lambda: 0.99
+    try:
+        assert asyncio.run(w._should_follow_managed_origin(ev)) is True
+    finally:
+        _r.random = old

@@ -1968,7 +1968,18 @@ class AccountWorker:
             target_uid = self._reply_target_user_id(getattr(event, "message", None) or event)
             if target_uid and target_uid == int(self.tg_user_id or 0):
                 return True
-        return False
+        # 事件上沒有 reply_from（很常見）就查訊息表：真人按「回覆」回我們那句，
+        # 是群裡最硬的互動訊號，認不出來就等於白被回。
+        target_uid, _role = await self._reply_target(event)
+        return bool(target_uid) and target_uid == int(self.tg_user_id or 0)
+
+    async def _reply_target(self, event) -> tuple[int, str]:
+        """這則在回覆誰：(sender_id, role)；認不出回 (0, "")。"""
+        mid = int(getattr(event, "reply_to_msg_id", 0) or 0)
+        if not mid:
+            direct = self._reply_target_user_id(getattr(event, "message", None) or event)
+            return direct, ""
+        return await self.db.message_author(int(event.chat_id or 0), mid)
 
     @staticmethod
     def _reply_claim_key(event) -> tuple[int, int]:
@@ -2200,7 +2211,12 @@ class AccountWorker:
         # 被點名不必等「這句被我登記過」：她在叫我的名字，本來就該接
         # （managed_claimed/sent 一整輪都是 0，全部死在這個 key 沒命中）。
         _my = str(self.persona.get("name") or "").strip()
-        _called_early = bool(_my) and _my in text
+        # 她直接按回覆回我那句：跟喊名字一樣是點名
+        _replied_me = False
+        if getattr(event, "is_reply", False):
+            _tuid, _ = await self._reply_target(event)
+            _replied_me = bool(_tuid) and _tuid == int(self.tg_user_id or 0)
+        _called_early = (bool(_my) and _my in text) or _replied_me
         if not text or message_id <= 0 or (expires_at < time.time() and not _called_early):
             if expires_at:
                 self.managed_origins.pop(key, None)
@@ -2294,6 +2310,16 @@ class AccountWorker:
         self._pcount("reply_seen_human")
         # 被 @／回覆自己 → 直接認領；回覆別人不是死路：群裡九成訊息都在互回，
         # 真人不會只接點名球（實測 4 分鐘 60 則真人，13/15 全死在這一關）。
+        # 真人按回覆回「某隻水軍」：那一號直接接，這是群裡最強的互動訊號
+        # （螃尋怠回 RICH「要注意飲酒(戳臉」，RICH 完全沒動）。被回的是別號時，
+        # 這裡照普通插話走，不搶。
+        if event.is_reply:
+            _tuid, _trole = await self._reply_target(event)
+            if _trole == "assistant" and _tuid:
+                if _tuid == int(self.tg_user_id or 0):
+                    self._pcount("reply_to_bot_me")
+                    return await self._claim_human_reply(event, int(self.tg_user_id or 0))
+                self._pcount("reply_to_bot_other")
         soft_other = False
         if event.is_reply or event.mentioned:
             if await self._is_directed_at_me(event):

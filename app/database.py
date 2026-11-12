@@ -1408,6 +1408,28 @@ class Database:
 
     # ---------- 記憶 ----------
 
+    async def message_author(self, group_id: int, message_id: int) -> tuple[int, str]:
+        """某則訊息的發話者與角色（真人回水軍時要認得出被回的是誰）。
+
+        Telegram 事件裡的 reply_to 常沒有 reply_from，get_reply_message() 在
+        快取沒命中時也會失敗，光靠事件抓不到被回覆的對象。訊息表一直有存
+        message_id 與 sender_id，直接查。
+        """
+        if not group_id or not message_id:
+            return 0, ""
+        try:
+            cursor = await self._c.execute(
+                "SELECT sender_id, role FROM messages "
+                "WHERE group_id = ? AND message_id = ? ORDER BY timestamp DESC LIMIT 1",
+                (int(group_id), int(message_id)),
+            )
+            row = await cursor.fetchone()
+        except Exception:
+            return 0, ""
+        if not row:
+            return 0, ""
+        return int(row[0] or 0), str(row[1] or "")
+
     async def add_message(self, account_id: str, group_id: int, sender_id: int,
                           sender_name: str, role: str, content: str,
                           message_id: int = 0, sent_at: float | None = None) -> None:
