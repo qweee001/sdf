@@ -9885,7 +9885,7 @@ class AccountWorker:
         ):
             # 超出一倍半就是真的話太多（真人中位 9 字、水軍 19）：切回帶內再發，
             # 不是整段照發。只在逗號切，不留斷尾。
-            if not _frag_mode and len(retry) > char_cap * 1.5:
+            if not _frag_mode and len(retry) > char_cap * 1.2:
                 self._pcount("soft_trim")
                 retry = self._soft_trim(retry, char_cap + 2)
             if _frag_mode:
