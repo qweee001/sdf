@@ -292,7 +292,7 @@ _STRUCT_BANDS: dict[str, tuple[int, int]] = {
     "beat": (25, 45),
     # 長鏡頭：整個過程一段到底。實測模型 577 字不斷手，卡住的一直是通道不是模型。
     # 只在場速低（兩分鐘 <4 則真人）時抽，熱場寫長等於遲到。
-    "long": (110, 190),
+    "long": (70, 130),
     # 留白：一句半、停在動作中，不接完也不問。熱場真人常這樣丟一句就沒了。
     "halt": (3, 9),
 }
@@ -9466,7 +9466,7 @@ class AccountWorker:
         # 重寫一次再丟掉：82 次抽中、0 則落地。這條上限放寬到自己一組。
         _is_long = self._struct_mode == "long"
         if _is_long:
-            char_cap = 260
+            char_cap = 170
         _frag_mode = self._struct_mode == "frag"
         self._band_lo, self._band_hi = _STRUCT_BANDS.get(
             self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX)
@@ -9506,9 +9506,9 @@ class AccountWorker:
             # 診斷用：長鏡頭抽中後到底生了多長、內容什麼樣（/api/status 看得到）
             self.stats["dbg_long_len"] = len(reply)
             self.stats["dbg_long"] = str(reply)[:80]
-        too_long = len(reply) > char_cap + (60 if _is_long else 4)
+        too_long = len(reply) > char_cap + (40 if _is_long else 4)
         # 長鏡頭寫太短就沒意義（實測抽中後常只寫 30 字）：比照超長，重寫一次。
-        too_short = _is_long and len(reply) < 90
+        too_short = _is_long and len(reply) < 55
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
@@ -10074,7 +10074,7 @@ class AccountWorker:
             "語法完整第一，不為湊短硬縮成病句（如「嘴長誰不會」是病句），嚴禁無常識照抄怪詞（如炒烤肉）；一句就好，結尾不要句號、不用感嘆號、不用@；"
             "要說兩句就合成一則講，禁止換行拆兩氣泡，挑逗時可以直接露骨，不要長篇）。"
             + (
-                f"【長度指引】這則刻意寫長，寫到 {self._struct_char_cap(max(char_cap, 90))} 字上下，"
+                f"【長度指引】這則刻意寫長，寫到 {self._struct_char_cap(max(char_cap, 60))} 字上下，"
                 "不是一句就收：三句以上、句句接著上一句往下推，整段都在同一個動作上，"
                 "語意完整通順。"
                 if getattr(self, "_struct_mode", "") == "long"
