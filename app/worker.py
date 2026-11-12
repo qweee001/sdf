@@ -2217,21 +2217,6 @@ class AccountWorker:
             _tuid, _ = await self._reply_target(event)
             _replied_me = bool(_tuid) and _tuid == int(self.tg_user_id or 0)
         _called_early = (bool(_my) and _my in text) or _replied_me
-        # 被點名時把候選收成「被叫到的那個人」：原本哈希可能在四號裡挑中別人，
-        # 被叫的這一號反而不回（managed_claimed 一整輪 0 的另一半原因）。
-        if _replied_me and int(self.tg_user_id or 0) in candidates:
-            candidates = [int(self.tg_user_id or 0)]
-        elif _called_early:
-            _named = []
-            for uid in candidates:
-                _nm = str(
-                    (self.personas.get(uid) or self.personas.get(str(uid)) or {}).get("name")
-                    or ""
-                ).strip()
-                if _nm and _nm in text:
-                    _named.append(uid)
-            if _named:
-                candidates = _named
         if not text or message_id <= 0 or (expires_at < time.time() and not _called_early):
             if expires_at:
                 self.managed_origins.pop(key, None)
@@ -2249,6 +2234,22 @@ class AccountWorker:
         )
         if not candidates or int(self.tg_user_id or 0) not in candidates:
             return False
+        # 被點名時把候選收成「被叫到的那個人」：原本哈希可能在四號裡挑中別人，
+        # 被叫的這一號反而不回（managed_claimed 一整輪 0 的另一半原因）。
+        if _replied_me and int(self.tg_user_id or 0) in candidates:
+            candidates = [int(self.tg_user_id or 0)]
+        elif _called_early:
+            _named = []
+            for uid in candidates:
+                _nm = str(
+                    (self.personas.get(uid) or self.personas.get(str(uid)) or {}).get("name")
+                    or ""
+                ).strip()
+                if _nm and _nm in text:
+                    _named.append(uid)
+            if _named:
+                candidates = _named
+
         # 被姊妹點名（「小天後你…」）就是叫她名字，真姊妹一定接；一般接龍才吃機率
         # 與回合上限。實測 managed_claimed/managed_sent 一整輪都是 0：姊妹互相點名
         # 沒有任何一條回得出去，四人像四個廣播電台。
