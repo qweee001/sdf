@@ -1295,7 +1295,7 @@ class AccountWorker:
         # 最近被真人插話砍掉的時間點：連三次以上就對路人插話關掉取消，先讓句子活著。
         self._cancel_ts: list[float] = []
         # 上一個水軍帳號在這個群講的句子：對位要「回她那一句」，只有文字抓不到是誰。
-        self._last_bot_line: dict[int, tuple[str, str, float]] = {}
+        self._last_bot_line: dict[int, dict[str, tuple[str, float]]] = {}
         self._recent_proactive_topics: set[str] = set()
         # 已過守門、還沒落地的點名：兩號同時生成時誰都看不到對方的成品
         # （11:01 三則同拍都喊「戰豆」），所以過了守門就先佔名，落地後自然過期。
@@ -3795,8 +3795,16 @@ class AccountWorker:
 
     async def _interaction_peer(self, group_id: int, seconds: float = 150.0) -> tuple[str, str]:
         """上一個講話的姊妹與她那一句（對位的目標）。超過窗或不是別人就回空。"""
-        name, text, at = self._last_bot_line.get(int(group_id), ("", "", 0.0))
-        if not name or not text or time.time() - float(at) > seconds:
+        mine = str(self.persona.get("name") or "")
+        best = ("", "", 0.0)
+        for name, (text, at) in (self._last_bot_line.get(int(group_id)) or {}).items():
+            if name == mine or not text:
+                continue
+            # 每人只留最近一句：上一則是我自己也不能空手，退而求其次抓別人的
+            if time.time() - float(at) <= seconds and float(at) > best[2]:
+                best = (name, text, float(at))
+        name, text, at = best
+        if not name or not text:
             return "", ""
         if name == str(self.persona.get("name") or ""):
             return "", ""
@@ -3812,7 +3820,7 @@ class AccountWorker:
         if len(recent) < 2:
             return "rescue" if random.random() < 0.5 else "open"
         fights = sum(1 for t in recent if self._is_broadcast(t) or "你" in t)
-        if fights >= 4:
+        if fights >= 5:
             roll = random.random()
             if roll < 0.4:
                 return "banter"
@@ -10915,11 +10923,9 @@ class AccountWorker:
         # 錨點還沒出現，閘門登記的時間戳早就過期；只有真正要送的這一刻登記，
         # 另一號的閘門才看得到（12:52:13／12:52:20 就是走這條路漏掉的）。
         self._burst_register(chat_id, text)
-        self._last_bot_line[int(chat_id)] = (
-            str(self.persona.get("name") or "妹子"),
-            str(text),
-            time.time(),
-        )
+        self._last_bot_line.setdefault(int(chat_id), {})[
+            str(self.persona.get("name") or "妹子")
+        ] = (str(text), time.time())
         async with self._send_slot():
             ok = await self._send_message_unlocked(
                 chat_id,
