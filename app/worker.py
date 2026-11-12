@@ -8213,7 +8213,12 @@ class AccountWorker:
                         self._pcount("strip_preamble_head")
                         text = _stripped
                 # 發送前最後一道：這段時間有沒有真人搶先講了新話（回過時話題＝當場破戲）
-                if not await self._context_still_fresh(event):
+                # 長鏡頭本來就慢半拍（一百多字要四五秒），它講的是「這一整段」而不是
+                # 某一句的答案，新訊息插進來也還是同一個場景，不必當過期丟掉。
+                if (
+                    getattr(self, "_struct_mode", "") != "long"
+                    and not await self._context_still_fresh(event)
+                ):
                     self._record_reply_drop("stale_context")
                     await self._audit_reply(event, "policy", "stale_context")
                     return
