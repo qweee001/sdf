@@ -5534,7 +5534,7 @@ class AccountWorker:
             if (
                 heat < _HOT_BURST_HUMANS
                 and self._struct_mode != "frag"
-                and random.random() < (0.06 if heat >= _WARM_BURST_HUMANS else 0.12)
+                and random.random() < (0.10 if heat >= _WARM_BURST_HUMANS else 0.18)
             ):
                 self._struct_mode = "long"
                 self._pcount("band_long")
@@ -11724,7 +11724,11 @@ class AccountWorker:
         elif _p_mode == "beat" and _p_density < 0.2:
             _p_mode = "scene"
         # 長鏡頭：主動是這條路的主力，但一樣只在場速低時抽（深夜、冷場才吃得下 90 字）。
-        if _p_heat < _WARM_BURST_HUMANS and _p_mode != "frag" and random.random() < 0.1:
+        if (
+            _p_heat < _HOT_BURST_HUMANS
+            and _p_mode != "frag"
+            and random.random() < (0.05 if _p_heat >= _WARM_BURST_HUMANS else 0.10)
+        ):
             _p_mode = "long"
             self._pcount("band_long")
         # 碎字通道（跟回覆路徑同一條）：兩三字的反應在群裡最自然，水軍一則都沒有，
