@@ -9444,6 +9444,17 @@ class AccountWorker:
                     self._set_generation_reason(event, "image_understanding_empty")
                     self.stats["image_understanding_errors"] += 1
                 return ""
+            # 長句的空回率高（離線 6 次就 2 次空），同一份長 prompt 再問一次多半還是空。
+            # 直接換極短角色卡那條路（拒答逃生同一支）：它有內容就可能直接可用。
+            if _is_long:
+                self._pcount("long_empty_escape")
+                escaped_empty = await self._refusal_escape(
+                    self._slim_lines(history),
+                    target=str(reply_message or ""),
+                    group_id=int(getattr(event, "chat_id", 0) or 0),
+                )
+                if escaped_empty:
+                    return escaped_empty
             retry_used = True
             retry_message = (
                 f"{user_message}\n"
