@@ -2122,6 +2122,15 @@ class AccountWorker:
         await asyncio.sleep(0)
         self._expire_media_claim_state(key, signal, True)
 
+    async def _owner_silent(self, owner_id: int, group_id: int) -> float:
+        """被指派這個群友的號，多久沒在這個群出聲（秒）。沒有紀錄回很大。"""
+        try:
+            spoke = await self.db.group_bot_last_spoke(int(group_id))
+        except Exception:
+            return 10**6
+        ts = float((spoke or {}).get(int(owner_id), 0.0) or 0.0)
+        return (time.time() - ts) if ts else 10**6
+
     async def _claim_human_reply(
         self,
         event,
@@ -2135,10 +2144,15 @@ class AccountWorker:
         if is_photo and claimant_id in self.failed_reply_claimants.get(key, set()):
             return False
         if owner_id and claimant_id != int(owner_id):
-            if is_photo:
-                return await self._wait_for_media_claim(event)
-            self._pcount("claim_owner_other")
-            return False
+            # 指定對象太久沒回就換人接：四號裡只有一號持有這個群友，他一忙那段就
+            # 整段已讀（實測 claim_owner_other 13 次、claim_ok 1 次）。
+            if await self._owner_silent(int(owner_id), int(event.chat_id or 0)) >= 90.0:
+                self._pcount("claim_owner_handover")
+            else:
+                if is_photo:
+                    return await self._wait_for_media_claim(event)
+                self._pcount("claim_owner_other")
+                return False
         if is_photo:
             self._media_claim_signal(key)
         claimed = await self._claim_reply(event)
