@@ -5594,7 +5594,10 @@ class AccountWorker:
         # 反向棘輪：整批縮死也要有人把帶撐回來（15:13–16:13 實測 45 則全在 8~17、
         # 一小時零長句，short 一路吃掉 dirty 與 scene）。
         flow_short = self._recent_len_flow_short(int(getattr(event, "chat_id", 0) or 0))
-        if forced_mode in _STRUCT_BANDS:
+        if getattr(event, "_sdf_keep_long", False):
+            self._struct_mode = "long"
+            self._pcount("band_long_keep")
+        elif forced_mode in _STRUCT_BANDS:
             self._struct_mode = forced_mode
         else:
             struct_roll = random.random()
@@ -7517,6 +7520,10 @@ class AccountWorker:
         """
         if not text or not self._decision_enabled():
             return text
+        # 長句一進審核，後面每次改寫都會重抽模式 → 通過的往往是重抽到的短句，
+        # 263 字生成了卻永遠沒有長句落地。釘在 event 上，改寫也只能是 long。
+        if getattr(self, "_struct_mode", "") == "long":
+            setattr(event, "_sdf_keep_long", True)
         try:
             context = await self._decision_state(event)
         except Exception as exc:

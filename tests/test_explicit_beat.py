@@ -528,3 +528,14 @@ def test_long_multiline_is_joined_not_rejected():
     assert "\n" not in out
     assert out.count("，") == 2
     assert w._join_long_lines("從下往上解") == "從下往上解"
+
+
+def test_keep_long_flag_pins_the_mode(monkeypatch):
+    """審核改寫時不能重抽模式，否則長句永遠換成短句才通過。"""
+    w = _worker()
+    ev = _event()
+    setattr(ev, "_sdf_keep_long", True)
+    monkeypatch.setattr(w, "_frag_probability", lambda *a: 9.9)   # 碎字一定不中
+    monkeypatch.setattr(random, "random", lambda: 0.99)           # 任何骰都不中
+    w._build_directors_note(ev, _rows(["真假"]), last_human="真假")
+    assert w._struct_mode == "long"
