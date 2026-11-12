@@ -5525,6 +5525,7 @@ class AccountWorker:
             ):
                 self._struct_mode = "long"
                 self._pcount("band_long")
+                self._pcount("band_long_reply")
             elif random.random() < self._frag_probability(history, heat, flow_long):
                 self._struct_mode = "frag"
             # 已經連四則都在 11 字上下：這則一定要出帶。熱場仍以直球為主（短而辛辣、
@@ -11752,6 +11753,7 @@ class AccountWorker:
         ):
             _p_mode = "long"
             self._pcount("band_long")
+            self._pcount("band_long_p")
         elif random.random() < self._frag_probability(msgs, _p_heat, _p_flow_long):
             _p_mode = "frag"
             self._pcount("band_frag")
