@@ -539,3 +539,50 @@ def test_keep_long_flag_pins_the_mode(monkeypatch):
     monkeypatch.setattr(random, "random", lambda: 0.99)           # 任何骰都不中
     w._build_directors_note(ev, _rows(["真假"]), last_human="真假")
     assert w._struct_mode == "long"
+
+
+# ---- 12. 炒群角色與對位 -------------------------------------------------
+
+def test_pick_role_opens_or_rescues_on_empty_field(monkeypatch):
+    w = _worker()
+    monkeypatch.setattr(w, "_cross_recent_items", lambda *a: [], raising=False)
+    roles = {w._pick_role(GID) for _ in range(30)}
+    assert roles <= {"open", "rescue"}
+
+
+def test_pick_role_turns_to_banter_when_field_is_fighting(monkeypatch):
+    w = _worker()
+    lines = ["你那什麼態度", "你才奇怪", "你敢不敢", "你講話很好笑", "你懂什麼", "你走開"]
+    monkeypatch.setattr(
+        w, "_cross_recent_items", lambda *a: [(t, 5.0) for t in lines], raising=False
+    )
+    roles = {w._pick_role(GID) for _ in range(40)}
+    assert "banter" in roles
+    assert roles <= {"banter", "cover", "punch"}
+
+
+def test_interaction_peer_returns_sister_line():
+    import asyncio
+    w = _worker("小天後")
+    w._last_bot_line[GID] = ("RICH", "剛被誇到耳朵紅", time.time())
+    assert asyncio.run(w._interaction_peer(GID)) == ("RICH", "剛被誇到耳朵紅")
+
+
+def test_interaction_peer_skips_self_and_stale():
+    import asyncio
+    w = _worker("小天後")
+    w._last_bot_line[GID] = ("小天後", "自己講的", time.time())
+    assert asyncio.run(w._interaction_peer(GID)) == ("", "")
+    w._last_bot_line[GID] = ("RICH", "太久以前", time.time() - 600)
+    assert asyncio.run(w._interaction_peer(GID)) == ("", "")
+
+
+def test_director_note_pairs_the_role_with_the_peer():
+    w = _worker("小天後")
+    note = w._build_directors_note(
+        _event(), _rows(["真假"]), last_human="真假",
+        sister_target="RICH", role="banter", peer_text="剛被誇到耳朵紅",
+    )
+    assert "抬槓" in note
+    assert "對位" in note and "RICH" in note
+    assert "剛被誇到耳朵紅" in note

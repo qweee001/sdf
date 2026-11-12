@@ -1294,6 +1294,8 @@ class AccountWorker:
         self._escape_inflight: int = 0
         # 最近被真人插話砍掉的時間點：連三次以上就對路人插話關掉取消，先讓句子活著。
         self._cancel_ts: list[float] = []
+        # 上一個水軍帳號在這個群講的句子：對位要「回她那一句」，只有文字抓不到是誰。
+        self._last_bot_line: dict[int, tuple[str, str, float]] = {}
         self._recent_proactive_topics: set[str] = set()
         # 已過守門、還沒落地的點名：兩號同時生成時誰都看不到對方的成品
         # （11:01 三則同拍都喊「戰豆」），所以過了守門就先佔名，落地後自然過期。
@@ -2472,7 +2474,7 @@ class AccountWorker:
         # 節奏用「自己的人聲間隔」而不是「全群最後一隻」：四號輪流主動，全群最後
         # 一則幾乎永遠落在 30 秒內，用全群當基準等於四個人共用一張嘴（實測 5 分鐘
         # 117 則真人、57 次 reply_block_gap、認領 1 則）。群級撞拍交給 claimed_20s。
-        own_gap = 8.0 + 32.0 * (1.0 - deficit)
+        own_gap = 15.0 + 50.0 * (1.0 - deficit)
         starved = False
         vacuum = False
         ignored = False
@@ -3779,6 +3781,55 @@ class AccountWorker:
         """長鏡頭分段寫的換行併成逗號：一則一個氣泡，且不被「不准換行」的閘打回。"""
         body = re.sub(r"[ \t]*[\r\n]+[ \t]*", "，", str(text or ""))
         return re.sub(r"，+", "，", body).strip("， ")
+
+    # 炒群的角色分工：成員之間要「互相表演」，不是人人都對客戶講。
+    # 群托的鐵律是配合但不像托——所以附和要具體、抬槓要真的刺、救場要換角度。
+    _ROLE_PROMPTS = {
+        "echo": "附和：具體同意她剛剛那句，補一個自己的例子或經驗（不是「+1」「真假」這種空話）",
+        "banter": "抬槓：故意唱反調或吐槽她，刺一句讓她想回嘴（可以誇張），不要客氣",
+        "punch": "補刀：接著前一句再補一記，比前一句更狠或更好笑，不要重講一遍",
+        "open": "拋題：丟一個具體的新問題給場上（誰都行，不要問候、不要「有人在嗎」）",
+        "cover": "圍事：站在被虧的那一邊幫她講話，順便虧回去",
+        "rescue": "救場：換一個跟剛剛完全不同的角度（生活、身體、吃的）把冷掉的場拉回來",
+    }
+
+    async def _interaction_peer(self, group_id: int, seconds: float = 150.0) -> tuple[str, str]:
+        """上一個講話的姊妹與她那一句（對位的目標）。超過窗或不是別人就回空。"""
+        name, text, at = self._last_bot_line.get(int(group_id), ("", "", 0.0))
+        if not name or not text or time.time() - float(at) > seconds:
+            return "", ""
+        if name == str(self.persona.get("name") or ""):
+            return "", ""
+        return name, text
+
+    def _pick_role(self, group_id: int) -> str:
+        """這一則在群裡扮什麼角色。
+
+        冷場要換人救、在吵要有人抬槓或圍事：同一個模子連發十則，看起來就是
+        四個客服在同一個群各講各的。判定全吃現場，不查詞表。
+        """
+        recent = [t for t, _a in self._cross_recent_items(int(group_id), 420.0)][-6:]
+        if len(recent) < 2:
+            return "rescue" if random.random() < 0.5 else "open"
+        fights = sum(1 for t in recent if self._is_broadcast(t) or "你" in t)
+        if fights >= 4:
+            roll = random.random()
+            if roll < 0.4:
+                return "banter"
+            return "cover" if roll < 0.7 else "punch"
+        if fights <= 1:
+            roll = random.random()
+            if roll < 0.4:
+                return "open"
+            return "rescue" if roll < 0.7 else "echo"
+        roll = random.random()
+        if roll < 0.3:
+            return "echo"
+        if roll < 0.55:
+            return "punch"
+        if roll < 0.8:
+            return "banter"
+        return "open"
 
     async def _sister_pick(self, group_id: int, seconds: float = 120.0) -> str:
         """近兩分鐘講過話的姊妹（不含自己）；抽 25% 讓這則回她。
@@ -5509,6 +5560,8 @@ class AccountWorker:
         own_texts=None,
         last_human: str = "",
         sister_target: str = "",
+        role: str = "",
+        peer_text: str = "",
     ) -> str:
         """酒館級 In-Chat @ Depth 末端動態演出指令（Author's Note）。
 
@@ -5841,21 +5894,30 @@ class AccountWorker:
                     "一起端上去了，你這則只寫反應或感受（哪裡緊、哪裡抖、聲音怎樣），"
                     "不准再開新的部位、不准再給新動作。\n"
                 )
-        # 橫向互接：這則回姊妹，不要每則都在對男的講。
-        sister_block = (
-            f"6. 【這則回姊妹 {sister_target}】直接喊她的名字接她的話（同意、吐槽、"
-            f"補自己的經驗都可以），這則不要對男的講、也不要對全場。\n"
-            if sister_target
-            else ""
-        )
-        # 回覆路徑的句子八成都在演自己（「雪松味乳液擦完，你想聞嗎」），真人講運動
-        # 也照樣講自己的：先接住他那句，才輪到自己。
+        # 回覆路徑的句子八成都在演自己（真人講運動也照樣講自己的）：先接住他那句。
         reply_first = (
             f"0. 【先接這一句】最新一句是「{last_human[:40]}」。第一句就接著它回答或反問，"
             f"把它當成對話，之後才補自己的身體或生活；整則都不能無視它。\n"
             if last_human
             else ""
         )
+        # 橫向互接：這一拍扮角色、對位一個姊妹，回她那句而不是對男的講。
+        # 炒群的骨架是成員之間互相表演（拋→接→補→有人反對），真人只是被夾在中間。
+        role_line = self._ROLE_PROMPTS.get(role, "") if role else ""
+        sister_block = ""
+        if sister_target and role_line:
+            sister_block = (
+                f"6. 【這一拍你在扮的{role}】{role_line}。\n"
+                f"7. 【對位】{sister_target} 剛剛說「{(peer_text or '')[:36]}」——直接喊她的名字"
+                f"回她那一句，這則不要對男的講、也不要對全場。\n"
+            )
+        elif sister_target:
+            sister_block = (
+                f"6. 【這則回姊妹 {sister_target}】直接喊她的名字接她的話（同意、吐槽、"
+                f"補自己的經驗都可以），這則不要對男的講、也不要對全場。\n"
+            )
+        elif role_line:
+            sister_block = f"6. 【這一拍你在扮的{role}】{role_line}。\n"
         return (
             f"\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\n"
             f"{reply_first}"
@@ -9415,15 +9477,22 @@ class AccountWorker:
 
         # 依主人指示：酒館級 Author's Note / In-Chat @ Depth 末端動態注入
         # 將最高權重的導演演出指令放在整個 Context 的最後一刻，直接引領模型演繹
+        # 這一拍扮什麼角色、對位誰：成員之間要有來回，不能四個人都只對客戶講。
+        _gid = int(getattr(event, "chat_id", 0) or 0)
+        _role = self._pick_role(_gid)
+        _peer_name, _peer_text = await self._interaction_peer(_gid)
+        if _role in ("echo", "banter", "punch", "cover") and not _peer_name:
+            # 沒人可對位（剛開場或只剩自己講過）就退成拋題，不要硬喊名字
+            _role = "open"
+        _sister = _peer_name or await self._sister_pick(_gid)
         director_note = self._build_directors_note(
             event,
             history,
             own_texts,
             last_human,
-            # 橫向互接：25% 回姊妹。原本四號只會各自對男的講，水軍緊接水軍 14%。
-            sister_target=await self._sister_pick(
-                int(getattr(event, "chat_id", 0) or 0)
-            ),
+            sister_target=_sister,
+            role=_role if _sister else "",
+            peer_text=_peer_text,
         )
         if director_note:
             user_message += f"\n{director_note}"
@@ -10846,6 +10915,11 @@ class AccountWorker:
         # 錨點還沒出現，閘門登記的時間戳早就過期；只有真正要送的這一刻登記，
         # 另一號的閘門才看得到（12:52:13／12:52:20 就是走這條路漏掉的）。
         self._burst_register(chat_id, text)
+        self._last_bot_line[int(chat_id)] = (
+            str(self.persona.get("name") or "妹子"),
+            str(text),
+            time.time(),
+        )
         async with self._send_slot():
             ok = await self._send_message_unlocked(
                 chat_id,
