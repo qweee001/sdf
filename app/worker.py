@@ -3730,10 +3730,18 @@ class AccountWorker:
             if now - float(ts or 0.0) > seconds:
                 continue
             persona = self.personas.get(acc) or self.personas.get(str(acc)) or {}
+            if not persona:
+                for _v in (self.personas or {}).values():
+                    if str((_v or {}).get("tg_user_id") or "") == str(acc):
+                        persona = _v
+                        break
             name = str((persona or {}).get("name") or "").strip()
             if name:
                 cands.append(name)
-        self.stats["dbg_sister"] = f"n={len(cands)} spoke={len(getattr(spoke, '__len__', lambda: 0)()) if False else len(spoke or {})} me={me}"
+        self.stats["dbg_sister"] = (
+            f"n={len(cands)} spoke={len(spoke or {})} me={me} "
+            f"keys={[str(k)[:6] for k in list(self.personas or {})[:3]]}"
+        )
         if not cands or random.random() >= 0.25:
             return ""
         self.stats["pick_sister"] = int(self.stats.get("pick_sister", 0)) + 1
