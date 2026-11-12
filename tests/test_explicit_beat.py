@@ -243,12 +243,13 @@ def test_long_band_only_in_slow_field(monkeypatch):
     assert hot_mode != "long"
 
 
-def test_long_cap_is_150_and_not_dragged_down_by_human_median():
+def test_long_cap_is_not_dragged_down_by_human_median():
     w = _worker()
     w._struct_mode = "long"
     w._human_ref = 8
     w._len_tail = False
-    assert w._struct_char_cap(90) == 150
+    # 模型實際會寫到 300 字，帶頂跟著抬（90 字時代 82 次抽中 0 則落地）
+    assert w._struct_char_cap(90) == 190
 
 
 # ---- 9. 同一拍撞名 -------------------------------------------------------
@@ -445,3 +446,66 @@ def test_ignored_group_holds_same_sender_reply():
         )
         == "cancel"
     )
+
+
+# ---- 11. 已讀補位：整場被晾著時不准再擋 -------------------------------
+
+def _allowed_worker(monkeypatch, last_bot_ago):
+    """組一個 _ordinary_reply_allowed 可跑的 worker：壓力低到不該觸發真空回場。"""
+    import asyncio
+    w = _worker()
+    w.tg_user_id = 1
+    w.reply_enabled = True
+    spoken = {2: time.time() - last_bot_ago}
+    assert asyncio.iscoroutinefunction  # noqa: F821
+
+    async def _pressure(_gid):
+        return {"human_5m": 8, "ordinary_claimed_10m": 0, "ordinary_claimed_20s": 1}
+
+    monkeypatch.setattr(w, "_interaction_pressure", _pressure, raising=False)
+    w.db = cast(Any, SimpleNamespace(
+        group_bot_last_spoke=lambda _g: _spoke_map(spoken),
+        group_traffic_window=lambda _g, _s: _traffic(),
+    ))
+    monkeypatch.setattr(w, "_voice_share", lambda *a: 0.1, raising=False)
+    monkeypatch.setattr(w, "_active_owner", lambda *a: 0, raising=False)
+    monkeypatch.setattr(w, "_get_runtime_float", _runtime, raising=False)
+    return w
+
+
+async def _spoke_map(d):
+    return dict(d)
+
+
+async def _traffic():
+    return {"human": 10, "bots": 2, "managed": set()}
+
+
+async def _runtime(_k, default):
+    return default
+
+
+def test_ignored_group_skips_the_pile_lock(monkeypatch):
+    """群裡兩分鐘沒水軍出聲：20 秒群級鎖（ordinary_claimed_20s=1）不能再擋。"""
+    import asyncio
+    w = _allowed_worker(monkeypatch, last_bot_ago=200.0)
+    ev = _event()
+    ev.mentioned = False
+    ev.is_reply = False
+    monkeypatch.setattr(w, "_reply_claim_key", lambda e: (GID, 5), raising=False)
+    monkeypatch.setattr(w, "_is_meaningful_human_message", lambda e: True, raising=False)
+    assert asyncio.run(w._ordinary_reply_allowed(ev)) is True
+    assert w.stats.get("ignored_fill_pass") == 1
+
+
+def test_fresh_group_keeps_the_pile_lock(monkeypatch):
+    """水軍二十秒前才講過：照舊只准一隻，不准因為補位全擠上來。"""
+    import asyncio
+    w = _allowed_worker(monkeypatch, last_bot_ago=20.0)
+    ev = _event()
+    ev.mentioned = False
+    ev.is_reply = False
+    monkeypatch.setattr(w, "_reply_claim_key", lambda e: (GID, 5), raising=False)
+    monkeypatch.setattr(w, "_is_meaningful_human_message", lambda e: True, raising=False)
+    assert asyncio.run(w._ordinary_reply_allowed(ev)) is False
+    assert "ignored_fill_pass" not in w.stats

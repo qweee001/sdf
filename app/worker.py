@@ -139,6 +139,9 @@ _SILENT_REJOIN_MIN_GAP = 45.0
 # 所有「讓位／配額／熱場預算」一律失效。17:44~18:05 四號全靜音 22 分鐘，
 # 期間 24 則真人在跑「睪丸哥」連續劇，就是被 hot_budget＋claimed 上限疊死。
 _GROUP_VACUUM_SECONDS = 300.0
+# 已讀補位：群裡兩分鐘沒半個水軍出聲＝這批真人正被晾著。真空回場要等五分鐘，
+# 五分鐘的已讀對「有人在聊」的群已經很明顯（250 則樣本 170 句真人沒人理）。
+_IGNORED_QUIET_SECONDS = 105.0
 _GROUP_VACUUM_MIN_HUMANS = 3
 # 非指向回覆撞到姊妹剛講過時拉長錯峰（秒）：實測 18:05:55／:56、18:10:42／:43
 # 四號兩兩差 1 秒，2.5~6 秒的固定抖動擋不住同秒感。真空回場的第一則不吃。
@@ -289,7 +292,7 @@ _STRUCT_BANDS: dict[str, tuple[int, int]] = {
     "beat": (25, 45),
     # 長鏡頭：整個過程一段到底。實測模型 577 字不斷手，卡住的一直是通道不是模型。
     # 只在場速低（兩分鐘 <4 則真人）時抽，熱場寫長等於遲到。
-    "long": (90, 150),
+    "long": (110, 190),
     # 留白：一句半、停在動作中，不接完也不問。熱場真人常這樣丟一句就沒了。
     "halt": (3, 9),
 }
@@ -1855,7 +1858,10 @@ class AccountWorker:
                 if is_hot
                 else _SILENT_REPLY_PROBABILITY_ORDINARY
             )
-            if random.random() < silent_p:
+            # 已讀狀態下不裝忙：兩分鐘沒半個水軍出聲，被晾著的人再被「已讀不回」
+            # 一次就掉客，這則直接進場。
+            _lulled = await self._seconds_since_any_bot(group_id) >= _IGNORED_QUIET_SECONDS
+            if not _lulled and random.random() < silent_p:
                 self.stats["silent_skips"] = (
                     int(self.stats.get("silent_skips", 0)) + 1
                 )
@@ -2435,6 +2441,7 @@ class AccountWorker:
         own_gap = 20.0 + 70.0 * (1.0 - deficit)
         starved = False
         vacuum = False
+        ignored = False
         try:
             spoke = await self.db.group_bot_last_spoke(group_id)
         except Exception:
@@ -2447,6 +2454,10 @@ class AccountWorker:
                 (not mine or now - mine >= _SILENT_REJOIN_SECONDS)
                 and now - last_any_bot >= _SILENT_REJOIN_MIN_GAP
             )
+            # 已讀補位：兩分鐘沒半個水軍出聲，這一則就是補位不是搶麥，下面全部放行。
+            ignored = now - last_any_bot >= _IGNORED_QUIET_SECONDS
+            if ignored:
+                self._pcount("ignored_fill_claim")
             # 整群真空：真人還在講、卻已經五分鐘沒有半個姊妹出聲＝此刻讓位等於消失。
             if (
                 now - last_any_bot >= _GROUP_VACUUM_SECONDS
@@ -2454,7 +2465,7 @@ class AccountWorker:
             ):
                 vacuum = True
                 self._pcount("vacuum_rejoin")
-            if not is_my_dialog and not is_photo and mine and now - mine < own_gap and not starved and not vacuum:
+            if not is_my_dialog and not is_photo and mine and now - mine < own_gap and not starved and not vacuum and not ignored:
                 self._pcount("reply_block_gap")
                 return False
             if starved and now - last_any_bot < 90.0:
@@ -2462,7 +2473,7 @@ class AccountWorker:
                     int(self.stats.get("starved_rejoin", 0)) + 1
                 )
         # 20 秒群級鎖：四號別疊在同一拍（照片不吃，只有一個會真的送出）
-        if not is_photo and not starved and not vacuum and int(pressure.get("ordinary_claimed_20s", 0) or 0) >= 1:
+        if not is_photo and not starved and not vacuum and not ignored and int(pressure.get("ordinary_claimed_20s", 0) or 0) >= 1:
             self._pcount("reply_block_pile")
             return False
 
@@ -2472,7 +2483,7 @@ class AccountWorker:
         if probability <= 0 and not is_photo:
             return False
         # 10 分鐘認領上限跟著真人量走：固定 8 則在 3 則/分的群是自己把自己噤聲。
-        if claimed_10m >= max(_MAX_ORDINARY_CLAIMS_10M, int(human_5m * 0.6)) and not vacuum and not starved:
+        if claimed_10m >= max(_MAX_ORDINARY_CLAIMS_10M, int(human_5m * 0.6)) and not vacuum and not starved and not ignored:
             self._pcount("reply_block_cap")
             return False
         if human_5m >= _HIGH_TRAFFIC_HUMANS_5M:
@@ -2488,18 +2499,22 @@ class AccountWorker:
                 and not vacuum
                 and not starved
                 and not is_photo
+                and not ignored
                 and deficit < 0.2
                 and already_5m >= hot_budget(human_5m)
             ):
                 self._pcount("reply_block_hot")
                 return False
             # 佔比越缺、擲骰越寬（達標 0.15／零發言 0.65），不然熱場永遠答不上。
-            if not vacuum:
+            if not vacuum and not ignored:
                 probability = min(probability, 0.15 + 0.5 * deficit)
         # 真空回場：這一則是全群五分鐘來的第一句，別再擲骰，直接放。
         if vacuum:
             probability = 1.0
             self._pcount("vacuum_rejoin_pass")
+        if ignored:
+            probability = 1.0
+            self._pcount("ignored_fill_pass")
         # 照片在熱場也照答：四號靠 claim 排隊，只有一個會真的送出。
         if is_photo:
             probability = 1.0
@@ -3649,8 +3664,9 @@ class AccountWorker:
         if heat >= _HOT_BURST_HUMANS:
             p *= 1.15
         # 11:00–11:47 實測：真人碎字 35%，水軍卻 53%（回覆與主動兩條都吃這個
-        # 機率，熱場再乘 1.25 直接頂到上限 0.45）。回檔到貼著真人走，上限 0.38。
-        return min(p, 0.38)
+        # 機率，熱場再乘 1.25 直接頂到上限 0.45）。回檔到貼著真人走。
+        # 上限 0.30：0.38 時 250 則樣本裡 frag 佔 157 次，短碎反而吃掉該有的中句。
+        return min(p, 0.30)
 
     @staticmethod
     def _explicit_axes(text: str) -> int:
@@ -9393,6 +9409,11 @@ class AccountWorker:
         # 為滿足主人「深入勾引、露骨誘惑、情節拉扯、激發肉體衝動」，
         # 允許上限放寬至 65 字元，絕不因稍微寫長或五感描寫豐富就判定 too_long 丟棄！
         char_cap = self._struct_char_cap(max(char_cap, 90))
+        # 長鏡頭模型實際會寫到 300 字（實測 343），用 150 當上限等於每條都 too_long
+        # 重寫一次再丟掉：82 次抽中、0 則落地。這條上限放寬到自己一組。
+        _is_long = self._struct_mode == "long"
+        if _is_long:
+            char_cap = 260
         _frag_mode = self._struct_mode == "frag"
         self._band_lo, self._band_hi = _STRUCT_BANDS.get(
             self._struct_mode, (_HUMAN_LINE_MIN, _HUMAN_LINE_MAX)
@@ -9428,9 +9449,9 @@ class AccountWorker:
             # 診斷用：長鏡頭抽中後到底生了多長、內容什麼樣（/api/status 看得到）
             self.stats["dbg_long_len"] = len(reply)
             self.stats["dbg_long"] = str(reply)[:80]
-        too_long = len(reply) > char_cap + 4
+        too_long = len(reply) > char_cap + (60 if _is_long else 4)
         # 長鏡頭寫太短就沒意義（實測抽中後常只寫 30 字）：比照超長，重寫一次。
-        too_short = self._struct_mode == "long" and len(reply) < 60
+        too_short = _is_long and len(reply) < 90
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
