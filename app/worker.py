@@ -1876,7 +1876,13 @@ class AccountWorker:
                 return
             # 人味延遲：被@/回覆 → 3-8 秒；普通 → 5-14 秒；姊妹互撩接話 → 45-90 秒（大幅拉開避免雙簧扎堆）
             if sender_id in self.managed_ids:
-                delay = random.uniform(45.0, 90.0)
+                # 被點名／被回覆是對話，九十秒後才回在熱場就是遲到；只有純插話
+                # 才拉長錯峰。實測 19 次 managed_claimed 全部在延遲後被讓位規則丟掉。
+                delay = (
+                    random.uniform(6.0, 14.0)
+                    if getattr(event, "_sdf_called", False)
+                    else random.uniform(20.0, 40.0)
+                )
             elif is_hot:
                 delay = random.uniform(3, 8)
             else:
@@ -2236,6 +2242,8 @@ class AccountWorker:
             return False
         # 被點名時把候選收成「被叫到的那個人」：原本哈希可能在四號裡挑中別人，
         # 被叫的這一號反而不回（managed_claimed 一整輪 0 的另一半原因）。
+        if _called_early:
+            setattr(event, "_sdf_called", True)
         if _replied_me and int(self.tg_user_id or 0) in candidates:
             candidates = [int(self.tg_user_id or 0)]
         elif _called_early:
@@ -3796,6 +3804,29 @@ class AccountWorker:
         elif flirty == 0:
             p -= 0.08
         return max(0.0, min(p, 0.45))
+
+    def _restore_full_name(self, text: str, group_id: int) -> str:
+        """三字名被截成兩字就補回來（「天後你這順序反了」→「小天後…」）。
+
+        只補「開頭或逗號後」的出現，句中的同形詞不動。
+        """
+        body = str(text or "")
+        if not body or not group_id:
+            return body
+        for name in self._speaker_names(int(group_id)):
+            if len(name) < 3:
+                continue
+            tail = name[-2:]
+            if name in body or tail not in body:
+                continue
+            fixed = re.sub(
+                rf"(^|[，,\s]){re.escape(tail)}",
+                lambda m: m.group(1) + name,
+                body,
+            )
+            if fixed != body:
+                return fixed
+        return body
 
     def _demote_repeated_lead(self, text: str, group_id: int) -> str:
         """同一個名字一直當開頭就把它挪到後面（「和進出口，X」連八次）。
@@ -5895,7 +5926,7 @@ class AccountWorker:
                 self._struct_mode in ("frag", "short", "scene", "halt")
                 and self._dry_streak(int(getattr(event, "chat_id", 0) or 0)) >= 3
             ):
-                self._struct_mode = "dirty" if random.random() < 0.5 else "beat"
+                self._struct_mode = "beat" if random.random() < 0.7 else "dirty"
                 self._pcount("dry_forced")
         # 模型永遠寫到字數帶的上緣：8~16 帶實測九則全在 11~19、0 則 ≤8 字，
         # 短碎等於只存在於提示詞。短碎模式再抽 45% 走「一句話」窄帶（上限 10 字），
@@ -8176,7 +8207,9 @@ class AccountWorker:
                 # 姊妹互撩讓位：若等待 45~90 秒期間已有真人插話聊天，互撩自動放棄，留空間給真人
                 try:
                     recent_msgs = await self.db.get_group_messages(int(event.chat_id or 0), limit=4)
-                    if any(str(m.get("role")) == "user" for m in recent_msgs):
+                    if any(str(m.get("role")) == "user" for m in recent_msgs) and not getattr(
+                        event, "_sdf_called", False
+                    ):
                         print(
                             f"[{self.name}] managed-followup drop: 等待期間真人已接話，姊妹互撩自動讓位給真人",
                             flush=True,
@@ -9760,6 +9793,7 @@ class AccountWorker:
                 self._pcount("long_hard_trim")
         if self._struct_mode in ("dirty", "beat", "scene", "short", "long"):
             reply = self._demote_repeated_lead(reply, int(getattr(event, "chat_id", 0) or 0))
+            reply = self._restore_full_name(reply, int(getattr(event, "chat_id", 0) or 0))
         # 兩段式骨架的唯一一刀已徹底廢除：不再對生成的對話進行任何機械裁剪
         format_leak = self._has_format_leak(reply)
         refusal = self._is_refusal(reply)

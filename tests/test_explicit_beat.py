@@ -750,3 +750,10 @@ def test_single_name_lead_is_kept():
     w = _worker()
     w._cross_recent_items = lambda *a: [("方sir，你好", 40.0)]
     assert w._demote_repeated_lead("小天後，趴好我來按", GID) == "小天後，趴好我來按"
+
+
+def test_truncated_name_is_restored():
+    w = _worker()
+    assert w._restore_full_name("天後你這順序反了", GID) == "小天後你這順序反了"
+    # 完整名字不動
+    assert w._restore_full_name("小天後你先摸", GID) == "小天後你先摸"
