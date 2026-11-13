@@ -1296,6 +1296,8 @@ class AccountWorker:
         self._cancel_ts: list[float] = []
         # 上一個水軍帳號在這個群講的句子：對位要「回她那一句」，只有文字抓不到是誰。
         self._last_bot_line: dict[int, dict[str, tuple[str, float]]] = {}
+        # 群裡最近的發言順序（誰先誰後）：自己的連發要看得出來，不然同一隻會連三則。
+        self._bot_line_order: dict[int, list[tuple[str, float]]] = {}
         self._recent_proactive_topics: set[str] = set()
         # 已過守門、還沒落地的點名：兩號同時生成時誰都看不到對方的成品
         # （11:01 三則同拍都喊「戰豆」），所以過了守門就先佔名，落地後自然過期。
@@ -2330,6 +2332,15 @@ class AccountWorker:
         if not bool(getattr(self.config, "reply_enabled", True)):
             return False
         if sender_id in self.managed_ids:
+            # 自己連兩則就讓別人接（Chen 剛剛連三則，一個人把場講完）
+            _named_me = str(self.persona.get("name") or "").strip()
+            if (
+                _named_me
+                and _named_me not in str(event.raw_text or "")
+                and await self._own_streak(group_id) >= 2
+            ):
+                self._pcount("own_streak_yield")
+                return False
             return await self._should_follow_managed_origin(event)
         self._pcount("reply_seen_human")
         # 被 @／回覆自己 → 直接認領；回覆別人不是死路：群裡九成訊息都在互回，
@@ -2357,6 +2368,9 @@ class AccountWorker:
                 return False
             self._pcount("reply_soft_other")
             soft_other = True
+        if not (event.is_reply or event.mentioned) and await self._own_streak(group_id) >= 2:
+            self._pcount("own_streak_yield_human")
+            return False
         if not self._is_meaningful_human_message(event):
             self._pcount("reply_skip_meaningless")
             return False
@@ -3804,6 +3818,23 @@ class AccountWorker:
         elif flirty == 0:
             p -= 0.08
         return max(0.0, min(p, 0.45))
+
+    async def _own_streak(self, group_id: int) -> int:
+        """自己在這個群最近連續講了幾則（跨帳號判，靠 DB 的發言序列）。
+
+        每隻水軍是獨立 worker，自己記的順序看不到別人，用 DB 才判得準。
+        """
+        try:
+            senders = await self.db.recent_bot_senders(int(group_id), 6)
+        except Exception:
+            return 0
+        me = int(self.tg_user_id or 0)
+        streak = 0
+        for sid in senders:
+            if int(sid) != me:
+                break
+            streak += 1
+        return streak
 
     def _restore_full_name(self, text: str, group_id: int) -> str:
         """三字名被截成兩字就補回來（「天後你這順序反了」→「小天後…」）。
@@ -11122,9 +11153,11 @@ class AccountWorker:
         # 錨點還沒出現，閘門登記的時間戳早就過期；只有真正要送的這一刻登記，
         # 另一號的閘門才看得到（12:52:13／12:52:20 就是走這條路漏掉的）。
         self._burst_register(chat_id, text)
-        self._last_bot_line.setdefault(int(chat_id), {})[
-            str(self.persona.get("name") or "妹子")
-        ] = (str(text), time.time())
+        _me_name = str(self.persona.get("name") or "妹子")
+        self._last_bot_line.setdefault(int(chat_id), {})[_me_name] = (str(text), time.time())
+        _order = self._bot_line_order.setdefault(int(chat_id), [])
+        _order.append((_me_name, time.time()))
+        del _order[:-20]
         async with self._send_slot():
             ok = await self._send_message_unlocked(
                 chat_id,

@@ -816,3 +816,27 @@ def test_shape_quiet_when_last_line_was_normal(monkeypatch):
     )
     note = w._build_directors_note(_event(), _rows(["道歉很難嗎"]), last_human="道歉很難嗎")
     assert "換邊" not in note and "不准先報備自己" not in note
+
+
+def test_own_streak_counts_trailing_self_lines():
+    import asyncio
+    w = _worker()
+    w.tg_user_id = 7
+
+    async def _senders(_gid, _n):
+        return [7, 7, 9, 7]
+
+    w.db = cast(Any, SimpleNamespace(recent_bot_senders=_senders))
+    assert asyncio.run(w._own_streak(GID)) == 2
+
+
+def test_own_streak_stops_at_other():
+    import asyncio
+    w = _worker()
+    w.tg_user_id = 7
+
+    async def _senders(_gid, _n):
+        return [9, 7, 7]
+
+    w.db = cast(Any, SimpleNamespace(recent_bot_senders=_senders))
+    assert asyncio.run(w._own_streak(GID)) == 0

@@ -1408,6 +1408,19 @@ class Database:
 
     # ---------- 記憶 ----------
 
+    async def recent_bot_senders(self, group_id: int, limit: int = 6) -> list[int]:
+        """最近幾則水軍發言的 sender_id（新→舊）：判自己有沒有連發。"""
+        try:
+            cursor = await self._c.execute(
+                "SELECT sender_id FROM messages WHERE group_id = ? AND role = 'assistant' "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (int(group_id), int(limit)),
+            )
+            rows = await cursor.fetchall()
+        except Exception:
+            return []
+        return [int(r[0] or 0) for r in rows]
+
     async def message_author(self, group_id: int, message_id: int) -> tuple[int, str]:
         """某則訊息的發話者與角色（真人回水軍時要認得出被回的是誰）。
 
