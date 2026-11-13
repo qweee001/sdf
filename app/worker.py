@@ -3819,6 +3819,27 @@ class AccountWorker:
             p -= 0.08
         return max(0.0, min(p, 0.45))
 
+    @staticmethod
+    def _has_dangling_subject(text: str) -> bool:
+        """主語斷掉的殘句（「被氣到下面發熱，跨過來壓著我，順便哄兩句」）。
+
+        兩種病灶，都只看句型不看詞表：
+        1. 被動句開頭沒有主語（「被…」而不是「我被…」），句中卻又出現「我」。
+        2. 三個子句以上卻只有一個「我」，中間的動作不知道誰做的。
+        """
+        body = str(text or "").strip()
+        if not body:
+            return False
+        clauses = [c.strip() for c in re.split(r"[，,]", body) if c.strip()]
+        if not clauses:
+            return False
+        head = clauses[0]
+        if head.startswith(("被", "給")) and "我" in body:
+            return True
+        if len(clauses) >= 3 and sum(1 for c in clauses if "我" in c) <= 1:
+            return True
+        return False
+
     async def _own_streak(self, group_id: int) -> int:
         """自己在這個群最近連續講了幾則（跨帳號判，靠 DB 的發言序列）。
 
@@ -6141,6 +6162,8 @@ class AccountWorker:
         return (
             f"\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\n"
             f"{reply_first}{shape_block}"
+            "0c. 【主語要清楚】動作是誰做的就寫出來（「你跨過來」「我壓上去」），"
+            "不要只寫「被…」或把兩三個動作疊在一起卻只有一個「我」。\n"
             f"1. 扮演真實的台灣女生 {name}，以 {band_lo}~{band_hi} 字內的極致自然口語短句隨性說話，不帶句號；"
             f"{band_hi} 字是硬上限，滿了就砍前情、只留最想講的那一句。{tail_note}\n"
             + (
@@ -9890,6 +9913,11 @@ class AccountWorker:
         # 露骨節拍的驗收就是兩軸（部位／動作／反應）。一軸等於只是丟了一個器官詞，
         # 整場就是「很色但沒有過程」。沒到就重寫一次。
         too_flat = self._struct_mode == "beat" and self._explicit_axes(reply) < 2
+        # 主語斷掉就重寫一次：短不等於可以沒有主詞。
+        broken_subject = (
+            self._struct_mode in ("dirty", "beat", "scene", "long")
+            and self._has_dangling_subject(reply)
+        )
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
@@ -9921,12 +9949,12 @@ class AccountWorker:
         if _is_long:
             _blocked = (
                 format_leak or refusal or too_long or too_short
-                or time_mismatch or simplified or too_flat
+                or time_mismatch or simplified or too_flat or broken_subject
             )
         else:
             _blocked = (
                 format_leak or refusal or too_long or too_short
-                or fact_bad or own_echo or tic_hit or too_flat
+                or fact_bad or own_echo or tic_hit or too_flat or broken_subject
             )
         if not _blocked:
             if image:

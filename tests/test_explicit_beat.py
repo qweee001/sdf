@@ -840,3 +840,21 @@ def test_own_streak_stops_at_other():
 
     w.db = cast(Any, SimpleNamespace(recent_bot_senders=_senders))
     assert asyncio.run(w._own_streak(GID)) == 0
+
+
+# ---- 16. 主語殘句 -------------------------------------------------------
+
+def test_dangling_subject_flags_passive_open():
+    w = _worker()
+    assert w._has_dangling_subject("被氣到下面發熱，跨過來壓著我，順便哄兩句") is True
+
+
+def test_dangling_subject_flags_many_clauses_one_me():
+    w = _worker()
+    assert w._has_dangling_subject("腰一沉倒抽一口氣，掌心壓在牆上，腿抖到打不直") is True
+
+
+def test_dangling_subject_ok_when_subject_named():
+    w = _worker()
+    assert w._has_dangling_subject("我背貼著牆被壓住，喘到說不出話") is False
+    assert w._has_dangling_subject("小穴好濕") is False
