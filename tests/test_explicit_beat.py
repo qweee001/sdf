@@ -780,3 +780,39 @@ def test_dry_five_forces_beat(monkeypatch):
     w._build_directors_note(_event(), _rows(["真假"]), last_human="真假")
     assert w._struct_mode == "beat"
     assert w.stats.get("dry_hard_forced") == 1
+
+
+# ---- 15. 形狀：先自己還是先正題 ---------------------------------------
+
+def test_shape_switches_side_after_a_preamble_line(monkeypatch):
+    w = _worker()
+    w._struct_mode_force = "short"
+    monkeypatch.setattr(
+        w, "_cross_recent_items",
+        lambda *a: [("彎腰搬貨背快散了，道歉兩個字很難嗎", 30.0)],
+        raising=False,
+    )
+    note = w._build_directors_note(_event(), _rows(["道歉很難嗎"]), last_human="道歉很難嗎")
+    assert "換邊" in note
+
+
+def test_shape_bans_self_disclosure_after_two(monkeypatch):
+    w = _worker()
+    w._struct_mode_force = "short"
+    monkeypatch.setattr(
+        w, "_cross_recent_items",
+        lambda *a: [("收衣服收到手痠，你要不要幫我", 60.0), ("彎腰搬貨背快散了，你道歉很難嗎", 30.0)],
+        raising=False,
+    )
+    note = w._build_directors_note(_event(), _rows(["道歉很難嗎"]), last_human="道歉很難嗎")
+    assert "不准先報備自己" in note
+
+
+def test_shape_quiet_when_last_line_was_normal(monkeypatch):
+    w = _worker()
+    w._struct_mode_force = "short"
+    monkeypatch.setattr(
+        w, "_cross_recent_items", lambda *a: [("道歉兩個字很難嗎", 30.0)], raising=False
+    )
+    note = w._build_directors_note(_event(), _rows(["道歉很難嗎"]), last_human="道歉很難嗎")
+    assert "換邊" not in note and "不准先報備自己" not in note

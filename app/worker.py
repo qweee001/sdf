@@ -6080,9 +6080,36 @@ class AccountWorker:
             )
         elif role_line:
             sister_block = f"6. 【這一拍你在扮的{role}】{role_line}。\n"
+        # 形狀：這條管的是「先講自己還是先講正題」，不是長度。
+        # 「彎腰搬貨背快散了，道歉兩個字很難嗎」——搬貨跟道歉無關，真人只會講後半。
+        # 前一則水軍已經是同一個骨架就換邊；連兩則都自曝就這則不准自曝。
+        _gid_shape = int(getattr(event, "chat_id", 0) or 0)
+        _prev_bot = next(
+            (t for t, _a in reversed(self._cross_recent_items(_gid_shape, 600.0))), ""
+        )
+        _recent_shape = [
+            t for t, _a in self._cross_recent_items(_gid_shape, 600.0)
+        ][-3:] if _gid_shape else []
+        _pre_streak = (
+            sum(1 for t in _recent_shape if self._is_preamble_beat(t, _gid_shape, loose=True))
+            if _gid_shape
+            else 0
+        )
+        if _pre_streak >= 2:
+            shape_block = (
+                "0b. 【這則不准先報備自己】前面已經連續兩則都是「先講自己再講正題」。"
+                "直接講正題（回答、吐槽、下判斷），要提到自己的身體就補在後面、最多半句。\n"
+            )
+        elif _prev_bot and self._is_preamble_beat(_prev_bot, _gid_shape, loose=True):
+            shape_block = (
+                "0b. 【換邊】上一則已經先講自己、後面才對人。這則先講正題，"
+                "自己放後面或干脆不講。\n"
+            )
+        else:
+            shape_block = ""
         return (
             f"\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\n"
-            f"{reply_first}"
+            f"{reply_first}{shape_block}"
             f"1. 扮演真實的台灣女生 {name}，以 {band_lo}~{band_hi} 字內的極致自然口語短句隨性說話，不帶句號；"
             f"{band_hi} 字是硬上限，滿了就砍前情、只留最想講的那一句。{tail_note}\n"
             + (
