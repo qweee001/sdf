@@ -5922,10 +5922,12 @@ class AccountWorker:
                 self._struct_mode = "scene"
             # 三則都沒有一點身體就整場乾掉（實測 0 軸佔 54%：互動上線之後句子
             # 全變成對話句）。第四則不問角色、直接補一記；短碎也可以帶一句話的濕。
-            if (
-                self._struct_mode in ("frag", "short", "scene", "halt")
-                and self._dry_streak(int(getattr(event, "chat_id", 0) or 0)) >= 3
-            ):
+            _dry = self._dry_streak(int(getattr(event, "chat_id", 0) or 0))
+            if self._struct_mode in ("frag", "short", "scene", "halt", "dirty") and _dry >= 5:
+                # 五則都沒有身體＝整場被話題帶去吵架了，這一則不問角色，直接露骨節拍
+                self._struct_mode = "beat"
+                self._pcount("dry_hard_forced")
+            elif self._struct_mode in ("frag", "short", "scene", "halt") and _dry >= 3:
                 self._struct_mode = "beat" if random.random() < 0.7 else "dirty"
                 self._pcount("dry_forced")
         # 模型永遠寫到字數帶的上緣：8~16 帶實測九則全在 11~19、0 則 ≤8 字，
@@ -9827,6 +9829,9 @@ class AccountWorker:
         too_long = len(reply) > char_cap + (5 if _is_long else 4)
         # 長鏡頭寫太短就沒意義（實測抽中後常只寫 30 字）：比照超長，重寫一次。
         too_short = _is_long and len(reply) < 25
+        # 露骨節拍的驗收就是兩軸（部位／動作／反應）。一軸等於只是丟了一個器官詞，
+        # 整場就是「很色但沒有過程」。沒到就重寫一次。
+        too_flat = self._struct_mode == "beat" and self._explicit_axes(reply) < 2
         # 事實層硬底線（不是文風規則，是「不可能發生」的錯誤）：
         # 時段錯亂（晚上八點說早安）、女號自稱有前女友、簡體字。
         # 文風／用語／撞梗一概不在此攔，交給 ③ 老司機裁判動態判斷。
@@ -9858,12 +9863,12 @@ class AccountWorker:
         if _is_long:
             _blocked = (
                 format_leak or refusal or too_long or too_short
-                or time_mismatch or simplified
+                or time_mismatch or simplified or too_flat
             )
         else:
             _blocked = (
                 format_leak or refusal or too_long or too_short
-                or fact_bad or own_echo or tic_hit
+                or fact_bad or own_echo or tic_hit or too_flat
             )
         if not _blocked:
             if image:

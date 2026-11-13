@@ -757,3 +757,26 @@ def test_truncated_name_is_restored():
     assert w._restore_full_name("天後你這順序反了", GID) == "小天後你這順序反了"
     # 完整名字不動
     assert w._restore_full_name("小天後你先摸", GID) == "小天後你先摸"
+
+
+def test_beat_with_one_axis_is_rewritten():
+    """露骨節拍只湊到一軸就重寫，不能只丟一個器官詞就算過。"""
+    w = _worker()
+    assert w._explicit_axes("小穴好濕") == 2      # 部位＋反應，合格
+    assert w._explicit_axes("小穴") == 1          # 只有部位，不合格
+    # 驗收邏輯直接綁在模式上：非 beat 不管軸數
+    w._struct_mode = "dirty"
+    assert w._struct_mode != "beat"
+
+
+def test_dry_five_forces_beat(monkeypatch):
+    w = _worker()
+    w._human_ref = 9
+    monkeypatch.setattr(w, "_frag_probability", lambda *a: 0.0, raising=False)
+    monkeypatch.setattr(w, "_long_starved", lambda *a: False, raising=False)
+    monkeypatch.setattr(w, "_burst_heat", lambda *a: 12, raising=False)
+    monkeypatch.setattr(w, "_cross_recent_items", lambda *a: [("真假", 60.0)] * 5, raising=False)
+    monkeypatch.setattr(random, "random", lambda: 0.8)   # 熱場落在 dirty（單軸那一格）
+    w._build_directors_note(_event(), _rows(["真假"]), last_human="真假")
+    assert w._struct_mode == "beat"
+    assert w.stats.get("dry_hard_forced") == 1
