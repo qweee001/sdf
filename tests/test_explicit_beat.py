@@ -858,3 +858,23 @@ def test_dangling_subject_ok_when_subject_named():
     w = _worker()
     assert w._has_dangling_subject("我背貼著牆被壓住，喘到說不出話") is False
     assert w._has_dangling_subject("小穴好濕") is False
+
+
+def test_off_field_sister_line_pulls_back_to_the_room():
+    w = _worker("小天後")
+    note = w._build_directors_note(
+        _event(), _rows(["吃螃蟹還要排隊嗎"]), last_human="吃螃蟹還要排隊嗎",
+        sister_target="Chen", role="echo", peer_text="那杯烈酒端來我腿都軟了",
+        field_topic="吃螃蟹還要排隊嗎",
+    )
+    assert "場上還在講" in note
+
+
+def test_on_field_sister_line_keeps_it_simple():
+    w = _worker("小天後")
+    note = w._build_directors_note(
+        _event(), _rows(["螃蟹要吃進口的"]), last_human="螃蟹要吃進口的",
+        sister_target="Chen", role="echo", peer_text="螃蟹要吃進口的啦",
+        field_topic="螃蟹要吃進口的",
+    )
+    assert "場上還在講" not in note

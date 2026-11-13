@@ -1981,6 +1981,38 @@ class AccountWorker:
         target_uid, _role = await self._reply_target(event)
         return bool(target_uid) and target_uid == int(self.tg_user_id or 0)
 
+    @staticmethod
+    def _shares_2gram(a: str, b: str) -> bool:
+        """兩句有沒有共用任何一個二字詞（判「有沒有在講同一件事」）。"""
+        def grams(x: str) -> set:
+            body = re.sub(r"[\s，。！？、,.!?]", "", str(x or ""))
+            return {body[i : i + 2] for i in range(len(body) - 1)}
+        return bool(grams(a) & grams(b))
+
+    async def _field_topic(self, group_id: int, seconds: float = 180.0) -> str:
+        """場上真人最後一句有內容的話（排除「真假」「哈哈」這種反應）。
+
+        姊妹三拍自己聊起來很容易離場（真人在講螃蟹，水軍在聊烈酒），
+        這支只取「還在講的具體事」給導演指令當錨。
+        """
+        if not group_id:
+            return ""
+        try:
+            rows = await self.db.get_group_messages(int(group_id), limit=8)
+        except Exception:
+            return ""
+        now = time.time()
+        for row in reversed(list(rows or [])):
+            if str(row.get("role")) != "user":
+                continue
+            if now - float(row.get("timestamp") or 0.0) > seconds:
+                continue
+            body = str(row.get("content") or "").strip()
+            if len(re.sub(r"\s", "", body)) < 6:
+                continue
+            return body[:40]
+        return ""
+
     async def _reply_target(self, event) -> tuple[int, str]:
         """這則在回覆誰：(sender_id, role)；認不出回 (0, "")。"""
         mid = int(getattr(event, "reply_to_msg_id", 0) or 0)
@@ -5766,6 +5798,7 @@ class AccountWorker:
         sister_target: str = "",
         role: str = "",
         peer_text: str = "",
+        field_topic: str = "",
     ) -> str:
         """酒館級 In-Chat @ Depth 末端動態演出指令（Author's Note）。
 
@@ -6119,6 +6152,16 @@ class AccountWorker:
         # 炒群的骨架是成員之間互相表演（拋→接→補→有人反對），真人只是被夾在中間。
         role_line = self._ROLE_PROMPTS.get(role, "") if role else ""
         sister_block = ""
+        # 她這句跟場上真人正在講的事沒有交集 → 先回場上，再回頭接她。
+        _off_field = bool(
+            field_topic and peer_text and not self._shares_2gram(field_topic, peer_text)
+        )
+        field_line = (
+            f"8. 【場上還在講】真人最後一句是「{field_topic}」——她剛剛那句岔開了，"
+            f"先把它接回來（回答或吐槽場上那件事），再回頭帶她一句。\n"
+            if _off_field
+            else ""
+        )
         if sister_target and role_line:
             sister_block = (
                 f"6. 【這一拍你在扮的{role}】{role_line}。\n"
@@ -6161,7 +6204,7 @@ class AccountWorker:
             shape_block = ""
         return (
             f"\n[導演即時動態指示（最高執行權重・拒絕每日重複模板）]：\n"
-            f"{reply_first}{shape_block}"
+            f"{reply_first}{shape_block}{field_line}"
             "0c. 【主語要清楚】動作是誰做的就寫出來（「你跨過來」「我壓上去」），"
             "不要只寫「被…」或把兩三個動作疊在一起卻只有一個「我」。\n"
             f"1. 扮演真實的台灣女生 {name}，以 {band_lo}~{band_hi} 字內的極致自然口語短句隨性說話，不帶句號；"
@@ -9739,6 +9782,7 @@ class AccountWorker:
             sister_target=_sister,
             role=_role if _sister else "",
             peer_text=_peer_text,
+            field_topic=await self._field_topic(_gid),
         )
         if director_note:
             user_message += f"\n{director_note}"
