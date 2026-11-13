@@ -3853,7 +3853,7 @@ class AccountWorker:
             return f"{parts[0]}，{name}，{'，'.join(parts[1:])}"
         return f"{parts[0]}，{name}"
 
-    def _dry_streak(self, group_id: int, limit: int = 4) -> int:
+    def _dry_streak(self, group_id: int, limit: int = 6) -> int:
         """近幾則水軍連續都沒有露骨軸（0 軸）。"""
         if not group_id:
             return 0
