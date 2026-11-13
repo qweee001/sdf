@@ -5974,10 +5974,16 @@ class AccountWorker:
             self.stats["dbg_long_roll"] = round(_long_roll, 3)
             # 每條回覆平均會被改寫四五次，而模式只在第一次抽（改寫保留原模式），
             # 所以 0.06/0.10 在這個流程裡等於每十幾條才一條，實務上永遠看不到。
-            if _long_ok and _long_roll < (
-                0.30 if heat >= _HOT_BURST_HUMANS
-                else 0.30 if heat >= _WARM_BURST_HUMANS
-                else 0.35
+            # 乾場要色不要長：連三則沒身體時長鏡頭讓位給節拍（冷場長鏡頭抽中率
+            # 最高，會把 beat 全部吃掉——band_long 3、band_beat 0）。
+            if (
+                _long_ok
+                and self._dry_streak(int(getattr(event, "chat_id", 0) or 0)) < 3
+                and _long_roll < (
+                    0.30 if heat >= _HOT_BURST_HUMANS
+                    else 0.30 if heat >= _WARM_BURST_HUMANS
+                    else 0.35
+                )
             ):
                 self._struct_mode = "long"
                 self._pcount("band_long")
