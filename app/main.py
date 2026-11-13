@@ -47,8 +47,11 @@ async def async_main() -> None:
         # FastAPI 1.x 用 lazy _IncludedRouter：include 後 routes 尾端多出一個物件。
         # 把該物件移到最前面，讓 /tg* 先於 dashboard 的根 static mount 匹配。
         if len(_routes) > _n:
-            _inc = _routes.pop()
-            _routes.insert(0, _inc)
+            # 新版 FastAPI include_router 會把子路由攤平成一串，只搬最後一個不夠
+            # （/tg/addacc 仍會被 static 吃掉回 404）。整批搬到最前面。
+            _inc = _routes[_n:]
+            del _routes[_n:]
+            _routes[0:0] = _inc
         print("Mini App 路由已掛到控制台（前置於 static mount）", flush=True)
 
     loop = asyncio.get_running_loop()

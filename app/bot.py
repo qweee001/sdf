@@ -377,6 +377,9 @@ class TgControlBot:
         self.bot_token = settings.bot_token
         self.admin_ids = tuple(str(x) for x in settings.bot_admin_ids if str(x))
         self._client: TelegramClient | None = None
+        # 面板訊息登記：chat_id → (message_id, 最後更新)。狀態一變就 edit 它，
+        # 否則首頁那條會變成死圖，按了全停還顯示停止、重啟後也不更新。
+        self._panels: dict[int, tuple[int, float]] = {}
         self._bot_username = ""
         # 群組勾選的暫存選中狀態（callback 無狀態，用記憶體暫存）。
         # 鍵＝(管理員, 聊天, 帳號)：避免兩個管理員同時勾同一帳號互相覆蓋。
@@ -468,6 +471,9 @@ class TgControlBot:
             )
             client.add_event_handler(self._on_message, events.NewMessage(incoming=True))
             client.add_event_handler(self._on_callback, events.CallbackQuery)
+            # 面板自動重畫：沒人按按鈕時狀態照樣要跟上（部署重啟、超時、
+            # 別處改設定都會變），不然畫面永遠停在被按下的那一刻。
+            asyncio.create_task(self._panel_loop())
             print(f"Telegram 控制台 bot 上線（@{self._bot_username}）", flush=True)
             log.info("Telegram 控制台 bot 上線（@%s）", self._bot_username)
             await client.run_until_disconnected()
@@ -806,6 +812,39 @@ class TgControlBot:
 
     # ---------- 內嵌按鈕（callback） ----------
 
+    async def _panel_loop(self) -> None:
+        """每 20 秒重畫所有登記面板；內容沒變時 Telegram 會回 MessageNotModified，吃掉。"""
+        while self._client is not None:
+            await asyncio.sleep(20)
+            for chat_id in list(self._panels):
+                await self._refresh_panels(int(chat_id))
+
+    async def _refresh_panels(self, chat_id: int) -> None:
+        """有狀態變更就把該聊天的主面板 edit 一次（不是只改按下的那條）。"""
+        if self._client is None:
+            return
+        rec = self._panels.get(int(chat_id))
+        if not rec:
+            # 記憶體沒有（bot 剛重啟／剛部署）→ 回 DB 撈，舊面板才不會變死圖。
+            try:
+                raw = await self.manager.db.get_runtime_setting(f"panel_msg:{int(chat_id)}")
+            except Exception:
+                raw = None
+            if not raw:
+                return
+            rec = (int(raw), 0.0)
+            self._panels[int(chat_id)] = rec
+        msg_id, _ts = rec
+        try:
+            await self._client.edit_message(
+                int(chat_id), int(msg_id), await self._home_text(),
+                buttons=await self._home_keyboard(),
+            )
+            self._panels[int(chat_id)] = (int(msg_id), time.time())
+        except Exception:
+            # 訊息被刪或內容沒變（MessageNotModified）都不影響操作
+            pass
+
     async def _on_callback(self, event) -> None:
         raw = getattr(event, "data", None)
         if isinstance(raw, bytes):
@@ -833,12 +872,25 @@ class TgControlBot:
         if not data:
             await event.answer()
             return
+        # 任何按鍵立刻回一次 ACK：不先回，Telegram 會讓按鈕一直轉圈，
+        # 看起來就像「沒反應／沒更新」。
+        try:
+            await event.answer("…")
+        except Exception:
+            pass
         action, _, arg = data.partition(":")
 
         if action == "home":
             await event.edit(
                 await self._home_text(), buttons=await self._home_keyboard()
             )
+            self._panels[int(event.chat_id)] = (int(event.message.id), time.time())
+            try:
+                await self.manager.db.set_runtime_settings(
+                    {f"panel_msg:{int(event.chat_id)}": str(event.message.id)}
+                )
+            except Exception:
+                pass
         elif action == "status":
             await event.edit(
                 (await self._status())[:MSG_LIMIT],
@@ -862,6 +914,7 @@ class TgControlBot:
             await event.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
+            await self._refresh_panels(int(event.chat_id))
         elif action == "acc.stop":
             try:
                 body = await self._acc_toggle("stopacc", [arg])
@@ -870,6 +923,7 @@ class TgControlBot:
             await event.edit(
                 body[:MSG_LIMIT], buttons=await self._home_keyboard()
             )
+            await self._refresh_panels(int(event.chat_id))
         elif action == "acc.del":
             # 先給確認頁（避免誤觸直接刪），簽發一次性 token
             admin = str(getattr(event, "sender_id", "") or "")
@@ -982,9 +1036,11 @@ class TgControlBot:
         elif action == "acc.master.all":
             body, kb = await self._acc_master_all_toggle()
             await event.edit(body[:MSG_LIMIT], buttons=kb)
+            await self._refresh_panels(int(event.chat_id))
         elif action == "acc.panic.stop":
             body, kb = await self._acc_panic_stop()
             await event.edit(body[:MSG_LIMIT], buttons=kb)
+            await self._refresh_panels(int(event.chat_id))
         elif action == "check":
             body, kb = await self._system_self_check()
             await event.edit(body[:MSG_LIMIT], buttons=kb)
@@ -1115,6 +1171,7 @@ class TgControlBot:
             + "\n"
             + "\n".join(rows)
             + f"\n\n選擇账号（{n} 個）→ 展開該账号可操作功能"
+            + f"\n🕒 更新 {time.strftime('%H:%M:%S')}"
         )
 
     async def _home_keyboard(self) -> types.ReplyInlineMarkup:
@@ -1137,11 +1194,12 @@ class TgControlBot:
             row = []
             for a in accs[i:i + 2]:
                 on = bool(a.get("is_running"))
+                muted = not bool(int(a.get("reply_enabled") or 0))
                 mark = "✓ " if on else ""
-                row.append(cb(
-                    "acc:" + a["id"],
-                    f"{mark}{self._acc_label(a)}（{'運行' if on else '待機'}）",
-                ))
+                # 「運行」只代表監聽中，不等於會講話：靜音要另外標，不然全停後
+                # 重啟看到「運行」會以為按鍵沒生效。
+                state = ("監聽" if on else "待機") + ("／靜音" if muted else "")
+                row.append(cb("acc:" + a["id"], f"{mark}{self._acc_label(a)}（{state}）"))
             rows.append(row)
         rows.append([
             cb("media", "🖼 媒體識別"),

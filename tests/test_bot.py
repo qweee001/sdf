@@ -1058,7 +1058,8 @@ def test_delete_confirm_reuse_and_cancel(monkeypatch):
         ev2 = _CbEvent(111, yes)
         loop.run_until_complete(bot._dispatch_callback(ev2, yes))
         assert mgr.calls.count(("delete", "a1")) == 1
-        assert len(ev2.answers) == 1  # 彈「確認已過期」提示，不再刪
+        # 一律先 ACK 一次（避免按鈕轉圈），過期提示再補一次 → 至少要有過期那句
+        assert any("過期" in str(a) for a, _k in ev2.answers)
         _, kb = loop.run_until_complete(bot._acc_delete_confirm("a1", "111", 7))
         yes2 = [d for d in _kb_data(kb) if d.startswith("acc.del.yes:")][0]
         bot._del_confirms[yes2.split(":", 1)[1]] = ("a1", "111", 7, _t.time() - 1)
@@ -1331,8 +1332,9 @@ def test_mini_routes_with_static_mount(monkeypatch):
     n = len(routes)
     host.include_router(bot.app)
     assert len(routes) > n
-    inc = routes.pop()
-    routes.insert(0, inc)
+    inc = routes[n:]
+    del routes[n:]
+    routes[0:0] = inc
 
     client = TestClient(host)
     tok = bot._mini_mint("111", 7)
