@@ -812,6 +812,15 @@ class TgControlBot:
 
     # ---------- 內嵌按鈕（callback） ----------
 
+    async def _register_panel(self, chat_id: int, message_id: int) -> None:
+        self._panels[int(chat_id)] = (int(message_id), time.time())
+        try:
+            await self.manager.db.set_runtime_settings(
+                {f"panel_msg:{int(chat_id)}": str(int(message_id))}
+            )
+        except Exception:
+            pass
+
     async def _panel_loop(self) -> None:
         """每 20 秒重畫所有登記面板；內容沒變時 Telegram 會回 MessageNotModified，吃掉。"""
         # 重啟後記憶體是空的：先把先前登記過的面板灌回來，否則部署完
@@ -868,6 +877,11 @@ class TgControlBot:
             return
         try:
             await self._dispatch_callback(event, data)
+            # 任何被按過的訊息都當面板登記：不必先按回主選單才開始追蹤。
+            try:
+                await self._register_panel(int(event.chat_id), int(event.message.id))
+            except Exception:
+                pass
         except Exception as e:
             log.exception("callback %r 失敗", data)
             try:
@@ -892,13 +906,7 @@ class TgControlBot:
             await event.edit(
                 await self._home_text(), buttons=await self._home_keyboard()
             )
-            self._panels[int(event.chat_id)] = (int(event.message.id), time.time())
-            try:
-                await self.manager.db.set_runtime_settings(
-                    {f"panel_msg:{int(event.chat_id)}": str(event.message.id)}
-                )
-            except Exception:
-                pass
+            await self._register_panel(int(event.chat_id), int(event.message.id))
         elif action == "status":
             await event.edit(
                 (await self._status())[:MSG_LIMIT],
