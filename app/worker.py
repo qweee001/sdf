@@ -2611,7 +2611,7 @@ class AccountWorker:
             self._pcount("reply_block_pile")
             return False
 
-        default_prob = float(getattr(self.config, "base_reply_probability", 0.35))
+        default_prob = float(getattr(self.config, "base_reply_probability", 0.5))
         base_prob = await self._get_runtime_float("base_reply_probability", default_prob)
         probability = max(0.0, min(1.0, base_prob))
         if probability <= 0 and not is_photo:
@@ -5975,9 +5975,9 @@ class AccountWorker:
             # 每條回覆平均會被改寫四五次，而模式只在第一次抽（改寫保留原模式），
             # 所以 0.06/0.10 在這個流程裡等於每十幾條才一條，實務上永遠看不到。
             if _long_ok and _long_roll < (
-                0.15 if heat >= _HOT_BURST_HUMANS
-                else 0.15 if heat >= _WARM_BURST_HUMANS
-                else 0.20
+                0.30 if heat >= _HOT_BURST_HUMANS
+                else 0.30 if heat >= _WARM_BURST_HUMANS
+                else 0.35
             ):
                 self._struct_mode = "long"
                 self._pcount("band_long")
@@ -6012,7 +6012,7 @@ class AccountWorker:
                 # 五則都沒有身體＝整場被話題帶去吵架了，這一則不問角色，直接露骨節拍
                 self._struct_mode = "beat"
                 self._pcount("dry_hard_forced")
-            elif self._struct_mode in ("frag", "short", "scene", "halt") and _dry >= 3:
+            elif self._struct_mode in ("frag", "short", "scene", "halt", "dirty") and _dry >= 3:
                 self._struct_mode = "beat" if random.random() < 0.7 else "dirty"
                 self._pcount("dry_forced")
         # 模型永遠寫到字數帶的上緣：8~16 帶實測九則全在 11~19、0 則 ≤8 字，
