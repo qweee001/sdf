@@ -878,3 +878,11 @@ def test_on_field_sister_line_keeps_it_simple():
         field_topic="螃蟹要吃進口的",
     )
     assert "場上還在講" not in note
+
+
+def test_beat_prompt_puts_body_first(monkeypatch):
+    w = _worker()
+    w._struct_mode_force = "beat"
+    note = w._build_directors_note(_event(), _rows(["用穴夾你雞雞嗎"]), last_human="用穴夾你雞雞嗎")
+    assert "這則以身體為主" in note
+    assert "三段都要有" in note
