@@ -814,6 +814,14 @@ class TgControlBot:
 
     async def _panel_loop(self) -> None:
         """每 20 秒重畫所有登記面板；內容沒變時 Telegram 會回 MessageNotModified，吃掉。"""
+        # 重啟後記憶體是空的：先把先前登記過的面板灌回來，否則部署完
+        # 那條舊訊息要等到有人按按鈕才會再更新。
+        try:
+            for key, val in (await self.manager.db.get_runtime_settings()).items():
+                if key.startswith("panel_msg:") and str(val).isdigit():
+                    self._panels[int(key.split(":", 1)[1])] = (int(val), 0.0)
+        except Exception:
+            pass
         while self._client is not None:
             await asyncio.sleep(20)
             for chat_id in list(self._panels):
