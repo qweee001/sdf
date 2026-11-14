@@ -87,3 +87,27 @@ def test_real_human_message_stays_user():
         assert db.recorded[0]["role"] == "user", db.recorded[0]
 
     asyncio.run(main())
+
+
+def test_should_reply_binds_group_id_for_peer_and_human():
+    """`_should_reply` 自己在姊妹連發／非點名兩處先用到 group_id。
+
+    這兩處都在它自己的賦值點（原 2405 行）之前，等於每一則訊息都 UnboundLocalError
+    → on_message 整段中止：回覆全死、只剩主動發言。上面的測試把 `_should_reply`
+    整個 mock 掉，正是漏掉這條的原因，所以這裡打真的。
+    """
+
+    async def main():
+        me = sorted(MANAGED)[0]
+        for sender in (PEER, 900123):
+            worker = _worker(me, db=_RecordingDB())
+            worker.tg_user_id = me
+            worker.reply_enabled = True
+            worker.persona = {"name": "小小"}
+            worker._own_streak = AsyncMock(return_value=2)
+            event = _incoming(sender)
+            event.is_bot = False
+            assert await worker._should_reply(event) is False
+            worker._own_streak.assert_awaited_once_with(GROUP)
+
+    asyncio.run(main())

@@ -2338,6 +2338,10 @@ class AccountWorker:
 
     async def _should_reply(self, event) -> bool:
         sender_id = int(event.sender_id or 0)
+        # group_id 在下面 2374（姊妹連發讓位）與 2402（非點名）就先用到，
+        # 原本只在自己的賦值點之後才存在 → 每一則真人訊息都拋 UnboundLocalError，
+        # on_message 整段中止（回覆全死、只剩主動發言；實測 send 失敗 691 次）。
+        group_id = int(event.chat_id or 0)
         if sender_id == self.tg_user_id:
             return False
         # 管理員/機器人公告不互動：它是群務廣播，真人也不會回它
@@ -2410,7 +2414,6 @@ class AccountWorker:
             return False
         if not await self._ordinary_reply_allowed(event, soft=soft_other):
             return False
-        group_id = int(event.chat_id or 0)
         eligible_in_group = self.active_group_ids.get(group_id, set())
         owner_key = (group_id, sender_id)
         owner_id = self._active_owner(self.human_owners.get(owner_key))
