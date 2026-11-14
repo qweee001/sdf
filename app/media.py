@@ -18,7 +18,11 @@ APPROVED_VISION_MODEL = "gemini-3.5-flash-lite"
 # 生產 VISION_MODEL 可能是 agnes-3.0-flash；舊白名單只認 gemini，
 # understand_image 在 _reserve 靜默 raise「未核准」→ 群圖 images_seen 有進
 # 也認不出。識別要放行這幾個，生成（image/video）維持原白名單。
+# unlid 網關的識圖主力（實測可解析 image_url 並正確描述圖內容），
+# 生產 VISION_MODEL 換到它時白名單就必須有它，否則 _reserve 靜默 raise。
 APPROVED_VISION_MODELS = frozenset({
+    "deepseek-v4.1-flash-uncensored",
+    "deepseek-v4.1-flash-abliterated",
     "gemini-3.5-flash-lite",
     "agnes-3.0-flash",
     "qwen3.8-27b-uncensored",

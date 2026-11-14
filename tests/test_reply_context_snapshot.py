@@ -180,3 +180,29 @@ def test_freshness_fails_open_without_timestamp_or_on_error():
         assert await worker._context_still_fresh(event) is True
 
     asyncio.run(main())
+
+
+def test_long_mode_empty_reply_does_not_raise_unbound_local():
+    """長鏡頭模式空回：`if not reply:` 的 long 逃生比原本的 _is_long 賦值點更早用到它。
+
+    空回在 API 出錯時是常態，若 `_is_long` 沒先綁好，每次空回都炸在那一行，
+    重試與逃生整段都不會跑（線上 send 失敗 650 次的根因）。
+    """
+
+    async def main():
+        db = _CtxDB(
+            messages=[{"sender_id": 5, "sender_name": "阿宏", "role": "user", "content": "洗澡沒"}]
+        )
+        worker = _worker(101, db=db)
+        worker._struct_mode = "long"
+        event = _reply_event()
+        # AsyncMock 會自動生 _sdf_mode（不是字串），長鏡頭判定要顯式給
+        event._sdf_mode = "long"
+        worker._call_ai = AsyncMock(return_value="")
+        worker._refusal_escape = AsyncMock(return_value="")
+        assert await worker._generate_reply(event) == ""
+        # 走過 long 逃生並進到重試，而不是在 _is_long 就炸掉
+        worker._refusal_escape.assert_awaited()
+        assert worker._call_ai.await_count == 2
+
+    asyncio.run(main())

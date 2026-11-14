@@ -9615,6 +9615,10 @@ class AccountWorker:
     async def _generate_reply(self, event, *, extra_hint: str = "") -> str:
         self._successful_vision_events.discard(self._generation_key(event))
         self._set_generation_reason(event, "generation_empty")
+        # 空回分支（`if not reply:` 的 long 逃生）比下面原本的賦值點早用到長鏡頭判定，
+        # 先綁好才不會 `UnboundLocalError: _is_long`——空回在 API 斷線時是常態，
+        # 每次空回都炸在那一行等於重試與逃生整段沒跑（實測 send 失敗 650 次）。
+        _is_long = getattr(event, "_sdf_mode", self._struct_mode) == "long"
         group_id = int(event.chat_id or 0)
         # 跨號語料先補齊，下面組指令時的撞詞／起手詞／播報判定才有跨帳號樣本
         await self._seed_cross_texts(group_id)
@@ -9915,7 +9919,6 @@ class AccountWorker:
         char_cap = self._struct_char_cap(max(char_cap, 90))
         # 長鏡頭模型實際會寫到 300 字（實測 343），用 150 當上限等於每條都 too_long
         # 重寫一次再丟掉：82 次抽中、0 則落地。這條上限放寬到自己一組。
-        _is_long = getattr(event, "_sdf_mode", self._struct_mode) == "long"
         if _is_long:
             char_cap = 60
         _frag_mode = self._struct_mode == "frag"
