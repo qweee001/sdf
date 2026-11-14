@@ -30,6 +30,9 @@ def _prep(worker, group):
     worker._proactive_gate_blocks = Mock(return_value=False)
     worker.db.claim_proactive_slot = AsyncMock(return_value=True)
     worker.db.get_group_messages = AsyncMock(return_value=[])
+    # 這支驗的是 tick 間隔落在 loop 帶；「全場沒水軍出聲」會另外把間隔縮到 60~150 秒，
+    # 所以先給一筆剛講過的紀錄，讓沉默路徑不要介入。
+    worker.db.bot_last_spoke = {101: time.time()}
     worker.db.release_proactive_slot = AsyncMock()
     worker.db.recent_bot_texts_by_group = AsyncMock(return_value=[])
     worker.db.get_group_shared_notes = AsyncMock(return_value=[])

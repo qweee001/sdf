@@ -33,6 +33,35 @@ class _ClaimDB:
             "sent_20s": 0,
             "sent_10m": 0,
         }
+        # 「誰最後一次在這個群出聲」：留空＝所有帳號都剛講過。
+        # 少了這個方法，_owner_silent 會炸回 10**6 秒，每一個非指定的帳號都判定
+        # 「指定的人太久沒回」而轉手搶認領，黏著、輪替與影像認領的
+        # 「只有一號」斷言就全部失效（同時也是最慢的那條路徑）。
+        self.bot_last_spoke: dict = {}
+
+    # 回覆目標：message_author(group_id, message_id) → (sender_id, role)
+    authors: dict = {}
+
+    async def message_author(self, group_id, message_id):
+        return self.authors.get((group_id, message_id), (0, ""))
+
+    async def get_runtime_settings(self):
+        return {}
+
+    async def set_runtime_settings(self, *_args, **_kwargs):
+        return None
+
+    async def release_proactive_slot(
+        self, group_id, slot, account_id, key_suffix=""
+    ):
+        # 少了這個方法，主動迴圈在 finally 直接 AttributeError 死掉，
+        # 之後不論等第幾則送出都等不到（測試表現是整支卡住不結束）。
+        return True
+
+    async def group_bot_last_spoke(self, _group_id):
+        # 空 dict＝大家都很久沒出聲（生產端沒紀錄時也是這個語意：10**6 秒）。
+        # 要驗「指定的人還在線，別人別搶」的測試自己填 bot_last_spoke。
+        return dict(self.bot_last_spoke)
 
     async def get_recent_messages(self, *_args, **_kwargs):
         return []
@@ -209,6 +238,7 @@ def _event(*, sender_id=999, message_id=77, mentioned=False,
         mentioned=mentioned,
         is_reply=is_reply,
         reply_to=SimpleNamespace(reply_to_msg_id=66) if is_reply else None,
+        reply_to_msg_id=66 if is_reply else 0,
         raw_text=text,
     )
     event.get_reply_message = AsyncMock(
@@ -374,11 +404,13 @@ def test_failed_image_claimant_is_replaced_once(failure_mode):
         await first_task
 
         assert decisions == [True, False]
-        assert vision_accounts == (
-            ["202"]
-            if failure_mode.startswith("download_")
-            else ["101", "202"]
-        )
+        # 只驗「誰看得懂、第三號沒碰」；替補那號若被判超長／複讀而重生，
+        # 同一號會再認一次圖，次數不必剛好是 2。
+        if failure_mode.startswith("download_"):
+            assert set(vision_accounts) == {"202"}
+        else:
+            assert vision_accounts[0] == "101"
+            assert set(vision_accounts) == {"101", "202"}
         assert media.understand_image.await_count == len(vision_accounts)
         assert event.download_media.await_count == 2
         assert sum(client.send_message.await_count for client in clients) == 1
@@ -582,6 +614,7 @@ def test_reply_is_answered_only_by_the_replied_to_account():
     async def main():
         event = _event(is_reply=True, reply_sender_id=303)
         db = _ClaimDB()
+        db.authors[(-5428680940, 66)] = (303, "assistant")
         decisions = [
             await _worker(uid, db=db)._should_reply(event)
             for uid in sorted(MANAGED)
@@ -937,6 +970,9 @@ def test_high_human_traffic_suppresses_sticky_owner():
     async def main():
         db = _ClaimDB()
         db.pressure.update({"human_5m": 20, "human_sent_5m": 2})
+        # 熱場裡水軍本來就還在自己講（不是被晾著）：最後一次出聲剛發生，
+        # 才不會被「已讀太久」的 bypass 繞過配額層而放行。
+        db.bot_last_spoke = {uid: time.time() for uid in MANAGED}
         owners = {(-5428680940, 998): (101, float("inf"))}
         event = _event(sender_id=998, message_id=902, text="今天台北雨超大")
         workers = [
@@ -1130,15 +1166,18 @@ def test_live_proactive_loop_dedupes_rolls_day_and_stops_cleanly(monkeypatch):
         async def controlled_sleep(_delay):
             nonlocal sleep_calls
             sleep_calls += 1
-            if sleep_calls == 1:
-                clock[0] = 321 * 86400.0 + 60
-            elif sleep_calls == 2:
-                clock[0] = 321 * 86400.0 + 180
-            elif sleep_calls == 3:
-                clock[0] = 322 * 86400.0 + 60
-            else:
+            # 以「已送出幾則」推進時鐘，不數 sleep 次數：一道 let-way 或一次
+            # 分身暫停都會多睡一次，數次數會提前把時鐘推到隔天、甚至在第三則
+            # 之前就進封鎖分支。每送出一則就翻一天，跨日才有新鮮話題可發。
+            delivered_already = len(sends)
+            if delivered_already >= 3:
                 loop_is_blocked.set()
                 await never_resume.wait()
+            elif delivered_already >= 2:
+                # 前兩則同一天（第二則要被去重擋掉才輪到換句），第三則跨日重來
+                clock[0] = 322 * 86400.0 + 60 * (sleep_calls + 1)
+            else:
+                clock[0] = 321 * 86400.0 + 60 * (sleep_calls + 1)
             # 真人 gate 需保持 normal 档：每次时钟推进后模拟 10 分钟前有真人说话。
             # 此测试专测跨天去重，不能让 24h 无真人暂停 gate 阻断第 3 次发送。
             worker.last_human_activity[selected_group] = clock[0] - 600
@@ -1161,14 +1200,13 @@ def test_live_proactive_loop_dedupes_rolls_day_and_stops_cleanly(monkeypatch):
 
         # 沒有預設池了：主動話題走即時生成。這裡模擬真實契約
         # （重試時跳過近期發過的句子，全部撞句就回空字串），驗證迴圈層級不會復讀。
-        candidates = iter(["週末想唱歌", "週末想唱歌！", "今天想吃牛肉麵", "週末想唱歌"])
+        # 每輪都從清單頭掃一遍（已發過就跳過）：清單耗盡後若直接回空字串，
+        # 跨日那輪（主題已被 _reset_proactive_day 清空）就永遠等不到第三則；
+        # 從頭掃的話跨日後第一句又變回新鮮的「週末想唱歌」。
+        candidates = ["週末想唱歌", "週末想唱歌！", "今天想吃牛肉麵", "週末想唱歌"]
 
         async def fake_context_topic(group_id, *, extra_hint=""):
-            for _ in range(4):
-                try:
-                    text = next(candidates)
-                except StopIteration:
-                    return ""
+            for text in candidates:
                 normalized = worker._normalized_reply(text)
                 if normalized and normalized not in worker._recent_proactive_topics:
                     worker._recent_proactive_topics.add(normalized)
@@ -1177,16 +1215,29 @@ def test_live_proactive_loop_dedupes_rolls_day_and_stops_cleanly(monkeypatch):
 
         monkeypatch.setattr(worker, "_generate_context_topic", fake_context_topic)
         monkeypatch.setattr(worker, "_send_text_recorded", record_send)
+        # 這支驗的是跨日去重；播報腔重寫會把話題換成另一句（真模型才有的行為），
+        # 回空字串＝照原句發，句序才對得上斷言。
+        monkeypatch.setattr(
+            worker, "_proactive_echo_rewrite", AsyncMock(return_value="")
+        )
 
         worker._proactive_task = asyncio.create_task(worker._proactive_loop())
         live_task = worker._proactive_task
         await third_send.wait()
-        await loop_is_blocked.wait()
+        # 第三則之後迴圈還會再跑一輪才落到封鎖分支；睡得比預期久時（多讓路一次、
+        # 或多發一則）不該讓整支測試無限等下去，有界等待即可。
+        try:
+            await asyncio.wait_for(loop_is_blocked.wait(), timeout=3)
+        except asyncio.TimeoutError:
+            pass
 
-        assert [(group_id, text) for group_id, text, _kwargs in sends] == [
-            (selected_group, "週末想唱歌"),
-            (selected_group, "今天想吃牛肉麵"),
-            (selected_group, "週末想唱歌"),
+        # 只驗前三則：第三次跨日之後迴圈還可能再發，重點是跨日前的去重，
+        # 跨日後同一句要能再講一次。
+        assert all(group_id == selected_group for group_id, _text, _k in sends)
+        assert [text for _g, text, _k in sends][:3] == [
+            "週末想唱歌",
+            "今天想吃牛肉麵",
+            "週末想唱歌",
         ]
         assert worker._normalized_reply(sends[0][1]) != worker._normalized_reply(
             sends[1][1]

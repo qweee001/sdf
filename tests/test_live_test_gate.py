@@ -164,26 +164,26 @@ def test_final_rpc_gate_counts_scripted_and_ordinary_text_and_media(tmp_path):
         client = worker.tg_client
 
         assert await worker._send_message(
-            GROUP_ID, "scripted", live_test_event_id="scripted-1"
+            GROUP_ID, "腳本句", live_test_event_id="scripted-1"
         ) is True
         # The same scheduled ID can never reach Telegram twice.
         assert await worker._send_message(
-            GROUP_ID, "duplicate", live_test_event_id="scripted-1"
+            GROUP_ID, "重複句", live_test_event_id="scripted-1"
         ) is False
-        assert client.messages == [(GROUP_ID, "scripted")]
+        assert client.messages == [(GROUP_ID, "腳本句")]
 
         # Ordinary human-reply text has no supplied ID; the gate allocates one.
-        assert await worker._send_message(GROUP_ID, "organic reply") is True
+        assert await worker._send_message(GROUP_ID, "真人回覆句") is True
         asset = MediaAsset("image", b"image", "image.jpg", "image/jpeg")
         # Ordinary media also consumes a slot at the final send_file boundary.
         assert await worker._send_media(GROUP_ID, asset) is True
 
         # Cap is exhausted: neither final Telegram RPC may run again.
-        assert await worker._send_message(GROUP_ID, "overflow") is False
+        assert await worker._send_message(GROUP_ID, "溢出句") is False
         assert await worker._send_media(GROUP_ID, asset) is False
         assert client.messages == [
-            (GROUP_ID, "scripted"),
-            (GROUP_ID, "organic reply"),
+            (GROUP_ID, "腳本句"),
+            (GROUP_ID, "真人回覆句"),
         ]
         assert len(client.files) == 1
 
@@ -286,9 +286,9 @@ def test_final_rpc_gate_denies_wrong_account_and_group_without_rpc(tmp_path):
         wrong_worker = await _worker(db, gate, account_id="not-in-run")
         asset = MediaAsset("video", b"video", "v.mp4", "video/mp4")
 
-        assert await right_worker._send_message(GROUP_ID - 1, "wrong group") is False
+        assert await right_worker._send_message(GROUP_ID - 1, "錯誤群組句") is False
         assert await right_worker._send_media(GROUP_ID - 1, asset) is False
-        assert await wrong_worker._send_message(GROUP_ID, "wrong account") is False
+        assert await wrong_worker._send_message(GROUP_ID, "錯誤帳號句") is False
         assert await wrong_worker._send_media(GROUP_ID, asset) is False
         assert right_worker.tg_client.messages == []
         assert right_worker.tg_client.files == []
@@ -338,7 +338,7 @@ def test_scripted_rpc_rechecks_human_pause_at_final_boundary(tmp_path):
 
         assert await worker._send_message(
             GROUP_ID,
-            "generated before the human spoke",
+            "人類插話前就在產的舊句",
             live_test_event_id="scripted-race",
         ) is False
         assert worker.tg_client.messages == []
@@ -348,10 +348,10 @@ def test_scripted_rpc_rechecks_human_pause_at_final_boundary(tmp_path):
         now[0] = 1_180.0
         assert await worker._send_message(
             GROUP_ID,
-            "fresh after pause",
+            "暫停解除後的新句",
             live_test_event_id="scripted-race",
         ) is True
-        assert worker.tg_client.messages == [(GROUP_ID, "fresh after pause")]
+        assert worker.tg_client.messages == [(GROUP_ID, "暫停解除後的新句")]
         await db.close()
 
     asyncio.run(main())
@@ -365,10 +365,10 @@ def test_outbound_gate_is_noop_outside_active_live_run(tmp_path):
         worker = await _worker(db, gate)
         asset = MediaAsset("image", b"image", "image.jpg", "image/jpeg")
 
-        assert await worker._send_message(GROUP_ID, "normal") is True
+        assert await worker._send_message(GROUP_ID, "正常句") is True
         assert await worker._send_media(GROUP_ID, asset) is True
-        assert await worker._send_message(12345, "private") is False
-        assert worker.tg_client.messages == [(GROUP_ID, "normal")]
+        assert await worker._send_message(12345, "私訊句") is False
+        assert worker.tg_client.messages == [(GROUP_ID, "正常句")]
         assert len(worker.tg_client.files) == 1
         assert await db.get_live_test_run() is None
         await db.close()
@@ -389,7 +389,7 @@ def test_outstanding_reservation_is_revoked_by_lockdown_and_worker_stop(tmp_path
         send = asyncio.create_task(
             worker._send_message(
                 GROUP_ID,
-                "must not escape",
+                "中文must not escape",
                 live_test_event_id="stale-lockdown",
             )
         )
@@ -444,7 +444,7 @@ def test_outstanding_scripted_reservation_rechecks_new_human_activity(tmp_path):
         send = asyncio.create_task(
             worker._send_message(
                 GROUP_ID,
-                "stale scripted text",
+                "中文stale scripted text",
                 live_test_event_id="stale-human",
             )
         )
@@ -541,7 +541,7 @@ def test_outstanding_reservation_is_revoked_when_clock_crosses_expiry(tmp_path):
         send = asyncio.create_task(
             worker._send_message(
                 GROUP_ID,
-                "late text",
+                "中文late text",
                 live_test_event_id="stale-expiry",
             )
         )
@@ -601,7 +601,7 @@ def test_final_rpc_boundary_rejects_permit_from_prior_gate_generation(tmp_path):
 
         assert await worker._send_message(
             GROUP_ID,
-            "old generation",
+            "中文old generation",
             live_test_event_id="old-generation",
         ) is False
         assert worker.tg_client.messages == []
@@ -625,14 +625,14 @@ def test_rpc_unknown_failure_consumes_hard_cap_and_is_audited(tmp_path):
         worker.tg_client = UnknownFailureClient()
 
         with pytest.raises(RuntimeError, match="result unknown"):
-            await worker._send_message(GROUP_ID, "unknown")
+            await worker._send_message(GROUP_ID, "未知句")
         status = await db.get_live_test_run("gate-run")
         assert status["failed"] == 0
         assert status["hard_attempt"] == 1
         assert status["cap_used"] == 1
 
         worker.tg_client = FakeTelegramClient()
-        assert await worker._send_message(GROUP_ID, "replacement blocked") is False
+        assert await worker._send_message(GROUP_ID, "中文replacement blocked") is False
         assert worker.tg_client.messages == []
         assert (await db.get_live_test_run("gate-run"))["reserved"] == 1
         await db.close()

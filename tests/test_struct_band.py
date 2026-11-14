@@ -8,6 +8,12 @@
 修法：模式自己帶字數帶（_STRUCT_BANDS），導演指令、常駐生成指令、硬上限三處
 都吃同一組數字；短碎／色誘另外明講「長度優先於心境」，免得心境的生活場景又把
 前情塞回去。
+
+之後又長了碎字（frag）、留白（halt）、露骨節拍（beat）、長鏡頭（long）幾條
+通道，骰子從一顆變成好幾顆（模式 roll → 長鏡頭 roll → 碎字 roll → 窄帶／尾巴），
+把 random.random 釘成單一常數已經控不住走哪條，也讓「roll 0.2 就是 short」這種
+假設悄悄失效。這裡改成腳本化骰子（_rolls 依序發牌、發完回 default），每支測試
+自己指定模式 roll 與長鏡頭 roll，驗的才是它宣稱要驗的那件事。
 """
 
 import random
@@ -57,75 +63,102 @@ def _event() -> SimpleNamespace:
     )
 
 
-def _note_at(roll: float) -> tuple[AccountWorker, str]:
-    w = _worker()
+def _rolls(*values: float, default: float = 0.5):
+    """依序發牌的 random.random 替身；發完回 default（不再全場同一個值）。
+
+    發牌順序就是 _build_directors_note 的抽取順序：模式 roll → 長鏡頭 roll →
+    碎字 roll → 窄帶 roll → 尾巴 roll → 尾巴模式 roll → 留白 roll。default 0.5
+    讓沒指定的後段骰子全部「不中」。
+    """
+    seq = list(values)
+
+    def _roll() -> float:
+        return seq.pop(0) if seq else default
+
+    return _roll
+
+
+def _note(w: AccountWorker, rolls, *, history=None) -> str:
     old = random.random
-    random.random = lambda: roll
+    random.random = rolls
     try:
-        note = w._build_directors_note(_event(), history=[], own_texts=[], last_human="")
+        return w._build_directors_note(
+            _event(), history=history or [], own_texts=[], last_human=""
+        )
     finally:
         random.random = old
-    return w, note
 
 
-def test_bands_are_three_distinct_widths():
-    assert _STRUCT_BANDS["short"][1] < _STRUCT_BANDS["dirty"][1] < _STRUCT_BANDS["scene"][1]
+def _note_at(*values: float, history=None) -> tuple[AccountWorker, str]:
+    w = _worker()
+    return w, _note(w, _rolls(*values), history=history)
+
+
+# 冷場（沒人講話）的模式 roll 對照：<0.26 short、<0.56 dirty、<0.84 scene、其餘 beat。
+# 長鏡頭 roll 給 0.99＝這一則不抽長鏡頭，才驗得到模式本身。
+SHORT_ROLL, DIRTY_ROLL, SCENE_ROLL, NO_LONG = 0.2, 0.5, 0.99, 0.99
+
+
+def test_bands_are_distinct_and_cover_every_mode():
+    """每個模式都要有帶，短的比長的窄；少一個 key 會在 _STRUCT_BANDS[mode] 直接 KeyError。"""
+    assert set(_STRUCT_BANDS) == {"frag", "short", "dirty", "scene", "beat", "long", "halt"}
+    # halt／frag 都是兩三字的反應，天花板可以比 short 更低；再上去要嚴格遞增
+    assert _STRUCT_BANDS["frag"][1] < _STRUCT_BANDS["short"][1]
+    assert _STRUCT_BANDS["halt"][0] < _STRUCT_BANDS["short"][0]
+    assert _STRUCT_BANDS["short"][1] <= _STRUCT_BANDS["dirty"][1] < _STRUCT_BANDS["scene"][1]
+    assert _STRUCT_BANDS["scene"][1] < _STRUCT_BANDS["beat"][1]
+    assert _STRUCT_BANDS["long"][1] <= _STRUCT_BANDS["beat"][1]
     assert _STRUCT_BANDS["short"] == (8, 16)
 
 
-def test_short_roll_puts_short_band_in_director_note():
-    # random() 全被釘在 0.0 時碎字通道一定先抽中（真人四成是兩三字在接）
-    w, note = _note_at(0.0)
+def test_frag_roll_puts_frag_band_in_director_note():
+    # 模式 roll 0.0 → 先落短碎；不抽長鏡頭；碎字 roll 0.0 → 改走碎字通道
+    w, note = _note_at(0.0, NO_LONG, 0.0)
     assert w._struct_mode == "frag"
     assert "2~6 字" in note
     assert "15~45" not in note
 
 
 def test_short_band_stays_when_frag_roll_misses():
-    w = _worker()
-    old = random.random
-    random.random = lambda: 0.2          # 冷場碎字機率 0.07，這一則不會被抽到
-    try:
-        note = w._build_directors_note(_event(), history=[], own_texts=[], last_human="")
-    finally:
-        random.random = old
+    w: AccountWorker = _worker()
+    # 發牌：模式 roll → 長鏡頭 roll → 碎字 roll → 留白 roll → 窄帶 roll（抽中）
+    note = _note(w, _rolls(SHORT_ROLL, NO_LONG, 0.99, 0.99, 0.2))
     assert w._struct_mode == "short"
-    # 沒有真人語料時仍走固定帶；短碎這則抽到窄帶，天花板就是 8+6
+    # 窄帶抽中：天花板是帶底 +6，沒有真人語料時就是 14
     assert "8~14 字內" in note
 
 
 def test_short_band_ceiling_follows_human_median():
     """真人只講 8 字時，提示詞的天花板要跟著壓下來，不能還給 16。"""
     w = _worker()
-    old = random.random
-    random.random = lambda: 0.2          # 短碎＋窄帶，天花板只剩真人倍率
-    try:
-        history = [{"role": "user", "content": "字" * n} for n in (6, 7, 7, 8, 8, 9)]
-        note = w._build_directors_note(_event(), history=history, own_texts=[], last_human="")
-    finally:
-        random.random = old
+    history = [{"role": "user", "content": "字" * n} for n in (6, 7, 7, 8, 8, 9)]
+    note = _note(w, _rolls(SHORT_ROLL, NO_LONG, 0.99, 0.99, 0.2), history=history)
     assert w._struct_mode == "short"
-    assert "8~16" not in note
-    assert "11 字是硬上限" in note
+    assert "8~16 字內" not in note
+    # 窄帶上限 14 再被真人中位的 1.25 倍壓下去，提示詞把壓後的天花板寫成硬上限
+    cap = w._struct_char_cap(90)
+    assert cap < 16
+    assert f"{cap} 字是硬上限" in note
 
 
 def test_dirty_roll_uses_mid_band():
-    w, note = _note_at(0.5)
+    w, note = _note_at(DIRTY_ROLL, NO_LONG)
     assert w._struct_mode == "dirty"
-    assert "12~24" in note
+    assert "8~16 字內" in note
 
 
-def test_scene_roll_keeps_old_shape():
-    w, note = _note_at(0.99)
+def test_high_roll_beat_drops_back_to_scene():
+    # 極高 roll 先落 beat，冷場而且沒在撩時再降回 scene（beat 在 0 檔太露骨）
+    w, note = _note_at(SCENE_ROLL, NO_LONG)
     assert w._struct_mode == "scene"
-    assert "15~30" in note
+    assert "10~20 字內" in note
 
 
 def test_short_and_dirty_override_mood_scene_pressure():
     """心境輪替常抽到生活瑣事，它會叫模型用場景開場；短碎／色誘要能壓過它。"""
-    _, short = _note_at(0.0)
-    _, dirty = _note_at(0.5)
-    _, scene = _note_at(0.99)
+    _, short = _note_at(SHORT_ROLL, NO_LONG)
+    _, dirty = _note_at(DIRTY_ROLL, NO_LONG)
+    _, scene = _note_at(SCENE_ROLL, NO_LONG)
     assert "長度優先於心境" in short
     assert "長度優先於心境" in dirty
     assert "長度優先於心境" not in scene
@@ -148,11 +181,11 @@ def test_reply_prompt_without_mode_falls_back_to_human_band():
 def test_cap_is_clamped_for_short_mode_only():
     w = _worker()
     w._struct_mode = "short"
-    assert w._struct_char_cap(90) == 20
+    assert w._struct_char_cap(90) == 20          # 帶頂 16 + 4 緩衝
     w._struct_mode = "dirty"
-    assert w._struct_char_cap(90) == 26
+    assert w._struct_char_cap(90) == 18          # 帶頂 16 + 2
     w._struct_mode = "scene"
-    assert w._struct_char_cap(90) == 34
+    assert w._struct_char_cap(90) == 24          # 帶頂 20 + 4
     w._struct_mode = ""
     assert w._struct_char_cap(90) == 90
 
@@ -170,32 +203,28 @@ def test_cap_never_raises_an_already_lower_cap():
 SHORT_FLOW = ["聽得我背脊發涼欸", "這數字看得我想睡", "下午犯睏，想被人按在床上", "也太衰了吧"]
 
 
-def _note_with_short_flow(roll: float) -> tuple[AccountWorker, str]:
+def _note_with_short_flow(*values: float) -> tuple[AccountWorker, str]:
     w = _worker()
     w._recent_texts_by_group[GID] = list(SHORT_FLOW)
     w._recent_texts_at[GID] = [time.time() - 60] * len(SHORT_FLOW)
-    old = random.random
-    random.random = lambda: roll
-    try:
-        note = w._build_directors_note(_event(), history=[], own_texts=[], last_human="")
-    finally:
-        random.random = old
-    return w, note
+    return w, _note(w, _rolls(*values))
 
 
 def test_short_flow_rebounds_off_short_band():
-    w, note = _note_with_short_flow(0.1)
+    # 模式 roll 0.1 → short；不抽長鏡頭；碎字不中 → 棘輪把 short 頂去 dirty
+    w, note = _note_with_short_flow(0.1, NO_LONG, 0.99)
     assert w._struct_mode != "short"
-    # roll 0.1 同時抽到尾通道，模式可能被尾巴改寫成 scene；重點是離開短碎。
     assert w._struct_mode in {"dirty", "scene"}
-    assert "12~24" in note or "15~" in note
+    assert "8~16 字內" in note or "10~20 字內" in note
 
 
-def test_short_flow_rebound_falls_back_to_scene_when_roll_high():
-    w, _note = _note_with_short_flow(0.9)
+def test_short_flow_rebound_can_still_take_the_tail_channel():
+    """反彈成 dirty 之後尾巴通道仍能把它推去 scene：棘輪不是死路。"""
+    # 反彈在留白／窄帶之前就把 short 換掉，所以第 4 顆骰子就是尾巴 roll
+    w, _note_text = _note_with_short_flow(0.1, NO_LONG, 0.99, 0.0, 0.0)
     assert w._struct_mode == "scene"
 
 
 def test_short_flow_rebound_is_counted():
-    w, _note = _note_with_short_flow(0.1)
+    w, _note_text = _note_with_short_flow(0.1, NO_LONG, 0.99)
     assert w.stats["band_flow_short_rebound"] == 1

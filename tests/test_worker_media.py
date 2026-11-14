@@ -1,4 +1,5 @@
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -308,10 +309,16 @@ def test_last_account_owns_image_download_vision_and_send_path(account_count):
         db.claim_message_response = AsyncMock(return_value=True)
         db.claim_group_text = AsyncMock(return_value=True)
         db.touch_activity = AsyncMock()
+        # 指派的號剛出聲過（沒這條 `_owner_silent` 取不到值＝10**6 秒，
+        # 每一號都判定「指定的人太久沒回」而轉手，於是全部認領成功，
+        # 「只有最後一號接手」的斷言就永遠不成立）
+        db.group_bot_last_spoke = AsyncMock(return_value={owner_id: time.time()})
         media = SimpleNamespace(
             understand_image=AsyncMock(return_value=vision_reply)
         )
         client = SimpleNamespace(send_message=AsyncMock())
+        signals: dict = {}
+        failed: dict = {}
         event = SimpleNamespace(
             id=owner_id,
             chat_id=-1001,
@@ -328,7 +335,11 @@ def test_last_account_owns_image_download_vision_and_send_path(account_count):
 
         workers = []
         for index, user_id in enumerate(sorted(active_ids), start=1):
-            worker = _worker(media)
+            worker = _worker(
+                media,
+                reply_claim_signals=signals,
+                failed_reply_claimants=failed,
+            )
             worker.account_id = f"account-{index}"
             worker.tg_user_id = user_id
             worker.managed_ids = active_ids
@@ -360,9 +371,11 @@ def test_last_account_owns_image_download_vision_and_send_path(account_count):
                 await worker._reply_later(event, 0)
             return should_reply
 
-        decisions = await asyncio.gather(
-            *(reply_if_owner(worker) for worker in workers)
-        )
+        # 等待窗預設 45 秒：沒有競爭者時等滿整窗才回 False，這裡縮到 0.05 秒
+        with patch("app.worker._REPLY_TASK_WINDOW_SECONDS", 0.05):
+            decisions = await asyncio.gather(
+                *(reply_if_owner(worker) for worker in workers)
+            )
 
         assert decisions.count(True) == 1
         assert decisions[account_count - 1] is True

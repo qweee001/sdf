@@ -2594,12 +2594,11 @@ class Database:
             gid = int(group_id)
         except (TypeError, ValueError):
             return {}
-        cursor = await self._c.execute(
+        rows = await self.rows(
             "SELECT sender_id, MAX(timestamp) AS at FROM messages "
             "WHERE group_id = ? AND role = 'assistant' GROUP BY sender_id",
             (gid,),
         )
-        rows = await cursor.fetchall()
         return {
             int(r["sender_id"]): float(r["at"] or 0.0)
             for r in rows

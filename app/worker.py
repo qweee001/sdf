@@ -2177,14 +2177,20 @@ class AccountWorker:
         await asyncio.sleep(0)
         self._expire_media_claim_state(key, signal, True)
 
-    async def _owner_silent(self, owner_id: int, group_id: int) -> float:
-        """被指派這個群友的號，多久沒在這個群出聲（秒）。沒有紀錄回很大。"""
+    async def _owner_silent(self, owner_id: int, group_id: int) -> float | None:
+        """被指派這個群友的號，多久沒在這個群出聲（秒）。
+
+        完全沒有紀錄回 None——那不是「指定的人掛掉」，是還沒人講過（新群、新群友），
+        這時該由指定的號接、別人別搶。舊版回 10**6 秒，於是每一則訊息、每一個非指定
+        的帳號都判定「他太久沒回」而全部轉手，最後誰先醒誰搶到：輪替、黏著、被回覆
+        指定都形同失效（實測 240 則全由同一號吃掉）。
+        """
         try:
             spoke = await self.db.group_bot_last_spoke(int(group_id))
         except Exception:
-            return 10**6
+            return None
         ts = float((spoke or {}).get(int(owner_id), 0.0) or 0.0)
-        return (time.time() - ts) if ts else 10**6
+        return (time.time() - ts) if ts else None
 
     async def _claim_human_reply(
         self,
@@ -2201,7 +2207,8 @@ class AccountWorker:
         if owner_id and claimant_id != int(owner_id):
             # 指定對象太久沒回就換人接：四號裡只有一號持有這個群友，他一忙那段就
             # 整段已讀（實測 claim_owner_other 13 次、claim_ok 1 次）。
-            if await self._owner_silent(int(owner_id), int(event.chat_id or 0)) >= 90.0:
+            silent = await self._owner_silent(int(owner_id), int(event.chat_id or 0))
+            if silent is not None and silent >= 90.0:
                 self._pcount("claim_owner_handover")
             else:
                 if is_photo:
@@ -2393,6 +2400,14 @@ class AccountWorker:
                     self._pcount("reply_to_bot_me")
                     return await self._claim_human_reply(event, int(self.tg_user_id or 0))
                 self._pcount("reply_to_bot_other")
+                # 被回的是別號：這是點名球，留給它，別搶。否則四個 worker 誰先醒
+                # 誰 claim 走，被回的那一號反而回不到（被回覆是最強的互動訊號）。
+                # 那號不在跑／沒分配到這個群時才照普通插話往後走。
+                if _tuid in self.active_ids and (
+                    not self._group_eligibility_enabled
+                    or _tuid in self.active_group_ids.get(group_id, set())
+                ):
+                    return False
         soft_other = False
         if event.is_reply or event.mentioned:
             if await self._is_directed_at_me(event):
@@ -12554,6 +12569,10 @@ class AccountWorker:
                     "挑一個部位、寫動作、再寫你當下的反應或聲音，三段連成一則。",
             "long": f"這則走長鏡頭（{_p_lo}~{_p_hi}字）：從怎麼開始寫到受不了，"
                     "中間不要斷、不要跳評語，三段以上一路往下推。",
+            # 留白半句也抽得到（12511 就會設 _p_mode="halt"），少這一格就是
+            # KeyError: 'halt'，主動發言整條掛掉。
+            "halt": f"這則走留白半句（{_p_lo}~{_p_hi}字）：只寫半句就停，停在動作中間，"
+                    "不問句也不收成完整句。",
         }[_p_mode]
         if self._len_tail:
             _p_struct += (
@@ -12561,7 +12580,7 @@ class AccountWorker:
                 "兩三個逗號，把動作、自己的身體反應、對他的評語一起寫完。"
             )
         # 提示詞裡的數字就是天花板：之前寫 hi+2（18），模型一律寫到 18~19。
-        if _p_mode not in ("scene", "beat", "long") and not self._len_tail:
+        if _p_mode not in ("scene", "beat", "long", "halt") and not self._len_tail:
             _p_struct += "字數滿了就砍掉前情，只留最後那記吐槽或撩撥。"
         _p_named_note = self._recent_named_note(int(group_id))
         if _p_named_note:
