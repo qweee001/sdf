@@ -1476,13 +1476,12 @@ class Database:
 
     async def get_recent_messages(self, account_id: str, group_id: int,
                                   limit: int = 30) -> list[dict]:
-        cursor = await self._c.execute(
+        rows = await self.rows(
             "SELECT sender_id, sender_name, role, content, timestamp "
             "FROM messages WHERE account_id = ? AND group_id = ? "
             "ORDER BY timestamp DESC, id DESC LIMIT ?",
             (account_id, group_id, limit),
         )
-        rows = list(await cursor.fetchall())
         return [dict(r) for r in reversed(rows)]
 
     async def last_assistant_message_at(self) -> float:
@@ -1492,11 +1491,10 @@ class Database:
         /health 卻全程綠燈，42 分鐘沒人知道。
         """
         try:
-            cursor = await self._c.execute(
-                "SELECT MAX(timestamp) AS last_at FROM messages WHERE role = 'assistant'"
+            value = await self.scalar(
+                "SELECT MAX(timestamp) FROM messages WHERE role = 'assistant'"
             )
-            row = await cursor.fetchone()
-            return float((row["last_at"] if row else 0) or 0)
+            return float(value or 0)
         except Exception:
             return 0.0
 
@@ -1507,13 +1505,12 @@ class Database:
         去重（F09 事件身分），舊資料無 TG ID 時退回 (sender_id, content, 秒)。
         """
         raw_limit = max(int(limit) * 5, 60)
-        cursor = await self._c.execute(
+        rows = await self.rows(
             "SELECT sender_id, sender_name, role, content, timestamp, message_id "
             "FROM messages WHERE group_id = ? "
             "ORDER BY timestamp DESC, id DESC LIMIT ?",
             (group_id, raw_limit),
         )
-        rows = list(await cursor.fetchall())
         seen: set = set()
         deduped: list[dict] = []
         for r in rows:
@@ -1538,13 +1535,13 @@ class Database:
         self, group_id: int, limit: int = 30
     ) -> list[str]:
         """跨所有帳號讀取群內近期實際送出的文案，供全群動態去重（擴展至最近 30 則，跨天跨輪記憶）。"""
-        cursor = await self._c.execute(
+        rows = await self.rows(
             "SELECT content FROM messages "
             "WHERE group_id = ? AND role = 'assistant' "
             "ORDER BY timestamp DESC, id DESC LIMIT ?",
             (group_id, limit),
         )
-        return [str(row["content"]) for row in await cursor.fetchall()]
+        return [str(row["content"]) for row in rows]
 
     async def recent_replies_by_name(
         self, group_id: int, name: str, limit: int = 8
@@ -1556,13 +1553,13 @@ class Database:
         """
         if not name:
             return []
-        cursor = await self._c.execute(
+        rows = await self.rows(
             "SELECT content FROM messages "
             "WHERE group_id = ? AND role = 'assistant' AND sender_name = ? "
             "ORDER BY timestamp DESC, id DESC LIMIT ?",
             (int(group_id), str(name), int(limit)),
         )
-        return [str(row["content"]) for row in await cursor.fetchall()]
+        return [str(row["content"]) for row in rows]
 
     async def recent_bot_texts_by_group(
         self, group_id: int, *, hours: float = 48, limit: int = 200
@@ -1573,13 +1570,13 @@ class Database:
         重啟後從這裡回填即可，無需新表。
         """
         cutoff = time.time() - float(hours) * 3600
-        cursor = await self._c.execute(
+        rows = await self.rows(
             "SELECT content FROM messages "
             "WHERE group_id = ? AND role = 'assistant' AND timestamp >= ? "
             "ORDER BY timestamp DESC, id DESC LIMIT ?",
             (int(group_id), float(cutoff), int(limit)),
         )
-        return [str(row["content"]) for row in await cursor.fetchall()]
+        return [str(row["content"]) for row in rows]
 
     async def bot_msgs_since(
         self, group_id: int, seconds: float, exclude_user_id: int | None = None
@@ -1596,23 +1593,21 @@ class Database:
         if exclude_user_id:
             sql = sql.replace("GROUP BY", "AND sender_id != ? GROUP BY")
             params.append(int(exclude_user_id))
-        cursor = await self._c.execute(sql, tuple(params))
-        row = await cursor.fetchone()
-        return int((row["n"] if row else 0) or 0)
+        value = await self.scalar(sql, tuple(params))
+        return int(value or 0)
 
     async def last_bot_ts_by_group(self, group_id: int) -> float:
         """同群最後一則水軍發言的時間；拿不到回 0。
 
         只用來決定「要不要為了避免搶話而錯開」，不看整天有沒有發言過。
         """
-        cursor = await self._c.execute(
-            "SELECT MAX(timestamp) AS ts FROM messages "
-            "WHERE group_id = ? AND role = 'assistant'",
-            (int(group_id),),
-        )
-        row = await cursor.fetchone()
         try:
-            return float((row["ts"] if row else 0) or 0)
+            value = await self.scalar(
+                "SELECT MAX(timestamp) FROM messages "
+                "WHERE group_id = ? AND role = 'assistant'",
+                (int(group_id),),
+            )
+            return float(value or 0)
         except Exception:
             return 0.0
 
@@ -2441,13 +2436,13 @@ class Database:
         async with self._write_lock:
             for attempt in range(6):
                 try:
-                    dup = await self._c.execute(
+                    dup = await self.scalar(
                         "SELECT 1 FROM group_memory "
                         "WHERE group_id = ? AND member_id = ? AND account_id = ? "
                         "AND note = ? AND updated_at > ? LIMIT 1",
                         (int(group_id), int(member_id), account_id, note, now - 60),
                     )
-                    if not await dup.fetchone():
+                    if not dup:
                         await self._c.execute(
                             "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
                             "VALUES (?, ?, ?, ?, ?)",
@@ -2481,13 +2476,13 @@ class Database:
         async with self._write_lock:
             for attempt in range(6):
                 try:
-                    dup = await self._c.execute(
+                    dup = await self.scalar(
                         "SELECT 1 FROM group_memory "
                         "WHERE group_id = ? AND member_id = 0 AND account_id = ? "
                         "AND note = ? AND updated_at > ? LIMIT 1",
                         (int(group_id), account_id, note, now - 60),
                     )
-                    if not await dup.fetchone():
+                    if not dup:
                         await self._c.execute(
                             "INSERT INTO group_memory (group_id, member_id, account_id, note, updated_at) "
                             "VALUES (?, 0, ?, ?, ?)",
