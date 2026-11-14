@@ -1896,7 +1896,9 @@ class AccountWorker:
             )
         except Exception as e:
             self._bump_error()
+            import traceback as _tb
             print(f"[{self.name}] on_message error: {e}", flush=True)
+            _tb.print_exc()
 
     async def on_chat_action(self, event):
         """新人入群 → 自然歡迎（攬客）"""
