@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import secrets
 import sqlite3
 import time
 import unicodedata
@@ -428,6 +429,31 @@ class Database:
                 updated_at REAL NOT NULL
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS group_scenes (
+                id TEXT PRIMARY KEY,
+                group_id INTEGER NOT NULL,
+                target_member_id INTEGER NOT NULL,
+                goal TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                peak_hits INTEGER NOT NULL DEFAULT 0,
+                aftercare_sent INTEGER NOT NULL DEFAULT 0,
+                opened_at REAL NOT NULL,
+                stage_entered_at REAL NOT NULL,
+                closed_at REAL,
+                close_reason TEXT
+            )
+        """)
+        # 同群同時只允許一場未閉合的場景；closed_at 一旦寫入就讓出位置
+        await db.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_group_scenes_open
+            ON group_scenes (group_id) WHERE closed_at IS NULL
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_group_scenes_recent
+            ON group_scenes (group_id, closed_at DESC)
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS record_reviews (
                 record_key TEXT PRIMARY KEY,
@@ -2543,6 +2569,137 @@ class Database:
         cursor = await self._c.execute("SELECT group_id, label FROM group_labels")
         rows = await cursor.fetchall()
         return {int(r[0]): str(r[1]) for r in rows}
+
+    # ---------- 場景狀態機 ----------
+
+    _SCENE_COLS = (
+        "id, group_id, target_member_id, goal, stage, peak_hits, "
+        "aftercare_sent, opened_at, stage_entered_at, closed_at, close_reason"
+    )
+
+    async def get_open_scene(self, group_id: int) -> dict | None:
+        """目前未閉合的場景；沒有就 None。"""
+        try:
+            gid = int(group_id)
+        except (TypeError, ValueError):
+            return None
+        cursor = await self._c.execute(
+            f"SELECT {self._SCENE_COLS} FROM group_scenes "
+            "WHERE group_id = ? AND closed_at IS NULL",
+            (gid,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return dict(row) if row else None
+
+    async def open_scene(self, group_id: int, target_member_id: int, goal: str) -> dict | None:
+        """開一場。同群已有未閉合場景時回那一場（不覆蓋、不清零）。
+
+        併發下靠 idx_group_scenes_open 的唯一性擋重複，衝突就回頭讀。
+        """
+        try:
+            gid = int(group_id)
+            target = int(target_member_id or 0)
+        except (TypeError, ValueError):
+            return None
+        existing = await self.get_open_scene(gid)
+        if existing:
+            return existing
+        now = time.time()
+        scene_id = f"{gid}:{target}:{int(now * 1000)}:{secrets.token_hex(3)}"
+        try:
+            await self._c.execute(
+                "INSERT INTO group_scenes "
+                "(id, group_id, target_member_id, goal, stage, opened_at, stage_entered_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (scene_id, gid, target, str(goal)[:60], "warm", now, now),
+            )
+            await self._commit()
+        except Exception:
+            # 唯一索引衝突（另一號搶先開了）：回滾後讀既有那場
+            try:
+                await self._c.rollback()
+            except Exception:
+                pass
+            return await self.get_open_scene(gid)
+        return await self.get_open_scene(gid)
+
+    async def transition_scene(
+        self,
+        scene_id: str,
+        from_stage: str,
+        to_stage: str,
+        reason: str = "",
+        *,
+        peak_inc: int = 0,
+        aftercare_inc: int = 0,
+    ) -> bool:
+        """CAS 推進：只有 `stage` 仍等於 `from_stage` 才寫得進去。
+
+        多個號是獨立 worker，讀-改-寫會在中間被別人插隊，
+        所以條件放在 SQL 的 WHERE 裡，搶輸的一方回 False 由呼叫方放棄。
+        """
+        now = time.time()
+        closed = "closed" if to_stage == "closed" else None
+        cursor = await self._c.execute(
+            "UPDATE group_scenes SET stage = ?, stage_entered_at = ?, "
+            "peak_hits = peak_hits + ?, aftercare_sent = aftercare_sent + ?, "
+            "closed_at = ?, close_reason = ? "
+            "WHERE id = ? AND stage = ? AND closed_at IS NULL",
+            (
+                to_stage,
+                now,
+                int(peak_inc),
+                int(aftercare_inc),
+                now if closed else None,
+                (reason or "")[:40] or None,
+                scene_id,
+                from_stage,
+            ),
+        )
+        changed = cursor.rowcount > 0
+        await self._commit()
+        return changed
+
+    async def touch_scene_stage_time(self, scene_id: str) -> None:
+        """warm/build 階段每發一則就續命，避免沒轉階段卻被 idle 判死。"""
+        await self._c.execute(
+            "UPDATE group_scenes SET stage_entered_at = ? "
+            "WHERE id = ? AND closed_at IS NULL",
+            (time.time(), scene_id),
+        )
+        await self._commit()
+
+    async def scene_cooldown_left(self, group_id: int, cooldown_seconds: float) -> float:
+        """關場後的冷卻剩餘秒數（同一 target 短期不要立刻重開）。"""
+        try:
+            gid = int(group_id)
+        except (TypeError, ValueError):
+            return 0.0
+        cursor = await self._c.execute(
+            "SELECT closed_at FROM group_scenes "
+            "WHERE group_id = ? AND closed_at IS NOT NULL "
+            "ORDER BY closed_at DESC LIMIT 1",
+            (gid,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if not row or not row["closed_at"]:
+            return 0.0
+        return max(0.0, cooldown_seconds - (time.time() - float(row["closed_at"])))
+
+    async def expire_scenes(self, max_age_seconds: float) -> int:
+        """清掉殘留的未閉合場景（重啟後沒有 worker 接手時）。"""
+        cutoff = time.time() - max_age_seconds
+        cursor = await self._c.execute(
+            "UPDATE group_scenes SET stage = 'closed', closed_at = ?, "
+            "close_reason = 'expired' WHERE closed_at IS NULL AND opened_at < ?",
+            (time.time(), cutoff),
+        )
+        count = cursor.rowcount
+        await self._commit()
+        return count
+
 
     async def group_last_human_ts(self, group_id: int) -> float:
         """群內最後一則真人訊息的時間（重啟後回填 last_human_activity 用）。

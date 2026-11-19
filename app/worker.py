@@ -67,6 +67,8 @@ from .persona import (
 )
 
 from . import text_guard
+from . import reply_hints
+from . import scene as _scene
 # P2：文字守門已解耦到 text_guard.py；下列常數仍被 worker 決策層／拆訊／送訊層直接引用。
 from .text_guard import (
     _BURST_PAUSE_SECONDS,
@@ -300,6 +302,9 @@ _STRUCT_BANDS: dict[str, tuple[int, int]] = {
 # 現場熱度門檻（近兩分鐘真人訊息數）：洗屏時短碎優先，不排生活場景。
 _HOT_BURST_HUMANS = 10
 _WARM_BURST_HUMANS = 4
+
+# 主動發言全關時的喚醒間隔（秒）：只為「開了就立刻動」，不跑整套 tick。
+_PROACTIVE_IDLE_POLL_SECONDS = 120.0
 
 # 每個模式對應的內容指令。長度另外由 _STRUCT_BANDS 帶，兩者一起才有差別。
 _STRUCT_SYNTAX: dict[str, str] = {
@@ -814,7 +819,6 @@ _SPEAKER_SHARE_CAP = 0.45
 # 份額上限失效時的絕對次數保險絲（同一帳號近期最多幾則）
 _SPEAKER_HARD_CAP = 3
 # 話題溫度計：連續這麼多輪色情話題後，強制冷卻插入日常降溫
-_TOPIC_HEAT_MAX_ROUNDS = 4
 # 地點問題訊號：命中才啟用「不准講具體地名」硬攔（平常聊到地名是合理的）
 _PLACE_QUESTION_MARKS = (
     "住哪", "在哪", "哪裡", "地點", "怎麼約", "約在哪", "哪一區",
@@ -1267,6 +1271,7 @@ class AccountWorker:
 
         self._proactive_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._lag_task: asyncio.Task | None = None
         self._reply_tasks: set[asyncio.Task] = set()
         self._send_lock = asyncio.Lock()
         # FloodWait 退避待辦秒數：在鎖內只記錄，出鎖後才睡（見 _send_slot）。
@@ -1436,6 +1441,85 @@ class AccountWorker:
 
     # ---------- 生命周期 ----------
 
+    # ---------- 背景任務自我託管 ----------
+
+    # 退避上限：真掛掉時不要每 2 秒重拉一次把 log 洗爛
+    _SUPERVISOR_MAX_BACKOFF = 60.0
+
+    def _spawn_supervised(self, attr: str, factory, *, backoff: float = 2.0) -> None:
+        """建立背景任務並託管：非正常結束就記原因、退避重啟。
+
+        4 個 worker、FastAPI、主動調度全在同一個進程，而且這些任務以前
+        完全沒有 done_callback：一條 `_proactive_loop` 靜默死掉，那個帳號
+        從此不再主動發言，畫面上卻仍 `connected`（11-11 全體真空一小時
+        就是這個形狀）。這裡把它變成「有計數、會自癒」。
+        """
+        if not self.is_running:
+            return
+        task = asyncio.create_task(factory(), name=f"{self.account_id}:{attr}")
+
+        def _done(finished: asyncio.Task) -> None:
+            if getattr(self, attr, None) is finished:
+                setattr(self, attr, None)
+            if finished.cancelled():
+                return  # stop() 正常取消，不算事故
+            exc = finished.exception()
+            reason = type(exc).__name__ if exc else "returned"
+            deaths = int(self.stats.get(f"task_death_{attr}", 0)) + 1
+            self.stats[f"task_death_{attr}"] = deaths
+            self.stats["task_last_death"] = f"{attr}:{reason}"[:120]
+            print(
+                f"[{self.name}] 背景任務 {attr} 結束（{reason} "
+                f"{str(exc)[:160] if exc else ''}），第 {deaths} 次，退避重啟",
+                flush=True,
+            )
+            if not self.is_running:
+                return
+            delay = min(backoff * (2 ** min(deaths - 1, 5)), self._SUPERVISOR_MAX_BACKOFF)
+            try:
+                asyncio.get_running_loop().call_later(
+                    delay, lambda: self._spawn_supervised(attr, factory, backoff=backoff)
+                )
+            except RuntimeError:
+                pass
+
+        task.add_done_callback(_done)
+        setattr(self, attr, task)
+
+    async def _loop_lag_probe(self) -> None:
+        """事件循環延遲探針：漂移記峰值與次數（毫秒）。
+
+        worker.py 大量同步解析（正則、JSON、opencc、Pillow）都在 loop 裡跑，
+        loop 一卡，回覆與主動發言一起遲到，卻沒有任何指標看得出來。
+        """
+        last = time.monotonic()
+        while True:
+            await asyncio.sleep(1.0)
+            now = time.monotonic()
+            drift_ms = int(max(0.0, now - last - 1.0) * 1000)
+            last = now
+            if drift_ms > int(self.stats.get("loop_lag_ms", 0) or 0):
+                self.stats["loop_lag_ms"] = drift_ms
+            if drift_ms >= 1000:
+                self.stats["loop_lag_hits"] = (
+                    int(self.stats.get("loop_lag_hits", 0)) + 1
+                )
+
+    async def _safe_on_message(self, event) -> None:
+        """on_message 的外殼：一則訊息的例外不准帶走整條收訊線。
+
+        Telethon 的 handler 例外只會寫 log；這裡額外留計數與最後一筆錯誤，
+        /api/status 直接看得到，不必翻 Railway log。
+        """
+        try:
+            await self.on_message(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.stats["handler_errors"] = int(self.stats.get("handler_errors", 0)) + 1
+            self.stats["handler_last_error"] = f"{type(exc).__name__}: {exc}"[:200]
+            print(f"[{self.name}] on_message error: {exc}", flush=True)
+
     async def start(self):
         try:
             await self._notify_status("connecting", None, "")
@@ -1462,7 +1546,7 @@ class AccountWorker:
             except Exception as exc:
                 print(f"[{self.name}] tg_username sync error: {exc}", flush=True)
 
-            self.tg_client.add_event_handler(self.on_message, events.NewMessage())
+            self.tg_client.add_event_handler(self._safe_on_message, events.NewMessage())
             self.tg_client.add_event_handler(self.on_chat_action, events.ChatAction())
 
             # 冷啟動：先把這個帳號在的所有群記下來（就算沒人講話，群也不會死）
@@ -1500,8 +1584,9 @@ class AccountWorker:
                     f"[{self.name}] proactive memory reload error: {exc}",
                     flush=True,
                 )
-            self._proactive_task = asyncio.create_task(self._proactive_loop())
-            self._cleanup_task = asyncio.create_task(self._memory_cleanup_loop())
+            self._spawn_supervised("_proactive_task", self._proactive_loop)
+            self._spawn_supervised("_cleanup_task", self._memory_cleanup_loop)
+            self._spawn_supervised("_lag_task", self._loop_lag_probe)
             await self._notify_status(
                 "connected", me.id, get_display_name(me) or ""
             )
@@ -1513,7 +1598,7 @@ class AccountWorker:
             self.status_detail = str(e)
             # 啟動失敗：連同已建立的連線與背景任務一起收乾淨，
             # 否則 manager 會把 worker 從 self.workers 移除，連線與任務永久洩漏。
-            for task_attr in ("_proactive_task", "_cleanup_task"):
+            for task_attr in ("_proactive_task", "_cleanup_task", "_lag_task"):
                 task = getattr(self, task_attr)
                 if task:
                     task.cancel()
@@ -1548,7 +1633,7 @@ class AccountWorker:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._reply_tasks.clear()
-        for task in (self._proactive_task, self._cleanup_task):
+        for task in (self._proactive_task, self._cleanup_task, self._lag_task):
             if task:
                 task.cancel()
                 try:
@@ -1557,6 +1642,7 @@ class AccountWorker:
                     pass
         self._proactive_task = None
         self._cleanup_task = None
+        self._lag_task = None
         if self.tg_client:
             await self.tg_client.disconnect()
             self.tg_client = None
@@ -2791,110 +2877,144 @@ class AccountWorker:
         # 5) 回退：雜湊抽選（保留既有防搶答機制）
         return self._ordinary_reply_winner(event, candidates=candidates)
 
-    # ---- 話題溫度計（Topic Heat）：避免色情話題閉環 ----
-    _NSFW_HEAT_WORDS = (
-        "深淺", "撞到底", "餵飽", "交作業", "吸緊", "兩張嘴",
-        "蕾絲", "舔", "剝光", "腿軟", "騷", "硬", "濕", "內衣",
-        "保險套", "套套", "懷孕", "推屁股", "雞巴", "屌", "小穴",
-        "騷穴", "吹", "含", "約嗎", "開房", "床上", "幹", "胸",
-    )
+    # ---- 場景狀態機（Scene）：把「每則重算的階梯」換成「有記憶的一場戲」 ----
 
-    def _topic_heat_hint(self, group_id: int, history: list[dict]) -> str:
-        """連續色情話題超過閾值 → 回一句強制冷卻提示（否則回 ""）。
+    async def _scene_hint(self, group_id: int, event, history: list[dict]) -> str:
+        """維護場景狀態並回這一輪的階段指令（不含換行前綴）。
 
-        真人聊完色情會自然疲勞轉回日常，只有機器人會在同一個色情閉環裡
-        無限打轉。這裡從最近訊息判斷「色情濃度」，過熱就命令模型這一輪
-        改講日常瑣事，把話題拉回生活感。
+        shadow（`SCENE_SHADOW=1` 且 `SCENE_ENABLED=0`，默認）只算狀態、寫 stats、
+        打日誌，回空字串讓舊的 `_tension_ladder_hint` 繼續供詞；
+        接到 enabled 的那一天，這裡就是唯一的尺度來源。
         """
-        rows = list(history or [])[-8:]
-        if not rows:
+        cfg = self.config
+        if not group_id:
             return ""
-        hot = 0
-        for row in rows:
-            body = str(row.get("content") or "")
-            if any(w in body for w in self._NSFW_HEAT_WORDS):
-                hot += 1
-        if hot < _TOPIC_HEAT_MAX_ROUNDS:
+        if not bool(getattr(cfg, "scene_enabled", False)) and not bool(
+            getattr(cfg, "scene_shadow", True)
+        ):
             return ""
-        # 真人最後一句還在講色＝現場正在燒，這時候下令「絕對禁止」等於把水軍踢出
-        # 正在燒的那一桌（實測「用穴夾你雞雞嗎」被回「下午低血糖到手抖」）。
-        # 所以改成兩階：還在燒就只降半檔，最後一句已轉日常、或整段七則以上才真轉場。
-        humans = [r for r in rows if str(r.get("role")) != "assistant"]
-        last_human = str((humans[-1] if humans else {}).get("content") or "")
-        still_hot = self._explicit_axes(last_human) >= 1
-        if still_hot and hot < 7:
-            self.stats["topic_cooldown_half"] = (
-                int(self.stats.get("topic_cooldown_half", 0)) + 1
+        try:
+            incoming = str(getattr(event, "raw_text", "") or "")
+            sender = int(getattr(event, "sender_id", 0) or 0)
+            scene_row = await self.db.get_open_scene(group_id)
+            if scene_row is None:
+                # 同伴（水軍）之間互撩不開場：那是同一組人，換目標才需要新場
+                if sender not in self.managed_ids:
+                    cooldown = await self.db.scene_cooldown_left(
+                        group_id, float(getattr(cfg, "scene_cooldown_seconds", 1800) or 1800)
+                    )
+                    reason = _scene.should_open(
+                        explicit_axes=self._explicit_axes(incoming),
+                        mentioned=bool(getattr(event, "mentioned", False)),
+                        booking_asked=any(
+                            mark in incoming for mark in self._ASK_BOOKING_MARKS
+                        ),
+                        cooldown_left=cooldown,
+                    )
+                    if reason:
+                        scene_row = await self.db.open_scene(
+                            group_id, sender, _scene.sample_goal()
+                        )
+                        if scene_row:
+                            self.stats["scene_opened"] = (
+                                int(self.stats.get("scene_opened", 0)) + 1
+                            )
+                            self.stats["scene_last_open_reason"] = reason
+            if scene_row is None:
+                return ""
+
+            now = time.time()
+            humans = [r for r in history if str(r.get("role")) != "assistant"]
+            explicit_ts = [
+                float(r.get("timestamp") or 0)
+                for r in humans
+                if self._explicit_axes(str(r.get("content") or ""))
+            ]
+            default_idle = float(getattr(cfg, "scene_cooldown_seconds", 1800) or 1800)
+            idle = max(0.0, now - max(explicit_ts)) if explicit_ts else default_idle
+            signals = _scene.SceneSignals(
+                age_seconds=max(0.0, now - float(scene_row.get("opened_at") or now)),
+                stage_age_seconds=max(
+                    0.0, now - float(scene_row.get("stage_entered_at") or now)
+                ),
+                idle_seconds=idle,
+                explicit_msgs_in_window=sum(
+                    1 for t in explicit_ts if now - t <= _scene.BUILD_WINDOW_SECONDS
+                ),
+                density=self._human_explicit_ratio(history),
+                heat_fired=bool(self._topic_heat_hint(group_id, history)),
+                peak_hits=int(scene_row.get("peak_hits") or 0),
+                aftercare_sent=int(scene_row.get("aftercare_sent") or 0),
             )
-            return (
-                "【話題溫度計・降半檔】：群裡這幾則都在講色，但真人最後一句還在同一個坑裡。"
-                "這一輪不要整則轉成日常，留一個露骨形容詞或一個身體感覺，"
-                "再接一件很小的事（例：「腳底板冰到發麻，小穴卻還有點熱」）。"
-                "一句話講完，不要開新場景、不要變成生活報告。"
-            )
-        self.stats["topic_cooldown_forced"] = (
-            int(self.stats.get("topic_cooldown_forced", 0)) + 1
-        )
-        print(
-            f"[{self.name}] topic-cooldown: 群 {group_id} 色情話題連續 {hot} 則，強制降溫",
-            flush=True,
-        )
-        return (
-            "【話題溫度計過熱｜這一輪強制冷卻轉場】：最近群裡已經連續太多則都在聊色情梗了，"
-            "真人姐妹聊到這裡會自然膩掉、自然轉回生活！"
-            "這一輪絕對禁止再聊性、器官、約炮或任何露骨內容！"
-            "請改講一件真實的日常瑣事來降溫（例如：剛点的外送到嗎、晚餐吃什麼、"
-            "今天加班到幾點、追的劇看到第幾集、外面下雨不想出門、生理期肚子好痛），"
-            "讓群裡感覺妳們是活人不是發情機器！"
+            stage = str(scene_row.get("stage") or _scene.WARM)
+            step = _scene.next_stage(stage, signals)
+            if step.changed:
+                ok = await self.db.transition_scene(
+                    str(scene_row["id"]),
+                    stage,
+                    step.stage,
+                    step.reason,
+                    peak_inc=1 if step.stage == _scene.PEAK else 0,
+                )
+                if ok:
+                    self.stats["scene_transitions"] = (
+                        int(self.stats.get("scene_transitions", 0)) + 1
+                    )
+                    self.stats["scene_last_transition"] = (
+                        f"{stage}->{step.stage}:{step.reason}"
+                    )
+                    stage = step.stage
+            if stage == _scene.CLOSED:
+                return ""
+            if stage == _scene.AFTERCARE and self._explicit_axes(incoming) == 0:
+                # 收尾那句講完就準備關場：下一次進來 aftercare_sent 已達標 → closed
+                await self.db.transition_scene(
+                    str(scene_row["id"]),
+                    _scene.AFTERCARE,
+                    _scene.AFTERCARE,
+                    "aftercare_line",
+                    aftercare_inc=1,
+                )
+            text = _scene.directive(stage, str(scene_row.get("goal") or ""))
+            if not text:
+                return ""
+            if stage == _scene.AFTERCARE:
+                text = text + "\n" + _scene.closing_line_hint()
+            if not bool(getattr(cfg, "scene_enabled", False)):
+                self.stats["scene_shadow_hits"] = (
+                    int(self.stats.get("scene_shadow_hits", 0)) + 1
+                )
+                print(
+                    f"[{self.name}] scene-shadow 群 {group_id} stage={stage} "
+                    f"goal={scene_row.get('goal')}",
+                    flush=True,
+                )
+                return ""
+            return "\n" + text
+        except Exception as exc:
+            self.stats["scene_errors"] = int(self.stats.get("scene_errors", 0)) + 1
+            print(f"[{self.name}] scene error: {exc}", flush=True)
+            return ""
+
+    # ---- 話題溫度計（Topic Heat）：避免色情話題閉環 ----
+    def _topic_heat_hint(self, group_id: int, history: list[dict]) -> str:
+        """連續色情話題超過閾值 → 降溫或轉場（實作在 reply_hints）。"""
+        return reply_hints.topic_heat_hint(
+            history,
+            group_id=group_id,
+            axes_fn=self._explicit_axes,
+            stats=self.stats,
+            name=self.name,
         )
 
     def _tension_ladder_hint(self, group_id: int, incoming_text: str, history: list[dict]) -> str:
-        """情節張力階梯（Tension Ladder）：95% 專注在生活瑣事閒聊、男女拉扯與極致露骨色誘。
-
-        1. 生活煙火氣（手搖、加班、追劇、天氣、外送、洗澡）與日常接梗
-        2. 從生活細節自然勾入感官誘惑、肉體描寫、性挑釁、讓男群友慾火焚身
-        3. 僅 5% 且對方明確開口求約時才順帶提助理。
-        """
-        l4_cues = ("怎麼約", "哪裡約", "多少錢", "今晚可以嗎", "可以約嗎", "想約你", "約出來", "跟妳睡")
-        # 只有「被明確求約」用字面判（那是意圖不是尺度）；尺度層改用語料現算的
-        # 色度，別再靠靜態詞表——詞表永遠落後現場，還會被「洗澡」這種生活詞誤判成 L3。
-        density = self._human_explicit_ratio(history)
-        axes_now = self._explicit_axes(incoming_text)
-
-        if any(w in incoming_text for w in l4_cues):
-            current_level = 4
-        elif axes_now >= 2 or density >= 0.5:
-            current_level = 3
-        elif axes_now >= 1 or density >= 0.2:
-            current_level = 2
-        else:
-            current_level = 1
-
-        # 95% 全力推升生活日常、感官誘惑與性衝動（約砲群組核心：直球、露骨、極致勾引）
-        if current_level == 1:
-            return (
-                "【情節張力階梯・L1日常調情與生活發騷】：以真實女生的隨性口吻接話，但處處帶刺帶鉤！"
-                "帶點調皮、傲嬌或微騷（如抱怨天氣悶熱想找人吹冷氣、問誰要請喝手搖飲再來床上報答），接住對方的梗，展現真實撩人的台灣女生！"
-            )
-        elif current_level == 2:
-            return (
-                "【情節張力階梯・L2日常曖昧與男女挑釁】：從生活細節切入男女張力與身體對抗！"
-                "挑釁群裡男生的體力、耐力與尺寸（例如「嘴巴這麼狂，真上場能撐過五分鐘嗎」「別光會吹，敢不敢讓我腿軟」），"
-                "帶點微醺傲嬌與肉體暗示，強烈挑起男人的勝負欲與性遐想！"
-            )
-        elif current_level == 3:
-            return (
-                "【情節張力階梯・L3情慾拉扯與性感色誘】：尺度完全放開，充滿肉體張力與性感誘惑！"
-                "順著對方的話題自然推進身體反應與性感細節（如貼身衣物滑開、敏感帶碰觸的微喘、小穴濕熱發燙、想被用力抱緊揉捏、抓破床單、深入撞擊），"
-                "言語大膽騷浪、調情自然，將情慾張力拉滿，激發男人的性衝動與肉體渴望！絕不主動提助理！"
-            )
-        elif current_level == 4:
-            # 對方明確求約時，勾一下後隨口推助理
-            return (
-                "【情節張力階梯・L4實戰收斂】：對方已經急著想約想幹了！"
-                "先大膽開撩讓對方心癢難耐（例如「看你本事能不能讓我腿軟哭著求饒」），最後隨性丟一句「自己去找助理排啦」，不要有業務廣告味！"
-            )
-        return ""
+        """情節張力階梯 L1–L4（實作在 reply_hints；無場景機時的尺度來源）。"""
+        return reply_hints.tension_ladder_hint(
+            history,
+            incoming_text,
+            axes_fn=self._explicit_axes,
+            density=self._human_explicit_ratio(history),
+        )
 
     def _group_attention_note(self, history: list[dict]) -> str:
         """動態群體注意力分佈感知（不寫死任何人名或規則）。
@@ -6295,12 +6415,6 @@ class AccountWorker:
 
     # ---- 多角色社交動力學：真人朋友圈不是捧哉機器 ----
     # 小圈圈（Crew）：真實朋友圈本來就分群，講話語氣有微差異
-    _CREW_MAP = {
-        "小小": "毒舌姐妹淘（小小＋小天後）",
-        "小天後": "毒舌姐妹淘（小小＋小天後）",
-        "RICH": "輕熟氣質組（RICH＋Chen）",
-        "Chen": "輕熟氣質組（RICH＋Chen）",
-    }
 
     # ---- 定位配額：已約過＋可再約（A+B）----
     # 自我推銷的動作標記（出現任一個＝這則在賣自己，不是旁白）
@@ -6446,37 +6560,9 @@ class AccountWorker:
         )
 
     def _social_dynamics_hint(self, history: list[dict]) -> str:
-        """真人社交動力學：偶爾無視、偶爾吐槽拆台，不是每句都捧場。
-
-        真人姐妹群的三個特徵：
-        1. 不是每句都接（有時候已讀不回、有時候講自己的事）
-        2. 會吐槽、會拆台、會酸對方，不會一味捧哉
-        3. 同一個小圈圈講話語氣接近，跨圈圈會有微妙距離感
-        """
-        rows = list(history or [])[-6:]
-        if not rows:
-            return ""
-        name = str(self.persona.get("name") or "")
-        crew = self._CREW_MAP.get(name, "")
-        parts: list[str] = []
-        if crew:
-            parts.append(f"你屬於群裡的小圈圈：{crew}。跟同圈的人講話可以更熟、更酸、更不客套。")
-        # 上一則是另一個水軍 → 高機率吐槽/拆台而不是捧場
-        last = rows[-1] if rows else {}
-        if str(last.get("role")) == "assistant":
-            parts.append(
-                "上一則是姊妹說的：請優先【吐槽、質疑、拆台或翻白眼】"
-                "（例如「又在臭美」「你說到最後還不是要買」），不要一味捧場附和。"
-            )
-        else:
-            parts.append(
-                "如果群友這句話沒有爆點、很普通，你可以選擇【只回一個表情／短評／"
-                "甚至這句不接去講自己的事】，真人不會每句都認真接。"
-            )
-        return (
-            "\n【真人社交動力學（拒絕捧哉機器人）】：\n"
-            + "".join(parts)
-            + "\n禁止每句都完美接話：真人會無視、會冷場、會吐槽。"
+        """真人社交動力學（實作在 reply_hints）：會無視、會吐槽。"""
+        return reply_hints.social_dynamics_hint(
+            history, persona_name=str(self.persona.get("name") or "")
         )
 
     def _memory_anchor_hint(self, history: list[dict]) -> str:
@@ -8906,6 +8992,9 @@ class AccountWorker:
             self._img_reject("too_big")
             return None
         mime_type = str(getattr(file_info, "mime_type", "") or "image/jpeg")
+        # 三段拆開：抓到（這裡）／看懂（call_reply 成功）／被拒（上面各路）。
+        # 只有 images_understood 一個數字時，0 什麼都證明不了。
+        self.stats["img_fetch_ok"] = int(self.stats.get("img_fetch_ok", 0)) + 1
         return bytes(data), mime_type
 
     def _img_reject(self, reason: str) -> None:
@@ -9697,13 +9786,18 @@ class AccountWorker:
         user_message = self._build_user_message(
             event, history, reply_message=reply_message, char_cap=char_cap
         )
+        # 場景狀態機：有場景就由它接管尺度（僅 SCENE_ENABLED=1 時真的注入）；
+        # shadow 或無場景時回空字串，下面的階梯照舊工作。
+        scene_hint = await self._scene_hint(group_id, event, history)
+        if scene_hint:
+            user_message += scene_hint
         # 話題溫度計：連續色情話題後強制冷卻，插入日常降溫，避免色情閉環
         heat_hint = self._topic_heat_hint(group_id, history)
         if heat_hint:
             user_message += f"\n{heat_hint}"
         # 情節張力只用於對真人群友的互動；同伴之間先處理人稱與對象，
         # 不能因「舔／被窩」等詞把兩位女性硬套進對男生的露骨邀約。
-        if int(getattr(event, "sender_id", 0) or 0) not in self.managed_ids:
+        if not scene_hint and int(getattr(event, "sender_id", 0) or 0) not in self.managed_ids:
             tension_hint = self._tension_ladder_hint(
                 group_id, str(getattr(event, "raw_text", "") or ""), history
             )
@@ -9837,10 +9931,22 @@ class AccountWorker:
                         self._successful_vision_events.add(
                             self._generation_key(event)
                         )
+                        self.stats["img_vision_ok"] = (
+                            int(self.stats.get("img_vision_ok", 0)) + 1
+                        )
+                    else:
+                        # 呼叫成功但沒拿到描述（白名單擋掉時 _reserve 靜默 raise 之前
+                        # 就是這種空回）：與「拋錯」分開數，才看得出是哪一類。
+                        self.stats["img_vision_empty"] = (
+                            int(self.stats.get("img_vision_empty", 0)) + 1
+                        )
                     return result
                 except Exception as exc:
                     self._set_generation_reason(event, "image_understanding_error")
                     self.stats["image_understanding_errors"] += 1
+                    self.stats["img_vision_err"] = (
+                        int(self.stats.get("img_vision_err", 0)) + 1
+                    )
                     print(f"[{self.name}] vision error: {exc}", flush=True)
                     return ""
             text = await self._call_ai(system_prompt, message, purpose="reply")
@@ -10036,6 +10142,25 @@ class AccountWorker:
                 format_leak or refusal or too_long or too_short
                 or fact_bad or own_echo or tic_hit or too_flat or broken_subject
             )
+        # P1-5：破綻分硬結構／軟語感。硬的一律擋；只有軟語感不合格時，
+        # 先只計數觀察（默認），開了 GUARD_SOFT_ENFORCE 才放行——
+        # 這種句子重寫四五秒往往還是同一句話，鬆掉能明顯提高出話率。
+        _hard_hit = bool(
+            format_leak or too_long or too_short or time_mismatch or simplified
+            or gender_term
+        )
+        _soft_hit = bool(
+            refusal or own_echo or tic_hit or too_flat or broken_subject
+            or fact_bad or meta_speak or group_meta or video_topic
+        )
+        if _blocked and _soft_hit and not _hard_hit:
+            self.stats["guard_soft_only"] = int(self.stats.get("guard_soft_only", 0)) + 1
+            if bool(getattr(self.config, "guard_soft_enforce", False)):
+                self.stats["guard_soft_released"] = (
+                    int(self.stats.get("guard_soft_released", 0)) + 1
+                )
+                self._set_generation_reason(event, "ok_soft")
+                _blocked = False
         if not _blocked:
             if image:
                 self.stats["images_understood"] += 1
@@ -12971,6 +13096,13 @@ class AccountWorker:
     async def _proactive_loop(self):
         while self.is_running:
             try:
+                # 兩個主動開關都關時只低頻喚醒：不必每輪算間隔、讀 runtime_settings，
+                # 三十秒一次的空轉在四號同時靜音時純屬浪費（11-11 全體靜音一整輪）。
+                if not self.proactive_enabled or not bool(
+                    getattr(self.config, "proactive_enabled", True)
+                ):
+                    await asyncio.sleep(_PROACTIVE_IDLE_POLL_SECONDS)
+                    continue
                 # 隨機間隔（支援 runtime_settings 動態覆蓋，單位：秒）
                 default_min = max(1.0, float(self.config.proactive_loop_min_seconds))
                 default_max = max(default_min, float(self.config.proactive_loop_max_seconds))

@@ -56,5 +56,30 @@ cp .env.example .env                           # 填好上面三个必填项
 
 - **Docker**：`docker build -t sdf . && docker run -p 8000:8000 --env-file .env -v sdfdata:/data sdf`
   镜像以非 root 用户 `app` 运行；数据卷挂到 `/data`（`DB_PATH` 默认 `/data/chat.db`）。
-- **Railway**：`railway.json` 已配置用 Dockerfile 构建、健康检查 `/health`、
+- **Railway**：`railway.json` 已配置用 Dockerfile 构建、健康检查 `/ready`、
   `ON_FAILURE` 最多重试 10 次。环境变量在 Railway 控制台里配，不要进仓库。
+
+## 健康度：`/health` 与 `/ready` 的分工
+
+- `/health`：给**人**看。永远 200，只把数据库、账号、静音数、24h 模型调用、
+  失败原因计数摊开，不承担状态码语义。
+- `/ready`：给**平台与探针**看。同一份判定，但真的哑了（全静音、25 分钟无输出、
+  402 欠费）回 503；启动后 `READY_GRACE_SECONDS`（默认 300 秒）内一律 200。
+- 外部轮询用 `python tools/ready_probe.py <base_url>`：非 200 即非 0 退出，
+  可直接接 cron / 监控。
+
+## 状态与待办（与代码同版本维护）
+
+| 项 | 状态 |
+|---|---|
+| `/ready` + 外部探针 + 任务自愈 + loop 延迟探针 | 已实装 |
+| 图片三段计数（抓到／看懂／被拒）、回复放弃原因上 `/health` | 已实装 |
+| 场景状态机（warm→build→peak→aftercare，DB 持久化 + CAS） | 已实装，默认 shadow |
+| 守门分层（硬结构／软语感） | 已实装，软语感默认只观察 |
+| worker.py 拆分 | hints 三支已外移到 `app/reply_hints.py`；生成体抽段未做 |
+| dashboard `_setup_routes`（798 行）拆分 | 已拆成五段方法（公开／读／群组写入／自检／账号） |
+| 软语感改由决策层打分（替代正则） | 未做 |
+| 成本日报（每小时调用数／p95 延迟／空回率） | 未做 |
+| 场景与守门的完整说明 | 见 `docs/reliability_and_scene.md` |
+| `analysis_msgs.json` 改存 gz（已 gzip） | 已实装 |
+

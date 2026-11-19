@@ -19,6 +19,21 @@ async def async_main() -> None:
     print("SDF 啟動中…", flush=True)
     settings = load_settings()
     print(f"設定載入完成（port={settings.dashboard_port}）", flush=True)
+    # 模型白名單啟動自檢：白名單外的 vision 模型會在 _reserve 靜默 raise，
+    # 群圖就變成「有看到、零理解」——最難查的一種故障，這裡先喊出來。
+    if bool(getattr(settings, "media_enabled", False)):
+        try:
+            from .media import APPROVED_VISION_MODELS
+
+            _vision = str(getattr(settings, "vision_model", "") or "").strip()
+            if _vision not in APPROVED_VISION_MODELS:
+                print(
+                    f"⚠ VISION_MODEL={_vision!r} 不在 APPROVED_VISION_MODELS，"
+                    "識圖會靜默失敗（見 app/media.py）",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"vision 白名單自檢略過：{exc}", flush=True)
 
     secret_box = SecretBox(settings.account_encryption_key)
     db = Database(settings.db_path)
