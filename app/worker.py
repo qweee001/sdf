@@ -8975,8 +8975,14 @@ class AccountWorker:
         file_info = getattr(event, "file", None)
         size = int(getattr(file_info, "size", 0) or 0)
         max_bytes = int(getattr(self.config, "media_max_input_bytes", 0) or 0)
-        if max_bytes <= 0 or size <= 0 or size > max_bytes:
-            self._img_reject("bad_size")
+        if max_bytes <= 0:
+            self._img_reject("bad_config")
+            return None
+        # 大小未知（部分媒體 file.size 是 0／None）就不在這裡擋：先下載，
+        # 下面再用 len(data) 判。以前 `size <= 0` 一律判 bad_size，等於把
+        # 「不知道多大」當成「太大」，整批照片連試都不試就被擋在門外。
+        if size > max_bytes:
+            self._img_reject("too_big_known")
             return None
         try:
             data = await asyncio.wait_for(
@@ -9733,7 +9739,10 @@ class AccountWorker:
         await self._seed_cross_texts(group_id)
         is_image = isinstance(getattr(event, "media", None), MessageMediaPhoto)
         if is_image:
-            self.stats["images_seen"] += 1
+            # images_seen 在 on_message 就記（群裡出現幾張照片，含沒輪到回覆的）；
+            # 這裡記「真的進入生成、有機會被看懂」的張數。兩個數字相減才是
+            # 「沒輪到」的量，以前兩處都加同一個計數，看圖率永遠算不準。
+            self.stats["img_admitted"] = int(self.stats.get("img_admitted", 0)) + 1
             if not bool(getattr(self.config, "media_enabled", False)):
                 self._set_generation_reason(event, "media_disabled")
                 return ""

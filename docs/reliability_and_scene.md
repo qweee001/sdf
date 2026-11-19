@@ -77,3 +77,16 @@ warm → build → peak → aftercare → closed
 `GET /api/metrics/hourly?hours=24`（需登入）回逐小時 `calls` / `retries` /
 `avg_latency_ms`：`/health` 給的是當下總量，看不出「22 點開始每小時掉到 0」
 或「延遲從 2 秒爬到 18 秒」，走勢要看這支。`hours` 夾在 1–168。
+
+## 八、看圖入口與計數修正（同日）
+
+`img_seen` 原本在 `on_message` 與 `_generate_reply` 兩處各加一次，而且
+`_incoming_image` 把「大小未知」(`file.size` 為 0／None) 直接判成 `bad_size`——
+等於整批照片連下載都不試。修正：
+
+- 大小未知 → 照樣下載，下載後再用 `len(data)` 判上限
+- 已知過大 → `too_big_known`，不再與 `bad_size` 混用
+- `images_seen` 只代表「群裡出現的照片」（`on_message`），新增 `img_admitted`
+  代表「真的進入生成」，兩者相減才是「沒輪到回覆」
+- `/health.metrics` 增列 `img_admitted` 與 `img_reject_reasons`（逐原因），
+  不再只有一個 `img_rejected` 總數
