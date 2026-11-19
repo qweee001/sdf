@@ -2430,6 +2430,41 @@ class Database:
         }
         return {"hours": int(hours), "totals": totals, "by_purpose": by_purpose}
 
+    async def ai_call_hourly(self, hours: int = 24) -> dict:
+        """近 N 小時逐小時的呼叫量、重試與平均延遲（成本與卡頓的走勢）。
+
+        `ai_call_summary` 只給整段總量，看不出「今晚 22 點開始每小時掉到 0」
+        或「延遲從 2s 爬到 18s」。這裡按 hour 分桶，給 dashboard 畫趨勢用；
+        DB 壞了回空桶而不是拋錯（探針不該被成本統計拖垮）。
+        """
+        try:
+            hours = int(hours)
+        except (TypeError, ValueError):
+            hours = 24
+        hours = max(1, min(hours, 168))
+        cutoff = time.time() - hours * 3600
+        try:
+            cursor = await self._c.execute(
+                "SELECT strftime('%Y-%m-%dT%H:00', at, 'unixepoch', '+8 hours') AS hour, "
+                "COUNT(*) AS calls, SUM(retries) AS retries, "
+                "AVG(latency_ms) AS avg_latency_ms "
+                "FROM ai_calls WHERE at >= ? GROUP BY hour ORDER BY hour",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+        except Exception as exc:
+            return {"hours": hours, "buckets": [], "error": str(exc)}
+        buckets = [
+            {
+                "hour": str(row["hour"]),
+                "calls": int(row["calls"] or 0),
+                "retries": int(row["retries"] or 0),
+                "avg_latency_ms": round(float(row["avg_latency_ms"] or 0.0), 1),
+            }
+            for row in rows
+        ]
+        return {"hours": hours, "buckets": buckets}
+
     # ---------- 維護 ----------
 
     async def get_group_member_notes(

@@ -79,7 +79,8 @@ cp .env.example .env                           # 填好上面三个必填项
 | worker.py 拆分 | hints 三支已外移到 `app/reply_hints.py`；生成体抽段未做 |
 | dashboard `_setup_routes`（798 行）拆分 | 已拆成五段方法（公开／读／群组写入／自检／账号） |
 | 软语感改由决策层打分（替代正则） | 未做 |
-| 成本日报（每小时调用数／p95 延迟／空回率） | 未做 |
+| 成本走势（逐小时调用数／重试／平均延迟） | 已实装：`GET /api/metrics/hourly`（需登入） |
+| 空回率单列、p95 延迟 | 未做（现为平均延迟 + 放弃原因分布） |
 | 场景与守门的完整说明 | 见 `docs/reliability_and_scene.md` |
 | `analysis_msgs.json` 改存 gz（已 gzip） | 已实装 |
 

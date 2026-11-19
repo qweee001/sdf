@@ -426,6 +426,20 @@ class Dashboard:
             await self.login_service.prune_expired()
             return JSONResponse(await self.manager.status())
 
+        @app.get("/api/metrics/hourly")
+        async def metrics_hourly(request: Request):
+            """逐小時呼叫量／重試／平均延遲（成本與卡頓走勢，需登入）。
+
+            /health 免費暴露的是當前總量；趨勢要登入才看，避免公開端點被爬。
+            """
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            try:
+                hours = int(request.query_params.get("hours", "24"))
+            except (TypeError, ValueError):
+                hours = 24
+            return JSONResponse(await self.manager.db.ai_call_hourly(hours))
+
         # 模型對照實測：同一套人設與真實群句，跑指定的模型各一遍，回可比較的數字。
         # 目的是換模型前先有證據（拒答率、外語碎片、簡體／大陸詞、長度、延遲），
         # 不靠「哪個聽起來比較強」。
