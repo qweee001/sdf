@@ -179,9 +179,11 @@ class Dashboard:
         """
         out: dict = {
             "img_seen": 0,
+            "img_admitted": 0,
             "img_fetched": 0,
             "img_understood": 0,
             "img_rejected": 0,
+            "img_reject_reasons": {},
             "img_vision_err": 0,
             "reply_drops": {},
             "reply_skips": {},
@@ -192,12 +194,17 @@ class Dashboard:
             stats = getattr(worker, "stats", None) or {}
             try:
                 out["img_seen"] += int(stats.get("images_seen", 0) or 0)
+                out["img_admitted"] += int(stats.get("img_admitted", 0) or 0)
                 out["img_fetched"] += int(stats.get("img_fetch_ok", 0) or 0)
                 out["img_understood"] += int(stats.get("images_understood", 0) or 0)
                 out["img_vision_err"] += int(stats.get("img_vision_err", 0) or 0)
                 for key, val in list(stats.items()):
                     if key.startswith("img_none_"):
                         out["img_rejected"] += int(val or 0)
+                        why = key[len("img_none_"):]
+                        out["img_reject_reasons"][why] = (
+                            out["img_reject_reasons"].get(why, 0) + int(val or 0)
+                        )
                     elif key.startswith("reply_skip_"):
                         name = key[len("reply_skip_"):]
                         out["reply_skips"][name] = (
