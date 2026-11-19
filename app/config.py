@@ -150,6 +150,10 @@ class Settings:
     reply_enabled: bool
     base_reply_probability: float
     water_cross_talk_probability: float
+    scene_enabled: bool
+    scene_shadow: bool
+    scene_cooldown_seconds: float
+    guard_soft_enforce: bool
 
     # 主動發言
     proactive_enabled: bool
@@ -297,6 +301,16 @@ def load_settings() -> Settings:
             "DECISION_TYPO_THRESHOLD", 0.5, 0.1, 0.95
         ),
         base_reply_probability=_float("BASE_REPLY_PROBABILITY", 0.70),
+        # 場景狀態機：默認「不啟用」。先 SCENE_SHADOW=1 只算不注入（打日誌比對），
+        # 確認分歧可接受再 SCENE_ENABLED=1 真正接管 prompt。
+        scene_enabled=_bool("SCENE_ENABLED", False),
+        scene_shadow=_bool("SCENE_SHADOW", True),
+        scene_cooldown_seconds=_bounded_float(
+            "SCENE_COOLDOWN_SECONDS", 1800.0, 60.0, 7200.0
+        ),
+        # 軟語感閘只觀察不放行（默認）：只統計「僅軟語感不合格」的比例，
+        # 打開後這種句子直接發，不再花一次重寫。
+        guard_soft_enforce=_bool("GUARD_SOFT_ENFORCE", False),
         reply_enabled=_bool("REPLY_ENABLED", True),
         water_cross_talk_probability=(
             1.0

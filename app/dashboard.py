@@ -37,6 +37,23 @@ _LOGIN_WINDOW = 300.0
 _MAX_TRACKED_LOGIN_KEYS = 4096
 
 
+def _env_float(name: str, default: float) -> float:
+    """讀數值型環境變量；壞值一律回預設，不讓啟動因一個字串失敗。"""
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+# /ready 的寬限與門檻。
+# 11-11 缺口：/health 明明算出 degraded（全靜音、25 分鐘真空、402 欠費），
+# 卻照樣回 200，Railway 只認 2xx，於是功能死了一小時容器全綠。
+# /ready 用同一份判定回 503，讓平台／外部探針都看得見。
+# 寬限是必要的：剛啟動時還沒有任何機器人訊息，silent_minutes 是 None 或很大，
+# 沒有寬限會一啟動就被判死、一路重啟到 healthcheckTimeout。
+_READY_GRACE_SECONDS = _env_float("READY_GRACE_SECONDS", 300.0)
+
+
 def _trusted_proxy_hops() -> int:
     """前面有幾層可信反向代理；預設 0 ＝不信任任何客戶端可自行填入的前綴標頭。"""
     try:
@@ -80,6 +97,8 @@ class Dashboard:
         self.app = FastAPI(title="SDF 控制台")
         self._sessions: dict[str, float] = {}
         self._login_attempts: dict[str, list[float]] = {}
+        # /ready 的啟動寬限基準
+        self._started_at = time.time()
         self._setup_routes()
 
     def attach_bot(self, bot) -> None:
@@ -150,6 +169,58 @@ class Dashboard:
 
     # ---------- 健康度（F15） ----------
 
+    def _metrics_snapshot(self) -> dict:
+        """把「為什麼沒送出」攤成可讀計數（跨 worker 加總，不含任何帳號資訊）。
+
+        以前 `images_understood` 只在發送成功那一刻 +1，所以 0 同時可能是
+        「圖下載失敗」「模型看不懂」「回覆被閘掉」；真正的拒絕原因
+        `img_none_<reason>` 只活在記憶體裡，被白名單擋掉時連痕跡都沒有。
+        這裡把圖片三段（抓到／看懂／被拒）與回覆放棄原因分開暴露到 /health。
+        """
+        out: dict = {
+            "img_seen": 0,
+            "img_fetched": 0,
+            "img_understood": 0,
+            "img_rejected": 0,
+            "img_vision_err": 0,
+            "reply_drops": {},
+            "reply_skips": {},
+            "loop_lag_ms": 0,
+        }
+        workers = getattr(self.manager, "workers", {}) or {}
+        for worker in workers.values():
+            stats = getattr(worker, "stats", None) or {}
+            try:
+                out["img_seen"] += int(stats.get("images_seen", 0) or 0)
+                out["img_fetched"] += int(stats.get("img_fetch_ok", 0) or 0)
+                out["img_understood"] += int(stats.get("images_understood", 0) or 0)
+                out["img_vision_err"] += int(stats.get("img_vision_err", 0) or 0)
+                for key, val in list(stats.items()):
+                    if key.startswith("img_none_"):
+                        out["img_rejected"] += int(val or 0)
+                    elif key.startswith("reply_skip_"):
+                        name = key[len("reply_skip_"):]
+                        out["reply_skips"][name] = (
+                            out["reply_skips"].get(name, 0) + int(val or 0)
+                        )
+            except Exception:
+                continue
+            drops = stats.get("reply_drops")
+            if isinstance(drops, dict):
+                for key, val in list(drops.items()):
+                    try:
+                        out["reply_drops"][key] = (
+                            out["reply_drops"].get(key, 0) + int(val or 0)
+                        )
+                    except Exception:
+                        continue
+            try:
+                lag = int(stats.get("loop_lag_ms", 0) or 0)
+            except Exception:
+                lag = 0
+            out["loop_lag_ms"] = max(out["loop_lag_ms"], lag)
+        return out
+
     async def _health(self) -> dict:
         """F15：真實健康度，不再固定回 ok。
 
@@ -217,6 +288,7 @@ class Dashboard:
             healthy = False
         payload: dict = {
             "status": "ok" if healthy else "degraded",
+            "healthy": bool(healthy),
             "database": "ok" if database_ok else "failed",
             "accounts": {
                 "running": running,
@@ -229,6 +301,9 @@ class Dashboard:
             payload["gateway_quota_dead_seconds"] = int(time.time() - quota_dead)
         if ai_calls_24h is not None:
             payload["ai_calls_24h"] = ai_calls_24h
+        # 失敗原因要能自證：這些計數以前只存在記憶體與 dashboard hover，
+        # 看不出「圖片 0/491」到底是下載失敗、白名單擋掉還是回覆被閘掉。
+        payload["metrics"] = self._metrics_snapshot()
         # #11：bot 健康也要在 /health 看得到（以前 bot task 掛了，health 仍 3/3）
         if self.bot is not None:
             try:
@@ -237,11 +312,48 @@ class Dashboard:
                 payload["bot"] = {"connected": False, "last_error": "state() 失敗"}
         return payload
 
+    async def _ready(self) -> tuple[dict, int]:
+        """`/ready` 的判定：同一份健康度，但把它變成狀態碼。
+
+        /health 永遠回 200 是為了「Railway 別把降級誤判成整個掛掉」，
+        代價就是功能死亡時平台也全綠。這裡讓 503 只代表「真的啞了」，
+        啟動寬限內一律 200（剛起來還沒有機器人訊息）。
+        """
+        payload = await self._health()
+        grace_left = max(
+            0.0, _READY_GRACE_SECONDS - (time.time() - getattr(self, "_started_at", 0.0))
+        )
+        payload["grace_seconds_left"] = int(grace_left)
+        if grace_left > 0:
+            payload["ready"] = True
+            payload["status"] = "starting"
+            return payload, 200
+        ready = bool(payload.get("healthy"))
+        payload["ready"] = ready
+        return payload, (200 if ready else 503)
+
     # ---------- 路由 ----------
 
     def _setup_routes(self):
         app = self.app
+        # 798 行一個函數拆成五段：公開／讀／群組寫入／自檢／帳號與登入。
+        # 順序即註冊順序，最後的 static mount 必須留在本函數尾巴（否則會吃掉 API）。
+        self._routes_public(app)
+        self._routes_reads(app)
+        self._routes_group_writes(app)
+        self._routes_live_test(app)
+        self._routes_accounts(app)
 
+        # 預設門面：v2（左側導覽＋工作總覽＋三欄紀錄＋營運操作）。
+        # 必須掛在「所有 API 路由註冊完之後」，否則掛在 "/" 的 static 會吃掉 API。
+        _v2_dir = Path(__file__).resolve().parent / "static" / "v2"
+        if _v2_dir.is_dir():
+            app.mount("/v2", StaticFiles(directory=str(_v2_dir), html=True), name="v2-alias")
+            app.mount("/", StaticFiles(directory=str(_v2_dir), html=True), name="v2")
+
+
+    def _routes_public(self, app) -> None:
+        """公開路由：門面、健康度、登入登出。"""
         @app.get("/classic", response_class=HTMLResponse)
         async def index():
             return HTMLResponse(PAGE)
@@ -251,6 +363,13 @@ class Dashboard:
             # Railway healthcheckPath：回最小公開狀態（DB 探測＋帳號數），
             # DB 壞時標 degraded 而不是假裝 ok（F15）。
             return await self._health()
+
+        @app.get("/ready")
+        async def ready():
+            # 與 /health 同一份判定，但功能死亡時回 503。
+            # 用途：healthcheckPath 與外部探針；/health 保留給人看詳情。
+            body, code = await self._ready()
+            return JSONResponse(body, status_code=code)
 
         @app.post("/api/login")
         async def login(request: Request):
@@ -297,12 +416,29 @@ class Dashboard:
 
         # ---------- 需登入的 API ----------
 
+
+    def _routes_reads(self, app) -> None:
+        """讀取類 API：狀態、模型探測、群組與紀錄、私訊。"""
         @app.get("/api/status")
         async def status(request: Request):
             if not self._check_session(request):
                 return JSONResponse({"error": "未登入"}, status_code=401)
             await self.login_service.prune_expired()
             return JSONResponse(await self.manager.status())
+
+        @app.get("/api/metrics/hourly")
+        async def metrics_hourly(request: Request):
+            """逐小時呼叫量／重試／平均延遲（成本與卡頓走勢，需登入）。
+
+            /health 免費暴露的是當前總量；趨勢要登入才看，避免公開端點被爬。
+            """
+            if not self._check_session(request):
+                return JSONResponse({"error": "未登入"}, status_code=401)
+            try:
+                hours = int(request.query_params.get("hours", "24"))
+            except (TypeError, ValueError):
+                hours = 24
+            return JSONResponse(await self.manager.db.ai_call_hourly(hours))
 
         # 模型對照實測：同一套人設與真實群句，跑指定的模型各一遍，回可比較的數字。
         # 目的是換模型前先有證據（拒答率、外語碎片、簡體／大陸詞、長度、延遲），
@@ -645,6 +781,9 @@ class Dashboard:
             groups.sort(key=lambda g: (-g["last_ts"], g["id"]))
             return JSONResponse({"groups": groups, "accounts": account_meta})
 
+
+    def _routes_group_writes(self, app) -> None:
+        """群組與功能開關的寫入 API。"""
         @app.post("/api/groups/label")
         async def set_group_label(request: Request):
             if not self._check_session(request):
@@ -744,6 +883,9 @@ class Dashboard:
                 "features": self.manager.feature_status(),
             })
 
+
+    def _routes_live_test(self, app) -> None:
+        """線上自檢（演練）的啟停與狀態。"""
         @app.post("/api/live-test/start")
         async def start_live_test(request: Request):
             if not self._check_session(request):
@@ -776,6 +918,9 @@ class Dashboard:
             result = await self.manager.stop_live_test()
             return JSONResponse({"ok": True, "live_test": result})
 
+
+    def _routes_accounts(self, app) -> None:
+        """帳號生命週期與 TG 登入。"""
         @app.post("/api/accounts/{account_id}/start")
         async def start_account(account_id: str, request: Request):
             if not self._check_session(request):
@@ -1029,14 +1174,6 @@ class Dashboard:
             })
 
 
-
-
-        # 預設門面：v2（左側導覽＋工作總覽＋三欄紀錄＋營運操作）。
-        # 必須掛在「所有 API 路由註冊完之後」，否則掛在 "/" 的 static 會吃掉 API。
-        _v2_dir = Path(__file__).resolve().parent / "static" / "v2"
-        if _v2_dir.is_dir():
-            app.mount("/v2", StaticFiles(directory=str(_v2_dir), html=True), name="v2-alias")
-            app.mount("/", StaticFiles(directory=str(_v2_dir), html=True), name="v2")
 def _record_key_of(group_id: int, row: dict) -> str:
     """跨帳號穩定的紀錄鍵：群＋發話者＋秒＋內容雜湊。
 
