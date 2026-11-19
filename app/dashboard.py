@@ -182,7 +182,7 @@ class Dashboard:
             "img_fetched": 0,
             "img_understood": 0,
             "img_rejected": 0,
-            "img_vision_error": 0,
+            "img_vision_err": 0,
             "reply_drops": {},
             "reply_skips": {},
             "loop_lag_ms": 0,
@@ -194,7 +194,7 @@ class Dashboard:
                 out["img_seen"] += int(stats.get("images_seen", 0) or 0)
                 out["img_fetched"] += int(stats.get("img_fetch_ok", 0) or 0)
                 out["img_understood"] += int(stats.get("images_understood", 0) or 0)
-                out["img_vision_error"] += int(stats.get("img_vision_err", 0) or 0)
+                out["img_vision_err"] += int(stats.get("img_vision_err", 0) or 0)
                 for key, val in list(stats.items()):
                     if key.startswith("img_none_"):
                         out["img_rejected"] += int(val or 0)
