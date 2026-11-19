@@ -71,3 +71,9 @@ warm → build → peak → aftercare → closed
   仍留在尾巴，否則掛在 `/` 的 static 會吃掉 API
 - `_topic_heat_hint` / `_tension_ladder_hint` / `_social_dynamics_hint` 的實作移到
   `app/reply_hints.py`，worker 的 method 只剩一行委託
+
+## 七、成本走勢
+
+`GET /api/metrics/hourly?hours=24`（需登入）回逐小時 `calls` / `retries` /
+`avg_latency_ms`：`/health` 給的是當下總量，看不出「22 點開始每小時掉到 0」
+或「延遲從 2 秒爬到 18 秒」，走勢要看這支。`hours` 夾在 1–168。
