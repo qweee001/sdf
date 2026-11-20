@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import os
 import signal
 import sys
 
@@ -94,6 +96,19 @@ async def async_main() -> None:
         print(f"水軍帳號啟動完成（{len(manager.workers)} 個運行中）", flush=True)
     except Exception as e:
         print(f"啟動水軍帳號失敗：{e}", flush=True)
+
+    # GC 調校：這是長壽命服務進程，全域 GC 每次都要掃過幾十萬個長壽物件，
+    # gen2 一次可停頓數秒（線上實測 loop_lag 3373ms，那幾秒四號完全不收訊）。
+    # freeze() 把「已經建好、幾乎不再死」的物件搬進永久代不再掃；同時放寬
+    # gen0 門檻，把頻繁的短命配置集中處理。GC_TUNE=0 可關。
+    if os.environ.get("GC_TUNE", "1").strip() not in ("0", "false", "False", ""):
+        try:
+            gc.collect()
+            gc.freeze()
+            gc.set_threshold(50_000, 500, 500)
+            print("GC 已調校（freeze + 放寬門檻）", flush=True)
+        except Exception as exc:
+            print(f"GC 調校略過：{exc}", flush=True)
 
     # Telegram 控制台 bot（有 BOT_TOKEN 才啟動；獨立 task，掛了不影響主流程）
     bot_task: asyncio.Task | None = None
