@@ -33,7 +33,9 @@ import random
 import re
 import secrets
 import sys
+import threading
 import time
+import traceback
 import unicodedata
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -302,6 +304,23 @@ _STRUCT_BANDS: dict[str, tuple[int, int]] = {
 # 現場熱度門檻（近兩分鐘真人訊息數）：洗屏時短碎優先，不排生活場景。
 _HOT_BURST_HUMANS = 10
 _WARM_BURST_HUMANS = 4
+
+
+def capture_loop_stack(depth: int = 6, limit: int = 400) -> str:
+    """抓「現在」呼叫者的堆疊（給 loop 卡頓探針用）。
+
+    卡住那一刻正好在跑的 frame 就是兇手；只留最內側幾層與檔名行號，
+    長度壓在 `limit` 內，塞進 stats 也不會撐爆 payload。
+    """
+    try:
+        frame = sys._current_frames().get(threading.get_ident())
+        if frame is None:
+            return ""
+        lines = traceback.format_stack(frame)[-depth:]
+    except Exception:
+        return ""
+    text = " / ".join(line.strip().split("\n")[0] for line in lines if line.strip())
+    return text[-limit:]
 
 # 主動發言全關時的喚醒間隔（秒）：只為「開了就立刻動」，不跑整套 tick。
 _PROACTIVE_IDLE_POLL_SECONDS = 120.0
@@ -1487,12 +1506,16 @@ class AccountWorker:
         setattr(self, attr, task)
 
     async def _loop_lag_probe(self) -> None:
-        """事件循環延遲探針：漂移記峰值與次數（毫秒）。
+        """事件循環延遲探針：漂移記峰值與次數（毫秒），卡住時抓堆疊。
 
-        worker.py 大量同步解析（正則、JSON、opencc、Pillow）都在 loop 裡跑，
-        loop 一卡，回覆與主動發言一起遲到，卻沒有任何指標看得出來。
+        卡頓一定有來源（同步解析、GC 全域掃描、某段純 CPU），但光有毫秒數
+        查不出是哪一行——所以超過 800ms 就抓一次**當前 event loop 執行緒的堆疊**
+        存進 stats 並印出來（60 秒最多一次，避免自己洗版）。
+        這支自己是 1 秒一跳的協程，抓到的堆疊就是「卡住那一刻正在跑什麼」。
         """
         last = time.monotonic()
+        dumped_at = 0.0
+        me = threading.get_ident()
         while True:
             await asyncio.sleep(1.0)
             now = time.monotonic()
@@ -1504,6 +1527,12 @@ class AccountWorker:
                 self.stats["loop_lag_hits"] = (
                     int(self.stats.get("loop_lag_hits", 0)) + 1
                 )
+            if drift_ms >= 800 and now - dumped_at >= 60.0:
+                dumped_at = now
+                text = capture_loop_stack()
+                if text:
+                    self.stats["loop_lag_last_stack"] = text
+                    print(f"[{self.name}] loop-lag {drift_ms}ms 堆疊：{text}", flush=True)
 
     async def _safe_on_message(self, event) -> None:
         """on_message 的外殼：一則訊息的例外不准帶走整條收訊線。

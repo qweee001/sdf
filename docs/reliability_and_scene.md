@@ -90,3 +90,17 @@ warm → build → peak → aftercare → closed
   代表「真的進入生成」，兩者相減才是「沒輪到回覆」
 - `/health.metrics` 增列 `img_admitted` 與 `img_reject_reasons`（逐原因），
   不再只有一個 `img_rejected` 總數
+
+## 九、事件循環卡頓（loop_lag 3373ms）
+
+上線後探針抓到 `loop_lag_ms` 一路從 2894 爬到 3373：三秒多的期間四個號一起停止收訊，
+而舊的探針只有一個毫秒數字，查不出是哪一行。兩件事一起做：
+
+1. **留證據**：卡頓 ≥800ms 時抓當下 event loop 執行緒的堆疊（`capture_loop_stack`），
+   寫進 `loop_lag_last_stack` 並打日誌，60 秒最多一次。下次再卡就是有名有姓的 frame。
+2. **先削一刀**：長壽命進程的全域 GC 每次要掃過幾十萬個長壽物件，gen2 一次可以停數秒。
+   啟動完成後 `gc.collect() + gc.freeze()`（把已建好的物件搬進永久代不再掃），
+   並把門檻放寬到 `(50000, 500, 500)` 降低短命配置的 churn。`GC_TUNE=0` 可關。
+
+freeze 只解「GC 造成的停頓」；若堆疊顯示是某段純 CPU（例如災難性回溯的正則），
+下一步就是把那段搬到 `asyncio.to_thread`——現在有堆疊可以直接指名，不必再猜。
